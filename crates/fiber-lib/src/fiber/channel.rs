@@ -3079,7 +3079,12 @@ where
             .collect();
         for (forwarding_channel_id, forwarding_tlc_id, payment_hash, shared_secret) in expired_tlcs
         {
-            if self.store.is_tlc_settled(&state.id, &payment_hash) {
+            if self.store.is_tlc_settled_on_chain(&state.id, &payment_hash)
+                && self
+                    .store
+                    .get_on_chain_discovered_preimage(&state.id, &payment_hash)
+                    .is_none()
+            {
                 let (send, _recv) = oneshot::channel();
                 let rpc_reply = RpcReplyPort::from(send);
                 if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
@@ -3103,6 +3108,191 @@ where
                     );
                 }
             }
+        }
+    }
+
+    /// Settle TLCs on a force-closed channel whose payment preimage was revealed on-chain.
+    ///
+    /// For every TLC the watchtower observed being claimed on-chain with a preimage, this marks
+    /// the TLC as fulfilled in the channel state (so it is no longer re-collected and is reflected
+    /// in queries/persistence) and propagates the fulfillment: a forwarded TLC is relayed upstream,
+    /// the original payer's payment session is notified, and a now fully-fulfilled invoice is
+    /// marked paid. On-chain preimage discovery is mutually exclusive with the on-chain fail
+    /// marker, so this never overlaps the fail path handled above.
+    fn settle_onchain_fulfilled_tlcs(&self, state: &mut ChannelActorState) {
+        let channel_id = state.get_id();
+        // Collect first so we don't borrow `tlc_state` across the state mutations and message sends.
+        let fulfilled: Vec<OnChainFulfilledTlc> = state
+            .tlc_state
+            .all_tlcs()
+            .filter(|tlc| {
+                if tlc.removed_reason.is_some() || tlc.removed_confirmed_at.is_some() {
+                    return false;
+                }
+                // Only TLCs that made it onto the on-chain commitment can be settled on-chain.
+                if tlc.is_offered() {
+                    tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
+                } else {
+                    matches!(
+                        tlc.inbound_status(),
+                        InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+                    )
+                }
+            })
+            .filter_map(|tlc| {
+                let preimage = self
+                    .store
+                    .get_on_chain_discovered_preimage(&channel_id, &tlc.payment_hash)?;
+                Some(OnChainFulfilledTlc {
+                    tlc_id: tlc.tlc_id,
+                    forwarding_tlc: tlc.forwarding_tlc,
+                    payment_hash: tlc.payment_hash,
+                    attempt_id: tlc.attempt_id,
+                    preimage,
+                })
+            })
+            .collect();
+
+        if !fulfilled.is_empty() {
+            debug!(
+                "Channel {:?} settling {} on-chain fulfilled TLC(s): {:?}",
+                channel_id,
+                fulfilled.len(),
+                fulfilled
+                    .iter()
+                    .map(|tlc| tlc.payment_hash)
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        for tlc in fulfilled {
+            let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: tlc.preimage,
+            });
+
+            match tlc.tlc_id {
+                TLCId::Offered(id) => {
+                    state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
+                    if let Some((forwarding_channel_id, forwarding_tlc_id)) = tlc.forwarding_tlc {
+                        // Forwarded TLC: relay the fulfillment upstream. The retryable relay keeps
+                        // trying if the upstream channel is momentarily unavailable.
+                        let _ = self.register_retryable_relay_tlc_remove(
+                            TLCId::Received(forwarding_tlc_id),
+                            forwarding_channel_id,
+                            fulfill.clone(),
+                        );
+                    } else {
+                        // Original payer: drive the payment session to success.
+                        self.network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::TlcRemoveReceived(
+                                    tlc.payment_hash,
+                                    tlc.attempt_id,
+                                    fulfill,
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+                }
+                TLCId::Received(id) => {
+                    state.tlc_state.set_received_tlc_removed(id, fulfill);
+                }
+            }
+
+            // A TLC was just marked fulfilled; settle the invoice if it is now fully paid.
+            self.settle_onchain_invoice_if_fulfilled(state, tlc.payment_hash);
+        }
+
+        self.sync_already_fulfilled_onchain_tlcs(state);
+    }
+
+    /// Sync TLC status fields and invoice state for TLCs already marked fulfilled (for example
+    /// after a partial off-chain fulfill on a closing channel) but not yet reflected in RPC state.
+    fn sync_already_fulfilled_onchain_tlcs(&self, state: &mut ChannelActorState) {
+        let offered_updates: Vec<(u64, RemoveTlcReason)> = state
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .filter(|tlc| {
+                matches!(
+                    tlc.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                ) && matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
+            })
+            .filter_map(|tlc| {
+                let TLCId::Offered(id) = tlc.tlc_id else {
+                    return None;
+                };
+                Some((id, tlc.removed_reason.clone()?))
+            })
+            .collect();
+        for (id, reason) in offered_updates {
+            state.tlc_state.set_offered_tlc_removed(id, reason);
+        }
+
+        let received_updates: Vec<(u64, RemoveTlcReason)> = state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .filter(|tlc| {
+                matches!(
+                    tlc.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                ) && matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
+            })
+            .filter_map(|tlc| {
+                let TLCId::Received(id) = tlc.tlc_id else {
+                    return None;
+                };
+                Some((id, tlc.removed_reason.clone()?))
+            })
+            .collect();
+        for (id, reason) in received_updates {
+            state.tlc_state.set_received_tlc_removed(id, reason);
+        }
+
+        for tlc in state.tlc_state.received_tlcs.tlcs.iter() {
+            if matches!(
+                tlc.removed_reason,
+                Some(RemoveTlcReason::RemoveTlcFulfill(_))
+            ) {
+                self.settle_onchain_invoice_if_fulfilled(state, tlc.payment_hash);
+            }
+        }
+    }
+
+    /// Mark an invoice paid when its received TLCs on this force-closed channel have been fulfilled
+    /// on-chain and together satisfy the invoice amount. No-op when there is no local invoice for the
+    /// payment hash (e.g. forwarded or payer TLCs) or it is already paid.
+    fn settle_onchain_invoice_if_fulfilled(
+        &self,
+        state: &ChannelActorState,
+        payment_hash: Hash256,
+    ) {
+        let Some(invoice) = self.store.get_invoice(&payment_hash) else {
+            return;
+        };
+        if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid) {
+            return;
+        }
+        let fulfilled_received_tlcs = state.tlc_state.received_tlcs.tlcs.iter().filter(|tlc| {
+            tlc.payment_hash == payment_hash
+                && matches!(
+                    tlc.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                )
+        });
+        if is_invoice_fulfilled(&invoice, fulfilled_received_tlcs) {
+            debug!(
+                "Channel {:?} marking invoice {:?} paid from on-chain fulfilled TLCs",
+                state.get_id(),
+                payment_hash
+            );
+            self.store
+                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+                .expect("update invoice status failed");
         }
     }
 
@@ -3471,6 +3661,11 @@ where
                 } else {
                     self.maintain_waiting_onchain_settlement_tlcs(state);
                 }
+                // The watchtower may observe an on-chain preimage before this channel transitions
+                // to `Closed(WAITING_ONCHAIN_SETTLEMENT)` (e.g. the counterparty force-closed
+                // first). Fulfill those TLCs on every maintenance tick so invoices and payments
+                // are not blocked on the state transition.
+                self.settle_onchain_fulfilled_tlcs(state);
             }
             ChannelEvent::OnChainSettlementCompleted => {
                 self.finalize_onchain_settlement(myself, state).await?;
@@ -4879,6 +5074,48 @@ pub(crate) fn tlc_expiry_delay(delay_epoch: &EpochNumberWithFraction) -> u64 {
         * MILLI_SECONDS_PER_EPOCH as f64
         * 2.0
         / 3.0) as u64
+}
+
+/// A TLC on a force-closed channel whose preimage the watchtower observed being revealed on-chain.
+struct OnChainFulfilledTlc {
+    tlc_id: TLCId,
+    forwarding_tlc: Option<(Hash256, u64)>,
+    payment_hash: Hash256,
+    attempt_id: Option<u64>,
+    preimage: Hash256,
+}
+
+/// Collect the upstream forwarded TLCs on a force-closed channel that can be fulfilled because the
+/// watchtower observed their preimage being revealed on-chain. Returns
+/// `(upstream_channel_id, upstream_tlc_id, payment_preimage)` for each claimable TLC.
+///
+/// The on-chain preimage discovery is the success signal; it is mutually exclusive with the
+/// on-chain fail marker when no preimage was discovered, so this never overlaps the fail path. This
+/// is used by the network actor's `CheckChannels` sweep as a relay-only fallback for channels with
+/// no live actor (e.g. a preimage revealed after settlement was finalized); the live channel actor
+/// instead uses `settle_onchain_fulfilled_tlcs`, which additionally updates channel, payment, and
+/// invoice state.
+pub(crate) fn collect_onchain_fulfillable_upstream_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<(Hash256, u64, Hash256)> {
+    state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .filter(|tlc| {
+            tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
+                && tlc.removed_reason.is_none()
+                && tlc.removed_confirmed_at.is_none()
+        })
+        .filter_map(|tlc| {
+            let (forwarding_channel_id, forwarding_tlc_id) = tlc.forwarding_tlc?;
+            let preimage =
+                store.get_on_chain_discovered_preimage(&state.get_id(), &tlc.payment_hash)?;
+            Some((forwarding_channel_id, forwarding_tlc_id, preimage))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -9726,8 +9963,30 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    /// Check if a tlc is settled on chain
-    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool;
+    /// Returns whether the watchtower has recorded this TLC as settled on-chain without a preimage.
+    ///
+    /// This reads state populated by the in-process watchtower. When the watchtower is disabled or
+    /// not running, this always returns `false`. Features that depend on on-chain settlement
+    /// signals—including updating TLC, invoice, and payment status, and resolving or rejecting
+    /// upstream forwarding TLCs—will not work in that configuration.
+    fn is_tlc_settled_on_chain(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
+        let _ = (channel_id, payment_hash);
+        false
+    }
+    /// Returns the payment preimage the watchtower observed being revealed on-chain for this TLC.
+    ///
+    /// This reads state populated by the in-process watchtower. When the watchtower is disabled or
+    /// not running, this always returns `None`. Features that depend on on-chain preimage
+    /// discovery—including updating TLC, invoice, and payment status, and resolving upstream
+    /// forwarding TLCs—will not work in that configuration.
+    fn get_on_chain_discovered_preimage(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<Hash256> {
+        let _ = (channel_id, payment_hash);
+        None
+    }
 
     /// Store a pending CommitDiff for channel reestablishment
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);

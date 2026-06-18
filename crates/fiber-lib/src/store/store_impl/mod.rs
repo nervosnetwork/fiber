@@ -564,6 +564,15 @@ impl StoreKeyValue for KeyValue {
 
 #[cfg(feature = "watchtower")]
 impl Store {
+    fn tlc_on_chain_settled_key(channel_id: &Hash256, payment_hash: &[u8; 20]) -> Vec<u8> {
+        [
+            &[WATCHTOWER_TLC_SETTLED_PREFIX],
+            channel_id.as_ref(),
+            payment_hash.as_ref(),
+        ]
+        .concat()
+    }
+
     fn watchtower_preimage_key(node_id: &NodeId, payment_hash: &Hash256) -> Vec<u8> {
         [
             &[WATCHTOWER_PREIMAGE_PREFIX],
@@ -926,14 +935,33 @@ impl ChannelActorStateStore for Store {
             )
     }
 
-    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
-        let key = [
-            &[WATCHTOWER_TLC_SETTLED_PREFIX],
-            channel_id.as_ref(),
-            &payment_hash.as_ref()[0..20],
-        ]
-        .concat();
-        self.get(key).is_some()
+    fn is_tlc_settled_on_chain(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
+        #[cfg(feature = "watchtower")]
+        {
+            WatchtowerStore::is_tlc_settled(self, channel_id, payment_hash)
+        }
+        #[cfg(not(feature = "watchtower"))]
+        {
+            let _ = (channel_id, payment_hash);
+            false
+        }
+    }
+
+    fn get_on_chain_discovered_preimage(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<Hash256> {
+        #[cfg(feature = "watchtower")]
+        {
+            let _ = channel_id;
+            WatchtowerStore::get_watch_preimage(self, &NodeId::local(), payment_hash)
+        }
+        #[cfg(not(feature = "watchtower"))]
+        {
+            let _ = (channel_id, payment_hash);
+            None
+        }
     }
 
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff) {
@@ -1533,18 +1561,26 @@ impl WatchtowerStore for Store {
 
     fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]) {
         let mut batch = self.batch();
-        let key = [
-            &[WATCHTOWER_TLC_SETTLED_PREFIX],
-            channel_id.as_ref(),
-            payment_hash.as_ref(),
-        ]
-        .concat();
-        batch.put(key, []);
+        batch.put(
+            Self::tlc_on_chain_settled_key(channel_id, &payment_hash),
+            [],
+        );
         batch.commit();
         self.cleanup_unused_watch_preimages(
             None,
             WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash),
         );
+    }
+
+    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
+        let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+            .try_into()
+            .expect("payment hash prefix");
+        self.get(Store::tlc_on_chain_settled_key(
+            channel_id,
+            &payment_hash_prefix,
+        ))
+        .is_some()
     }
 }
 

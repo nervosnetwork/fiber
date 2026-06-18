@@ -73,8 +73,8 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, OfflineChannelRestoreMode,
+    collect_onchain_fulfillable_upstream_tlcs, tlc_expiry_delay, AddTlcResponse, ChannelActorState,
+    ChannelEphemeralConfig, ChannelInitializationOperation, OfflineChannelRestoreMode,
     OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
     MAX_TLC_NUMBER_IN_FLIGHT,
 };
@@ -2298,7 +2298,17 @@ where
                                 shared_secret,
                             ) in expired_tlcs
                             {
-                                if self.store.is_tlc_settled(&channel_id, &payment_hash) {
+                                if self
+                                    .store
+                                    .is_tlc_settled_on_chain(&channel_id, &payment_hash)
+                                    && self
+                                        .store
+                                        .get_on_chain_discovered_preimage(
+                                            &channel_id,
+                                            &payment_hash,
+                                        )
+                                        .is_none()
+                                {
                                     if let Err(err) = self
                                         .send_remove_tlc_to_channel(
                                             state,
@@ -2320,6 +2330,37 @@ where
                                             forwarding_tlc_id, forwarding_channel_id, err
                                         );
                                     }
+                                }
+                            }
+
+                            // Fulfill upstream forwarded TLCs whose preimage is now known
+                            // (e.g. discovered on-chain by the watchtower). Acts as soon as the
+                            // preimage is available, without waiting for expiry, and is mutually
+                            // exclusive with the on-chain fail path above when no preimage exists.
+                            let fulfilled_tlcs = collect_onchain_fulfillable_upstream_tlcs(
+                                &actor_state,
+                                &self.store,
+                            );
+                            for (forwarding_channel_id, forwarding_tlc_id, payment_preimage) in
+                                fulfilled_tlcs
+                            {
+                                if let Err(err) = self
+                                    .send_remove_tlc_to_channel(
+                                        state,
+                                        forwarding_channel_id,
+                                        RemoveTlcCommand {
+                                            id: forwarding_tlc_id,
+                                            reason: RemoveTlcReason::RemoveTlcFulfill(
+                                                RemoveTlcFulfill { payment_preimage },
+                                            ),
+                                        },
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to fulfill upstream tlc {:?} for channel {:?}: {}",
+                                        forwarding_tlc_id, forwarding_channel_id, err
+                                    );
                                 }
                             }
                         }
