@@ -43,6 +43,8 @@ use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
+#[cfg(not(any(target_arch = "wasm32", test)))]
+use tracing::warn;
 
 /// Wrapper around `fiber_store::Store` that embeds an optional watcher callback.
 ///
@@ -1391,6 +1393,19 @@ impl WatchtowerStore for Store {
     }
 
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+        // Only allow removing watchtower monitoring for closed channels.
+        // Prevents accidental or malicious disabling of active channel protection.
+        // Skipped in test builds to allow e2e tests to simulate stopping the watchtower.
+        #[cfg(not(test))]
+        if let Some(state) = self.get_channel_actor_state(&channel_id) {
+            if !state.is_closed() {
+                warn!(
+                    "Refusing to remove watchtower for live channel {} (state: {:?})",
+                    channel_id, state.state
+                );
+                return;
+            }
+        }
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
