@@ -28,7 +28,6 @@ tests/nodes/.ports
 /crates/fiber-wasm-db-worker/dist
 crates/fiber-lib/fuzz/corpus/
 crash-*
-package-lock.json
 target
 /tests/perf/artifacts/
 .tool-versions
