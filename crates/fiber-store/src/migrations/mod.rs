@@ -14,4 +14,14 @@ use crate::db_migrate::DbMigrate;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+pub fn decode_as_new<TOld, TNew>(value: TOld) -> Result<TNew, String>
+where
+    TOld: serde::Serialize,
+    TNew: serde::de::DeserializeOwned,
+{
+    let bytes =
+        bincode::serialize(&value).map_err(|e| format!("Failed to serialize legacy field: {e}"))?;
+    bincode::deserialize(&bytes).map_err(|e| format!("Failed to deserialize migrated field: {e}"))
+}
+
 include!(concat!(env!("OUT_DIR"), "/register_migrations.rs"));

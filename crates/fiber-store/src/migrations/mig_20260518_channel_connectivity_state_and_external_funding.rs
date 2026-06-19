@@ -1,4 +1,5 @@
 use crate::migration::{Migration, MigrationStore};
+use super::decode_as_new;
 use tracing::info;
 
 const MIGRATION_DB_VERSION: &str = "20260518120000";
@@ -21,17 +22,6 @@ type NewRevokeAndAck = fiber_types_090::channel::RevokeAndAck;
 type NewShutdownInfo = fiber_types_090::channel::ShutdownInfo;
 type NewTlcReplayUpdate = fiber_types_090::channel::TlcReplayUpdate;
 type NewTlcState = fiber_types_090::channel::TlcState;
-
-fn decode_as_new<TOld, TNew>(value: TOld) -> Result<TNew, String>
-where
-    TOld: serde::Serialize,
-    TNew: serde::de::DeserializeOwned,
-{
-    let bytes = fiber_types_081::serialize(&value)
-        .map_err(|e| format!("Failed to serialize legacy field: {}", e))?;
-    fiber_types_090::deserialize(&bytes)
-        .map_err(|e| format!("Failed to deserialize migrated field: {}", e))
-}
 
 fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActorData, String> {
     Ok(NewChannelActorData {
