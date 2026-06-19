@@ -1,9 +1,12 @@
 #![allow(clippy::needless_range_loop)]
-use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
+use crate::fiber::config::{
+    DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+};
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
 use crate::fiber::graph::SendPaymentState;
+use crate::fiber::graph::TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT;
 use crate::fiber::network::{get_chain_hash, BuildRouterCommand};
 use crate::fiber::payment::{SendPaymentCommand, SendPaymentDataBuilder, SendPaymentDataExt};
 use crate::fiber::types::new_channel_update_unsigned;
@@ -1134,9 +1137,11 @@ fn test_graph_trampoline_routing_tlc_expiry_limit_too_small_fails() {
     network.add_edge(2, 3, Some(10_000), Some(0));
     network.add_edge(3, 4, Some(10_000), Some(0));
 
-    // Required delta is FINAL + 3*DEFAULT (since we have 3 trampoline hops).
-    // Set a limit that is smaller than that.
-    let too_small_limit = FINAL_TLC_EXPIRY_DELTA_IN_TESTS + 2 * DEFAULT_TLC_EXPIRY_DELTA;
+    // Set a limit that is smaller than the per-segment trampoline forwarding budget.
+    let base_final = FINAL_TLC_EXPIRY_DELTA_IN_TESTS.max(MIN_TLC_EXPIRY_DELTA);
+    let segment_budget =
+        TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT * DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+    let too_small_limit = base_final + 3 * segment_budget - 1;
 
     let payment_state: SendPaymentState =
         SendPaymentDataBuilder::new(final_recipient.into(), 1000, Hash256::default())

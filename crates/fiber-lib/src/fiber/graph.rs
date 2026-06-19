@@ -8,6 +8,7 @@ use super::types::BroadcastMessageWithTimestamp;
 use crate::fiber::channel::DEFAULT_FEE_RATE;
 use crate::fiber::config::{
     DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+    MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::history::SentNode;
@@ -44,6 +45,8 @@ use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace, warn};
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
+// Budget a short forwarding route for each remaining trampoline segment.
+pub(crate) const TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT: u64 = 3;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 static FIND_PATH_CALL_COUNT_FOR_TESTS: AtomicU64 = AtomicU64::new(0);
@@ -1747,15 +1750,22 @@ where
         remaining_trampoline_hops: &[Pubkey],
         tlc_expiry_limit: u64,
     ) -> Result<u64, PathFindError> {
-        let slack = remaining_trampoline_hops
-            .iter()
-            .map(|_h| DEFAULT_TLC_EXPIRY_DELTA)
-            .try_fold(0u64, |acc, d| {
-                acc.checked_add(d).ok_or_else(|| {
-                    PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
-                })
+        let remaining_segments = u64::try_from(remaining_trampoline_hops.len()).map_err(|_| {
+            PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+        })?;
+        let segment_budget = DEFAULT_TLC_EXPIRY_DELTA
+            .checked_mul(TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT)
+            .and_then(|budget| budget.checked_add(MIN_TLC_EXPIRY_DELTA))
+            .ok_or_else(|| {
+                PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
+            })?;
+        let slack = segment_budget
+            .checked_mul(remaining_segments)
+            .ok_or_else(|| {
+                PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
             })?;
 
+        let base_final = base_final.max(MIN_TLC_EXPIRY_DELTA);
         let total = base_final.checked_add(slack).ok_or_else(|| {
             PathFindError::Other("trampoline tlc_expiry_delta overflow".to_string())
         })?;
