@@ -1030,14 +1030,17 @@ fn test_graph_trampoline_routing_trampoline_hops_specified() {
         .expect("trampoline route should be built");
     let after = now_timestamp_as_millis_u64();
 
-    // The expiry to the first trampoline must include slack for each trampoline hop.
-    let expected_delta = FINAL_TLC_EXPIRY_DELTA_IN_TESTS
-        + (payment_state
-            .trampoline_hops
-            .as_ref()
-            .expect("trampoline_hops")
-            .len() as u64)
-            * DEFAULT_TLC_EXPIRY_DELTA;
+    // The expiry to the first trampoline must include the forwarding-route budget for
+    // each remaining trampoline segment.
+    let base_final = FINAL_TLC_EXPIRY_DELTA_IN_TESTS.max(MIN_TLC_EXPIRY_DELTA);
+    let segment_budget =
+        TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT * DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+    let remaining_segments = payment_state
+        .trampoline_hops
+        .as_ref()
+        .expect("trampoline_hops")
+        .len() as u64;
+    let expected_delta = base_final + remaining_segments * segment_budget;
     let last_expiry = route.last().expect("last hop").expiry;
     assert!(
         last_expiry >= before + expected_delta && last_expiry <= after + expected_delta,
