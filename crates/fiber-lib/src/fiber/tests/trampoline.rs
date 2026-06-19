@@ -2855,6 +2855,16 @@ async fn test_trampoline_routing_two_hops_both_retry_success() {
     wait_until_node_has_public_channels_at_least(&node_t1, 9).await; // 9 total channels in network
     wait_until_node_has_public_channels_at_least(&node_t2, 9).await;
 
+    // The retry paths insert one public intermediate hop between each trampoline hop.
+    // Pin the privacy expiry slack so success does not depend on the random minimum.
+    let fixed_rand_expiry_delta = DEFAULT_TLC_EXPIRY_DELTA * 3;
+    for node in [&node_a, &node_t1, &node_t2] {
+        node.with_network_graph_mut(|graph| {
+            graph.set_fixed_rand_expiry_delta(fixed_rand_expiry_delta)
+        })
+        .await;
+    }
+
     // Drain P1 (T1 -> P1 -> T2 path)
     let drain_amount = usable_cap - 1000;
 
