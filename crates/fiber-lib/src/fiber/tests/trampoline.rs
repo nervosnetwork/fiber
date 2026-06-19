@@ -135,16 +135,6 @@ async fn expect_add_tlc_failed(
     );
 }
 
-async fn pin_trampoline_routing_rand_expiry_delta(nodes: &[&NetworkNode]) {
-    for node in nodes {
-        // Keep routing tests deterministic while preserving a small wall-clock slack for actors.
-        node.with_network_graph_mut(|graph| {
-            graph.set_fixed_rand_expiry_delta(MIN_TLC_EXPIRY_DELTA)
-        })
-        .await;
-    }
-}
-
 #[tokio::test]
 async fn test_trampoline_routing_basic() {
     init_tracing();
@@ -164,7 +154,6 @@ async fn test_trampoline_routing_basic() {
 
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // ================================================================
     // Create an invoice on C.
@@ -233,7 +222,6 @@ async fn test_trampoline_routing_with_sync_disabled_on_sender() {
 
     wait_until_async_timeout(|| async { !node_a.get_network_graph_channels().await.is_empty() })
         .await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     let channel_outpoint = node_a
         .get_channel_outpoint(&channel_id)
@@ -352,7 +340,6 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
 
     // Ensure B learns C supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_b, &node_c).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_b, &node_c]).await;
 
     let amount: u128 = 1000;
 
@@ -474,7 +461,6 @@ async fn test_trampoline_routing_udt_to_ckb_private_last_hop_no_path() {
     // Ensure A learns C supports trampoline routing and has public path to C.
     wait_until_node_supports_trampoline_routing(&node_a, &node_c).await;
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_c]).await;
 
     let amount: u128 = 1000;
     let preimage_ad = gen_rand_sha256_hash();
@@ -577,7 +563,6 @@ async fn test_trampoline_routing_keysend_success() {
 
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     let amount: u128 = 1000;
     let res = node_a
@@ -638,7 +623,6 @@ async fn test_trampoline_keysend_when_trampoline_use_default_fee() {
     .await;
 
     let [node_a, node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_c]).await;
 
     // Record initial balances for first payment test
     let node_a_initial_1 = node_a.get_local_balance_from_channel(channels[0]);
@@ -838,7 +822,6 @@ async fn test_trampoline_routing_multi_trampoline_hops_keysend_success() {
 
     // Ensure A learns enough public channels to reach the first trampoline.
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
 
     let amount: u128 = 1000;
     let res = node_a
@@ -875,7 +858,6 @@ async fn test_trampoline_routing_private_last_hop_payment_success() {
 
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Create an invoice on C.
     let amount: u128 = 1000;
@@ -964,7 +946,6 @@ async fn test_trampoline_routing_with_two_networks() {
     .await;
 
     let [mut node_d, _node_e, node_f] = nodes.try_into().expect("3 nodes");
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b, &node_d]).await;
 
     // no direct connection between node_b and node_d
     // ---------------------------------------------------------------
@@ -1042,7 +1023,6 @@ async fn test_trampoline_routing_multi_trampoline_hops() {
 
     // Wait until A learns enough public channels to reach the first trampoline.
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
 
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
@@ -1086,8 +1066,6 @@ async fn test_trampoline_routing_four_private_trampoline_hops_payment_success() 
 
     // Wait until A learns enough public channels to reach the first trampoline.
     wait_until_node_has_public_channels_at_least(&node_a, 1).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2, &node_t3, &node_t4])
-        .await;
 
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
@@ -1152,11 +1130,6 @@ async fn test_trampoline_routing_max_trampoline_hops_success() {
     wait_until_graph_channel_updates_along_path(&node_t2, &[&node_t2, &node_x23, &node_t3]).await;
     wait_until_graph_channel_updates_along_path(&node_t3, &[&node_t3, &node_x34, &node_t4]).await;
     wait_until_graph_channel_updates_along_path(&node_t4, &[&node_t4, &node_x45, &node_t5]).await;
-
-    pin_trampoline_routing_rand_expiry_delta(&[
-        &node_a, &node_t1, &node_t2, &node_t3, &node_t4, &node_t5,
-    ])
-    .await;
 
     // Trampoline forwarding will call into routing/path finding.
     reset_find_path_call_count_for_tests();
@@ -1242,7 +1215,6 @@ async fn test_trampoline_single_hop_long_public_path() {
         ],
     )
     .await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t5]).await;
 
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
@@ -1352,7 +1324,6 @@ async fn test_trampoline_routing_four_hops_with_public_paths_between_trampolines
 
     // Wait until T3 has the public graph needed to route to T4 via Y.
     wait_until_node_has_public_channels_at_least(&node_t3, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t2, &node_t4]).await;
 
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
@@ -1505,7 +1476,6 @@ async fn test_trampoline_forwarding_prefers_better_channel_private_vs_public() {
 
     // Ensure A has a usable public channel update to reach the first trampoline.
     wait_until_graph_channel_has_update(&node_a, &node_a, &node_t1).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1]).await;
 
     // Create an invoice on C that explicitly allows trampoline routing.
     let amount: u128 = 1000;
@@ -1722,7 +1692,6 @@ async fn test_trampoline_error_wrapping_propagates_to_payer() {
 
     // Wait until A learns enough public channels to reach the first trampoline.
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
 
     // Build an invoice for C but do NOT insert it on C, so the payment fails at the final
     // recipient (beyond the trampoline boundary) and must be wrapped for the payer.
@@ -1786,7 +1755,6 @@ async fn test_trampoline_forwarding_fee_insufficient_due_to_rate_cap() {
 
     wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1]).await;
 
     let amount: u128 = 2000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
@@ -1882,7 +1850,6 @@ async fn test_trampoline_hop_feature_disabled_during_payment() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
     wait_until_node_supports_trampoline_routing(&node_a, &node_t2).await;
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
 
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
@@ -1969,7 +1936,6 @@ async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
     wait_until_node_has_public_channels_at_least(&node_a, 2).await;
     wait_until_node_has_public_channels_at_least(&node_t1, 2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
 
     let amount: u128 = 2000;
     let attempts = [1, 5];
@@ -2608,7 +2574,6 @@ async fn test_trampoline_routing_loop_failure_insufficient_fee() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_c).await;
     wait_until_node_supports_trampoline_routing(&node_a, &node_d).await;
     wait_until_node_supports_trampoline_routing(&node_a, &node_e).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b, &node_c, &node_d]).await;
 
     let amount = 1000;
     let (invoice, _preimage) = node_e.gen_basic_invoice(amount);
@@ -2711,7 +2676,6 @@ async fn test_trampoline_routing_retry_with_intermediate_failure() {
 
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
     wait_until_node_has_public_channels_at_least(&node_b, 5).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Drain P1 -> C
     let drain_amount = usable_cap - 1000;
@@ -2879,8 +2843,6 @@ async fn test_trampoline_routing_two_hops_both_retry_success() {
     wait_until_node_has_public_channels_at_least(&node_t1, 9).await; // 9 total channels in network
     wait_until_node_has_public_channels_at_least(&node_t2, 9).await;
 
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
-
     // Drain P1 (T1 -> P1 -> T2 path)
     let drain_amount = usable_cap - 1000;
 
@@ -3024,7 +2986,6 @@ async fn test_trampoline_routing_mid_failure_propagates_back() {
     wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
     wait_until_node_supports_trampoline_routing(&node_a, &node_t2).await;
     wait_until_node_has_public_channels_at_least(&node_t2, 6).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t1, &node_t2]).await;
 
     // Drain Q1->C
     {
@@ -3138,7 +3099,6 @@ async fn test_trampoline_routing_concurrent_payments() {
     wait_until_node_has_public_channels_at_least(&node_t, 4).await;
     wait_until_node_has_public_channels_at_least(&node_a, 4).await;
     wait_until_node_has_public_channels_at_least(&node_c, 4).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_c, &node_t]).await;
 
     // Prepare Payment 1: A -> T -> B
     let amount1 = 1000;
@@ -3203,7 +3163,6 @@ async fn test_trampoline_routing_no_path_found() {
     let [node_a, node_t, node_b] = nodes.try_into().expect("3 nodes");
 
     wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t]).await;
 
     let amount = 1000;
     let (invoice, _preimage) = node_b.gen_basic_invoice(amount);
@@ -3276,7 +3235,6 @@ async fn test_trampoline_routing_race_same_invoice() {
 
     wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
     wait_until_node_supports_trampoline_routing(&node_b, &node_t2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b, &node_t1, &node_t2]).await;
 
     // C creates invoice
     let amount = 1000;
@@ -3411,7 +3369,6 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
 
     wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
     wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_t]).await;
 
     // 1. Create correct invoice on B with explicit secret
     let amount = 1000;
@@ -3480,7 +3437,6 @@ async fn test_trampoline_node_restart() {
 
     // Wait until A learns B (public channel).
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Create an invoice on C.
     // Use a large timeout so we have time to restart B.
@@ -3798,7 +3754,6 @@ async fn test_trampoline_routing_mpp_last_hop() {
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Use a larger amount than single channel capacity (1000000000) to force MPP
     let amount: u128 = 1500000000;
@@ -3873,7 +3828,6 @@ async fn test_trampoline_routing_invoice_not_allow_mpp_will_fail() {
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Use a larger amount than single channel capacity (1000000000) to force MPP
     let amount: u128 = 1500000000;
@@ -4000,7 +3954,6 @@ async fn test_trampoline_routing_dry_run_basic() {
 
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Create an invoice on C.
     let amount: u128 = 1000;
@@ -4134,7 +4087,6 @@ async fn test_trampoline_routing_dry_run_get_default_fee() {
 
     // Wait until A learns B supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node_a, &node_b]).await;
 
     // Create an invoice on C.
     let amount: u128 = 1000;
@@ -4294,7 +4246,6 @@ async fn test_trampoline_mpp_with_oneway() {
 
     // Wait until node1 learns node2 supports trampoline routing.
     wait_until_node_supports_trampoline_routing(&node1, &node2).await;
-    pin_trampoline_routing_rand_expiry_delta(&[&node1, &node2]).await;
 
     async fn run_with_hash_algo(
         node1: &NetworkNode,
