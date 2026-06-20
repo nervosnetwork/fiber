@@ -1131,16 +1131,6 @@ async fn test_trampoline_routing_max_trampoline_hops_success() {
     wait_until_graph_channel_updates_along_path(&node_t3, &[&node_t3, &node_x34, &node_t4]).await;
     wait_until_graph_channel_updates_along_path(&node_t4, &[&node_t4, &node_x45, &node_t5]).await;
 
-    // This synthetic max-hop topology inserts public intermediate nodes between trampoline hops.
-    // Pin the privacy expiry slack so success does not depend on the random delta chosen in CI.
-    let fixed_rand_expiry_delta = DEFAULT_TLC_EXPIRY_DELTA * 6;
-    for node in [&node_a, &node_t1, &node_t2, &node_t3, &node_t4, &node_t5] {
-        node.with_network_graph_mut(|graph| {
-            graph.set_fixed_rand_expiry_delta(fixed_rand_expiry_delta)
-        })
-        .await;
-    }
-
     // Trampoline forwarding will call into routing/path finding.
     reset_find_path_call_count_for_tests();
 
@@ -1634,12 +1624,12 @@ async fn test_trampoline_routing_connect_two_networks() {
 }
 
 #[tokio::test]
-async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
+async fn test_trampoline_routing_rejects_tlc_expiry_limit_below_segment_budget() {
     init_tracing();
 
     // A --(public)--> T1 --(private)--> X --(private)--> C
     // A can only route to T1; T1 must forward over 2 private hops.
-    // Set a tight `tlc_expiry_limit` that is sufficient for A->T1, but insufficient for T1->X->C.
+    // Set a tight `tlc_expiry_limit` that cannot cover the trampoline segment budget.
     let (nodes, _channels) = create_n_nodes_network_with_visibility(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
@@ -1659,9 +1649,9 @@ async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
-    // Tight limit: large enough for payer's trampoline slack (final + 1*DEFAULT), but too small
-    // for T1 to reach C over 2 hops (final + 2*DEFAULT).
-    let tight_limit = DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA + 1;
+    let segment_budget =
+        TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT * DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+    let tight_limit = DEFAULT_FINAL_TLC_EXPIRY_DELTA + segment_budget - 1;
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -1671,13 +1661,11 @@ async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
             trampoline_hops: Some(vec![node_t1.get_public_key()]),
             ..Default::default()
         })
-        .await;
-    assert!(res.is_ok());
-
-    let payment_hash = res.unwrap().payment_hash;
-    node_a.wait_until_failed(payment_hash).await;
-    let payment_res = node_a.get_payment_result(payment_hash).await;
-    assert!(payment_res.failed_error.is_some());
+        .await
+        .expect_err("tlc_expiry_limit below trampoline segment budget should fail locally");
+    assert!(res
+        .to_string()
+        .contains("trampoline tlc_expiry_delta exceeds tlc_expiry_limit"));
 }
 
 #[tokio::test]
