@@ -179,11 +179,85 @@ const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
 /// rapidly reconnects/reestablishes.
 const CHANNEL_READY_RETRY_DEBOUNCE_MS: u64 = 60_000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelReadyRetryScanDecision {
+    ScanNow,
+    ScheduleTrailing(Duration),
+    AlreadyScheduled,
+}
+
+fn decide_channel_ready_retry_scan(
+    last_channel_ready_scan: &mut HashMap<OutPoint, u64>,
+    pending_channel_ready_retry_scans: &mut HashSet<OutPoint>,
+    channel_outpoint: OutPoint,
+    now: u64,
+) -> ChannelReadyRetryScanDecision {
+    let should_scan = last_channel_ready_scan
+        .get(&channel_outpoint)
+        .is_none_or(|last| now.saturating_sub(*last) >= CHANNEL_READY_RETRY_DEBOUNCE_MS);
+
+    if should_scan {
+        last_channel_ready_scan.insert(channel_outpoint.clone(), now);
+        pending_channel_ready_retry_scans.remove(&channel_outpoint);
+        return ChannelReadyRetryScanDecision::ScanNow;
+    }
+
+    if !pending_channel_ready_retry_scans.insert(channel_outpoint.clone()) {
+        return ChannelReadyRetryScanDecision::AlreadyScheduled;
+    }
+
+    let elapsed = last_channel_ready_scan
+        .get(&channel_outpoint)
+        .map(|last| now.saturating_sub(*last))
+        .unwrap_or(0);
+    let remaining = CHANNEL_READY_RETRY_DEBOUNCE_MS.saturating_sub(elapsed);
+
+    ChannelReadyRetryScanDecision::ScheduleTrailing(Duration::from_millis(remaining))
+}
+
 fn funding_retry_delay(retry_count: u32) -> Duration {
     let shift = retry_count.min(63);
     let factor = 1u64 << shift;
     let delay = FUNDING_RETRY_BASE_MILLIS.saturating_mul(factor);
     Duration::from_millis(delay.min(FUNDING_RETRY_MAX_MILLIS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_ready_retry_debounce_coalesces_pending_trailing_scan() {
+        let outpoint = OutPoint::default();
+        let mut last_scans = HashMap::from([(outpoint.clone(), 1_000)]);
+        let mut pending_trailing_scans = HashSet::new();
+
+        let first_decision = decide_channel_ready_retry_scan(
+            &mut last_scans,
+            &mut pending_trailing_scans,
+            outpoint.clone(),
+            2_000,
+        );
+
+        assert_eq!(
+            first_decision,
+            ChannelReadyRetryScanDecision::ScheduleTrailing(Duration::from_millis(59_000))
+        );
+        assert!(pending_trailing_scans.contains(&outpoint));
+
+        let second_decision = decide_channel_ready_retry_scan(
+            &mut last_scans,
+            &mut pending_trailing_scans,
+            outpoint,
+            3_000,
+        );
+
+        assert_eq!(
+            second_decision,
+            ChannelReadyRetryScanDecision::AlreadyScheduled
+        );
+        assert_eq!(last_scans.get(&OutPoint::default()), Some(&1_000));
+    }
 }
 
 /// Handles a `FundingError` with retry logic.  If the error is temporary and
@@ -951,6 +1025,8 @@ pub enum NetworkActorEvent {
     ExternalFundingTxReady(Hash256, Transaction),
     /// A channel is ready to use.
     ChannelReady(Hash256, Pubkey, OutPoint),
+    /// Retry pending payment attempts for a ChannelReady outpoint after debounce.
+    RetryPendingPaymentsForChannel(OutPoint),
     /// A channel is going to be closed, waiting the closing transaction to be broadcasted and confirmed.
     ClosingTransactionPending(Hash256, Pubkey, TransactionView, bool),
 
@@ -1468,61 +1544,33 @@ where
                 // reestablish events. Uses trailing-edge: when suppressed,
                 // schedules a deferred scan so the trailing ChannelReady
                 // (e.g. from a real reconnect) is never lost.
-                let now = now_timestamp_as_millis_u64();
-                let should_scan = state
-                    .last_channel_ready_scan
-                    .get(&channel_outpoint)
-                    .is_none_or(|last| {
-                        now.saturating_sub(*last) >= CHANNEL_READY_RETRY_DEBOUNCE_MS
-                    });
-                if should_scan {
-                    state
-                        .last_channel_ready_scan
-                        .insert(channel_outpoint.clone(), now);
-                    for attempt in self
-                        .store
-                        .get_pending_attempts_by_channel_outpoint(&channel_outpoint)
-                    {
-                        debug!(
-                            "Retrying payment attempt {:?} for channel {:?} reestablished",
-                            attempt.payment_hash, channel_outpoint
-                        );
-                        if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::RetrySendPayment(
-                                attempt.payment_hash,
-                                Some(attempt.id),
-                            ),
-                        )) {
-                            debug!(
-                                "Failed to register payment retry for {:?}: {:?}",
-                                attempt.payment_hash, err
-                            );
-                        }
+                match decide_channel_ready_retry_scan(
+                    &mut state.last_channel_ready_scan,
+                    &mut state.pending_channel_ready_retry_scans,
+                    channel_outpoint.clone(),
+                    now_timestamp_as_millis_u64(),
+                ) {
+                    ChannelReadyRetryScanDecision::ScanNow => {
+                        state.retry_pending_payments_for_channel(&myself, &channel_outpoint);
                     }
-                } else {
-                    // Trailing edge: schedule a deferred scan at cooldown expiry
-                    // so the last ChannelReady in a burst isn't lost.
-                    let elapsed = state
-                        .last_channel_ready_scan
-                        .get(&channel_outpoint)
-                        .map(|last| now.saturating_sub(*last))
-                        .unwrap_or(0);
-                    let remaining = CHANNEL_READY_RETRY_DEBOUNCE_MS.saturating_sub(elapsed);
-                    if remaining > 0 {
+                    ChannelReadyRetryScanDecision::ScheduleTrailing(delay) => {
                         let ch_outpoint = channel_outpoint.clone();
-                        let ch_id = channel_id;
-                        let pk = pubkey;
                         debug!(
                             "Debounced ChannelReady retry scan for {:?}, scheduling deferred scan in {}ms",
-                            ch_outpoint, remaining
+                            ch_outpoint,
+                            delay.as_millis()
                         );
-                        myself.send_after(Duration::from_millis(remaining), move || {
-                            NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
-                                ch_id,
-                                pk,
-                                ch_outpoint,
-                            ))
+                        myself.send_after(delay, move || {
+                            NetworkActorMessage::new_event(
+                                NetworkActorEvent::RetryPendingPaymentsForChannel(ch_outpoint),
+                            )
                         });
+                    }
+                    ChannelReadyRetryScanDecision::AlreadyScheduled => {
+                        trace!(
+                            "Debounced ChannelReady retry scan for {:?}, trailing scan already scheduled",
+                            channel_outpoint
+                        );
                     }
                 }
 
@@ -1625,6 +1673,18 @@ where
                     PaymentActorMessage::RetrySendPayment(attempt_id),
                 )
                 .await;
+            }
+            NetworkActorEvent::RetryPendingPaymentsForChannel(channel_outpoint) => {
+                if state
+                    .pending_channel_ready_retry_scans
+                    .remove(&channel_outpoint)
+                    && state.outpoint_channel_map.contains_key(&channel_outpoint)
+                {
+                    state
+                        .last_channel_ready_scan
+                        .insert(channel_outpoint.clone(), now_timestamp_as_millis_u64());
+                    state.retry_pending_payments_for_channel(&myself, &channel_outpoint);
+                }
             }
             NetworkActorEvent::AddTlcResult(
                 payment_hash,
@@ -3998,6 +4058,7 @@ pub struct NetworkActorState<S, C> {
         HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 
     last_channel_ready_scan: HashMap<OutPoint, u64>,
+    pending_channel_ready_retry_scans: HashSet<OutPoint>,
     // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -4043,6 +4104,30 @@ where
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
+    fn retry_pending_payments_for_channel(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        channel_outpoint: &OutPoint,
+    ) {
+        for attempt in self
+            .store
+            .get_pending_attempts_by_channel_outpoint(channel_outpoint)
+        {
+            debug!(
+                "Retrying payment attempt {:?} for channel {:?} reestablished",
+                attempt.payment_hash, channel_outpoint
+            );
+            if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::RetrySendPayment(attempt.payment_hash, Some(attempt.id)),
+            )) {
+                debug!(
+                    "Failed to register payment retry for {:?}: {:?}",
+                    attempt.payment_hash, err
+                );
+            }
+        }
+    }
+
     pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
         let now = now_timestamp_as_millis_u64();
         match self.last_node_announcement_message {
@@ -5570,6 +5655,7 @@ where
         {
             self.pending_channels.remove(outpoint);
             self.last_channel_ready_scan.remove(outpoint);
+            self.pending_channel_ready_retry_scans.remove(outpoint);
         }
         self.outpoint_channel_map.retain(|_, id| *id != channel_id);
     }
@@ -6259,6 +6345,7 @@ where
             inflight_payments: Default::default(),
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
+            pending_channel_ready_retry_scans: Default::default(),
             inflight_tracers: Default::default(),
         };
 
