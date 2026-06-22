@@ -3153,7 +3153,9 @@ where
             })
             .collect();
 
-        if !fulfilled.is_empty() {
+        let has_fulfilled = !fulfilled.is_empty();
+
+        if has_fulfilled {
             debug!(
                 "Channel {:?} settling {} on-chain fulfilled TLC(s): {:?}",
                 channel_id,
@@ -3203,7 +3205,12 @@ where
             self.settle_onchain_invoice_if_fulfilled(state, tlc.payment_hash);
         }
 
-        self.sync_already_fulfilled_onchain_tlcs(state);
+        // Synchronize TLC status and invoice state for any previously-fulfilled
+        // TLCs that still need removal applied.  When no new on-chain fulfillments
+        // were discovered this tick there is nothing to sync.
+        if has_fulfilled {
+            self.sync_already_fulfilled_onchain_tlcs(state);
+        }
     }
 
     /// Sync TLC status fields and invoice state for TLCs already marked fulfilled (for example
