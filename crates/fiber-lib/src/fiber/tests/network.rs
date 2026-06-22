@@ -1482,6 +1482,60 @@ async fn test_invalid_gossip_from_no_channel_peer_triggers_disconnect_and_temp_b
 }
 
 #[tokio::test]
+async fn test_rate_limited_channel_update_from_no_channel_peer_triggers_disconnect_and_temp_ban() {
+    init_tracing();
+
+    let mut target = NetworkNode::new_with_config(
+        NetworkNodeConfig::builder()
+            .fiber_config_updater(|config| {
+                config.gossip_policy.ban.threshold = 25;
+                config.gossip_policy.inbound_channel_update =
+                    crate::fiber::gossip_policy::ChannelUpdateRateLimitConfig {
+                        interval_ms: 60_000,
+                        burst: 1,
+                    };
+            })
+            .build(),
+    )
+    .await;
+    let mut peer = NetworkNode::new().await;
+    let channel_context = ChannelTestContext::gen().await;
+    let update1 = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        42,
+        42,
+        42,
+        Some(1_000),
+    );
+    let update2 = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        43,
+        43,
+        43,
+        Some(2_000),
+    );
+
+    peer.connect_to(&mut target).await;
+    target.mock_received_gossip_message_from_peer(
+        peer.pubkey,
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![
+                BroadcastMessage::ChannelUpdate(update1),
+                BroadcastMessage::ChannelUpdate(update2),
+            ],
+        }),
+    );
+
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(list_connected_peers(&target).await.is_empty());
+}
+
+#[tokio::test]
 async fn test_invalid_gossip_from_channel_peer_is_scored_but_not_disconnected() {
     init_tracing();
 

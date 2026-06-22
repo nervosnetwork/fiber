@@ -56,7 +56,7 @@ fn test_channel_update_limiter_keys_node1_and_node2_separately() {
 }
 
 #[test]
-fn test_channel_update_limiter_bounds_tracked_keys() {
+fn test_channel_update_limiter_rejects_new_keys_when_full() {
     let peer = gen_rand_fiber_public_key();
     let mut limiter = ChannelUpdateRateLimitConfig {
         interval_ms: 60_000,
@@ -72,11 +72,34 @@ fn test_channel_update_limiter_bounds_tracked_keys() {
     assert!(limiter.try_acquire(&key2, 2));
     assert_eq!(limiter.tracked_keys(), 2);
 
-    assert!(limiter.try_acquire(&key3, 3));
+    assert!(!limiter.try_acquire(&key3, 3));
     assert_eq!(limiter.tracked_keys(), 2);
 
-    assert!(limiter.try_acquire(&key1, 4));
+    assert!(!limiter.try_acquire(&key1, 4));
+    assert!(limiter.try_acquire(&key1, 60_001));
     assert_eq!(limiter.tracked_keys(), 2);
+}
+
+#[test]
+fn test_channel_update_limiter_prunes_idle_keys_before_accepting_new_key() {
+    let peer = gen_rand_fiber_public_key();
+    let mut limiter = ChannelUpdateRateLimitConfig {
+        interval_ms: 60_000,
+        burst: 1,
+    }
+    .build_limiter_with_max_entries(2);
+
+    let key1 = ChannelUpdateLimiterKey::new(peer, gen_rand_channel_outpoint(), true);
+    let key2 = ChannelUpdateLimiterKey::new(peer, gen_rand_channel_outpoint(), true);
+    let key3 = ChannelUpdateLimiterKey::new(peer, gen_rand_channel_outpoint(), true);
+
+    assert!(limiter.try_acquire(&key1, 0));
+    assert!(limiter.try_acquire(&key2, 1));
+    assert_eq!(limiter.tracked_keys(), 2);
+
+    assert!(limiter.try_acquire(&key3, 60_001));
+    assert_eq!(limiter.tracked_keys(), 1);
+    assert!(!limiter.try_acquire(&key3, 60_001));
 }
 
 #[test]
