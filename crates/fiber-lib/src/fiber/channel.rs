@@ -3661,11 +3661,13 @@ where
                 } else {
                     self.maintain_waiting_onchain_settlement_tlcs(state);
                 }
-                // The watchtower may observe an on-chain preimage before this channel transitions
-                // to `Closed(WAITING_ONCHAIN_SETTLEMENT)` (e.g. the counterparty force-closed
-                // first). Fulfill those TLCs on every maintenance tick so invoices and payments
-                // are not blocked on the state transition.
-                self.settle_onchain_fulfilled_tlcs(state);
+                // Only closed or shutting-down channels can have on-chain TLC settlement
+                // signals. Scanning all TLCs against the watchtower store every tick on a
+                // healthy ready channel degrades payment throughput (see the benchmark
+                // regression in PR #1254).
+                if state.is_closed() || matches!(state.state, ChannelState::ShuttingDown(_)) {
+                    self.settle_onchain_fulfilled_tlcs(state);
+                }
             }
             ChannelEvent::OnChainSettlementCompleted => {
                 self.finalize_onchain_settlement(myself, state).await?;
