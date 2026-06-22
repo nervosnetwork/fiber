@@ -22,17 +22,60 @@ use fiber_types::{payment::PaymentStatus, CchInvoice, CchOrder, CchOrderStatus, 
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 
-/// Compute the routing fee budget (in satoshis) available for the outgoing payment leg.
+/// Compute the routing fee budget (in satoshis) available for an outgoing payment on the
+/// **BTC/Lightning** leg.
 ///
 /// The budget is `fee_sats * max_outgoing_fee_percentage / 100`, where `fee_sats` is the fee
 /// charged on the incoming/order leg. This enforces the invariant that the total outgoing route
 /// fee never exceeds the fee the operator collected. `max_outgoing_fee_percentage` is validated
 /// to be within `1..=100` at startup, so the multiplication only ever shrinks `fee_sats`.
 pub(crate) fn outgoing_fee_budget_sats(order: &CchOrder, max_outgoing_fee_percentage: u64) -> u128 {
-    order
-        .fee_sats
+    let fee_sats = order.btc_fee_msat / 1000u128;
+    fee_sats.saturating_mul(max_outgoing_fee_percentage as u128) / 100
+}
+
+/// Compute the routing fee budget (in the Fiber asset's smallest unit) available for an outgoing
+/// payment on the **Fiber** leg.
+///
+/// The hub collects its fee on the BTC leg (`btc_fee_msat`), but a Fiber outgoing payment is
+/// denominated in the Fiber asset's smallest unit, which may be on an entirely different scale
+/// (shannon for native CKB, or a UDT's own unit). The BTC-denominated fee budget is therefore
+/// converted to the Fiber unit using the order's exchange rate.
+///
+/// The rate must **exclude** the operator fee: `fiber_invoice_amount` is the value of the
+/// *net* BTC payout (`lightning_invoice_amount - btc_fee_msat`), not the gross
+/// `lightning_invoice_amount`, so the conversion uses the net BTC amount as the denominator:
+///
+/// ```text
+/// net_btc_msat = lightning_invoice_amount - btc_fee_msat
+/// budget       = btc_fee_msat * pct / 100 * fiber_invoice_amount / net_btc_msat
+/// ```
+///
+/// This preserves the invariant that the outgoing route fee never exceeds the value the operator
+/// collected, expressed in the leg's own asset. `pct` (`max_outgoing_fee_percentage`) is validated
+/// to be within `1..=100` at startup. Returns `0` when the net BTC amount is `0` (no rate to apply).
+pub(crate) fn outgoing_fee_budget_fiber_smallest_unit(
+    order: &CchOrder,
+    max_outgoing_fee_percentage: u64,
+) -> u128 {
+    // The exchange rate relates the Fiber amount to the BTC amount *before* the hub fee, since
+    // `fiber_invoice_amount` was priced off the net BTC payout. Using the gross
+    // `lightning_invoice_amount` here would understate the rate and shrink the budget below what
+    // was charged.
+    let net_btc_msat = order
+        .lightning_invoice_amount
+        .saturating_sub(order.btc_fee_msat);
+    if net_btc_msat == 0 {
+        return 0;
+    }
+    // Scale by the configured percentage first (shrinks the value, limiting overflow), then convert
+    // to the Fiber unit. `u256`-style widening is unnecessary: the product stays within `u128` for
+    // realistic amounts, and `saturating_mul` guards the pathological case.
+    let budget_msat = order
+        .btc_fee_msat
         .saturating_mul(max_outgoing_fee_percentage as u128)
-        / 100
+        / 100;
+    budget_msat.saturating_mul(order.fiber_invoice_amount) / net_btc_msat
 }
 
 /// Compute the `max_fee_rate` (proportional, over `MAX_FEE_RATE_DENOMINATOR`) that corresponds to
@@ -364,11 +407,14 @@ impl SendOutgoingPaymentDispatcher {
 
         // Cap the outgoing routing fee at the fee the operator collected on the incoming leg
         // (scaled by the configured percentage) so a route cannot consume more than was charged.
-        let fee_budget_sats =
-            outgoing_fee_budget_sats(order, state.config.max_outgoing_fee_percentage);
-
+        // The budget is denominated in the outgoing leg's own asset: the Fiber asset's smallest
+        // unit for a Fiber payment, or satoshis for a Lightning payment.
         match dispatch_payment_handler(order) {
             PaymentHandlerType::Fiber => {
+                let fee_budget_smallest_unit = outgoing_fee_budget_fiber_smallest_unit(
+                    order,
+                    state.config.max_outgoing_fee_percentage,
+                );
                 let tlc_expiry_limit = max_outgoing_seconds
                     .saturating_mul(1000)
                     .min(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
@@ -380,12 +426,17 @@ impl SendOutgoingPaymentDispatcher {
                     retry_count,
                     tlc_expiry_limit,
                     fee_limit: OutgoingFeeLimit {
-                        max_fee_amount: fee_budget_sats,
-                        max_fee_rate: outgoing_max_fee_rate(order.amount_sats, fee_budget_sats),
+                        max_fee_amount: fee_budget_smallest_unit,
+                        max_fee_rate: outgoing_max_fee_rate(
+                            order.fiber_invoice_amount,
+                            fee_budget_smallest_unit,
+                        ),
                     },
                 }))
             }
             PaymentHandlerType::Lightning => {
+                let fee_budget_sats =
+                    outgoing_fee_budget_sats(order, state.config.max_outgoing_fee_percentage);
                 let cltv_limit = (max_outgoing_seconds / 600) as i32;
                 // LND fee limits are i64; clamp the (already small) sat budget defensively.
                 let fee_limit_sat = i64::try_from(fee_budget_sats).unwrap_or(i64::MAX);

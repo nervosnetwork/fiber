@@ -83,6 +83,16 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "subscribe_store_changes",
         r#"allow if internal("store_changes");"#,
     );
+    // CCH operator acceptor (multi-asset proposal flow). Both endpoints are
+    // operator-only — leaking access lets an attacker silently reject swaps.
+    b.rule(
+        "subscribe_swap_proposals",
+        r#"allow if write("cch_acceptor");"#,
+    );
+    b.rule(
+        "submit_swap_proposal_response",
+        r#"allow if write("cch_acceptor");"#,
+    );
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);

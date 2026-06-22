@@ -49,8 +49,18 @@ pub enum CchError {
     SendBTCOrderAmountTooLarge,
     #[error("ReceiveBTC order payment amount is too large")]
     ReceiveBTCOrderAmountTooLarge,
-    #[error("Wrapped BTC type script mismatch")]
-    WrappedBTCTypescriptMismatch,
+    #[error("Fiber asset is not in the configured allowlist")]
+    FiberAssetNotAllowlisted,
+    #[error("Swap proposal rejected by operator: {0}")]
+    SwapProposalRejected(String),
+    #[error("Swap proposal timed out waiting for operator response")]
+    SwapProposalTimeout,
+    #[error("Operator response is missing the required counterparty_leg_amount")]
+    SwapProposalResponseMissingAmount,
+    #[error("Operator response counterparty_leg_amount is invalid (zero or out of range)")]
+    SwapProposalResponseInvalidAmount,
+    #[error("No pending swap proposal with the given proposal_id")]
+    SwapProposalUnknown,
     #[error("Expect preimage in settled payment but missing")]
     SettledPaymentMissingPreimage,
     #[error("Preimage hash mismatch")]

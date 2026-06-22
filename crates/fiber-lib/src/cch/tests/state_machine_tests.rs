@@ -52,17 +52,18 @@ fn create_test_order_with_payment_hash(status: CchOrderStatus, payment_hash: Has
     CchOrder {
         created_at: 1700000000,
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script {
+        fiber_type_script: Some(ckb_jsonrpc_types::Script {
             code_hash: Default::default(),
             hash_type: ckb_jsonrpc_types::ScriptHashType::Data,
             args: Default::default(),
-        },
+        }),
         outgoing_pay_req: btc_invoice_str.to_string(),
         incoming_invoice: CchInvoice::Lightning(btc_invoice),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100000,
-        fee_sats: 100,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 100_000,
+        fiber_invoice_amount: 100_000,
         status,
         failure_reason: None,
     }

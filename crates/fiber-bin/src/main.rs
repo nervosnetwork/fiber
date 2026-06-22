@@ -393,6 +393,8 @@ async fn run_node(
             if network_actor.is_none() {
                 cch_config.validate_standalone().map_err(ExitMessage)?;
             }
+            // Cross-mode invariants (e.g. positive fixed-rate divisors).
+            cch_config.validate().map_err(ExitMessage)?;
 
             info!("Starting cch");
             let ignore_startup_failure = cch_config.ignore_startup_failure;

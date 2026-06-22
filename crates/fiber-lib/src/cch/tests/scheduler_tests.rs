@@ -94,13 +94,14 @@ fn create_test_order(
     CchOrder {
         created_at,
         expiry_delta_seconds,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: "test".to_string(),
         incoming_invoice: CchInvoice::Fiber(invoice),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 1000,
-        fee_sats: 0,
+        lightning_invoice_amount: 1_000_000,
+        btc_fee_msat: 0,
+        fiber_invoice_amount: 1_000,
         status,
         failure_reason: None,
     }

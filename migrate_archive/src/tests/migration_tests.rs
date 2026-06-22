@@ -306,3 +306,106 @@ fn test_migration_output_is_deterministic() {
         assert_eq!(new1, new2, "Attempt migration is not deterministic");
     }
 }
+
+// ─── CchOrder migration tests (mig_20260421_cch_multi_asset) ─────────
+
+mod cch_multi_asset {
+    use crate::migrations::mig_20260421_cch_multi_asset::{migrate_cch_order, NewCchOrder};
+    use fiber_v070::cch::{CchInvoice, CchOrder as OldCchOrder, CchOrderStatus};
+    use fiber_v070::fiber::types::Hash256;
+
+    /// Build a real `Bolt11Invoice` using `lightning_invoice::InvoiceBuilder`
+    /// so the test does not depend on a hand-crafted bech32 string surviving
+    /// upstream BOLT-11 checksum/version bumps.
+    fn build_test_lightning_invoice() -> lightning_invoice::Bolt11Invoice {
+        use bitcoin::hashes::Hash as _;
+        use lightning_invoice::{Currency as LnCurrency, InvoiceBuilder, PaymentSecret};
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let private_key = bitcoin::secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let payment_hash =
+            bitcoin::hashes::sha256::Hash::from_slice(&[0xAA; 32]).expect("32-byte hash");
+        let duration_since_epoch = std::time::Duration::from_secs(1_700_000_000);
+        InvoiceBuilder::new(LnCurrency::Bitcoin)
+            .description("migration test".to_string())
+            .payment_hash(payment_hash)
+            .payment_secret(PaymentSecret([0u8; 32]))
+            .duration_since_epoch(duration_since_epoch)
+            .min_final_cltv_expiry_delta(36)
+            .amount_milli_satoshis(100_000_000)
+            .build_signed(|h| secp.sign_ecdsa_recoverable(h, &private_key))
+            .expect("build BOLT-11 invoice")
+    }
+
+    fn build_old_cch_order() -> OldCchOrder {
+        let payment_hash: Hash256 = [0xAA; 32].into();
+        let preimage: Hash256 = [0xBB; 32].into();
+        let invoice = build_test_lightning_invoice();
+        let outgoing_pay_req = invoice.to_string();
+
+        OldCchOrder {
+            created_at: 1_700_000_000,
+            expiry_delta_seconds: 3_600,
+            wrapped_btc_type_script: ckb_jsonrpc_types_legacy::Script::default(),
+            outgoing_pay_req,
+            incoming_invoice: CchInvoice::Lightning(invoice),
+            payment_hash,
+            payment_preimage: Some(preimage),
+            amount_sats: 100_000,
+            fee_sats: 250,
+            status: CchOrderStatus::Pending,
+            failure_reason: None,
+        }
+    }
+
+    /// End-to-end roundtrip mirroring what
+    /// `mig_20260421_cch_multi_asset::MigrationObj::migrate` does in
+    /// production: bincode-serialize the v0.7.0 `CchOrder`, deserialize it
+    /// back through the snapshot type, run `migrate_cch_order`, then
+    /// serialize the new layout and confirm it deserializes via the
+    /// migration's `NewCchOrder` shadow type. Catches any drift in either
+    /// the old or new bincode layouts (which would otherwise only surface
+    /// on a real upgrade).
+    #[test]
+    fn test_migrate_cch_order_bytes_roundtrip() {
+        let old = build_old_cch_order();
+        let old_bytes = bincode::serialize(&old).expect("serialize old CchOrder");
+
+        let decoded: OldCchOrder =
+            bincode::deserialize(&old_bytes).expect("deserialize old CchOrder");
+        let new = migrate_cch_order(decoded);
+
+        let new_bytes = bincode::serialize(&new).expect("serialize new CchOrder");
+        let _: NewCchOrder =
+            bincode::deserialize(&new_bytes).expect("deserialize new CchOrder");
+    }
+
+    /// Field-by-field check that the migration preserves identifying data
+    /// and applies the documented sat→msat conversion plus the legacy
+    /// 1:1 sat-to-smallest-unit assumption for the new
+    /// `fiber_invoice_amount` field.
+    #[test]
+    fn test_migrate_cch_order_preserves_fields() {
+        let old = build_old_cch_order();
+        let old_amount_sats = old.amount_sats;
+        let old_fee_sats = old.fee_sats;
+        let old_payment_hash = old.payment_hash;
+        let old_created_at = old.created_at;
+        let old_expiry_delta = old.expiry_delta_seconds;
+        let old_pay_req = old.outgoing_pay_req.clone();
+
+        let new = migrate_cch_order(old);
+
+        assert_eq!(new.created_at, old_created_at);
+        assert_eq!(new.expiry_delta_seconds, old_expiry_delta);
+        assert_eq!(new.outgoing_pay_req, old_pay_req);
+        assert_eq!(new.payment_hash, old_payment_hash);
+        // Legacy 1:1 wrapped-BTC fee math: 1 sat == 1 smallest unit on
+        // the Fiber side, BTC amounts shift sat → msat (×1000).
+        assert_eq!(new.lightning_invoice_amount, old_amount_sats * 1_000);
+        assert_eq!(new.btc_fee_msat, old_fee_sats * 1_000);
+        assert_eq!(new.fiber_invoice_amount, old_amount_sats);
+        // Legacy single-asset orders all carried a wrapped-BTC type
+        // script, so the migration always sets `Some(_)`.
+        assert!(new.fiber_type_script.is_some());
+    }
+}

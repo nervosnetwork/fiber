@@ -19,8 +19,18 @@ rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 # Fiber types for migration
 fiber-types-090 = { package = "fiber-types", version = "0.9.0-rc4" }
 
+# Current (workspace) fiber types: target shape for migrations whose new
+# layout has not been published to a registry version yet (e.g. the CCH
+# multi-asset reshape). Swap this back to a registry `fiber-types-0xx`
+# alias once a version carrying the new types is published.
+fiber-types-local = { package = "fiber-types", path = "../fiber-types", features = [
+  "cch",
+] }
+
 # Old fiber types for deserializing legacy data
-fiber-types-081 = { package = "fiber-types", version = "0.8.1" }
+fiber-types-081 = { package = "fiber-types", version = "0.8.1", features = [
+  "cch",
+] }
 
 # Serialization for migration data conversion
 bincode = "1.3.3"
@@ -38,7 +48,10 @@ wasm-bindgen = "0.2.84"
 web-sys = "0.3.72"
 
 [dev-dependencies]
-fiber-types-081 = { package = "fiber-types", version = "0.8.1", features = ["sample"] }
+fiber-types-081 = { package = "fiber-types", version = "0.8.1", features = [
+  "sample",
+  "cch",
+] }
 tempfile = "3.10.1"
 
 [features]

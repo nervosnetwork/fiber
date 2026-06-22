@@ -18,6 +18,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `send_btc`](#cch-send_btc)
         * [Method `receive_btc`](#cch-receive_btc)
         * [Method `get_cch_order`](#cch-get_cch_order)
+        * [Method `subscribe_swap_proposals`](#cch-subscribe_swap_proposals)
+        * [Method `submit_swap_proposal_response`](#cch-submit_swap_proposal_response)
     * [Module Channel](#module-channel)
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
@@ -99,6 +101,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SessionRouteNode`](#type-sessionroutenode)
     * [Type `SettlementData`](#type-settlementdata)
     * [Type `SettlementTlc`](#type-settlementtlc)
+    * [Type `SwapDirection`](#type-swapdirection)
+    * [Type `SwapProposal`](#type-swapproposal)
     * [Type `TLCId`](#type-tlcid)
     * [Type `TlcStatus`](#type-tlcstatus)
     * [Type `TransportType`](#type-transporttype)
@@ -120,22 +124,35 @@ RPC module for cross chain hub demonstration.
 
 Creates a CCH order for a BTC Lightning payee.
 
+ For a fixed-rate Fiber asset the counterparty invoice is minted inline
+ and the response carries the created order (already `Pending`). For a
+ non-fixed-rate asset no order is created yet: the response carries the
+ swap proposal the hub is broadcasting to operators while it awaits a
+ decision. Poll `get_cch_order` until the order appears (`Pending`); if
+ the operator rejects the proposal or it times out, no order is ever
+ created and `get_cch_order` reports it as not found.
+
+ The result is an externally-tagged `CchNewOrderResponse` JSON enum:
+
+ * `{"Order": <CchOrderResponse>}` — fixed-rate asset: the order was
+   created and is already `Pending`. Contains `incoming_invoice` and
+   `payment_hash` for the Fiber leg.
+ * `{"PendingProposal": <SwapProposal>}` — non-fixed-rate asset: no
+   order exists yet; the hub is awaiting an operator decision.
+
 ##### Params
 
 * `btc_pay_req` - <em>`String`</em>, Payment request string for the BTC Lightning payee.
 * `currency` - <em>[Currency](#type-currency)</em>, Request currency
+* `fiber_type_script` - <em>`Option<Script>`</em>, Identity of the Fiber-side asset to use for this swap. `null` denotes
+ native CKB; otherwise the full UDT type script identifies the asset.
+ Must appear in the hub's `fiber_asset_allowlist`.
 
 ##### Returns
 
-* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
-* `wrapped_btc_type_script` - <em>`Script`</em>, Wrapped BTC type script
-* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
-* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
-* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
-* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+* `Order` - <em>[CchOrderResponse](#type-cchorderresponse)</em>, Fast path: the order was created and is already `Pending`.
+* `PendingProposal` - <em>[SwapProposal](#type-swapproposal)</em>, Proposal path: no order exists yet; the swap awaits an operator
+ decision on this proposal.
 
 ---
 
@@ -146,21 +163,31 @@ Creates a CCH order for a BTC Lightning payee.
 
 Creates a CCH order for a CKB Fiber payee.
 
+ For a fixed-rate Fiber asset the counterparty invoice is minted inline
+ and the response carries the created order (already `Pending`). For a
+ non-fixed-rate asset no order is created yet: the response carries the
+ swap proposal the hub is broadcasting to operators while it awaits a
+ decision. Poll `get_cch_order` until the order appears (`Pending`); if
+ the operator rejects the proposal or it times out, no order is ever
+ created and `get_cch_order` reports it as not found.
+
+ The result is an externally-tagged `CchNewOrderResponse` JSON enum:
+
+ * `{"Order": <CchOrderResponse>}` — fixed-rate asset: the order was
+   created and is already `Pending`. Contains `incoming_invoice` and
+   `payment_hash` for the BTC leg.
+ * `{"PendingProposal": <SwapProposal>}` — non-fixed-rate asset: no
+   order exists yet; the hub is awaiting an operator decision.
+
 ##### Params
 
 * `fiber_pay_req` - <em>`String`</em>, Payment request string for the CKB Fiber payee.
 
 ##### Returns
 
-* `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
-* `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
-* `wrapped_btc_type_script` - <em>`Script`</em>, Wrapped BTC type script
-* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
-* `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
-* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
-* `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+* `Order` - <em>[CchOrderResponse](#type-cchorderresponse)</em>, Fast path: the order was created and is already `Pending`.
+* `PendingProposal` - <em>[SwapProposal](#type-swapproposal)</em>, Proposal path: no order exists yet; the swap awaits an operator
+ decision on this proposal.
 
 ---
 
@@ -179,13 +206,80 @@ Get a CCH order by payment hash.
 
 * `timestamp` - <em>`u64`</em>, Seconds since epoch when the order is created
 * `expiry_delta_seconds` - <em>`u64`</em>, Relative expiry time in seconds from `created_at` that the order expires
-* `wrapped_btc_type_script` - <em>`Script`</em>, Wrapped BTC type script
-* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment
+* `fiber_type_script` - <em>`Option<Script>`</em>, Identity of the Fiber-side asset for this order. `null` denotes native
+ CKB; otherwise the full UDT type script identifies the asset.
+* `incoming_invoice` - <em>[CchInvoice](#type-cchinvoice)</em>, Generated invoice for the incoming payment.
 * `outgoing_pay_req` - <em>`String`</em>, The final payee to accept the payment. It has the different network with incoming invoice.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash for the HTLC for both CKB and BTC.
-* `amount_sats` - <em>`u128`</em>, Amount required to pay in Satoshis, including fee
-* `fee_sats` - <em>`u128`</em>, Fee in Satoshis
+* `lightning_invoice_amount` - <em>`u128`</em>, Amount of the Lightning (BTC) leg invoice, in **millisatoshi** (the same
+ unit a Bolt11 invoice carries; 1 satoshi = 1000 millisatoshi). Always
+ equals that leg's invoice amount: fee-exclusive on `SendBTC` (the
+ submitted Bolt11), fee-inclusive on `ReceiveBTC` (the minted hold
+ invoice).
+* `btc_fee_msat` - <em>`u128`</em>, Hub fee for this order, in millisatoshi.
+* `fiber_invoice_amount` - <em>`u128`</em>, Amount of the Fiber leg invoice, in the **smallest unit** of
+ `fiber_type_script` (shannon for native CKB, the UDT's smallest unit
+ otherwise; the same unit a Fiber invoice carries). Always equals that
+ leg's invoice amount.
 * `status` - <em>[CchOrderStatus](#type-cchorderstatus)</em>, Order status
+
+---
+
+
+
+<a id="cch-subscribe_swap_proposals"></a>
+#### Method `subscribe_swap_proposals`
+
+Subscribe to swap proposals that the hub needs the operator to
+ approve. Each notification carries a `proposal_id` that the operator
+ must echo back via [`submit_swap_proposal_response`] before the
+ configured timeout, otherwise the proposal is auto-rejected.
+
+ (Spec §5 calls for inline subscription replies; jsonrpsee
+ subscriptions are unidirectional, so we use a separate normal RPC
+ method on the same connection.)
+
+##### Params
+* None
+
+##### Returns
+
+* `jsonrpsee` - <em>jsonrpsee</em>, 
+
+---
+
+
+
+<a id="cch-submit_swap_proposal_response"></a>
+#### Method `submit_swap_proposal_response`
+
+Submit an operator decision for a previously emitted swap proposal.
+ Any authenticated operator may resolve any pending proposal — the
+ acceptor does not require that the response arrive on the same
+ WebSocket session that received the proposal notification. Operators
+ can list outstanding proposals/orders via the orders RPC and submit
+ decisions over any session.
+
+ On accept the hub mints the counterparty invoice and creates the order
+ as `Pending`; on reject it drops the pending proposal without creating
+ an order. The call returns `Ok` once the decision is applied — the swap
+ client observes the resulting state by polling `get_cch_order`.
+
+##### Params
+
+* `proposal_id` - <em>[Hash256](#type-hash256)</em>, Must match a pending proposal previously notified to this client.
+* `accept` - <em>`bool`</em>, `true` to accept the swap, `false` to reject.
+* `counterparty_leg_amount` - <em>`Option<u128>`</em>, REQUIRED when `accept` is `true`. Smallest-unit integer in the
+ counterparty leg's asset:
+
+ * On `SendBTC`, this is the **Fiber-leg** amount in smallest units.
+ * On `ReceiveBTC`, this is the **BTC-leg** amount in millisatoshi.
+* `reject_reason` - <em>`Option<String>`</em>, Optional human-readable reason; logged by the hub and returned to
+ the swap client when `accept` is `false`.
+
+##### Returns
+
+* None
 
 ---
 
@@ -1738,6 +1832,64 @@ Data needed to authorize and execute a Time-Locked Contract (TLC) settlement tra
 * `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
 * `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC (hex without 0x prefix)
 * `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC (hex without 0x prefix)
+---
+
+<a id="#type-swapdirection"></a>
+### Type `SwapDirection`
+
+Direction of a swap proposal sent to the operator acceptor.
+
+
+#### Enum with values of
+
+* `SendBTC` - Swap client submitted a Bolt11 invoice; hub will pay Lightning,
+ client pays the Fiber leg.
+* `ReceiveBTC` - Swap client submitted a Fiber invoice; hub will pay the Fiber leg,
+ client pays Lightning.
+---
+
+<a id="#type-swapproposal"></a>
+### Type `SwapProposal`
+
+Notification pushed to operator clients subscribed via
+ `subscribe_swap_proposals` when a swap whose Fiber leg is allowlisted
+ but **not** in the fixed-rate list arrives at the hub. The operator
+ must answer with a [`SwapProposalResponse`] (via
+ `submit_swap_proposal_response`) before the configured timeout, or the
+ proposal is rejected automatically.
+
+
+#### Fields
+
+* `proposal_id` - <em>[Hash256](#type-hash256)</em>, Opaque id; the operator MUST echo this in their `SwapProposalResponse`.
+* `order_id` - <em>[Hash256](#type-hash256)</em>, Hub-internal id of the underlying CCH order. For now this equals
+ `payment_hash`; kept as a separate field so the spec's contract is
+ honoured even if the two diverge later.
+* `direction` - <em>[SwapDirection](#type-swapdirection)</em>, Whether the Fiber leg is incoming (`SendBTC`) or outgoing
+ (`ReceiveBTC`) from the hub's perspective.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash that links both legs.
+* `fiber_asset` - <em>`Option<Script>`</em>, UDT type script when the Fiber leg is a UDT; absent for native CKB.
+* `fiber_invoice_amount` - <em>`Option<u128>`</em>, Fiber-leg amount in the asset's smallest unit when known up-front
+ (parsed from the submitted Fiber invoice on `ReceiveBTC`); absent on
+ `SendBTC` because the operator supplies it in their response. Same unit
+ as the Fiber invoice (shannon for native CKB, UDT smallest unit
+ otherwise).
+* `lightning_invoice_amount` - <em>`Option<u128>`</em>, Lightning amount in millisatoshi when known up-front (parsed from
+ the submitted Bolt11 on `SendBTC`, fee-exclusive); absent on `ReceiveBTC`
+ because the operator supplies it in their response. Same unit as the
+ Bolt11 invoice (millisatoshi).
+* `configured_fee_rate_per_million_sats` - <em>`u64`</em>, Hub-configured proportional fee in effect for this swap.
+* `configured_base_fee_sats` - <em>`u64`</em>, Hub-configured flat base fee in effect for this swap, in satoshis.
+* `fee_on_btc_side_msat` - <em>`Option<u128>`</em>, Fee attributed to the BTC leg derived from the configured rate,
+ in millisatoshi. `Some` on `SendBTC` (computed from the submitted
+ Bolt11 amount); `null` on `ReceiveBTC`, where it cannot be computed
+ up-front (it depends on the operator-set BTC-leg amount) — the operator
+ MUST account for the configured rate/base when choosing the
+ counterparty amount.
+* `submitted_invoice` - <em>`String`</em>, Encoded pay request the swap client supplied, for operator review.
+* `expires_at` - <em>`u64`</em>, Wall-clock seconds since UNIX epoch when this proposal will be
+ auto-rejected if no response has been received.
+* `created_at` - <em>`u64`</em>, Wall-clock seconds since UNIX epoch when this proposal was built.
 ---
 
 <a id="#type-tlcid"></a>

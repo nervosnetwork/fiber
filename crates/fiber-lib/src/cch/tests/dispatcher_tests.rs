@@ -32,17 +32,18 @@ fn create_order_with_lightning_invoice(status: CchOrderStatus) -> CchOrder {
     CchOrder {
         created_at: 1000,
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script {
+        fiber_type_script: Some(ckb_jsonrpc_types::Script {
             code_hash: Default::default(),
             hash_type: ckb_jsonrpc_types::ScriptHashType::Data,
             args: Default::default(),
-        },
+        }),
         outgoing_pay_req: "fibb1280...".to_string(),
         incoming_invoice: CchInvoice::Lightning(invoice),
         payment_hash: test_payment_hash(1),
         payment_preimage: None,
-        amount_sats: 100000,
-        fee_sats: 100,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 100_000,
+        fiber_invoice_amount: 100_000,
         status,
         failure_reason: None,
     }
@@ -87,17 +88,18 @@ fn create_order_with_fiber_invoice(status: CchOrderStatus) -> CchOrder {
     CchOrder {
         created_at: 1000,
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script {
+        fiber_type_script: Some(ckb_jsonrpc_types::Script {
             code_hash: Default::default(),
             hash_type: ckb_jsonrpc_types::ScriptHashType::Data,
             args: Default::default(),
-        },
+        }),
         outgoing_pay_req: "lnbc1...".to_string(),
         incoming_invoice: CchInvoice::Fiber(invoice),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100000,
-        fee_sats: 100,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 100_000,
+        fiber_invoice_amount: 100_000,
         status,
         failure_reason: None,
     }
@@ -326,7 +328,7 @@ fn test_invoice_and_payment_handlers_are_inverse_for_lightning() {
 #[test]
 fn test_outgoing_fee_budget_full_percentage_uses_entire_fee() {
     let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
-    order.fee_sats = 1_000;
+    order.btc_fee_msat = 1_000_000;
     assert_eq!(
         crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 100),
         1_000
@@ -336,7 +338,7 @@ fn test_outgoing_fee_budget_full_percentage_uses_entire_fee() {
 #[test]
 fn test_outgoing_fee_budget_scales_with_percentage() {
     let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
-    order.fee_sats = 1_000;
+    order.btc_fee_msat = 1_000_000;
     assert_eq!(
         crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 50),
         500
@@ -350,7 +352,7 @@ fn test_outgoing_fee_budget_scales_with_percentage() {
 #[test]
 fn test_outgoing_fee_budget_rounds_down() {
     let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
-    order.fee_sats = 99;
+    order.btc_fee_msat = 99_000;
     // 99 * 50 / 100 = 49.5 -> 49 (integer division floors, never exceeding the collected fee)
     assert_eq!(
         crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 50),
@@ -362,7 +364,7 @@ fn test_outgoing_fee_budget_rounds_down() {
 fn test_outgoing_fee_budget_never_exceeds_collected_fee() {
     let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
     for fee_sats in [0u128, 1, 7, 1_000, u128::from(u64::MAX)] {
-        order.fee_sats = fee_sats;
+        order.btc_fee_msat = fee_sats * 1000;
         for pct in 1..=100u64 {
             let budget =
                 crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, pct);
@@ -375,6 +377,94 @@ fn test_outgoing_fee_budget_never_exceeds_collected_fee() {
             );
         }
     }
+}
+
+// =============================================================================
+// outgoing_fee_budget_fiber_smallest_unit tests
+// =============================================================================
+
+#[test]
+fn test_outgoing_fee_budget_fiber_converts_at_net_rate() {
+    // Net BTC amount = 100_000_000 - 100_000 = 99_900_000 msat maps to
+    // fiber_invoice_amount = 100_000. So 1 fiber unit ≈ 999 msat.
+    // budget_msat (100%) = btc_fee_msat = 100_000.
+    // fiber budget = 100_000 * 100_000 / 99_900_000 = 100 (floored).
+    let order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_fiber_smallest_unit(
+            &order, 100
+        ),
+        100
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_fiber_excludes_operator_fee() {
+    // The rate must use the BTC amount net of the fee. With a 1:1 (1000 msat per fiber unit)
+    // net rate the budget equals the fee in sats; including the fee in the denominator would
+    // understate it. Choose amounts so net_btc_msat == fiber_invoice_amount * 1000.
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fiber_invoice_amount = 100_000;
+    order.btc_fee_msat = 1_000_000; // 1_000 sats
+    order.lightning_invoice_amount = 100_000_000 + order.btc_fee_msat; // net = 100_000_000 msat
+                                                                       // net rate: 100_000_000 msat / 100_000 units = 1000 msat per unit (1 unit per sat)
+                                                                       // budget = btc_fee_msat (msat) * units / net_msat = 1_000_000 * 100_000 / 100_000_000 = 1_000
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_fiber_smallest_unit(
+            &order, 100
+        ),
+        1_000
+    );
+    // Sanity: had the gross amount been used, the denominator (101_000_000) would have produced
+    // a strictly smaller budget.
+    let gross_rate_budget = 1_000_000u128 * 100_000 / order.lightning_invoice_amount;
+    assert!(gross_rate_budget < 1_000);
+}
+
+#[test]
+fn test_outgoing_fee_budget_fiber_scales_with_percentage() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fiber_invoice_amount = 100_000;
+    order.btc_fee_msat = 1_000_000;
+    order.lightning_invoice_amount = 100_000_000 + order.btc_fee_msat; // net = 100_000_000 msat
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_fiber_smallest_unit(
+            &order, 50
+        ),
+        500
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_fiber_handles_disparate_scales() {
+    // A UDT whose smallest unit is far larger than a satoshi: net 100_000 sats (1e8 msat)
+    // maps to 1e12 fiber units, i.e. 10_000 units per sat. With a 1_000-sat fee the budget
+    // must scale into the UDT unit, not stay at "1000 sats".
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fiber_invoice_amount = 1_000_000_000_000; // 1e12
+    order.btc_fee_msat = 1_000_000; // 1_000 sats
+    order.lightning_invoice_amount = 100_000_000 + order.btc_fee_msat; // net = 1e8 msat (100_000 sats)
+                                                                       // budget = 1_000_000 * 1e12 / 1e8 = 1e10
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_fiber_smallest_unit(
+            &order, 100
+        ),
+        10_000_000_000
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_fiber_zero_net_amount_is_zero() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    // Degenerate order where the entire BTC amount is fee: no net payout, so no rate to apply.
+    order.lightning_invoice_amount = 100_000;
+    order.btc_fee_msat = 100_000;
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_fiber_smallest_unit(
+            &order, 100
+        ),
+        0
+    );
 }
 
 // =============================================================================

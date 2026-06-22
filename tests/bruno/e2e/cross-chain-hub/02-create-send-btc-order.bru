@@ -23,7 +23,12 @@ body:json {
     "params": [
       {
         "btc_pay_req": "{{BTC_PAY_REQ}}",
-        "currency": "Fibd"
+        "currency": "Fibd",
+        "fiber_type_script": {
+          "code_hash": "{{UDT_CODE_HASH}}",
+          "hash_type": "data2",
+          "args": "{{UDT_SCRIPT_ARGS}}"
+        }
       }
     ]
   }
@@ -36,8 +41,8 @@ assert {
 
 script:post-response {
   if (res.body.result) {
-    bru.setVar("FIBER_PAY_REQ", res.body.result.incoming_invoice.Fiber);
-    console.log(res.body.result.payment_hash);
+    bru.setVar("FIBER_PAY_REQ", res.body.result.Order.incoming_invoice.Fiber);
+    console.log(res.body.result.Order.payment_hash);
   }
 }
 

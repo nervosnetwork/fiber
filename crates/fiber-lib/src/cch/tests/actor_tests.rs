@@ -25,8 +25,10 @@ use crate::fiber::{
 };
 use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256, HashAlgorithm, PaymentStatus};
-use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
+use fiber_types::{
+    CchInvoice, CchOrder, CchOrderStatus, Hash256, HashAlgorithm, PaymentStatus, SwapProposal,
+};
+use ractor::{call, call_t, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
 use secp256k1::{Secp256k1, SecretKey};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -40,11 +42,21 @@ const BTC_BLOCK_TIME_SECS: u64 = BTC_BLOCK_TIME_MILLIS / 1_000;
 #[derive(Clone, Default)]
 pub struct MockCchOrderStore {
     orders: Arc<Mutex<HashMap<Hash256, CchOrder>>>,
+    pending_proposals: Arc<Mutex<HashMap<Hash256, SwapProposal>>>,
 }
 
 impl MockCchOrderStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Seed a pending proposal directly into the backing map, bypassing the
+    /// actor. Used to simulate proposals persisted before a restart.
+    pub fn seed_pending_proposal(&self, proposal: SwapProposal) {
+        self.pending_proposals
+            .lock()
+            .unwrap()
+            .insert(proposal.payment_hash, proposal);
     }
 }
 
@@ -84,6 +96,53 @@ impl CchOrderStore for MockCchOrderStore {
     fn delete_cch_order(&self, payment_hash: &Hash256) {
         let mut orders = self.orders.lock().unwrap();
         orders.remove(payment_hash);
+    }
+
+    fn get_cch_pending_proposal(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<SwapProposal, CchStoreError> {
+        self.pending_proposals
+            .lock()
+            .unwrap()
+            .get(payment_hash)
+            .ok_or(CchStoreError::NotFound(*payment_hash))
+            .cloned()
+    }
+
+    fn insert_cch_pending_proposal(&self, proposal: SwapProposal) -> Result<(), CchStoreError> {
+        let mut proposals = self.pending_proposals.lock().unwrap();
+        let payment_hash = proposal.payment_hash;
+        match proposals.insert(payment_hash, proposal) {
+            Some(_) => Err(CchStoreError::Duplicated(payment_hash)),
+            None => Ok(()),
+        }
+    }
+
+    fn get_cch_pending_proposal_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
+        self.pending_proposals
+            .lock()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
+    fn delete_cch_pending_proposal(&self, payment_hash: &Hash256) {
+        let mut proposals = self.pending_proposals.lock().unwrap();
+        proposals.remove(payment_hash);
+    }
+}
+
+/// Unwrap a `send_btc` / `receive_btc` result as a created order, panicking if
+/// the request entered the proposal flow instead. Used by fast-path tests
+/// where a fixed-rate asset is expected to mint the order inline.
+fn expect_order(result: fiber_types::NewOrderResult) -> CchOrder {
+    match result {
+        fiber_types::NewOrderResult::Order(order) => order,
+        fiber_types::NewOrderResult::PendingProposal(_) => {
+            panic!("expected an order, got a pending proposal")
+        }
     }
 }
 
@@ -272,6 +331,30 @@ impl TestHarness {
         }
     }
 
+    /// Wait until `get_cch_order` reports the order as absent (NotFound). Used
+    /// for the proposal reject/timeout paths, where the pending proposal is
+    /// deleted and no order is ever created.
+    async fn wait_for_order_absent(&self, payment_hash: Hash256, timeout_ms: u64) {
+        let start = std::time::Instant::now();
+        let poll_interval = tokio::time::Duration::from_millis(10);
+        let timeout = tokio::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            match self.get_order(payment_hash).await {
+                Err(CchError::StoreError(CchStoreError::NotFound(_))) => return,
+                other => {
+                    if start.elapsed() > timeout {
+                        panic!(
+                            "Timeout waiting for order {:x} to be absent. Last result: {:?}",
+                            payment_hash, other
+                        );
+                    }
+                }
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     /// Simulate incoming invoice being paid (e.g., user pays Fiber invoice or LN invoice)
     /// This injects the event via OutputPort, simulating what FiberStoreWatcher/LndTrackerActor would do
     fn simulate_incoming_invoice_received(&self, payment_hash: Hash256) {
@@ -356,17 +439,18 @@ impl TestHarness {
         let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
         let btc_pay_req = lightning_invoice.to_string();
 
-        let order = call!(
+        let result = call!(
             self.actor,
             CchMessage::SendBTC,
             crate::cch::actor::SendBTC {
                 btc_pay_req,
                 currency: Currency::Fibb,
+                fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
             }
         )
         .expect("actor call failed")?;
 
-        Ok((order, preimage))
+        Ok((expect_order(result), preimage))
     }
 
     /// Insert an order directly into the database (for testing without LND)
@@ -380,6 +464,23 @@ async fn setup_test_harness() -> TestHarness {
     setup_test_harness_with_store(MockCchOrderStore::new()).await
 }
 
+/// Poll the actor's pending-proposal map until a proposal id appears, returning
+/// the first one. Panics if none is registered within two seconds.
+async fn wait_for_pending_proposal_id(actor: &ActorRef<CchMessage>) -> Hash256 {
+    let start = std::time::Instant::now();
+    loop {
+        let ids: Vec<Hash256> =
+            ractor::call!(actor, CchMessage::TestPendingProposalIds).expect("query pending ids");
+        if let Some(id) = ids.into_iter().next() {
+            return id;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(2) {
+            panic!("actor never registered a pending proposal");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 async fn setup_test_harness_with_config(config: CchConfig) -> TestHarness {
     setup_test_harness_with_config_and_store(config, MockCchOrderStore::new()).await
 }
@@ -387,7 +488,6 @@ async fn setup_test_harness_with_config(config: CchConfig) -> TestHarness {
 async fn setup_test_harness_with_store(store: MockCchOrderStore) -> TestHarness {
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         ..Default::default()
     };
@@ -398,6 +498,33 @@ async fn setup_test_harness_with_config_and_store(
     config: CchConfig,
     store: MockCchOrderStore,
 ) -> TestHarness {
+    // Ensure tests have at least one Fiber asset configured. Default the
+    // allowlist to the empty (default) script when nothing is set, and
+    // synthesise a 1:1 fixed-rate entry for every allowlisted asset when the
+    // caller did not supply ANY fixed-rate config (preserving the legacy
+    // wrapped-BTC fee-math semantics: 1 sat = 1 smallest unit). When the
+    // caller supplies a non-empty `fixed_rate_assets`, we leave it untouched
+    // so tests can deliberately exercise the allowlisted-but-not-fixed-rate
+    // rejection path.
+    let mut config = if config.fiber_asset_allowlist.is_empty() {
+        CchConfig {
+            fiber_asset_allowlist: vec![Some(ckb_jsonrpc_types::Script::default())],
+            ..config
+        }
+    } else {
+        config
+    };
+    if config.fixed_rate_assets.is_empty() {
+        for asset in config.fiber_asset_allowlist.clone() {
+            config
+                .fixed_rate_assets
+                .push(crate::cch::config::FixedRateAsset {
+                    fiber_asset: asset,
+                    smallest_units_per_sat: 1,
+                });
+        }
+    }
+
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
     let mock_state = MockNetworkState {
@@ -477,11 +604,23 @@ fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
 
 /// Create a test Fiber invoice with a specific amount
 fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) -> CkbInvoice {
+    use crate::invoice::CkbScript;
+    use ckb_types::packed::Script;
+
     // Create a deterministic keypair for tests
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
 
     let default_expiry_delta_ms = DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS * 1000;
+    // Pick a final-TLC expiry that always satisfies the ReceiveBTC validation
+    // (`ckb_final_tlc_millis < btc_final_cltv_millis / 2`). Half the
+    // configured BTC budget converted to milliseconds gives plenty of headroom
+    // while staying well below the limit; `min` against the CKB default keeps
+    // SendBTC-flow callers (which compare against the CKB budget) happy too.
+    let safe_final_tlc_ms = std::cmp::min(
+        default_expiry_delta_ms,
+        DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS * BTC_BLOCK_TIME_MILLIS / 4,
+    );
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
         amount: Some(amount),
@@ -493,10 +632,13 @@ fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) ->
                 .unwrap()
                 .as_millis(),
             attrs: vec![
-                Attribute::FinalHtlcMinimumExpiryDelta(default_expiry_delta_ms),
+                Attribute::FinalHtlcMinimumExpiryDelta(safe_final_tlc_ms),
                 Attribute::Description("test".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(3600)),
                 Attribute::PayeePublicKey(public_key),
+                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+                // Match the default test-harness allowlist (Some(default Script)).
+                Attribute::UdtScript(CkbScript(Script::default())),
             ],
         },
     };
@@ -599,13 +741,14 @@ async fn test_receive_btc_happy_path() {
             .unwrap()
             .as_secs(),
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: fiber_invoice.to_string(),
         incoming_invoice: CchInvoice::Lightning(lightning_invoice),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::Pending,
         failure_reason: None,
     };
@@ -657,13 +800,15 @@ async fn test_receive_btc_happy_path() {
 /// the outgoing Fiber `SendPayment` has been dispatched, and return the `max_fee_amount` that
 /// was attached to the `SendPaymentCommand`.
 ///
-/// `amount_sats`/`fee_sats` configure the order economics so callers can exercise the fee
-/// budget binding (the outgoing route fee must be capped at the collected CCH fee).
+/// `amount_sats`/`fee_sats` configure the BTC-leg economics; `fiber_invoice_amount` sets the
+/// Fiber-leg amount so callers can exercise the cross-asset fee conversion. The captured budget is
+/// denominated in the Fiber asset's smallest unit (not satoshis).
 async fn dispatch_fiber_outgoing_and_capture_fee(
     harness: &TestHarness,
     seed: u8,
     amount_sats: u128,
     fee_sats: u128,
+    fiber_invoice_amount: u128,
 ) -> Option<u128> {
     let (_preimage, payment_hash) = create_valid_preimage_pair(seed);
 
@@ -678,13 +823,14 @@ async fn dispatch_fiber_outgoing_and_capture_fee(
             .unwrap()
             .as_secs(),
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: None,
         outgoing_pay_req: fiber_invoice.to_string(),
         incoming_invoice: CchInvoice::Lightning(lightning_invoice),
         payment_hash,
         payment_preimage: None,
-        amount_sats,
-        fee_sats,
+        lightning_invoice_amount: amount_sats * 1000,
+        btc_fee_msat: fee_sats * 1000,
+        fiber_invoice_amount,
         status: CchOrderStatus::Pending,
         failure_reason: None,
     };
@@ -705,30 +851,44 @@ async fn dispatch_fiber_outgoing_and_capture_fee(
 /// The outgoing Fiber payment must carry `max_fee_amount` equal to the order's collected fee.
 ///
 /// This is a regression test for the issue where CCH did not bind its fee budget to the
-/// outgoing payment, allowing the default user-payment fee cap (0.5% of amount) to authorize a
-/// route fee far larger than the fee the operator charged.
+/// The outgoing Fiber route fee must be capped at the value the operator collected, converted
+/// into the Fiber asset's smallest unit at the order's net exchange rate (excluding the hub fee),
+/// not at Fiber's default 0.5%-of-amount cap.
 #[tokio::test]
 async fn test_receive_btc_outgoing_fiber_fee_capped_at_collected_fee() {
     let harness = setup_test_harness().await;
 
-    // Pick economics where the default Fiber cap (0.5% * amount = 5000) vastly exceeds the
-    // tiny collected CCH fee (100). Without binding, the route could spend up to 5000.
-    let amount_sats = 1_000_000;
-    let fee_sats = 100;
-    let max_fee =
-        dispatch_fiber_outgoing_and_capture_fee(&harness, 60, amount_sats, fee_sats).await;
+    // Pick economics where the default Fiber cap (0.5% * amount) vastly exceeds the tiny collected
+    // CCH fee. The Fiber leg uses a finer-grained unit than a satoshi (10 units per net-sat) so the
+    // budget is genuinely converted into the Fiber asset, not passed through as raw sats.
+    let amount_sats = 1_000_000u128;
+    let fee_sats = 100u128;
+    // net_btc_msat = (amount_sats - fee_sats) * 1000 = 999_900_000.
+    let fiber_invoice_amount = (amount_sats - fee_sats) * 10; // 10 fiber units per net-sat
+    let max_fee = dispatch_fiber_outgoing_and_capture_fee(
+        &harness,
+        60,
+        amount_sats,
+        fee_sats,
+        fiber_invoice_amount,
+    )
+    .await;
 
+    // budget = btc_fee_msat * pct/100 * fiber_units / net_btc_msat, with pct = 100 (default).
+    let net_btc_msat = (amount_sats - fee_sats) * 1000;
+    let expected = (fee_sats * 1000) * fiber_invoice_amount / net_btc_msat;
+    assert_eq!(expected, 1_000, "sanity: expected budget is in fiber units");
     assert_eq!(
         max_fee,
-        Some(fee_sats),
-        "outgoing Fiber payment must be capped at the collected CCH fee, not the default 0.5% cap"
+        Some(expected),
+        "outgoing Fiber payment must be capped at the collected CCH fee converted to fiber units"
     );
 
-    // Sanity check: the default user-payment cap would have been much larger than fee_sats.
-    let default_cap = amount_sats * 5 / 1000;
+    // Sanity check: the default user-payment cap (in fiber units) would have been much larger.
+    let default_cap = fiber_invoice_amount * 5 / 1000;
     assert!(
-        default_cap > fee_sats,
-        "test scenario must have default cap exceeding collected fee to be meaningful"
+        default_cap > expected,
+        "test scenario must have default cap exceeding collected fee budget to be meaningful"
     );
 }
 
@@ -737,19 +897,30 @@ async fn test_receive_btc_outgoing_fiber_fee_capped_at_collected_fee() {
 async fn test_receive_btc_outgoing_fiber_fee_scaled_by_percentage() {
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         max_outgoing_fee_percentage: 50,
         ..Default::default()
     };
     let harness = setup_test_harness_with_config(config).await;
 
-    let fee_sats = 1_000;
-    let max_fee = dispatch_fiber_outgoing_and_capture_fee(&harness, 61, 1_000_000, fee_sats).await;
+    let amount_sats = 1_000_000u128;
+    let fee_sats = 1_000u128;
+    let fiber_invoice_amount = (amount_sats - fee_sats) * 10; // 10 fiber units per net-sat
+    let max_fee = dispatch_fiber_outgoing_and_capture_fee(
+        &harness,
+        61,
+        amount_sats,
+        fee_sats,
+        fiber_invoice_amount,
+    )
+    .await;
 
+    // budget = btc_fee_msat * 50/100 * fiber_units / net_btc_msat.
+    let net_btc_msat = (amount_sats - fee_sats) * 1000;
+    let expected = (fee_sats * 1000) * 50 / 100 * fiber_invoice_amount / net_btc_msat;
     assert_eq!(
         max_fee,
-        Some(fee_sats * 50 / 100),
+        Some(expected),
         "outgoing Fiber fee budget must be scaled by max_outgoing_fee_percentage"
     );
 }
@@ -766,13 +937,14 @@ async fn test_resume_expired_order_marked_as_failed() {
     let expired_order = CchOrder {
         created_at: current_time - 7200,
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: "test".to_string(),
         incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::Pending,
         failure_reason: None,
     };
@@ -804,13 +976,14 @@ async fn test_resume_active_order_tracking_resumed() {
     let active_order = CchOrder {
         created_at: current_time - 100,
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: "test".to_string(),
         incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::Pending,
         failure_reason: None,
     };
@@ -844,13 +1017,14 @@ async fn test_resume_skips_final_orders() {
             .unwrap()
             .as_secs(),
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: "test".to_string(),
         incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash1)),
         payment_hash: payment_hash1,
         payment_preimage: Some(preimage1),
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::Success,
         failure_reason: None,
     };
@@ -861,13 +1035,14 @@ async fn test_resume_skips_final_orders() {
             .unwrap()
             .as_secs(),
         expiry_delta_seconds: 3600,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: "test".to_string(),
         incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash2)),
         payment_hash: payment_hash2,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::Failed,
         failure_reason: Some("Test failure".to_string()),
     };
@@ -971,6 +1146,7 @@ async fn test_send_btc_rejects_currency_mismatch() {
         crate::cch::actor::SendBTC {
             btc_pay_req,
             currency: Currency::Fibd,
+            fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         }
     )
     .expect("actor call failed");
@@ -1005,6 +1181,7 @@ async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
         crate::cch::actor::SendBTC {
             btc_pay_req,
             currency: Currency::Fibb, // Matches configured currency
+            fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         }
     )
     .expect("actor call failed");
@@ -1016,6 +1193,84 @@ async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
         }
         other => panic!("Expected BTCInvoiceNetworkMismatch, got {:?}", other),
     }
+}
+
+/// Tests that send_btc rejects a `fiber_type_script` that is not in the
+/// configured allowlist.
+#[tokio::test]
+async fn test_send_btc_rejects_unallowlisted_fiber_asset() {
+    let harness = setup_test_harness().await;
+    // Harness allowlist contains only Some(default Script).
+
+    let (_, payment_hash) = create_valid_preimage_pair(120);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+
+    // Build a UDT script that is *not* in the allowlist.
+    let other_script = ckb_jsonrpc_types::Script {
+        code_hash: [1u8; 32].into(),
+        hash_type: ckb_jsonrpc_types::ScriptHashType::Type,
+        args: ckb_jsonrpc_types::JsonBytes::from_vec(vec![0xab]),
+    };
+
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req: lightning_invoice.to_string(),
+            currency: Currency::Fibb,
+            fiber_type_script: Some(other_script),
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::FiberAssetNotAllowlisted) => {} // Expected
+        other => panic!("Expected FiberAssetNotAllowlisted, got {:?}", other),
+    }
+}
+
+/// Tests that send_btc accepts a `fiber_type_script: None` (native CKB) when
+/// `None` is in the allowlist, and that the resulting proxy Fiber invoice has
+/// no `UdtScript` attribute.
+#[tokio::test]
+async fn test_send_btc_accepts_native_ckb_when_allowlisted() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // Allowlist native CKB only.
+        fiber_asset_allowlist: vec![None],
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (_, payment_hash) = create_valid_preimage_pair(121);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req: lightning_invoice.to_string(),
+            currency: Currency::Fibb,
+            fiber_type_script: None,
+        }
+    )
+    .expect("actor call failed")
+    .expect("send_btc should succeed for allowlisted native CKB");
+    let order = expect_order(result);
+
+    assert!(
+        order.fiber_type_script.is_none(),
+        "order.fiber_type_script should be None for native CKB"
+    );
+    let fiber_invoice = match &order.incoming_invoice {
+        CchInvoice::Fiber(inv) => inv.clone(),
+        other => panic!("expected Fiber invoice, got: {:?}", other),
+    };
+    assert!(
+        fiber_invoice.udt_type_script().is_none(),
+        "native-CKB proxy invoice should have no UdtScript attribute"
+    );
 }
 
 /// Tests that receive_btc rejects when the CKB invoice currency doesn't match the configured network.
@@ -1074,12 +1329,14 @@ async fn test_receive_btc_rejects_unsigned_fiber_invoice() {
     );
 }
 
-/// Tests that receive_btc rejects a plain CKB invoice without UDT type script.
-/// Issue #983: receive_btc should fail when invoice has no wrapped BTC UDT type script
+/// Tests that receive_btc rejects a Fiber invoice whose asset is not in the
+/// configured allowlist. The harness only allowlists a default UDT script, so
+/// a plain CKB invoice (no UDT script attribute) is rejected.
 #[tokio::test]
 async fn test_receive_btc_rejects_ckb_invoice_without_udt() {
     let harness = setup_test_harness().await;
-    // The harness is configured with Currency::Fibb
+    // The harness is configured with Currency::Fibb and only Some(default UDT)
+    // in the allowlist; native CKB (None) is therefore not allowlisted.
 
     let (_, payment_hash) = create_valid_preimage_pair(103);
     // create_test_fiber_invoice_with_currency creates an invoice WITHOUT UDT type script
@@ -1094,8 +1351,8 @@ async fn test_receive_btc_rejects_ckb_invoice_without_udt() {
     .expect("actor call failed");
 
     match result {
-        Err(CchError::WrappedBTCTypescriptMismatch) => {} // Expected
-        other => panic!("Expected WrappedBTCTypescriptMismatch, got {:?}", other),
+        Err(CchError::FiberAssetNotAllowlisted) => {} // Expected
+        other => panic!("Expected FiberAssetNotAllowlisted, got {:?}", other),
     }
 }
 
@@ -1157,14 +1414,16 @@ async fn test_receive_btc_amount_overflow_u128() {
 
 /// Tests that the send_btc proxy Fiber invoice includes the fee in its amount.
 ///
-/// In the SendBTC flow, the hub creates a Fiber invoice (the proxy invoice) for the
-/// user to pay. Its amount must be `ceil(btc_amount_msat / 1000) + fee_sats` so
-/// the hub collects enough to cover the outgoing Lightning payment plus its fee.
+/// In the SendBTC flow, the hub creates a Fiber invoice (the proxy invoice) for
+/// the user to pay. The Fiber leg is priced off the gross BTC amount
+/// (Bolt11 amount + fee) so the hub collects enough (in the Fiber asset's
+/// smallest unit) to cover the outgoing Lightning payment plus its fee, while
+/// `lightning_invoice_amount` itself stays equal to the (fee-exclusive) Bolt11
+/// amount the hub pays.
 #[tokio::test]
 async fn test_send_btc_proxy_invoice_includes_fee() {
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         base_fee_sats: 1_000, // 1000 sat base fee to make the fee clearly visible
         fee_rate_per_million_sats: 10_000, // 1% proportional fee
@@ -1174,23 +1433,32 @@ async fn test_send_btc_proxy_invoice_includes_fee() {
 
     // The lightning invoice has 100_000_000 msat = 100_000 sats
     let (order, _preimage) = harness.create_send_btc_order_with_preimage().await.unwrap();
-    let btc_amount_sats: u128 = 100_000; // 100_000_000 msat / 1000
 
-    // fee_sats = amount_msat * fee_rate / 1_000_000_000 + base_fee
-    //          = 100_000_000 * 10_000 / 1_000_000_000 + 1_000
-    //          = 1_000 + 1_000
-    //          = 2_000
-    let expected_fee: u128 = 2_000;
+    // btc_fee_msat = amount_msat * fee_rate_per_million / 1_000_000 + base_fee_sats * 1_000
+    //              = 100_000_000 * 10_000 / 1_000_000 + 1_000 * 1_000
+    //              = 1_000_000 + 1_000_000
+    //              = 2_000_000 msat
+    let expected_fee_msat: u128 = 2_000_000;
     assert_eq!(
-        order.fee_sats, expected_fee,
-        "fee_sats should be calculated from rate + base"
+        order.btc_fee_msat, expected_fee_msat,
+        "btc_fee_msat should be calculated from rate + base"
     );
 
-    // The proxy invoice amount must include the fee
-    let expected_total = btc_amount_sats + expected_fee;
+    // For SendBTC the Lightning leg is the outgoing Bolt11 the hub pays, so
+    // lightning_invoice_amount equals the (fee-exclusive) Bolt11 amount.
+    let expected_lightning_invoice_amount: u128 = 100_000_000;
     assert_eq!(
-        order.amount_sats, expected_total,
-        "proxy invoice amount should be btc_amount + fee"
+        order.lightning_invoice_amount, expected_lightning_invoice_amount,
+        "lightning_invoice_amount should equal the fee-exclusive Bolt11 amount"
+    );
+
+    // The Fiber leg is priced off the gross BTC amount (amount + fee):
+    //   fiber_invoice_amount = ceil((amount_msat + btc_fee_msat) * rate / 1000)
+    //                        = (100_000_000 + 2_000_000) * 1 / 1000 = 102_000
+    let expected_fiber_amount: u128 = 102_000;
+    assert_eq!(
+        order.fiber_invoice_amount, expected_fiber_amount,
+        "fiber_invoice_amount should be priced off the gross BTC amount (amount + fee)"
     );
 
     // Verify the Fiber invoice stored in the order also has the correct amount
@@ -1200,8 +1468,8 @@ async fn test_send_btc_proxy_invoice_includes_fee() {
     };
     assert_eq!(
         fiber_invoice.amount(),
-        Some(expected_total),
-        "Fiber proxy invoice amount should include the fee"
+        Some(expected_fiber_amount),
+        "Fiber proxy invoice amount should match fiber_invoice_amount"
     );
 }
 
@@ -1217,12 +1485,13 @@ async fn test_receive_btc_fee_calculation() {
     use crate::ckb::contracts::{get_script_by_contract, Contract};
     use crate::invoice::CkbScript;
 
+    let fiber_type_script = get_script_by_contract(Contract::SimpleUDT, &[]);
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         base_fee_sats: 500,
         fee_rate_per_million_sats: 5_000, // 0.5% proportional fee
+        fiber_asset_allowlist: vec![Some(fiber_type_script.clone().into())],
         ..Default::default()
     };
     let harness = setup_test_harness_with_config(config).await;
@@ -1232,7 +1501,7 @@ async fn test_receive_btc_fee_calculation() {
 
     // Build a Fiber invoice with the correct UDT type script and SHA256 hash algorithm
     // to pass all validations before the LND call.
-    let wrapped_btc_type_script = get_script_by_contract(Contract::SimpleUDT, &[]);
+    let wrapped_btc_type_script = fiber_type_script;
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
     let mut invoice = CkbInvoice {
@@ -1275,11 +1544,12 @@ async fn test_receive_btc_fee_calculation() {
     // meaning the hold invoice would have been created with the correct total_msat.
     let err = result.unwrap_err();
 
-    // fee_sats = 200_000 * 5_000 / 1_000_000 + 500 = 1_000 + 500 = 1_500
-    // total_msat = (200_000 + 1_500) * 1_000 = 201_500_000
-    let expected_fee: u128 = 1_500;
-    let expected_total_msat: i64 = ((amount_sats + expected_fee) * 1_000) as i64;
-    assert_eq!(expected_total_msat, 201_500_000);
+    // btc_fee_msat = amount_sats * fee_rate_per_million / 1_000 + base_fee_sats * 1_000
+    //              = 200_000 * 5_000 / 1_000 + 500 * 1_000
+    //              = 1_000_000 + 500_000
+    //              = 1_500_000 msat
+    // lightning_invoice_amount = amount_sats * 1_000 + btc_fee_msat = 201_500_000 msat
+    let expected_total_msat: i64 = 201_500_000;
 
     match err {
         CchError::LndRpcError(msg) => {
@@ -1393,7 +1663,6 @@ async fn test_send_btc_fails_insufficient_expiry_delta() {
     let ckb_final_tlc_seconds: u64 = INCOMING_CKB_FINAL_TLC_SECS;
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         ckb_final_tlc_expiry_delta_seconds: ckb_final_tlc_seconds,
         ..Default::default()
@@ -1409,7 +1678,7 @@ async fn test_send_btc_fails_insufficient_expiry_delta() {
     let order = CchOrder {
         created_at: now - ELAPSED_SINCE_ORDER_CREATED_SECS,
         expiry_delta_seconds: 100_000, // large enough not to expire
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: lightning_invoice.to_string(),
         incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice_with_expiry(
             payment_hash,
@@ -1417,8 +1686,9 @@ async fn test_send_btc_fails_insufficient_expiry_delta() {
         )),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::IncomingAccepted,
         failure_reason: None,
     };
@@ -1464,7 +1734,6 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
     // max_outgoing_secs, outgoing needs max_outgoing_secs + 1 → fails.
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         ..Default::default()
     };
@@ -1482,13 +1751,14 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
     let order = CchOrder {
         created_at: now,
         expiry_delta_seconds: 200_000,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: fiber_invoice.to_string(),
         incoming_invoice: CchInvoice::Lightning(lightning_invoice),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::IncomingAccepted,
         failure_reason: None,
     };
@@ -1535,7 +1805,6 @@ async fn test_send_btc_passes_sufficient_expiry_delta() {
     let ckb_final_tlc_seconds: u64 = INCOMING_CKB_FINAL_TLC_SECS;
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
-        wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         ckb_final_tlc_expiry_delta_seconds: ckb_final_tlc_seconds,
         ..Default::default()
@@ -1548,7 +1817,7 @@ async fn test_send_btc_passes_sufficient_expiry_delta() {
     let order = CchOrder {
         created_at: now - ELAPSED_SINCE_ORDER_CREATED_SECS,
         expiry_delta_seconds: 200_000,
-        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        fiber_type_script: Some(ckb_jsonrpc_types::Script::default()),
         outgoing_pay_req: lightning_invoice.to_string(),
         incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice_with_expiry(
             payment_hash,
@@ -1556,8 +1825,9 @@ async fn test_send_btc_passes_sufficient_expiry_delta() {
         )),
         payment_hash,
         payment_preimage: None,
-        amount_sats: 100_000,
-        fee_sats: 1_000,
+        lightning_invoice_amount: 100_000_000,
+        btc_fee_msat: 1_000_000,
+        fiber_invoice_amount: 100_000,
         status: CchOrderStatus::IncomingAccepted,
         failure_reason: None,
     };
@@ -1579,4 +1849,407 @@ async fn test_send_btc_passes_sufficient_expiry_delta() {
          Failure reason: {:?}",
         order.failure_reason,
     );
+}
+
+/// Tests that send_btc applies a non-1:1 fixed-rate when computing the Fiber
+/// proxy invoice amount. With `smallest_units_per_sat = 100` (Fiber asset is
+/// 100x more numerous per sat), the Fiber-leg amount must be
+/// `lightning_invoice_amount * 100 / 1000 = lightning_invoice_amount / 10`.
+#[tokio::test]
+async fn test_send_btc_applies_fixed_rate_non_one_to_one() {
+    use crate::cch::config::FixedRateAsset;
+
+    let asset_script = ckb_jsonrpc_types::Script::default();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // Zero fees so the amount math is unambiguous.
+        base_fee_sats: 0,
+        fee_rate_per_million_sats: 0,
+        fiber_asset_allowlist: vec![Some(asset_script.clone())],
+        fixed_rate_assets: vec![FixedRateAsset {
+            fiber_asset: Some(asset_script.clone()),
+            smallest_units_per_sat: 100,
+        }],
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (order, _preimage) = harness.create_send_btc_order_with_preimage().await.unwrap();
+
+    // The harness lightning invoice is 100_000_000 msat.
+    assert_eq!(order.btc_fee_msat, 0);
+    assert_eq!(order.lightning_invoice_amount, 100_000_000);
+    // fiber = 100_000_000 * 100 / 1000 = 10_000_000
+    assert_eq!(
+        order.fiber_invoice_amount, 10_000_000,
+        "non-1:1 rate should scale the Fiber-leg amount accordingly"
+    );
+}
+
+/// Tests that receive_btc applies a non-1:1 fixed-rate when deriving the
+/// BTC-leg amount from the Fiber invoice. With `smallest_units_per_sat = 100`,
+/// `btc_amount_msat_before_fee = fiber * 1000 / 100 = fiber * 10`.
+#[tokio::test]
+async fn test_receive_btc_applies_fixed_rate_non_one_to_one() {
+    use crate::cch::config::FixedRateAsset;
+    use crate::invoice::CkbScript;
+
+    let asset_script = ckb_jsonrpc_types::Script::default();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        base_fee_sats: 0,
+        fee_rate_per_million_sats: 0,
+        fiber_asset_allowlist: vec![Some(asset_script.clone())],
+        fixed_rate_assets: vec![FixedRateAsset {
+            fiber_asset: Some(asset_script.clone()),
+            smallest_units_per_sat: 100,
+        }],
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    // Build an invoice with a small final-TLC delta so the expiry sanity check
+    // passes and we reach the LND call.
+    let (_, payment_hash) = create_valid_preimage_pair(200);
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(1_000_000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("test".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+                Attribute::UdtScript(CkbScript(ckb_types::packed::Script::default())),
+                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    // LND is not actually running so the call fails at the AddHoldInvoice
+    // step, but only after the rate-driven fee math has been computed and the
+    // BTC-leg total assembled. We assert the failure surface comes from LND,
+    // not from anything earlier in the pipeline.
+    match result {
+        Err(CchError::LndChannelError(_)) | Err(CchError::LndRpcError(_)) => {}
+        other => panic!("expected LND failure after rate math, got: {:?}", other),
+    }
+}
+
+/// Tests that send_btc routes an allowlisted-but-not-fixed-rate asset to the
+/// proposal flow. The call returns immediately with a pending-proposal result;
+/// with no operator subscribed, the proposal times out and is dropped — no
+/// order is ever persisted, so `get_cch_order` reports it absent.
+#[tokio::test]
+async fn test_send_btc_rejects_allowlisted_without_fixed_rate() {
+    let asset_script = ckb_jsonrpc_types::Script::default();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // Asset is allowlisted...
+        fiber_asset_allowlist: vec![Some(asset_script.clone())],
+        // ...but there is no fixed-rate entry for it (and the harness only
+        // auto-fills entries when a non-empty allowlist would otherwise lack
+        // them — we deliberately set fixed_rate_assets to a NON-matching entry
+        // to defeat that logic).
+        fixed_rate_assets: vec![crate::cch::config::FixedRateAsset {
+            fiber_asset: None,
+            smallest_units_per_sat: 1,
+        }],
+        // Use a tiny timeout so the test exercises the proposal-timeout path
+        // without taking the full default 30s.
+        swap_proposal_timeout_seconds: 1,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (_, payment_hash) = create_valid_preimage_pair(201);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+
+    // The call returns immediately with a pending-proposal result — no blocking.
+    let result = call_t!(
+        harness.actor,
+        CchMessage::SendBTC,
+        1_000,
+        crate::cch::actor::SendBTC {
+            btc_pay_req: lightning_invoice.to_string(),
+            currency: Currency::Fibb,
+            fiber_type_script: Some(asset_script),
+        }
+    )
+    .expect("actor call failed")
+    .expect("send_btc should return a pending proposal");
+    assert!(
+        matches!(result, fiber_types::NewOrderResult::PendingProposal(_)),
+        "expected PendingProposal, got {:?}",
+        result
+    );
+
+    // With no operator subscribed, the proposal times out and is dropped; the
+    // order never materialises, so it is reported absent.
+    harness.wait_for_order_absent(payment_hash, 5_000).await;
+}
+
+/// Tests that an operator's accept response on a `SendBTC` proposal causes
+/// the hub to mint the Fiber-leg invoice with the operator-supplied amount and
+/// flip the order to `Pending`.
+#[tokio::test]
+async fn test_send_btc_proposal_path_accept() {
+    use fiber_types::SwapProposalResponse;
+
+    let asset_script = ckb_jsonrpc_types::Script::default();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        fiber_asset_allowlist: vec![Some(asset_script.clone())],
+        // No fixed-rate entry for `Some(asset_script)` — proposal path.
+        fixed_rate_assets: vec![crate::cch::config::FixedRateAsset {
+            fiber_asset: None,
+            smallest_units_per_sat: 1,
+        }],
+        swap_proposal_timeout_seconds: 5,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (_, payment_hash) = create_valid_preimage_pair(202);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+
+    // The call returns immediately with a pending-proposal result.
+    let result = call_t!(
+        harness.actor,
+        CchMessage::SendBTC,
+        1_000,
+        crate::cch::actor::SendBTC {
+            btc_pay_req: lightning_invoice.to_string(),
+            currency: Currency::Fibb,
+            fiber_type_script: Some(asset_script.clone()),
+        }
+    )
+    .expect("actor call failed")
+    .expect("send_btc should return a pending proposal");
+    assert!(
+        matches!(result, fiber_types::NewOrderResult::PendingProposal(_)),
+        "expected PendingProposal, got {:?}",
+        result
+    );
+
+    // Discover the actual proposal id from the actor's pending map.
+    let proposal_id = wait_for_pending_proposal_id(&harness.actor).await;
+
+    let resp = SwapProposalResponse {
+        proposal_id,
+        accept: true,
+        counterparty_leg_amount: Some(123_456),
+        reject_reason: None,
+    };
+    let result = call_t!(
+        harness.actor,
+        CchMessage::SubmitSwapProposalResponse,
+        1_000,
+        resp
+    )
+    .expect("submit call failed");
+    result.expect("submit accepted");
+
+    // The order resumes to `Pending` with the operator-supplied Fiber amount.
+    let resumed = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Pending, 5_000)
+        .await;
+    assert_eq!(resumed.fiber_invoice_amount, 123_456);
+    assert_eq!(resumed.fiber_type_script, Some(asset_script));
+    assert!(matches!(resumed.incoming_invoice, CchInvoice::Fiber(_)));
+}
+
+/// Tests that an operator's reject response on a `ReceiveBTC` proposal causes
+/// the hub to fail the order. We exercise the reject path (rather than accept)
+/// because accepting would then require LND to mint a hold invoice, which the
+/// test harness intentionally does not provide.
+#[tokio::test]
+async fn test_receive_btc_proposal_path_reject() {
+    use fiber_types::SwapProposalResponse;
+
+    let asset_script = ckb_jsonrpc_types::Script::default();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        fiber_asset_allowlist: vec![Some(asset_script.clone())],
+        // No fixed-rate entry → ReceiveBTC must take the proposal path.
+        fixed_rate_assets: vec![crate::cch::config::FixedRateAsset {
+            fiber_asset: None,
+            smallest_units_per_sat: 1,
+        }],
+        swap_proposal_timeout_seconds: 5,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (_, payment_hash) = create_valid_preimage_pair(33);
+    // Build a Fiber invoice that (a) carries a `UdtScript` so its
+    // `udt_type_script` matches the test's allowlist of `Some(default Script)`,
+    // and (b) uses a small `FinalHtlcMinimumExpiryDelta` so the
+    // `ckb_final_tlc_millis < btc_final_cltv_millis / 2` guard passes with
+    // the default `btc_final_tlc_expiry_delta_blocks`.
+    let fiber_invoice = {
+        use crate::invoice::CkbScript;
+        use ckb_types::packed::Script;
+        let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+        let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+        let mut invoice = CkbInvoice {
+            currency: Currency::Fibb,
+            amount: Some(100_000),
+            signature: None,
+            data: InvoiceData {
+                payment_hash,
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+                attrs: vec![
+                    Attribute::FinalHtlcMinimumExpiryDelta(12),
+                    Attribute::Description("test".to_string()),
+                    Attribute::ExpiryTime(Duration::from_secs(3600)),
+                    Attribute::PayeePublicKey(public_key),
+                    Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+                    Attribute::UdtScript(CkbScript(Script::default())),
+                ],
+            },
+        };
+        invoice
+            .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
+        invoice
+    };
+
+    // The call returns immediately with a pending-proposal result.
+    let result = call_t!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        1_000,
+        crate::cch::actor::ReceiveBTC {
+            fiber_pay_req: fiber_invoice.to_string(),
+        }
+    )
+    .expect("actor call failed")
+    .expect("receive_btc should return a pending proposal");
+    assert!(
+        matches!(result, fiber_types::NewOrderResult::PendingProposal(_)),
+        "expected PendingProposal, got {:?}",
+        result
+    );
+
+    // Discover the actual proposal id from the actor's pending map.
+    let proposal_id = wait_for_pending_proposal_id(&harness.actor).await;
+
+    let resp = SwapProposalResponse {
+        proposal_id,
+        accept: false,
+        counterparty_leg_amount: None,
+        reject_reason: Some("operator declined".to_string()),
+    };
+    let result = call_t!(
+        harness.actor,
+        CchMessage::SubmitSwapProposalResponse,
+        1_000,
+        resp
+    )
+    .expect("submit call failed");
+    result.expect("submit accepted");
+
+    // The proposal is dropped on reject; no order is created, so it is absent.
+    harness.wait_for_order_absent(payment_hash, 5_000).await;
+
+    // A response for an unknown proposal id must be rejected with
+    // `SwapProposalUnknown`.
+    let bogus_id = fiber_types::Hash256::from([0xAB; 32]);
+    let bogus_resp = SwapProposalResponse {
+        proposal_id: bogus_id,
+        accept: true,
+        counterparty_leg_amount: Some(1),
+        reject_reason: None,
+    };
+    let result = call_t!(
+        harness.actor,
+        CchMessage::SubmitSwapProposalResponse,
+        500,
+        bogus_resp
+    )
+    .expect("submit call failed");
+    assert!(
+        matches!(result, Err(CchError::SwapProposalUnknown)),
+        "expected SwapProposalUnknown for unknown id, got {:?}",
+        result
+    );
+}
+
+/// Tests that a pending proposal persisted before a restart is resumed:
+/// re-registered in the pending map, re-broadcast, and—since no operator
+/// answers—dropped once its proposal deadline elapses (no order is created).
+#[tokio::test]
+async fn test_pending_proposal_resumed_on_restart() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let (_, payment_hash) = create_valid_preimage_pair(77);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+    let proposal_id = Hash256::from([0x77u8; 32]);
+    let proposal = SwapProposal {
+        proposal_id,
+        order_id: payment_hash,
+        direction: fiber_types::SwapDirection::SendBTC,
+        payment_hash,
+        fiber_asset: None,
+        fiber_invoice_amount: None,
+        lightning_invoice_amount: Some(100_000_000),
+        configured_fee_rate_per_million_sats: 0,
+        configured_base_fee_sats: 0,
+        fee_on_btc_side_msat: Some(0),
+        submitted_invoice: lightning_invoice.to_string(),
+        // Proposal expires shortly so the resumed timeout fires during the test.
+        expires_at: now + 1,
+        created_at: now,
+    };
+
+    let store = MockCchOrderStore::new();
+    store.seed_pending_proposal(proposal);
+
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        swap_proposal_timeout_seconds: 1,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    // The persisted proposal is re-registered in the pending map on startup.
+    let resumed_id = wait_for_pending_proposal_id(&harness.actor).await;
+    assert_eq!(resumed_id, proposal_id);
+
+    // Once the proposal deadline elapses with no operator response, the
+    // pending proposal is dropped and no order is created.
+    harness.wait_for_order_absent(payment_hash, 5_000).await;
 }
