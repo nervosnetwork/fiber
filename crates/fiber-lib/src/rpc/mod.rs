@@ -40,6 +40,8 @@ pub mod server {
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
     #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
     use crate::rpc::prof::{ProfRpcServer, ProfRpcServerImpl};
+    use crate::x402::server::{settle_response, supported_response, verify_response};
+    use crate::x402::types::{SettleRequest, VerifyRequest};
     use crate::{
         cch::CchMessage,
         fiber::{
@@ -60,8 +62,12 @@ pub mod server {
     use anyhow::{bail, Result};
     #[cfg(debug_assertions)]
     use ckb_types::core::TransactionView;
+    use hyper::http::header::CONTENT_TYPE;
+    use hyper::http::{Method, StatusCode};
+    use jsonrpsee::core::http_helpers::read_body;
     use jsonrpsee::server::{
-        serve_with_graceful_shutdown, stop_channel, ServerHandle, StopHandle, TowerServiceBuilder,
+        serve_with_graceful_shutdown, stop_channel, HttpBody, HttpResponse, ServerHandle,
+        StopHandle, TowerServiceBuilder,
     };
     use jsonrpsee::ws_client::RpcServiceBuilder;
     use jsonrpsee::{Methods, RpcModule};
@@ -121,10 +127,12 @@ pub mod server {
     {
     }
 
-    async fn start_server(
+    async fn start_server<S: RpcServerStore + Clone + Send + Sync + 'static>(
         addr: &str,
         auth: Option<BiscuitAuth>,
         methods: impl Into<Methods>,
+        x402_fiber_config: Option<FiberConfig>,
+        x402_store: Option<S>,
         cors_enabled: bool,
         cors_allowed_origins: Vec<String>,
     ) -> Result<(ServerHandle, SocketAddr)> {
@@ -141,10 +149,12 @@ pub mod server {
         // Make sure that nothing expensive is cloned here
         // when doing this or use an `Arc`.
         #[derive(Clone)]
-        struct PerConnection<RpcMiddlewave, HttpMiddlewave> {
+        struct PerConnection<RpcMiddlewave, HttpMiddlewave, Store> {
             methods: Methods,
             stop_handle: StopHandle,
             svc_builder: TowerServiceBuilder<RpcMiddlewave, HttpMiddlewave>,
+            x402_fiber_config: Option<FiberConfig>,
+            x402_store: Option<Store>,
         }
 
         // Each RPC call/connection get its own `stop_handle`
@@ -158,6 +168,8 @@ pub mod server {
             methods: methods.into(),
             stop_handle: stop_handle.clone(),
             svc_builder: jsonrpsee::server::Server::builder().to_service_builder(),
+            x402_fiber_config,
+            x402_store,
         };
         let enable_auth = auth.is_some();
         let auth = Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey));
@@ -186,6 +198,8 @@ pub mod server {
                         methods,
                         stop_handle,
                         svc_builder,
+                        x402_fiber_config,
+                        x402_store,
                     } = per_conn2.clone();
 
                     let headers = req.headers().clone();
@@ -200,7 +214,113 @@ pub mod server {
                     let mut svc = svc_builder
                         .set_rpc_middleware(rpc_middleware)
                         .build(methods, stop_handle);
-                    async move { svc.call(req).await }
+                    async move {
+                        if let Some(fiber_config) = x402_fiber_config {
+                            if req.method() == Method::GET && req.uri().path() == "/supported" {
+                                let body = serde_json::to_vec(&supported_response(&fiber_config))
+                                    .expect("serialize x402 supported response");
+                                return Ok(HttpResponse::builder()
+                                    .status(StatusCode::OK)
+                                    .header(CONTENT_TYPE, "application/json")
+                                    .body(HttpBody::from(body))
+                                    .expect("build x402 supported response"));
+                            }
+
+                            if req.method() == Method::POST
+                                && (req.uri().path() == "/verify" || req.uri().path() == "/settle")
+                            {
+                                let Some(store) = x402_store else {
+                                    return Ok(HttpResponse::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header(CONTENT_TYPE, "application/json")
+                                        .body(HttpBody::from(
+                                            serde_json::to_vec(&serde_json::json!({
+                                                "error": "x402 store unavailable"
+                                            }))
+                                            .expect("serialize x402 store error response"),
+                                        ))
+                                        .expect("build x402 store error response"));
+                                };
+
+                                let path = req.uri().path().to_string();
+                                let (parts, body) = req.into_parts();
+                                let (body, _) =
+                                    match read_body(&parts.headers, body, 10 * 1024 * 1024).await {
+                                        Ok(result) => result,
+                                        Err(_) => {
+                                            return Ok(HttpResponse::builder()
+                                                .status(StatusCode::BAD_REQUEST)
+                                                .header(CONTENT_TYPE, "application/json")
+                                                .body(HttpBody::from(
+                                                    serde_json::to_vec(&serde_json::json!({
+                                                        "error": "invalid request body"
+                                                    }))
+                                                    .expect("serialize x402 body error response"),
+                                                ))
+                                                .expect("build x402 body error response"));
+                                        }
+                                    };
+
+                                let body = if path == "/verify" {
+                                    let request: VerifyRequest = match serde_json::from_slice(&body)
+                                    {
+                                        Ok(request) => request,
+                                        Err(_) => {
+                                            return Ok(HttpResponse::builder()
+                                                .status(StatusCode::BAD_REQUEST)
+                                                .header(CONTENT_TYPE, "application/json")
+                                                .body(HttpBody::from(
+                                                    serde_json::to_vec(&serde_json::json!({
+                                                        "error": "invalid verify request"
+                                                    }))
+                                                    .expect("serialize x402 verify request error response"),
+                                                ))
+                                                .expect("build x402 verify request error response"));
+                                        }
+                                    };
+
+                                    serde_json::to_vec(&verify_response(
+                                        &store,
+                                        &fiber_config,
+                                        request,
+                                    ))
+                                    .expect("serialize x402 verify response")
+                                } else {
+                                    let request: SettleRequest = match serde_json::from_slice(&body)
+                                    {
+                                        Ok(request) => request,
+                                        Err(_) => {
+                                            return Ok(HttpResponse::builder()
+                                                .status(StatusCode::BAD_REQUEST)
+                                                .header(CONTENT_TYPE, "application/json")
+                                                .body(HttpBody::from(
+                                                    serde_json::to_vec(&serde_json::json!({
+                                                        "error": "invalid settle request"
+                                                    }))
+                                                    .expect("serialize x402 settle request error response"),
+                                                ))
+                                                .expect("build x402 settle request error response"));
+                                        }
+                                    };
+
+                                    serde_json::to_vec(&settle_response(
+                                        &store,
+                                        &fiber_config,
+                                        request,
+                                    ))
+                                    .expect("serialize x402 settle response")
+                                };
+
+                                return Ok(HttpResponse::builder()
+                                    .status(StatusCode::OK)
+                                    .header(CONTENT_TYPE, "application/json")
+                                    .body(HttpBody::from(body))
+                                    .expect("build x402 verify response"));
+                            }
+                        }
+
+                        svc.call(req).await
+                    }
                 });
 
                 // Conditionally wrap the service with CORS layer if enabled
@@ -299,8 +419,12 @@ pub mod server {
         if config.is_module_enabled("invoice") {
             modules
                 .merge(
-                    InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
-                        .into_rpc(),
+                    InvoiceRpcServerImpl::new(
+                        store.clone(),
+                        network_actor.clone(),
+                        fiber_config.clone(),
+                    )
+                    .into_rpc(),
                 )
                 .unwrap();
         }
@@ -399,6 +523,16 @@ pub mod server {
             listening_addr,
             auth,
             modules,
+            if config.is_module_enabled("x402") {
+                fiber_config.clone()
+            } else {
+                None
+            },
+            if config.is_module_enabled("x402") {
+                Some(store.clone())
+            } else {
+                None
+            },
             config.cors_enabled,
             config.cors_allowed_origins.clone(),
         )

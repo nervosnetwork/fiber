@@ -12,6 +12,7 @@ interface SessionRouteNode {
 }
 interface GetPaymentCommandResult {
     payment_hash: HexString;
+    payment_preimage?: HexString;
     status: PaymentSessionStatus;
     created_at: HexString;
     last_updated_at: HexString;

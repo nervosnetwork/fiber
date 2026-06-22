@@ -517,6 +517,7 @@ pub struct PendingAcceptChannel {
 #[derive(Debug)]
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
+    pub payment_preimage: Option<Hash256>,
     pub status: PaymentStatus,
     pub created_at: u64,
     pub last_updated_at: u64,

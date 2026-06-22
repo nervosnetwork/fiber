@@ -825,6 +825,7 @@ Sends a payment to a peer.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage when the payment succeeds.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
@@ -854,6 +855,7 @@ Retrieves a payment.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage when the payment succeeds.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
@@ -945,6 +947,7 @@ Sends a payment to a peer with specified router.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage when the payment succeeds.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
@@ -1419,6 +1422,7 @@ The result of a get_payment command, which includes the payment hash, status, ti
 #### Fields
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The payment preimage when the payment succeeds.
 * `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
 * `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
