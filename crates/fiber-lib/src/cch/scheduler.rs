@@ -277,6 +277,15 @@ impl<S: CchOrderStore> SchedulerState<S> {
             return Ok(());
         }
 
+        if order.status != CchOrderStatus::Pending {
+            tracing::debug!(
+                "Order {:x} is {:?}, skipping pending-order expiry",
+                payment_hash,
+                order.status
+            );
+            return Ok(());
+        }
+
         // Store order info before updating
         let created_at = order.created_at;
         let expiry_delta_seconds = order.expiry_delta_seconds;

@@ -25,7 +25,7 @@ use crate::cch::trackers::{
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::NetworkActorMessage;
-use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::store::store_impl::StoreChange;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use fiber_types::{AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
@@ -569,6 +569,15 @@ impl<S: CchOrderStore> CchState<S> {
 
         let payment_hash = Hash256::from(*invoice.payment_hash());
 
+        let invoice_created_at = invoice.duration_since_epoch().as_secs();
+        let order_created_at = duration_since_epoch.as_secs();
+        if invoice_created_at > order_created_at {
+            return Err(CchError::BTCInvoiceCreationTimeInFuture {
+                invoice_created_at,
+                order_created_at,
+            });
+        }
+
         // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // BTC uses blocks (~10 min each), CKB uses seconds.
@@ -706,6 +715,14 @@ impl<S: CchOrderStore> CchState<S> {
         }
 
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let order_created_at_ms = duration_since_epoch.as_millis();
+        if invoice.data.timestamp > order_created_at_ms {
+            return Err(CchError::CKBInvoiceCreationTimeInFuture {
+                invoice_created_at_ms: invoice.data.timestamp,
+                order_created_at_ms,
+            });
+        }
+
         // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
         let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {
             Some(expiry) => invoice
@@ -791,6 +808,30 @@ impl<S: CchOrderStore> CchState<S> {
             None => return Ok(vec![]),
             Some(order) => order,
         };
+
+        if order.status == CchOrderStatus::Pending
+            && matches!(
+                &event,
+                CchTrackingEvent::InvoiceChanged {
+                    status: CkbInvoiceStatus::Received,
+                    ..
+                }
+            )
+        {
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("System time should always be after UNIX_EPOCH")
+                .as_secs();
+            if order.update_if_expired_with_reason(current_time, "Order expired") {
+                self.store.update_cch_order(order.clone());
+                self.schedule_job_on_entering(&order);
+                tracing::info!(
+                    "Rejected incoming invoice event for expired pending order {:x}",
+                    order.payment_hash
+                );
+                return Ok(vec![]);
+            }
+        }
 
         if CchOrderStateMachine::apply(&mut order, event.into())?.is_some() {
             self.store.update_cch_order(order.clone());

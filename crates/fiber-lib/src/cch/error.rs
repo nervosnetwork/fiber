@@ -22,6 +22,13 @@ pub enum CchError {
     OutgoingInvoiceExpiryTooShort,
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(lightning_invoice::ParseOrSemanticError),
+    #[error(
+        "BTC invoice creation timestamp {invoice_created_at} is newer than CCH order creation timestamp {order_created_at}"
+    )]
+    BTCInvoiceCreationTimeInFuture {
+        invoice_created_at: u64,
+        order_created_at: u64,
+    },
     #[error("BTC invoice expired")]
     BTCInvoiceExpired,
     #[error("BTC invoice missing amount")]
@@ -30,6 +37,13 @@ pub enum CchError {
     BTCInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error(
+        "CKB invoice creation timestamp {invoice_created_at_ms} is newer than CCH order creation timestamp {order_created_at_ms}"
+    )]
+    CKBInvoiceCreationTimeInFuture {
+        invoice_created_at_ms: u128,
+        order_created_at_ms: u128,
+    },
     #[error("CKB invoice expired")]
     CKBInvoiceExpired,
     #[error("CKB invoice missing amount")]
