@@ -26,8 +26,9 @@ use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::StoreChange;
-use crate::time::{Duration, SystemTime, UNIX_EPOCH};
+use crate::time::Duration;
 use fiber_types::{AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
 use fiber_types::{Hash256, Privkey};
 
@@ -253,10 +254,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time should always be after UNIX_EPOCH")
-            .as_secs();
+        let current_time = now_timestamp_as_millis_u64() / 1000;
 
         // Load all orders from the database
         for mut order in state
@@ -539,7 +537,7 @@ impl<S: CchOrderStore> CchState<S> {
     }
 
     async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
-        let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let order_created_at = now_timestamp_as_millis_u64() / 1000;
 
         // Validate that the currency matches the configured CKB network (#981)
         if send_btc.currency != self.currency {
@@ -570,7 +568,6 @@ impl<S: CchOrderStore> CchState<S> {
         let payment_hash = Hash256::from(*invoice.payment_hash());
 
         let invoice_created_at = invoice.duration_since_epoch().as_secs();
-        let order_created_at = duration_since_epoch.as_secs();
         if invoice_created_at > order_created_at {
             return Err(CchError::BTCInvoiceCreationTimeInFuture {
                 invoice_created_at,
@@ -592,8 +589,7 @@ impl<S: CchOrderStore> CchState<S> {
 
         let outgoing_invoice_expiry_delta_seconds = invoice
             .expires_at()
-            .and_then(|expired_at| expired_at.checked_sub(duration_since_epoch))
-            .map(|duration| duration.as_secs())
+            .and_then(|expired_at| expired_at.as_secs().checked_sub(order_created_at))
             .ok_or(CchError::BTCInvoiceExpired)?;
         if outgoing_invoice_expiry_delta_seconds
             < self.config.min_outgoing_invoice_expiry_delta_seconds
@@ -647,7 +643,7 @@ impl<S: CchOrderStore> CchState<S> {
 
         let order = CchOrder {
             amount_sats: invoice_amount_sats,
-            created_at: duration_since_epoch.as_secs(),
+            created_at: order_created_at,
             expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Fiber(invoice),
@@ -714,12 +710,12 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
         }
 
-        let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        let order_created_at_ms = duration_since_epoch.as_millis();
-        if invoice.data.timestamp > order_created_at_ms {
+        let order_created_at_ms = now_timestamp_as_millis_u64();
+        let order_created_at = order_created_at_ms / 1000;
+        if invoice.data.timestamp > u128::from(order_created_at_ms) {
             return Err(CchError::CKBInvoiceCreationTimeInFuture {
                 invoice_created_at_ms: invoice.data.timestamp,
-                order_created_at_ms,
+                order_created_at_ms: u128::from(order_created_at_ms),
             });
         }
 
@@ -732,7 +728,7 @@ impl<S: CchOrderStore> CchState<S> {
                 .and_then(|expiry_at| {
                     u64::try_from(expiry_at / 1000)
                         .unwrap_or(u64::MAX)
-                        .checked_sub(duration_since_epoch.as_secs())
+                        .checked_sub(order_created_at)
                 })
                 .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
             // CKB invoice has no default expiry, use minimal * 2 to create the invoice
@@ -786,7 +782,7 @@ impl<S: CchOrderStore> CchState<S> {
         let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
 
         let order = CchOrder {
-            created_at: duration_since_epoch.as_secs(),
+            created_at: order_created_at,
             expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Lightning(incoming_invoice),
@@ -818,10 +814,7 @@ impl<S: CchOrderStore> CchState<S> {
                 }
             )
         {
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("System time should always be after UNIX_EPOCH")
-                .as_secs();
+            let current_time = now_timestamp_as_millis_u64() / 1000;
             if order.update_if_expired_with_reason(current_time, "Order expired") {
                 self.store.update_cch_order(order.clone());
                 self.schedule_job_on_entering(&order);

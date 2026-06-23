@@ -17,7 +17,7 @@ use crate::cch::{
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::payment::MAX_FEE_RATE_DENOMINATOR;
 use crate::invoice::CkbInvoice;
-use crate::time::{SystemTime, UNIX_EPOCH};
+use crate::now_timestamp_as_millis_u64;
 use fiber_types::{payment::PaymentStatus, CchInvoice, CchOrder, CchOrderStatus, Hash256};
 
 const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
@@ -246,10 +246,7 @@ impl SendOutgoingPaymentDispatcher {
         state: &CchState<S>,
         order: &CchOrder,
     ) -> Option<u64> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time should always be after UNIX_EPOCH")
-            .as_secs();
+        let now = now_timestamp_as_millis_u64() / 1000;
         let elapsed = now.saturating_sub(order.created_at);
 
         // The incoming TLC/HTLC was accepted with at least this many seconds of expiry.
