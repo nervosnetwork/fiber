@@ -4,7 +4,7 @@
 //! - Valid state transitions
 //! - Invalid state transitions
 //! - on_entering actions for each status
-//! - Failure transitions from any state
+//! - Failure transitions from active states
 
 use crate::cch::order::{state_machine::CchOrderEvent, CchOrderStateMachine};
 use crate::cch::CchError;
@@ -253,6 +253,21 @@ fn test_staying_in_pending_via_invoice_open() {
 }
 
 #[test]
+fn test_staying_in_incoming_accepted_via_payment_created() {
+    let mut order = create_test_order(CchOrderStatus::IncomingAccepted);
+    let event = CchOrderEvent::OutgoingPaymentChanged {
+        status: PaymentStatus::Created,
+        payment_preimage: None,
+        failure_reason: None,
+    };
+
+    let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
+
+    assert!(transition.is_none());
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+}
+
+#[test]
 fn test_staying_in_outgoing_in_flight_via_payment_inflight() {
     let mut order = create_test_order(CchOrderStatus::OutgoingInFlight);
     let event = CchOrderEvent::OutgoingPaymentChanged {
@@ -272,6 +287,27 @@ fn test_staying_in_outgoing_in_flight_via_payment_inflight() {
 // ============================================================================
 
 #[test]
+fn test_invalid_transition_pending_rejects_outgoing_payment_created() {
+    let mut order = create_test_order(CchOrderStatus::Pending);
+    let event = CchOrderEvent::OutgoingPaymentChanged {
+        status: PaymentStatus::Created,
+        payment_preimage: None,
+        failure_reason: None,
+    };
+
+    let result = CchOrderStateMachine::apply(&mut order, event);
+
+    assert!(matches!(
+        result,
+        Err(CchError::InvalidTransition(
+            CchOrderStatus::Pending,
+            CchOrderStatus::IncomingAccepted
+        ))
+    ));
+    assert_eq!(order.status, CchOrderStatus::Pending);
+}
+
+#[test]
 fn test_invalid_transition_pending_to_outgoing_in_flight() {
     let mut order = create_test_order(CchOrderStatus::Pending);
     let event = CchOrderEvent::OutgoingPaymentChanged {
@@ -283,6 +319,7 @@ fn test_invalid_transition_pending_to_outgoing_in_flight() {
     let result = CchOrderStateMachine::apply(&mut order, event);
 
     assert!(matches!(result, Err(CchError::InvalidTransition(_, _))));
+    assert_eq!(order.status, CchOrderStatus::Pending);
 }
 
 #[test]
@@ -298,6 +335,30 @@ fn test_invalid_transition_pending_to_outgoing_succeeded() {
     let result = CchOrderStateMachine::apply(&mut order, event);
 
     assert!(matches!(result, Err(CchError::InvalidTransition(_, _))));
+    assert_eq!(order.status, CchOrderStatus::Pending);
+    assert_eq!(order.payment_preimage, None);
+}
+
+#[test]
+fn test_invalid_transition_pending_rejects_outgoing_payment_failed() {
+    let mut order = create_test_order(CchOrderStatus::Pending);
+    let event = CchOrderEvent::OutgoingPaymentChanged {
+        status: PaymentStatus::Failed,
+        payment_preimage: None,
+        failure_reason: Some("test failure".to_string()),
+    };
+
+    let result = CchOrderStateMachine::apply(&mut order, event);
+
+    assert!(matches!(
+        result,
+        Err(CchError::InvalidTransition(
+            CchOrderStatus::Pending,
+            CchOrderStatus::Failed
+        ))
+    ));
+    assert_eq!(order.status, CchOrderStatus::Pending);
+    assert_eq!(order.failure_reason, None);
 }
 
 #[test]
@@ -361,23 +422,8 @@ fn test_payment_success_without_preimage_returns_error() {
 }
 
 // ============================================================================
-// Tests for failure transitions from any state
+// Tests for failure transitions from active states
 // ============================================================================
-
-#[test]
-fn test_failure_from_pending() {
-    let mut order = create_test_order(CchOrderStatus::Pending);
-    let event = CchOrderEvent::OutgoingPaymentChanged {
-        status: PaymentStatus::Failed,
-        payment_preimage: None,
-        failure_reason: Some("test failure".to_string()),
-    };
-
-    let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
-
-    assert!(transition.is_some());
-    assert_eq!(order.status, CchOrderStatus::Failed);
-}
 
 #[test]
 fn test_failure_from_incoming_accepted() {
