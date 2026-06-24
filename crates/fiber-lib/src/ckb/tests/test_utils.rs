@@ -912,6 +912,55 @@ impl CkbChainClient for MockCkbChainClient {
             .into())
     }
 
+    async fn get_live_cell(
+        &self,
+        out_point: ckb_jsonrpc_types::OutPoint,
+        _with_data: bool,
+    ) -> Result<ckb_jsonrpc_types::CellWithStatus, anyhow::Error> {
+        let state = self.state.read().unwrap();
+        let packed_out_point: OutPoint = out_point.clone().into();
+
+        let is_consumed = matches!(
+            state.cell_status.get(&packed_out_point),
+            Some(CellStatus::Consumed)
+        );
+
+        if is_consumed {
+            return Ok(ckb_jsonrpc_types::CellWithStatus {
+                cell: None,
+                status: "dead".to_string(),
+            });
+        }
+
+        for response in state.txs.values() {
+            let Some(tx) = &response.transaction else {
+                continue;
+            };
+            for (index, output) in tx.outputs().into_iter().enumerate() {
+                let candidate = ckb_jsonrpc_types::OutPoint::from(
+                    ckb_types::packed::OutPoint::new_builder()
+                        .tx_hash(tx.hash())
+                        .index(ckb_types::packed::Uint32::from(index as u32))
+                        .build(),
+                );
+                if candidate == out_point {
+                    return Ok(ckb_jsonrpc_types::CellWithStatus {
+                        cell: Some(ckb_jsonrpc_types::CellInfo {
+                            output: output.into(),
+                            data: None,
+                        }),
+                        status: "live".to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(ckb_jsonrpc_types::CellWithStatus {
+            cell: None,
+            status: "unknown".to_string(),
+        })
+    }
+
     async fn get_cells(
         &self,
         _search_key: ckb_sdk::rpc::ckb_indexer::SearchKey,

@@ -3259,6 +3259,14 @@ async fn get_channel_tx(
     #[cfg(not(any(test, feature = "bench")))]
     let _ = chain;
 
+    let is_live = is_funding_outpoint_live(outpoint, client).await?;
+    if !is_live {
+        return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
+            "Channel announcement funding outpoint {:?} is not live",
+            outpoint
+        )));
+    }
+
     match client.get_transaction(outpoint.tx_hash().unpack()).await {
         Ok(GetTxResponse {
             transaction: Some(tx),

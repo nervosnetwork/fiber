@@ -1,6 +1,6 @@
 use crate::ckb::config::new_ckb_rpc_async_client;
 use crate::ckb::CkbConfig;
-use ckb_jsonrpc_types::JsonBytes;
+use ckb_jsonrpc_types::{CellWithStatus, JsonBytes, OutPoint};
 use ckb_sdk::rpc::ckb_indexer::{Cell, CellType, Order, Pagination, ScriptType, SearchKey, Tx};
 use ckb_types::H256;
 
@@ -112,6 +112,11 @@ fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
 #[async_trait::async_trait]
 pub trait CkbChainClient: Send + Sync {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error>;
+    async fn get_live_cell(
+        &self,
+        out_point: OutPoint,
+        with_data: bool,
+    ) -> Result<CellWithStatus, anyhow::Error>;
     async fn get_cells(
         &self,
         search_key: SearchKey,
@@ -223,6 +228,18 @@ impl CkbChainClient for CkbRpcClient {
             .get_transaction(hash)
             .await
             .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    async fn get_live_cell(
+        &self,
+        out_point: OutPoint,
+        with_data: bool,
+    ) -> Result<CellWithStatus, anyhow::Error> {
+        let client = self.config.ckb_rpc_client();
+        client
+            .get_live_cell(out_point, with_data)
+            .await
             .map_err(Into::into)
     }
 
