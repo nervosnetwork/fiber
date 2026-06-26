@@ -38,7 +38,7 @@ use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
 use fiber_types::protocol::AnnouncedNodeName;
-use fiber_types::CloseFlags;
+use fiber_types::{AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData};
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{SettlementTlc, TLCId};
 use musig2::secp::MaybeScalar;
@@ -1280,12 +1280,38 @@ fn test_store_change_watcher() {
         .insert_invoice(invoice.clone(), Some(preimage))
         .unwrap();
 
+    let payment_data = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, payment_hash)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .timeout(Some(10))
+        .max_fee_amount(Some(1000))
+        .build()
+        .expect("valid payment_data");
+    let payment_session = PaymentSession::new_session(&store, payment_data, 10);
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let route_hops = vec![PaymentHopData {
+        amount: 100,
+        expiry: DEFAULT_TLC_EXPIRY_DELTA,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(1, source, target, route_hops);
+    attempt.set_inflight_status();
+    store.insert_attempt(attempt);
+
     let changes = saver.changes.read().unwrap();
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutCkbInvoiceStatus { payment_hash: h, invoice_status: CkbInvoiceStatus::Open } if h == &payment_hash)
     ));
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutPreimage { payment_hash: h, payment_preimage: i } if h == &payment_hash && i == &preimage)
+    ));
+    assert!(changes.iter().any(
+        |e| matches!(e, StoreChange::PutAttempt { payment_hash: h, attempt_status: AttemptStatus::Inflight } if h == &payment_hash)
     ));
 }
 

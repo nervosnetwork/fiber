@@ -20,12 +20,19 @@ use crate::cch::{
     CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
-    network::SendPaymentResponse, payment::SendPaymentCommand, NetworkActorCommand,
-    NetworkActorMessage,
+    graph::NetworkGraphStateStore,
+    network::SendPaymentResponse,
+    payment::{PaymentSessionExt, SendPaymentCommand, SendPaymentDataBuilder},
+    NetworkActorCommand, NetworkActorMessage,
 };
 use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
+use crate::store::{store_impl::StoreChange, Store};
+use crate::tests::test_utils::{generate_store, TempDir};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256, HashAlgorithm, PaymentStatus};
+use fiber_types::{
+    AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, Hash256, HashAlgorithm, PaymentHopData,
+    PaymentStatus,
+};
 use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
 use secp256k1::{Secp256k1, SecretKey};
 use std::collections::HashMap;
@@ -113,7 +120,7 @@ fn create_valid_preimage_pair(seed: u8) -> (Hash256, Hash256) {
 }
 
 /// Shared state for the mock network actor
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct MockNetworkState {
     /// Reference to CchActor to send callbacks
     cch_actor: Arc<Mutex<Option<ActorRef<CchMessage>>>>,
@@ -123,6 +130,8 @@ struct MockNetworkState {
     sent_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Tracks the `max_fee_amount` of each outgoing Fiber SendPayment, keyed by payment hash.
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
+    /// Status returned by mocked outgoing Fiber SendPayment.
+    send_payment_status: Arc<Mutex<PaymentStatus>>,
 }
 
 /// Mock network actor that handles commands from action executors
@@ -171,9 +180,10 @@ impl Actor for MockNetworkActor {
                         .insert(payment_hash, cmd.max_fee_amount);
 
                     // Return success response - the executor will create CchTrackingEvent
+                    let status = *state.send_payment_status.lock().unwrap();
                     let response = SendPaymentResponse {
                         payment_hash,
-                        status: PaymentStatus::Inflight,
+                        status,
                         created_at: SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -234,6 +244,15 @@ struct TestHarness {
     /// Event port to inject external events (simulates trackers)
     event_port: Arc<OutputPort<CchTrackingEvent>>,
     /// Shared mock state for tracking sent payments
+    mock_state: MockNetworkState,
+}
+
+struct StoreBackedTestHarness {
+    actor: ActorRef<CchMessage>,
+    event_port: Arc<OutputPort<CchTrackingEvent>>,
+    _store_change_port: Arc<OutputPort<StoreChange>>,
+    store: Store,
+    _store_dir: TempDir,
     mock_state: MockNetworkState,
 }
 
@@ -299,6 +318,19 @@ impl TestHarness {
             .unwrap()
             .get(&payment_hash)
             .copied()
+    }
+
+    fn set_send_payment_status(&self, status: PaymentStatus) {
+        *self.mock_state.send_payment_status.lock().unwrap() = status;
+    }
+
+    fn simulate_fiber_attempt_status(&self, payment_hash: Hash256, attempt_status: AttemptStatus) {
+        self.actor
+            .send_message(CchMessage::StoreChangeEvent(StoreChange::PutAttempt {
+                payment_hash,
+                attempt_status,
+            }))
+            .expect("actor should accept store change");
     }
 
     /// Simulate outgoing Fiber payment succeeding with preimage
@@ -375,6 +407,64 @@ impl TestHarness {
     }
 }
 
+impl StoreBackedTestHarness {
+    async fn get_order(&self, payment_hash: Hash256) -> Result<CchOrder, CchError> {
+        call!(self.actor, CchMessage::GetCchOrder, payment_hash).expect("actor call failed")
+    }
+
+    async fn wait_for_order_status(
+        &self,
+        payment_hash: Hash256,
+        expected_status: CchOrderStatus,
+        timeout_ms: u64,
+    ) -> CchOrder {
+        let start = std::time::Instant::now();
+        let poll_interval = tokio::time::Duration::from_millis(10);
+        let timeout = tokio::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let order = self.get_order(payment_hash).await.unwrap();
+
+            if order.status == expected_status {
+                return order;
+            }
+
+            if start.elapsed() > timeout {
+                panic!(
+                    "Timeout waiting for order status {:?}. Current status: {:?}",
+                    expected_status, order.status
+                );
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    fn set_send_payment_status(&self, status: PaymentStatus) {
+        *self.mock_state.send_payment_status.lock().unwrap() = status;
+    }
+
+    fn simulate_incoming_invoice_received(&self, payment_hash: Hash256) {
+        self.event_port.send(CchTrackingEvent::InvoiceChanged {
+            payment_hash,
+            status: CkbInvoiceStatus::Received,
+            failure_reason: None,
+        });
+    }
+
+    fn was_fiber_payment_sent(&self, payment_hash: Hash256) -> bool {
+        self.mock_state
+            .sent_fiber_payments
+            .lock()
+            .unwrap()
+            .contains(&payment_hash)
+    }
+
+    async fn insert_order_directly(&self, order: CchOrder) -> Result<(), CchError> {
+        call!(self.actor, CchMessage::InsertOrder, order).expect("actor call failed")
+    }
+}
+
 /// Set up a test harness with mocked dependencies
 async fn setup_test_harness() -> TestHarness {
     setup_test_harness_with_store(MockCchOrderStore::new()).await
@@ -405,6 +495,7 @@ async fn setup_test_harness_with_config_and_store(
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
@@ -431,6 +522,60 @@ async fn setup_test_harness_with_config_and_store(
     TestHarness {
         actor: actor_ref,
         event_port,
+        mock_state,
+    }
+}
+
+async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
+    let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
+    let store_change_port = Arc::new(OutputPort::<StoreChange>::default());
+    let (mut store, store_dir) = generate_store();
+    let store_change_port_clone = store_change_port.clone();
+    store.set_watcher(Arc::new(move |change| {
+        store_change_port_clone.send(change);
+    }));
+
+    let mock_state = MockNetworkState {
+        cch_actor: Arc::new(Mutex::new(None)),
+        event_port: event_port.clone(),
+        sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+    };
+
+    let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
+        .await
+        .expect("spawn mock network actor");
+
+    let args = CchArgs {
+        config: CchConfig {
+            lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+            wrapped_btc_type_script_args: "0x".to_string(),
+            min_outgoing_invoice_expiry_delta_seconds: 60,
+            ..Default::default()
+        },
+        tracker: TaskTracker::new(),
+        token: CancellationToken::new(),
+        network_actor: Some(network_actor),
+        node_keypair: Some(crate::fiber::KeyPair::try_from([42u8; 32].as_slice()).unwrap()),
+        store: store.clone(),
+        currency: Currency::Fibb,
+    };
+
+    let (actor_ref, _handle) = Actor::spawn(None, CchActor::default(), args)
+        .await
+        .expect("spawn cch actor");
+
+    actor_ref.subscribe_to_port(&event_port);
+    actor_ref.subscribe_to_port(&store_change_port);
+    *mock_state.cch_actor.lock().unwrap() = Some(actor_ref.clone());
+
+    StoreBackedTestHarness {
+        actor: actor_ref,
+        event_port,
+        _store_change_port: store_change_port,
+        store,
+        _store_dir: store_dir,
         mock_state,
     }
 }
@@ -651,6 +796,130 @@ async fn test_receive_btc_happy_path() {
     assert!(order.is_final());
     assert_eq!(order.payment_preimage, Some(preimage));
     assert!(order.failure_reason.is_none());
+}
+
+#[tokio::test]
+async fn test_receive_btc_outgoing_fiber_attempt_inflight_marks_outgoing_inflight() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(98);
+    let harness = setup_test_harness().await;
+    harness.set_send_payment_status(PaymentStatus::Created);
+
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(
+        payment_hash,
+        DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+    );
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    assert!(harness.was_fiber_payment_sent(payment_hash));
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+
+    harness.simulate_fiber_attempt_status(payment_hash, AttemptStatus::Inflight);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 1000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+}
+
+#[tokio::test]
+async fn test_receive_btc_store_attempt_inflight_updates_payment_and_cch_status() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(99);
+    let harness = setup_store_backed_test_harness().await;
+    harness.set_send_payment_status(PaymentStatus::Created);
+
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(
+        payment_hash,
+        DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+    );
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    assert!(harness.was_fiber_payment_sent(payment_hash));
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+
+    let payment_data =
+        SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100_000, payment_hash)
+            .final_tlc_expiry_delta(10_000)
+            .tlc_expiry_limit(10_000)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1_000))
+            .build()
+            .expect("valid payment_data");
+    let payment_session =
+        fiber_types::PaymentSession::new_session(&harness.store, payment_data, 10);
+    harness
+        .store
+        .insert_payment_session(payment_session.clone());
+
+    let route_hops = vec![PaymentHopData {
+        amount: 100_000,
+        expiry: 10_000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: crate::gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        crate::gen_rand_fiber_public_key(),
+        route_hops,
+    );
+    harness.store.insert_attempt(attempt.clone());
+    attempt.set_inflight_status();
+    harness.store.insert_attempt(attempt);
+
+    let payment = harness
+        .store
+        .get_payment_session(payment_hash)
+        .expect("payment session should exist");
+    assert_eq!(payment.status, PaymentStatus::Inflight);
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 1000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
 }
 
 /// Drive a ReceiveBTC-style order (incoming Lightning, outgoing Fiber) up to the point where

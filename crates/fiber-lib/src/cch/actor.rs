@@ -28,7 +28,7 @@ use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
 use crate::store::store_impl::StoreChange;
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
+use fiber_types::{AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
 use fiber_types::{Hash256, Privkey};
 
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
@@ -833,6 +833,19 @@ impl<S: CchOrderStore> CchState<S> {
                     }]
                 }
             }
+            StoreChange::PutAttempt {
+                payment_hash,
+                attempt_status: AttemptStatus::Inflight,
+            } => {
+                use fiber_types::payment::PaymentStatus;
+                vec![CchTrackingEvent::PaymentChanged {
+                    payment_hash: *payment_hash,
+                    payment_preimage: None,
+                    status: PaymentStatus::Inflight,
+                    failure_reason: None,
+                }]
+            }
+            StoreChange::PutAttempt { .. } => vec![],
             StoreChange::PutPreimage {
                 payment_hash,
                 payment_preimage,
@@ -1015,6 +1028,11 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
         },
         StoreChange::PutPaymentSession { payment_hash, .. } => RedactedStoreChangeSummary {
             kind: "PutPaymentSession",
+            payment_hash: *payment_hash,
+            has_payment_preimage: false,
+        },
+        StoreChange::PutAttempt { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutAttempt",
             payment_hash: *payment_hash,
             has_payment_preimage: false,
         },

@@ -413,6 +413,10 @@ pub enum StoreChange {
         payment_hash: Hash256,
         payment_session: PaymentSession,
     },
+    PutAttempt {
+        payment_hash: Hash256,
+        attempt_status: AttemptStatus,
+    },
 }
 
 pub trait StoreKeyValue {
@@ -1182,6 +1186,10 @@ impl NetworkGraphStateStore for Store {
         }
 
         batch.commit();
+        self.notify(StoreChange::PutAttempt {
+            payment_hash: attempt.payment_hash,
+            attempt_status: attempt.status,
+        });
     }
 
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {

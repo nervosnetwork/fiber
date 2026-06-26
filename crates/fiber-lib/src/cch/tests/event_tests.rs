@@ -10,7 +10,7 @@ use crate::cch::order::state_machine::CchOrderEvent;
 use crate::cch::trackers::{CchTrackingEvent, RedactedCchTrackingEvent};
 use crate::store::store_impl::StoreChange;
 use fiber_types::invoice::CkbInvoiceStatus;
-use fiber_types::{CchOrderStatus, Hash256, PaymentStatus};
+use fiber_types::{AttemptStatus, CchOrderStatus, Hash256, PaymentStatus};
 
 /// Helper function to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {
@@ -177,6 +177,21 @@ fn test_redacted_store_change_summary_masks_preimage() {
     assert!(summary.has_payment_preimage);
     assert!(redacted.contains("has_payment_preimage"));
     assert!(!redacted.contains(&preimage_hex));
+}
+
+#[test]
+fn test_redacted_store_change_summary_handles_attempt() {
+    let payment_hash = test_payment_hash(9);
+    let change = StoreChange::PutAttempt {
+        payment_hash,
+        attempt_status: AttemptStatus::Inflight,
+    };
+
+    let summary = redacted_store_change_summary(&change);
+
+    assert_eq!(summary.kind, "PutAttempt");
+    assert_eq!(summary.payment_hash, payment_hash);
+    assert!(!summary.has_payment_preimage);
 }
 
 // =============================================================================

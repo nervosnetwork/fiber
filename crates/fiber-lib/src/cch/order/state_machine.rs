@@ -42,6 +42,14 @@ impl CchOrderStateMachine {
                 payment_preimage,
                 failure_reason,
             } => {
+                if status == PaymentStatus::Created
+                    && matches!(
+                        order.status,
+                        CchOrderStatus::OutgoingInFlight | CchOrderStatus::OutgoingSuccess
+                    )
+                {
+                    return Ok(None);
+                }
                 if status == PaymentStatus::Success && payment_preimage.is_none() {
                     return Err(CchError::SettledPaymentMissingPreimage);
                 }
