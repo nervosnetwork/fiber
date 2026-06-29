@@ -2141,6 +2141,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         let mut latest_validated_cursor = None;
         let now_ms = now_timestamp_as_millis_u64();
 
+        let mut skipped_no_deps = 0usize;
+        let mut skipped_deferred = 0usize;
+        let mut skipped_ckb_deferred = 0usize;
+        let mut skipped_duplicate_cached = 0usize;
+
         for message in messages {
             if !self.allow_inbound_remote_broadcast_message(peer, &message, now_ms) {
                 result = Some(ActiveSyncSaveMessagesResult::Pending);
@@ -2160,8 +2165,8 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                             continue;
                         }
                         None => {
-                            result = Some(ActiveSyncSaveMessagesResult::Pending);
-                            break;
+                            skipped_duplicate_cached += 1;
+                            continue;
                         }
                     }
                 }
@@ -2190,13 +2195,13 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             }
 
             if !self.has_dependencies_available(&message) {
+                skipped_no_deps += 1;
                 observe_missing_dependency_message(broadcast_message_type(&message));
-                result = Some(ActiveSyncSaveMessagesResult::Pending);
-                break;
+                continue;
             }
             if self.should_defer_message_verification(&message) {
-                result = Some(ActiveSyncSaveMessagesResult::Pending);
-                break;
+                skipped_deferred += 1;
+                continue;
             }
 
             match verify_and_save_broadcast_message(
@@ -2226,13 +2231,12 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                         _,
                     ),
                 ) => {
-                    trace!(
-                        "Deferring active sync message verification for {:?}: {:?}",
-                        message,
-                        error
+                    skipped_ckb_deferred += 1;
+                    warn!(
+                        "Deferred active sync CA verification for {:?}: {:?}",
+                        message, error
                     );
-                    result = Some(ActiveSyncSaveMessagesResult::Pending);
-                    break;
+                    continue;
                 }
                 Err(error) => {
                     self.remove_pending_message(&message, &[*peer]);
@@ -2258,11 +2262,19 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         }
 
         self.broadcast_messages(&verified_messages);
-        result.unwrap_or_else(|| {
-            latest_validated_cursor
-                .map(ActiveSyncSaveMessagesResult::Validated)
-                .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
-        })
+        if skipped_no_deps > 0
+            || skipped_deferred > 0
+            || skipped_ckb_deferred > 0
+            || skipped_duplicate_cached > 0
+        {
+            ActiveSyncSaveMessagesResult::Pending
+        } else {
+            result.unwrap_or_else(|| {
+                latest_validated_cursor
+                    .map(ActiveSyncSaveMessagesResult::Validated)
+                    .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
+            })
+        }
     }
 
     fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
