@@ -4,7 +4,7 @@ pub use actor::{CchActor, CchArgs, CchMessage, ReceiveBTC, SendBTC};
 mod cch_fiber_agent;
 pub use cch_fiber_agent::{
     CchFiberAgent, CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentMessage,
-    CchFiberAgentRef, OutgoingFeeLimit,
+    CchFiberAgentRef, CchFiberCancelInvoiceError, CchFiberSettleInvoiceError, OutgoingFeeLimit,
 };
 
 mod error;
