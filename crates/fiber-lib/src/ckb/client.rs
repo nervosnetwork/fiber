@@ -2,7 +2,7 @@ use crate::ckb::config::new_ckb_rpc_async_client;
 use crate::ckb::CkbConfig;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::rpc::ckb_indexer::{Cell, CellType, Order, Pagination, ScriptType, SearchKey, Tx};
-use ckb_types::H256;
+use ckb_types::{prelude::Entity, prelude::IntoTransactionView, H256};
 
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
@@ -36,11 +36,9 @@ impl From<Option<ckb_jsonrpc_types::TransactionWithStatusResponse>> for GetTxRes
                 transaction: response.transaction.and_then(|tx| match tx.inner {
                     ckb_jsonrpc_types::Either::Left(json) => Some(transaction_view_from_json(json)),
                     ckb_jsonrpc_types::Either::Right(bytes) => {
-                        tracing::warn!(
-                            "CKB RPC returned unexpected bytes transaction format ({} bytes), ignoring",
-                            bytes.len()
-                        );
-                        None
+                        ckb_types::packed::Transaction::from_slice(bytes.as_bytes())
+                            .ok()
+                            .map(|packed| packed.into_view())
                     }
                 }),
                 tx_status: tx_status_from_json(response.tx_status),
@@ -220,9 +218,9 @@ impl CkbChainClient for CkbRpcClient {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error> {
         let client = self.config.ckb_rpc_client();
         client
-            .get_transaction(hash)
+            .get_only_committed_packed_transaction(hash)
             .await
-            .map(Into::into)
+            .map(|resp| GetTxResponse::from(Some(resp)))
             .map_err(Into::into)
     }
 
@@ -243,9 +241,23 @@ impl CkbChainClient for CkbRpcClient {
     async fn get_block_timestamp(&self, block_hash: Hash256) -> Result<Option<u64>, anyhow::Error> {
         let client = self.config.ckb_rpc_client();
         client
-            .get_header(block_hash.into())
+            .get_packed_header(block_hash.into())
             .await
-            .map(|x| x.map(|x| x.inner.timestamp.into()))
+            .map(|maybe_bytes| {
+                maybe_bytes.and_then(|bytes| {
+                    match ckb_types::packed::Header::from_slice(bytes.as_bytes()) {
+                        Ok(header) => Some(u64::from(header.raw().timestamp())),
+                        Err(err) => {
+                            tracing::warn!(
+                                "failed to parse packed header ({} bytes): {:?}",
+                                bytes.len(),
+                                err
+                            );
+                            None
+                        }
+                    }
+                })
+            })
             .map_err(Into::into)
     }
 
