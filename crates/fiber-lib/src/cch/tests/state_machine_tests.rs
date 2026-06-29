@@ -188,6 +188,21 @@ fn test_transition_outgoing_in_flight_to_outgoing_succeeded_via_payment_success(
 }
 
 #[test]
+fn test_stale_payment_created_after_outgoing_in_flight_is_ignored() {
+    let mut order = create_test_order(CchOrderStatus::OutgoingInFlight);
+    let event = CchOrderEvent::OutgoingPaymentChanged {
+        status: PaymentStatus::Created,
+        payment_preimage: None,
+        failure_reason: None,
+    };
+
+    let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
+
+    assert!(transition.is_none());
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+}
+
+#[test]
 fn test_transition_incoming_accepted_to_failed_via_payment_failed() {
     let mut order = create_test_order(CchOrderStatus::IncomingAccepted);
     let event = CchOrderEvent::OutgoingPaymentChanged {
