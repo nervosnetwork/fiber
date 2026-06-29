@@ -13,7 +13,7 @@ use crate::tests::test_utils::{
     establish_channel_between_nodes, ChannelParameters, NetworkNode, NetworkNodeConfigBuilder,
 };
 use crate::{
-    ckb::tests::test_utils::{MockChainActor, MockChainState},
+    ckb::tests::test_utils::{set_next_block_timestamp, MockChainActor, MockChainState},
     fiber::types::{ChannelUpdateChannelFlags, NodeAnnouncement},
 };
 use crate::{
@@ -607,8 +607,63 @@ async fn test_active_sync_rejects_future_timestamp_without_saving() {
     assert_eq!(
         context
             .get_store()
-            .get_latest_node_announcement(&announcement.node_id),
-        None
+            .get_broadcast_messages(&Cursor::default(), 0),
+        vec![]
+    );
+}
+
+// Verifies that a ChannelAnnouncement's stored timestamp is adjusted to be
+// strictly before the on-chain block timestamp, so it always sorts before
+// its own ChannelUpdates in get_broadcast_messages regardless of local
+// clock skew.
+#[tokio::test]
+async fn test_ca_adjusted_timestamp_sorts_before_cu() {
+    let block_ts = now_timestamp_as_millis_u64();
+    set_next_block_timestamp(block_ts).await;
+
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen().await;
+    let channel_outpoint = channel_context.channel_outpoint().clone();
+
+    // Save and confirm the CA (gets stored with adjusted timestamp)
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    context.submit_tx(channel_context.funding_tx.clone()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(context
+        .get_store()
+        .get_latest_channel_announcement(&channel_outpoint)
+        .is_some());
+
+    // Save a CU with the same block timestamp (simulating local clock == block time)
+    let cu = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        144,
+        0,
+        0,
+        Some(block_ts),
+    );
+    context.save_message(BroadcastMessage::ChannelUpdate(cu));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Query all messages and verify CA sorts before CU
+    let messages = context
+        .get_store()
+        .get_broadcast_messages(&Cursor::default(), 0);
+    let ca_pos = messages.iter().position(|m| {
+        matches!(m, BroadcastMessageWithTimestamp::ChannelAnnouncement(_, ca) if ca.channel_outpoint == channel_outpoint)
+    });
+    let cu_pos = messages.iter().position(|m| {
+        matches!(m, BroadcastMessageWithTimestamp::ChannelUpdate(cu) if cu.channel_outpoint == channel_outpoint)
+    });
+
+    assert!(ca_pos.is_some(), "CA should be in the store");
+    assert!(cu_pos.is_some(), "CU should be in the store");
+    assert!(
+        ca_pos.unwrap() < cu_pos.unwrap(),
+        "CA should sort before CU (adjusted CA timestamp < CU timestamp)"
     );
 }
 

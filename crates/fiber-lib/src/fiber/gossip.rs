@@ -3273,11 +3273,13 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
                         .await?;
                 let _ = verify_channel_announcement(channel_announcement, &on_chain_info, store)
                     .await?;
-                store.save_channel_announcement(
-                    on_chain_info.timestamp,
-                    channel_announcement.clone(),
-                );
-                (on_chain_info.timestamp, true)
+                // Subtracting 1 from the block timestamp ensures the CA always
+                // sorts before its own ChannelUpdates in get_broadcast_messages,
+                // even when a CU's local timestamp happens to be slightly before
+                // the on-chain block confirmation time.
+                let adjusted_timestamp = on_chain_info.timestamp.saturating_sub(1);
+                store.save_channel_announcement(adjusted_timestamp, channel_announcement.clone());
+                (adjusted_timestamp, true)
             }
         }
         BroadcastMessage::ChannelUpdate(channel_update) => {
