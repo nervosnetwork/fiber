@@ -749,7 +749,8 @@ struct DelayedGossipMessage {
 #[derive(Debug, Default)]
 struct DelayedGossipMessageQueue {
     per_peer_capacity: usize,
-    per_peer_counts: HashMap<Pubkey, usize>,
+    per_peer_bytes: HashMap<Pubkey, u64>,
+    total_bytes: u64,
     messages: VecDeque<DelayedGossipMessage>,
 }
 
@@ -757,7 +758,8 @@ impl DelayedGossipMessageQueue {
     fn new(capacity: usize) -> Self {
         Self {
             per_peer_capacity: capacity,
-            per_peer_counts: HashMap::new(),
+            per_peer_bytes: HashMap::new(),
+            total_bytes: 0,
             messages: VecDeque::new(),
         }
     }
@@ -766,13 +768,37 @@ impl DelayedGossipMessageQueue {
         if self.is_full_for_peer(&message.target) {
             return false;
         }
-        *self.per_peer_counts.entry(message.target).or_default() += 1;
+        self.add_message_accounting(&message);
         self.messages.push_back(message);
         true
     }
 
+    fn add_message_accounting(&mut self, message: &DelayedGossipMessage) {
+        let peer_bytes = self.per_peer_bytes.entry(message.target).or_default();
+        *peer_bytes = peer_bytes.saturating_add(message.reserved_bytes);
+        self.total_bytes = self.total_bytes.saturating_add(message.reserved_bytes);
+    }
+
     fn is_full_for_peer(&self, peer: &Pubkey) -> bool {
-        self.per_peer_counts.get(peer).copied().unwrap_or_default() >= self.per_peer_capacity
+        self.messages
+            .iter()
+            .filter(|message| &message.target == peer)
+            .count()
+            >= self.per_peer_capacity
+    }
+
+    fn queued_bytes_for_peer(&self, peer: &Pubkey) -> u64 {
+        self.per_peer_bytes.get(peer).copied().unwrap_or_default()
+    }
+
+    fn exceeds_peer_byte_capacity(&self, peer: &Pubkey, bytes: u64, capacity: Option<u64>) -> bool {
+        capacity.is_some_and(|capacity| {
+            self.queued_bytes_for_peer(peer).saturating_add(bytes) > capacity
+        })
+    }
+
+    fn exceeds_global_byte_capacity(&self, bytes: u64, capacity: Option<u64>) -> bool {
+        capacity.is_some_and(|capacity| self.total_bytes.saturating_add(bytes) > capacity)
     }
 
     fn next_ready_at_ms(&self) -> Option<u64> {
@@ -787,7 +813,7 @@ impl DelayedGossipMessageQueue {
         let mut pending = VecDeque::with_capacity(self.messages.len());
         while let Some(message) = self.messages.pop_front() {
             if message.ready_at_ms <= now_ms {
-                self.decrement_peer_count(&message.target);
+                self.remove_message_accounting(&message);
                 ready.push(message);
             } else {
                 pending.push_back(message);
@@ -802,24 +828,25 @@ impl DelayedGossipMessageQueue {
         let mut retained = VecDeque::with_capacity(self.messages.len());
         while let Some(message) = self.messages.pop_front() {
             if &message.target == peer {
+                self.remove_message_accounting(&message);
                 removed.push(message);
             } else {
                 retained.push_back(message);
             }
         }
         self.messages = retained;
-        self.per_peer_counts.remove(peer);
         removed
     }
 
-    fn decrement_peer_count(&mut self, peer: &Pubkey) {
-        let Some(count) = self.per_peer_counts.get_mut(peer) else {
-            return;
-        };
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            self.per_peer_counts.remove(peer);
+    fn remove_message_accounting(&mut self, message: &DelayedGossipMessage) {
+        let peer = &message.target;
+        if let Some(bytes) = self.per_peer_bytes.get_mut(peer) {
+            *bytes = bytes.saturating_sub(message.reserved_bytes);
+            if *bytes == 0 {
+                self.per_peer_bytes.remove(peer);
+            }
         }
+        self.total_bytes = self.total_bytes.saturating_sub(message.reserved_bytes);
     }
 }
 
@@ -2486,6 +2513,13 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
                 let now_ms = now_timestamp_as_millis_u64();
                 for message in messages {
                     if !state.allow_inbound_remote_broadcast_message(&peer, &message, now_ms) {
+                        state
+                            .gossip_actor
+                            .send_message(GossipActorMessage::MaliciousPeerFound {
+                                peer,
+                                violation: GossipViolation::PolicyRejectedMessage,
+                            })
+                            .expect("gossip actor alive");
                         continue;
                     }
                     match state.insert_message_to_be_saved_list(&peer, &message).await {
@@ -3074,6 +3108,36 @@ fn reserve_or_delay_outbound_message(
         );
         return Err(Error::InternalError(anyhow::anyhow!(
             "delayed outbound gossip queue is full for peer"
+        )));
+    }
+
+    if delayed_outbound_messages.exceeds_peer_byte_capacity(
+        pubkey,
+        bytes,
+        policy.outbound_peer_delayed_byte_capacity(),
+    ) {
+        trace!(
+            peer = format!("{pubkey:?}"),
+            bytes,
+            delay_ms,
+            "Rejecting delayed outbound gossip payload due to full per-peer byte budget"
+        );
+        return Err(Error::InternalError(anyhow::anyhow!(
+            "delayed outbound gossip queue peer byte budget is full"
+        )));
+    }
+
+    if delayed_outbound_messages
+        .exceeds_global_byte_capacity(bytes, policy.outbound_global_delayed_byte_capacity())
+    {
+        trace!(
+            peer = format!("{pubkey:?}"),
+            bytes,
+            delay_ms,
+            "Rejecting delayed outbound gossip payload due to full global byte budget"
+        );
+        return Err(Error::InternalError(anyhow::anyhow!(
+            "delayed outbound gossip queue global byte budget is full"
         )));
     }
 
@@ -4281,11 +4345,41 @@ impl ServiceProtocol for GossipProtocolHandle {
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fiber::types::ChannelUpdateChannelFlags, ChannelTestContext};
+    use crate::{
+        fiber::{
+            gossip_policy::{ByteRateLimitConfig, GossipBanConfig},
+            types::ChannelUpdateChannelFlags,
+        },
+        tests::gen_utils::gen_rand_fiber_public_key,
+        ChannelTestContext,
+    };
+
+    fn chargeable_response(id: u64) -> GossipMessage {
+        GossipMessage::QueryBroadcastMessagesResult(QueryBroadcastMessagesResult {
+            id,
+            messages: Vec::new(),
+            missing_queries: vec![0, 1, 2],
+        })
+    }
+
+    fn outbound_policy(global_burst_bytes: u64, peer_burst_bytes: u64) -> GossipPolicyState {
+        GossipPolicyState::new(GossipPolicyConfig {
+            ban: GossipBanConfig::default(),
+            outbound_global: ByteRateLimitConfig {
+                rate_bytes_per_sec: 1,
+                burst_bytes: global_burst_bytes,
+            },
+            outbound_peer: ByteRateLimitConfig {
+                rate_bytes_per_sec: 1,
+                burst_bytes: peer_burst_bytes,
+            },
+            outbound_delay_queue_capacity: 16,
+            inbound_channel_update: ChannelUpdateRateLimitConfig::default(),
+        })
+    }
 
     #[test]
     fn test_broadcast_result_len_validation_enforces_request_and_protocol_limit() {
@@ -4354,5 +4448,88 @@ mod tests {
         );
 
         assert_eq!(replayed, vec![update_with_dependency]);
+    }
+
+    #[test]
+    fn test_delayed_outbound_queue_rejects_peer_byte_budget_overflow() {
+        let peer = gen_rand_fiber_public_key();
+        let message = chargeable_response(0);
+        let bytes = outbound_gossip_message_cost(&message).expect("chargeable response");
+        assert!(bytes > 0);
+
+        let mut policy = outbound_policy(bytes * 10, bytes);
+        let mut delayed_messages = DelayedGossipMessageQueue::new(16);
+
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer,
+            message.clone(),
+            0,
+        )
+        .expect("immediate send")
+        .is_some());
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer,
+            message.clone(),
+            0,
+        )
+        .expect("first delayed payload")
+        .is_none());
+        assert!(
+            reserve_or_delay_outbound_message(
+                &mut policy,
+                &mut delayed_messages,
+                &peer,
+                message,
+                0,
+            )
+            .is_err(),
+            "queued bytes for one peer must be capped, not only queued item count"
+        );
+    }
+
+    #[test]
+    fn test_delayed_outbound_queue_rejects_global_byte_budget_overflow() {
+        let peer1 = gen_rand_fiber_public_key();
+        let peer2 = gen_rand_fiber_public_key();
+        let message = chargeable_response(0);
+        let bytes = outbound_gossip_message_cost(&message).expect("chargeable response");
+        assert!(bytes > 0);
+
+        let mut policy = outbound_policy(bytes, bytes * 10);
+        let mut delayed_messages = DelayedGossipMessageQueue::new(16);
+
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer1,
+            message.clone(),
+            0,
+        )
+        .expect("immediate send")
+        .is_some());
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer1,
+            message.clone(),
+            0,
+        )
+        .expect("first delayed payload")
+        .is_none());
+        assert!(
+            reserve_or_delay_outbound_message(
+                &mut policy,
+                &mut delayed_messages,
+                &peer2,
+                message,
+                0,
+            )
+            .is_err(),
+            "queued bytes across peers must be globally capped"
+        );
     }
 }
