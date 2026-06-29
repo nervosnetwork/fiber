@@ -584,6 +584,19 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
 fn create_test_lightning_invoice_with_payment_hash(
     payment_hash: Hash256,
 ) -> lightning_invoice::Bolt11Invoice {
+    let duration_since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time");
+    create_test_lightning_invoice_with_payment_hash_and_timestamp(
+        payment_hash,
+        duration_since_epoch,
+    )
+}
+
+fn create_test_lightning_invoice_with_payment_hash_and_timestamp(
+    payment_hash: Hash256,
+    duration_since_epoch: std::time::Duration,
+) -> lightning_invoice::Bolt11Invoice {
     use bitcoin::hashes::Hash as _;
     use lightning_invoice::{Currency as LnCurrency, InvoiceBuilder as LnInvoiceBuilder};
 
@@ -601,9 +614,6 @@ fn create_test_lightning_invoice_with_payment_hash(
     // Build the invoice with current timestamp (will be valid for 1 hour)
     // Use 36 blocks (~6 hours) for final CLTV, which is less than half of the default
     // CKB final TLC expiry (20 hours), satisfying the cross-chain safety requirement.
-    let duration_since_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time");
     LnInvoiceBuilder::new(LnCurrency::Bitcoin)
         .description("test invoice".to_string())
         .payment_hash(payment_hash_btc)
@@ -922,6 +932,221 @@ async fn test_receive_btc_store_attempt_inflight_updates_payment_and_cch_status(
     assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
 }
 
+async fn insert_receive_btc_order_with_expiry(
+    harness: &TestHarness,
+    payment_hash: Hash256,
+    expiry_delta_seconds: u64,
+) {
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    insert_receive_btc_order_with_created_at_and_expiry(
+        harness,
+        payment_hash,
+        created_at,
+        expiry_delta_seconds,
+    )
+    .await;
+}
+
+async fn insert_receive_btc_order_with_created_at_and_expiry(
+    harness: &TestHarness,
+    payment_hash: Hash256,
+    created_at: u64,
+    expiry_delta_seconds: u64,
+) {
+    let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 60_000);
+    let lightning_invoice = create_test_lightning_invoice_with_cltv(
+        payment_hash,
+        DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+    );
+    let order = CchOrder {
+        created_at,
+        expiry_delta_seconds,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_receive_btc_expired_pending_order_rejects_late_incoming_invoice() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(210);
+    let order_expiry_delta_seconds = 1u64;
+    let harness = setup_test_harness().await;
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let created_at = current_time - order_expiry_delta_seconds - 1;
+
+    insert_receive_btc_order_with_created_at_and_expiry(
+        &harness,
+        payment_hash,
+        created_at,
+        order_expiry_delta_seconds,
+    )
+    .await;
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 1000)
+        .await;
+
+    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(order
+        .failure_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("expired"));
+    assert!(
+        !harness.was_fiber_payment_sent(payment_hash),
+        "expired pending order must not dispatch outgoing Fiber payment"
+    );
+}
+
+#[tokio::test]
+async fn test_receive_btc_pending_order_rejects_incoming_invoice_at_expiry_cutoff() {
+    let order_expiry_delta_seconds = 1u64;
+    let harness = setup_test_harness().await;
+
+    for seed in 213u8..223 {
+        let (_preimage, payment_hash) = create_valid_preimage_pair(seed);
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cutoff_time = current_time + 1;
+        let created_at = cutoff_time - order_expiry_delta_seconds;
+
+        insert_receive_btc_order_with_created_at_and_expiry(
+            &harness,
+            payment_hash,
+            created_at,
+            order_expiry_delta_seconds,
+        )
+        .await;
+
+        loop {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            if now >= cutoff_time {
+                if now != cutoff_time {
+                    break;
+                }
+
+                harness.simulate_incoming_invoice_received(payment_hash);
+                let order = harness
+                    .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 1000)
+                    .await;
+
+                assert_eq!(order.status, CchOrderStatus::Failed);
+                assert!(order
+                    .failure_reason
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("expired"));
+                assert!(
+                    !harness.was_fiber_payment_sent(payment_hash),
+                    "pending order at expiry cutoff must not dispatch outgoing Fiber payment"
+                );
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    panic!("could not deliver incoming invoice event at the exact expiry cutoff");
+}
+
+#[tokio::test]
+async fn test_receive_btc_late_preimage_after_order_expiry_is_reconciled() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(211);
+    let order_expiry_delta_seconds = 2u64;
+    let harness = setup_test_harness().await;
+
+    insert_receive_btc_order_with_expiry(&harness, payment_hash, order_expiry_delta_seconds).await;
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 2000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert!(harness.was_fiber_payment_sent(payment_hash));
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(
+        order_expiry_delta_seconds + 2,
+    ))
+    .await;
+
+    harness.simulate_fiber_payment_success(payment_hash, preimage);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 2000)
+        .await;
+
+    assert_eq!(
+        order.status,
+        CchOrderStatus::OutgoingSuccess,
+        "late outgoing Fiber preimage should keep receive_btc reconciliation active"
+    );
+    assert_eq!(
+        order.payment_preimage,
+        Some(preimage),
+        "late outgoing Fiber preimage should be persisted for incoming settlement"
+    );
+
+    harness.simulate_lightning_invoice_settled(payment_hash);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::Success);
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(order.failure_reason.is_none());
+}
+
+#[tokio::test]
+async fn test_receive_btc_order_expiry_does_not_fail_after_incoming_accepted() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(212);
+    let order_expiry_delta_seconds = 2u64;
+    let harness = setup_test_harness().await;
+
+    insert_receive_btc_order_with_expiry(&harness, payment_hash, order_expiry_delta_seconds).await;
+
+    harness.simulate_incoming_invoice_received(payment_hash);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 2000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert!(harness.was_fiber_payment_sent(payment_hash));
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(
+        order_expiry_delta_seconds + 2,
+    ))
+    .await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(
+        order.status,
+        CchOrderStatus::OutgoingInFlight,
+        "receive_btc order should remain active after incoming payment is accepted"
+    );
+    assert!(
+        !order.is_final(),
+        "accepted receive_btc order must not become final from the original quote TTL"
+    );
+    assert!(order.failure_reason.is_none());
+}
+
 /// Drive a ReceiveBTC-style order (incoming Lightning, outgoing Fiber) up to the point where
 /// the outgoing Fiber `SendPayment` has been dispatched, and return the `max_fee_amount` that
 /// was attached to the `SendPaymentCommand`.
@@ -1058,6 +1283,39 @@ async fn test_resume_expired_order_marked_as_failed() {
         .failure_reason
         .unwrap()
         .contains("Order expired on startup"));
+}
+
+#[tokio::test]
+async fn test_resume_expired_non_pending_order_is_not_marked_as_failed() {
+    let (_preimage, payment_hash) = create_valid_preimage_pair(154);
+    let store = MockCchOrderStore::new();
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired_order = CchOrder {
+        created_at: current_time - 7200,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(expired_order).unwrap();
+
+    let harness = setup_test_harness_with_store(store).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+    assert!(order.failure_reason.is_none());
 }
 
 /// Tests that non-expired active orders have tracking resumed on startup.
@@ -1287,6 +1545,42 @@ async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
     }
 }
 
+#[tokio::test]
+async fn test_send_btc_rejects_future_btc_invoice_timestamp() {
+    let harness = setup_test_harness().await;
+
+    let (_, payment_hash) = create_valid_preimage_pair(104);
+    let future_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        + std::time::Duration::from_secs(3600);
+    let lightning_invoice = create_test_lightning_invoice_with_payment_hash_and_timestamp(
+        payment_hash,
+        future_timestamp,
+    );
+    let btc_pay_req = lightning_invoice.to_string();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::actor::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibb,
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::BTCInvoiceCreationTimeInFuture {
+            invoice_created_at,
+            order_created_at,
+        }) => {
+            assert!(invoice_created_at > order_created_at);
+        }
+        other => panic!("Expected BTCInvoiceCreationTimeInFuture, got {:?}", other),
+    }
+}
+
 /// Tests that receive_btc rejects when the CKB invoice currency doesn't match the configured network.
 /// Issue #982: receive_btc should fail when invoice currency (e.g. Fibt) doesn't match node's network (e.g. Fibd)
 #[tokio::test]
@@ -1312,6 +1606,42 @@ async fn test_receive_btc_rejects_currency_mismatch() {
             assert_eq!(actual, Currency::Fibt);
         }
         other => panic!("Expected CKBInvoiceNetworkMismatch, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_receive_btc_rejects_future_fiber_invoice_timestamp() {
+    let harness = setup_test_harness().await;
+
+    let (_, payment_hash) = create_valid_preimage_pair(105);
+    let mut invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
+    invoice.data.timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + u128::from(60_000u64);
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    match result {
+        Err(CchError::CKBInvoiceCreationTimeInFuture {
+            invoice_created_at_ms,
+            order_created_at_ms,
+        }) => {
+            assert!(invoice_created_at_ms > order_created_at_ms);
+        }
+        other => panic!("Expected CKBInvoiceCreationTimeInFuture, got {:?}", other),
     }
 }
 

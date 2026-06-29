@@ -3828,6 +3828,89 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
 }
 
 #[tokio::test]
+async fn test_offered_tlc_survives_force_close_transition() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let preimage: [u8; 32] = [211u8; 32];
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        3_000_000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added offered tlc");
+    let tlc_id = TLCId::Offered(add_tlc_result.tlc_id);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let state_before = node_a.get_channel_actor_state(channel_id);
+    let tlc_before = state_before
+        .tlc_state
+        .get(&tlc_id)
+        .expect("offered tlc exists");
+    assert_eq!(tlc_before.payment_hash, payment_hash);
+    assert_eq!(tlc_before.outbound_status(), OutboundTlcStatus::Committed);
+
+    node_b.stop().await;
+    node_a.stop().await;
+    let mut saved_state = node_a.get_channel_actor_state(channel_id);
+    saved_state
+        .tlc_state
+        .get_mut(&tlc_id)
+        .expect("offered tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_a.store.insert_channel_actor_state(saved_state);
+    node_a.start().await;
+
+    let mut state_after = node_a.get_channel_actor_state(channel_id);
+    for _ in 0..20 {
+        if !matches!(state_after.state, ChannelState::ChannelReady) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        state_after = node_a.get_channel_actor_state(channel_id);
+    }
+
+    match &state_after.state {
+        ChannelState::ShuttingDown(_) => {}
+        ChannelState::Closed(flags) => {
+            assert!(flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
+        }
+        _ => panic!(
+            "Channel did NOT force-close. State: {:?}",
+            state_after.state
+        ),
+    }
+
+    let tlc_after = state_after
+        .tlc_state
+        .get(&tlc_id)
+        .expect("offered TLC must persist after force-close");
+    assert_eq!(
+        tlc_after.payment_hash, payment_hash,
+        "TLC payment_hash preserved after force-close transition"
+    );
+}
+
+#[tokio::test]
 async fn do_test_add_tlc_duplicated() {
     init_tracing();
     let node_a_funding_amount = 100000000000;
