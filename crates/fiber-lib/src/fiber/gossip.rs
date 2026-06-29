@@ -2144,6 +2144,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         let mut skipped_no_deps = 0usize;
         let mut skipped_deferred = 0usize;
         let mut skipped_ckb_deferred = 0usize;
+        let mut skipped_duplicate_cached = 0usize;
 
         for message in messages {
             if !self.allow_inbound_remote_broadcast_message(peer, &message, now_ms) {
@@ -2164,6 +2165,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                             continue;
                         }
                         None => {
+                            skipped_duplicate_cached += 1;
                             continue;
                         }
                     }
@@ -2260,7 +2262,11 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         }
 
         self.broadcast_messages(&verified_messages);
-        if skipped_no_deps > 0 || skipped_deferred > 0 || skipped_ckb_deferred > 0 {
+        if skipped_no_deps > 0
+            || skipped_deferred > 0
+            || skipped_ckb_deferred > 0
+            || skipped_duplicate_cached > 0
+        {
             ActiveSyncSaveMessagesResult::Pending
         } else {
             result.unwrap_or_else(|| {
