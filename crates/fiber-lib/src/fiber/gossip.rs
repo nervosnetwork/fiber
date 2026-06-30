@@ -33,7 +33,7 @@ use tentacle::{
     traits::ServiceProtocol,
     SessionId,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Mutex};
 use tokio_util::codec::length_delimited;
 use tracing::{debug, error, info, trace, warn};
 
@@ -91,6 +91,7 @@ const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
     MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT.as_millis() as u64;
 
 pub(crate) const DEFAULT_NUM_OF_BROADCAST_MESSAGE: u16 = 100;
+const MAX_CHANNEL_ONCHAIN_INFO_CACHE_ENTRIES: usize = 10_000;
 const MAX_INCOMPLETE_GOSSIP_MESSAGES_PER_PEER: usize = 1000;
 #[cfg(target_arch = "wasm32")]
 const MAX_CONCURRENT_CA_VERIFICATION: usize = 5;
@@ -1655,6 +1656,7 @@ pub struct ExtendedGossipMessageStoreState<S, C> {
     // Our own messages are always saved directly to the store.
     messages_to_be_saved: HashMap<Pubkey, HashSet<BroadcastMessage>>,
     num_query_tasks_running: usize,
+    channel_onchain_info_cache: Arc<Mutex<HashMap<OutPoint, ChannelOnchainInfo>>>,
 }
 
 impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
@@ -1681,6 +1683,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
             output_ports: Default::default(),
             messages_to_be_saved: Default::default(),
             num_query_tasks_running: 0,
+            channel_onchain_info_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1714,6 +1717,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
         let store = self.store.clone();
         let chain_actor = self.chain_actor.clone();
         let chain_client = self.chain_client.clone();
+        let channel_onchain_info_cache = self.channel_onchain_info_cache.clone();
 
         // Limit concurrent CKB RPC calls to avoid overwhelming the CKB node.
         let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CA_VERIFICATION));
@@ -1732,6 +1736,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
             let store = store.clone();
             let chain_actor = chain_actor.clone();
             let chain_client = chain_client.clone();
+            let channel_onchain_info_cache = channel_onchain_info_cache.clone();
             let permit = semaphore.clone();
             tasks.push(async move {
                 let _permit = permit.acquire().await.unwrap();
@@ -1740,6 +1745,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
                     &store,
                     &chain_actor,
                     &chain_client,
+                    channel_onchain_info_cache,
                 )
                 .await;
                 (message, peers, result)
@@ -1819,6 +1825,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
                 &self.store,
                 &self.chain_actor,
                 &self.chain_client,
+                self.channel_onchain_info_cache.clone(),
             )
             .await
             {
@@ -2291,6 +2298,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
             let store = self.store.clone();
             let chain_actor = self.chain_actor.clone();
             let chain_client = self.chain_client.clone();
+            let channel_onchain_info_cache = self.channel_onchain_info_cache.clone();
             let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CA_VERIFICATION));
 
             use futures::stream::{FuturesUnordered, StreamExt};
@@ -2300,6 +2308,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
                 let store = store.clone();
                 let chain_actor = chain_actor.clone();
                 let chain_client = chain_client.clone();
+                let channel_onchain_info_cache = channel_onchain_info_cache.clone();
                 let permit = semaphore.clone();
                 tasks.push(async move {
                     let _permit = permit.acquire().await.unwrap();
@@ -2308,6 +2317,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
                         &store,
                         &chain_actor,
                         &chain_client,
+                        channel_onchain_info_cache,
                     )
                     .await;
                     (message, is_inserted, r)
@@ -3368,6 +3378,7 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     store: &S,
     chain: &ActorRef<CkbChainMessage>,
     client: &impl CkbChainClient,
+    channel_onchain_info_cache: Arc<tokio::sync::Mutex<HashMap<OutPoint, ChannelOnchainInfo>>>,
 ) -> Result<(BroadcastMessageWithTimestamp, bool), VerifyBroadcastMessageError> {
     let msg_chain_hash = match message {
         BroadcastMessage::NodeAnnouncement(msg) => msg.chain_hash,
@@ -3392,9 +3403,13 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
             if already_saved {
                 (0, false)
             } else {
-                let on_chain_info =
-                    get_channel_on_chain_info(channel_announcement.out_point(), chain, client)
-                        .await?;
+                let on_chain_info = get_cached_channel_on_chain_info(
+                    channel_announcement.out_point(),
+                    chain,
+                    client,
+                    channel_onchain_info_cache,
+                )
+                .await?;
                 let _ = verify_channel_announcement(channel_announcement, &on_chain_info, store)
                     .await?;
                 store.save_channel_announcement(
@@ -3525,6 +3540,33 @@ async fn get_channel_on_chain_info(
         first_output,
         first_output_data,
     })
+}
+
+async fn get_cached_channel_on_chain_info(
+    outpoint: &OutPoint,
+    chain: &ActorRef<CkbChainMessage>,
+    client: &impl CkbChainClient,
+    cache: Arc<tokio::sync::Mutex<HashMap<OutPoint, ChannelOnchainInfo>>>,
+) -> Result<ChannelOnchainInfo, VerifyBroadcastMessageError> {
+    {
+        let cache = cache.lock().await;
+        if let Some(on_chain_info) = cache.get(outpoint) {
+            return Ok(on_chain_info.clone());
+        }
+    }
+
+    let on_chain_info = get_channel_on_chain_info(outpoint, chain, client).await?;
+    let mut cache = cache.lock().await;
+    if let Some(cached_on_chain_info) = cache.get(outpoint) {
+        return Ok(cached_on_chain_info.clone());
+    }
+
+    if cache.len() >= MAX_CHANNEL_ONCHAIN_INFO_CACHE_ENTRIES {
+        cache.clear();
+    }
+
+    cache.insert(outpoint.clone(), on_chain_info.clone());
+    Ok(on_chain_info)
 }
 
 // Verify the channel announcement message. If any error occurs, return the error.
