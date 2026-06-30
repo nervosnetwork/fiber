@@ -98,6 +98,7 @@ ckb-hash = { version = "1", features = [
   "blake2b-ref",
 ], default-features = false }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 jsonrpsee = { version = "0.25.1", features = [
   "macros",
   "server-core",
@@ -107,9 +108,6 @@ tentacle = { version = "0.7", default-features = false, features = [
   "wasm-timer",
 ] }
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
-wasm-bindgen = "0.2"
-js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window"] }
 tracing = { version = "0.1", features = ["log"] }
 web-time = { version = "1.1.0", features = ["serde"] }
 wasm-bindgen-futures = "0.4"

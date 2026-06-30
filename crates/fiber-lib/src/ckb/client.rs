@@ -217,7 +217,7 @@ async fn find_first_input_tx_hash_async(
 
 /// On WASM, reqwest ClientBuilder lacks timeout, and
 /// tokio::time::timeout panics (std::time::Instant not available).
-/// Use a Promise-based setTimeout that returns a Send future.
+/// Use gloo_timers future which works in both window and worker contexts.
 /// Native keeps builder.timeout() for OS-level socket timeout.
 #[cfg(target_arch = "wasm32")]
 mod wasm_timeout {
@@ -226,46 +226,33 @@ mod wasm_timeout {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use wasm_bindgen::prelude::{Closure, JsCast};
-    use wasm_bindgen_futures::JsFuture;
-
     pub fn timeout<F>(dur: Duration, fut: F) -> WasmTimeout<F> {
-        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-            let window = web_sys::window().expect("no window");
-            window
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                    &resolve,
-                    dur.as_millis() as i32,
-                )
-                .expect("setTimeout");
-        });
         WasmTimeout {
             fut,
-            timer: JsFuture::from(promise),
+            timer: gloo_timers::future::TimeoutFuture::new(dur.as_millis() as u32),
         }
     }
 
     pub struct WasmTimeout<F> {
         fut: F,
-        timer: JsFuture,
+        timer: gloo_timers::future::TimeoutFuture,
     }
 
     impl<F: Future> Future for WasmTimeout<F> {
         type Output = Result<F::Output, ()>;
         fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            // safety: pin projection
             let this = unsafe { self.get_unchecked_mut() };
             match unsafe { Pin::new_unchecked(&mut this.fut) }.poll(cx) {
                 Poll::Ready(v) => Poll::Ready(Ok(v)),
-                Poll::Pending => match unsafe { Pin::new_unchecked(&mut this.timer) }.poll(cx) {
-                    Poll::Ready(_) => Poll::Ready(Err(())),
+                Poll::Pending => match Pin::new(&mut this.timer).poll(cx) {
+                    Poll::Ready(()) => Poll::Ready(Err(())),
                     Poll::Pending => Poll::Pending,
                 },
             }
         }
     }
 
-    // Safety: JsFuture and F are Send
+    // Safety: F is Send and TimeoutFuture is Send
     unsafe impl<F: Send> Send for WasmTimeout<F> {}
 }
 
