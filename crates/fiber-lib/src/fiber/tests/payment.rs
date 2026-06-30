@@ -4223,7 +4223,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             target_pubkey: Some(nodes[1].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + 1), // Ok now
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await;
@@ -7939,13 +7939,16 @@ async fn test_network_with_hops_max_number_limit() {
     )
     .await;
 
+    let thirteen_hop_base_limit = DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let thirteen_hop_limit = thirteen_hop_base_limit + DEFAULT_TLC_EXPIRY_DELTA;
+
     let payment = nodes[0]
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(nodes[14].pubkey), // can not make a payment with 14 hops
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await;
@@ -7959,7 +7962,7 @@ async fn test_network_with_hops_max_number_limit() {
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await

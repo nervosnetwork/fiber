@@ -1403,6 +1403,7 @@ where
     ) -> Result<(), PathFindError> {
         let mut from = source;
         let mut previous_hop: Option<&RouterHop> = None;
+        let route_tlc_expiry_limit = self.route_tlc_expiry_limit(payment_data.tlc_expiry_limit)?;
 
         for hop in route {
             if hop.amount_received == 0 {
@@ -1410,9 +1411,9 @@ where
                     "route hop amount_received must be greater than 0".to_string(),
                 ));
             }
-            if hop.incoming_tlc_expiry > payment_data.tlc_expiry_limit {
+            if hop.incoming_tlc_expiry > route_tlc_expiry_limit {
                 return Err(PathFindError::Overflow(format!(
-                    "route hop incoming_tlc_expiry {} exceeds tlc_expiry_limit {}",
+                    "route hop incoming_tlc_expiry {} exceeds tlc_expiry_limit {} after random expiry reserve",
                     hop.incoming_tlc_expiry, payment_data.tlc_expiry_limit
                 )));
             }
@@ -1554,6 +1555,12 @@ where
                     low_total_trampoline_fee, high_total_trampoline_fee, max_fee_amount
                 )));
         }
+        let route_tlc_expiry_limit = self.route_tlc_expiry_limit(payment_data.tlc_expiry_limit)?;
+        let trampoline_forward_expiry_delta = self.trampoline_forward_expiry_delta(
+            payment_data.final_tlc_expiry_delta,
+            hops,
+            route_tlc_expiry_limit,
+        )?;
 
         let mut route_to_trampoline = self.find_path(
             source,
@@ -1565,12 +1572,8 @@ where
             )?),
             Some(max_fee_amount),
             payment_data.udt_type_script.clone(),
-            self.trampoline_forward_expiry_delta(
-                payment_data.final_tlc_expiry_delta,
-                hops,
-                payment_data.tlc_expiry_limit,
-            )?,
-            payment_data.tlc_expiry_limit,
+            trampoline_forward_expiry_delta,
+            route_tlc_expiry_limit,
             payment_data.allow_self_payment,
             &payment_data.hop_hints,
             &payment_data.channel_stats,
@@ -1673,7 +1676,7 @@ where
                 tlc_expiry_delta: self.trampoline_forward_expiry_delta(
                     payment_data.final_tlc_expiry_delta,
                     remaining_trampoline_hops,
-                    payment_data.tlc_expiry_limit,
+                    route_tlc_expiry_limit,
                 )?,
                 max_parts: if payment_data.allow_mpp() {
                     Some(payment_data.max_parts() as u64)
@@ -1709,11 +1712,7 @@ where
             hops: route_to_trampoline,
             amount: checked_add_u128(final_amount, remaining_fee, "trampoline resolved amount")?,
             trampoline_onion: Some(trampoline_onion),
-            final_hop_expiry_delta_override: Some(self.trampoline_forward_expiry_delta(
-                payment_data.final_tlc_expiry_delta,
-                hops,
-                payment_data.tlc_expiry_limit,
-            )?),
+            final_hop_expiry_delta_override: Some(trampoline_forward_expiry_delta),
         });
     }
 
@@ -1793,6 +1792,7 @@ where
             *stats.entry(payment_data.payment_hash).or_insert(0) += 1;
         }
 
+        let route_tlc_expiry_limit = self.route_tlc_expiry_limit(payment_data.tlc_expiry_limit)?;
         self.find_path(
             source,
             payment_data.target_pubkey,
@@ -1800,7 +1800,7 @@ where
             max_fee_amount,
             payment_data.udt_type_script.clone(),
             payment_data.final_tlc_expiry_delta,
-            payment_data.tlc_expiry_limit,
+            route_tlc_expiry_limit,
             payment_data.allow_self_payment,
             &payment_data.hop_hints,
             &payment_data.channel_stats,
@@ -1818,6 +1818,7 @@ where
             *stats.entry(payment_data.payment_hash).or_insert(0) += 1;
         }
 
+        let route_tlc_expiry_limit = self.route_tlc_expiry_limit(payment_data.tlc_expiry_limit)?;
         match self.find_path(
             self.get_source_pubkey(),
             payment_data.target_pubkey,
@@ -1825,7 +1826,7 @@ where
             None,
             payment_data.udt_type_script.clone(),
             payment_data.final_tlc_expiry_delta,
-            payment_data.tlc_expiry_limit,
+            route_tlc_expiry_limit,
             payment_data.allow_self_payment,
             &payment_data.hop_hints,
             &payment_data.channel_stats,
@@ -1961,6 +1962,7 @@ where
         route: &[RouterHop],
         payment_data: &SendPaymentState,
     ) -> Result<std::vec::Vec<RouterHop>, PathFindError> {
+        let route_tlc_expiry_limit = self.route_tlc_expiry_limit(payment_data.tlc_expiry_limit)?;
         self.inner_find_path(
             source,
             payment_data.target_pubkey,
@@ -1968,7 +1970,7 @@ where
             payment_data.max_fee_amount,
             payment_data.udt_type_script.clone(),
             payment_data.final_tlc_expiry_delta,
-            payment_data.tlc_expiry_limit,
+            route_tlc_expiry_limit,
             &payment_data.hop_hints,
             &payment_data.channel_stats,
             payment_data.allow_mpp(),
@@ -1991,7 +1993,38 @@ where
         let route_len = route.len();
         let now = now_timestamp_as_millis_u64();
         let mut hops_data = Vec::with_capacity(route.len() + 1);
-        let mut rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route);
+        let last_expiry_delta =
+            final_hop_expiry_delta_override.unwrap_or(payment_data.final_tlc_expiry_delta);
+        let max_base_expiry_delta = route
+            .iter()
+            .map(|r| r.incoming_tlc_expiry)
+            .chain(std::iter::once(last_expiry_delta))
+            .max()
+            .unwrap_or(last_expiry_delta);
+        let max_random_expiry_delta = payment_data
+            .tlc_expiry_limit
+            .checked_sub(max_base_expiry_delta)
+            .ok_or_else(|| {
+                PathFindError::Overflow(format!(
+                    "route base expiry {} exceeds tlc_expiry_limit {}",
+                    max_base_expiry_delta, payment_data.tlc_expiry_limit
+                ))
+            })?;
+        let max_payment_expiry = checked_add_u64(
+            now,
+            payment_data.tlc_expiry_limit,
+            "payment tlc_expiry_limit",
+        )?;
+        let check_tlc_expiry_limit = |expiry: u64, context: &str| -> Result<(), PathFindError> {
+            if expiry > max_payment_expiry {
+                return Err(PathFindError::Overflow(format!(
+                    "{} {} exceeds tlc_expiry_limit {} (max actual expiry {})",
+                    context, expiry, payment_data.tlc_expiry_limit, max_payment_expiry
+                )));
+            }
+            Ok(())
+        };
+        let mut rand_tlc_expiry_delta = self.rand_tlc_expiry_delta(route, max_random_expiry_delta);
         if let Some(max_expiry) = payment_data
             .trampoline_context
             .as_ref()
@@ -2011,6 +2044,7 @@ where
                 rand_tlc_expiry_delta,
                 "payment hop expiry random delta",
             )?;
+            check_tlc_expiry_limit(expiry, "payment hop expiry")?;
             hops_data.push(PaymentHopData {
                 amount: r.amount_received,
                 next_hop: Some(r.target),
@@ -2032,14 +2066,13 @@ where
                 ),
             };
 
-        let last_expiry_delta =
-            final_hop_expiry_delta_override.unwrap_or(payment_data.final_tlc_expiry_delta);
         let last_expiry = checked_add_u64(now, last_expiry_delta, "final payment hop expiry")?;
         let last_expiry = checked_add_u64(
             last_expiry,
             rand_tlc_expiry_delta,
             "final payment hop expiry random delta",
         )?;
+        check_tlc_expiry_limit(last_expiry, "final payment hop expiry")?;
 
         let mut last_hop = PaymentHopData {
             amount: last_amount,
@@ -2084,7 +2117,27 @@ where
             .unwrap_or(true)
     }
 
-    fn rand_tlc_expiry_delta(&self, route: &[RouterHop]) -> u64 {
+    fn min_rand_tlc_expiry_delta(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(expiry_delta) = self.fixed_rand_expiry_delta {
+            return expiry_delta;
+        }
+        DEFAULT_TLC_EXPIRY_DELTA
+    }
+
+    fn route_tlc_expiry_limit(&self, tlc_expiry_limit: u64) -> Result<u64, PathFindError> {
+        let random_expiry_reserve = self.min_rand_tlc_expiry_delta();
+        tlc_expiry_limit
+            .checked_sub(random_expiry_reserve)
+            .ok_or_else(|| {
+                PathFindError::Overflow(format!(
+                    "tlc_expiry_limit {} is too small for random expiry reserve {}",
+                    tlc_expiry_limit, random_expiry_reserve
+                ))
+            })
+    }
+
+    fn rand_tlc_expiry_delta(&self, route: &[RouterHop], max_random_expiry_delta: u64) -> u64 {
         #[cfg(test)]
         if let Some(expiry_delta) = self.fixed_rand_expiry_delta {
             return expiry_delta;
@@ -2094,6 +2147,7 @@ where
         // This makes it harder for the intermediate nodes to infer their position in the route.
         let max_rand_expiry_num = MAX_PAYMENT_TLC_EXPIRY_LIMIT
             .saturating_sub(route.first().map(|r| r.incoming_tlc_expiry).unwrap_or(0))
+            .min(max_random_expiry_delta)
             / DEFAULT_TLC_EXPIRY_DELTA;
 
         thread_rng().gen_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA

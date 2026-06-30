@@ -7881,14 +7881,14 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
 
-    let expected_minimal_tlc_expiry_limit =
-        DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let base_route_tlc_expiry_limit = DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let expected_minimal_tlc_expiry_limit = base_route_tlc_expiry_limit + DEFAULT_TLC_EXPIRY_DELTA;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
+            tlc_expiry_limit: Some(base_route_tlc_expiry_limit - 1),
             keysend: Some(true),
             ..Default::default()
         })
