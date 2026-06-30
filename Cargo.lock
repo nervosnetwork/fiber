@@ -2596,6 +2596,7 @@ dependencies = [
  "home",
  "hyper 1.10.1",
  "hyper-util",
+ "js-sys",
  "jsonrpsee",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
@@ -2629,8 +2630,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
  "web-time",
 ]
 

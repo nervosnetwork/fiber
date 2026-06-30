@@ -217,8 +217,58 @@ async fn find_first_input_tx_hash_async(
 
 /// On WASM, reqwest ClientBuilder lacks timeout, and
 /// tokio::time::timeout panics (std::time::Instant not available).
-/// Use tokio_with_wasm::time::timeout which uses setTimeout internally.
+/// Use a Promise-based setTimeout that returns a Send future.
 /// Native keeps builder.timeout() for OS-level socket timeout.
+#[cfg(target_arch = "wasm32")]
+mod wasm_timeout {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    use wasm_bindgen::prelude::{Closure, JsCast};
+    use wasm_bindgen_futures::JsFuture;
+
+    pub fn timeout<F>(dur: Duration, fut: F) -> WasmTimeout<F> {
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            let window = web_sys::window().expect("no window");
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    &resolve,
+                    dur.as_millis() as i32,
+                )
+                .expect("setTimeout");
+        });
+        WasmTimeout {
+            fut,
+            timer: JsFuture::from(promise),
+        }
+    }
+
+    pub struct WasmTimeout<F> {
+        fut: F,
+        timer: JsFuture,
+    }
+
+    impl<F: Future> Future for WasmTimeout<F> {
+        type Output = Result<F::Output, ()>;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            // safety: pin projection
+            let this = unsafe { self.get_unchecked_mut() };
+            match unsafe { Pin::new_unchecked(&mut this.fut) }.poll(cx) {
+                Poll::Ready(v) => Poll::Ready(Ok(v)),
+                Poll::Pending => match unsafe { Pin::new_unchecked(&mut this.timer) }.poll(cx) {
+                    Poll::Ready(_) => Poll::Ready(Err(())),
+                    Poll::Pending => Poll::Pending,
+                },
+            }
+        }
+    }
+
+    // Safety: JsFuture and F are Send
+    unsafe impl<F: Send> Send for WasmTimeout<F> {}
+}
+
 async fn with_ckb_rpc_timeout<F, T, E>(fut: F) -> Result<T, anyhow::Error>
 where
     F: std::future::Future<Output = Result<T, E>>,
@@ -226,7 +276,7 @@ where
 {
     #[cfg(target_arch = "wasm32")]
     {
-        tokio_with_wasm::time::timeout(CKB_RPC_TIMEOUT, fut)
+        wasm_timeout::timeout(CKB_RPC_TIMEOUT, fut)
             .await
             .map_err(|_| anyhow::anyhow!("CKB RPC timed out after {:?}", CKB_RPC_TIMEOUT))?
             .map_err(Into::into)
