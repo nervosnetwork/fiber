@@ -1995,6 +1995,11 @@ where
         let mut hops_data = Vec::with_capacity(route.len() + 1);
         let last_expiry_delta =
             final_hop_expiry_delta_override.unwrap_or(payment_data.final_tlc_expiry_delta);
+
+        // `RouterHop::incoming_tlc_expiry` and `last_expiry_delta` are relative expiry
+        // budgets. `PaymentHopData::expiry` below is an absolute timestamp after adding `now`
+        // and the privacy random delta. The largest base budget decides how much room is left
+        // for the actual random delta while still honoring `tlc_expiry_limit` as a hard cap.
         let max_base_expiry_delta = route
             .iter()
             .map(|r| r.incoming_tlc_expiry)
@@ -2125,6 +2130,11 @@ where
         DEFAULT_TLC_EXPIRY_DELTA
     }
 
+    // Path finding runs before the actual random expiry delta is selected, so this helper is
+    // intentionally a deterministic reserve, not the real random value. Reserving the minimum
+    // possible random delta prevents path finding from choosing a route that already consumes the
+    // whole `tlc_expiry_limit`. `build_router_from_path` still caps the actual random delta against
+    // the selected route's remaining budget and performs the final absolute-expiry hard check.
     fn route_tlc_expiry_limit(&self, tlc_expiry_limit: u64) -> Result<u64, PathFindError> {
         let random_expiry_reserve = self.min_rand_tlc_expiry_delta();
         tlc_expiry_limit
