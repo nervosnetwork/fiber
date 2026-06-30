@@ -1653,7 +1653,9 @@ pub struct ExtendedGossipMessageStoreState<S, C> {
     num_query_tasks_running: usize,
 }
 
-impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S, C> {
+impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
+    ExtendedGossipMessageStoreState<S, C>
+{
     fn new(
         announce_private_addr: bool,
         inbound_channel_update: ChannelUpdateRateLimitConfig,
@@ -1702,6 +1704,19 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         );
 
         let mut verified_sorted_messages = Vec::with_capacity(complete_messages.len());
+
+        // Clone data for concurrent verification, so we don't hold &mut self
+        // while futures are in-flight (CAs need slow CKB RPCs).
+        let store = self.store.clone();
+        let chain_actor = self.chain_actor.clone();
+        let chain_client = self.chain_client.clone();
+
+        // Limit concurrent CKB RPC calls to avoid overwhelming the CKB node.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let mut tasks = FuturesUnordered::new();
+
         for (message, peers) in complete_messages {
             if self.should_defer_message_verification(&message) {
                 trace!(
@@ -1710,14 +1725,25 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 );
                 continue;
             }
-            match verify_and_save_broadcast_message(
-                &message,
-                &self.store,
-                &self.chain_actor,
-                &self.chain_client,
-            )
-            .await
-            {
+            let store = store.clone();
+            let chain_actor = chain_actor.clone();
+            let chain_client = chain_client.clone();
+            let permit = semaphore.clone();
+            tasks.push(async move {
+                let _permit = permit.acquire().await.unwrap();
+                let result = verify_and_save_broadcast_message(
+                    &message,
+                    &store,
+                    &chain_actor,
+                    &chain_client,
+                )
+                .await;
+                (message, peers, result)
+            });
+        }
+
+        while let Some((message, peers, result)) = tasks.next().await {
+            match result {
                 Ok((verified_message, is_newly_applied)) => {
                     self.remove_pending_message(&message, &peers);
                     if is_newly_applied {
@@ -1767,6 +1793,44 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 }
             }
         }
+
+        // After concurrent verification, some CUs may now have their CAs
+        // available (just verified above). Re-check and process remaining.
+        let mut recheck_complete = HashMap::<BroadcastMessage, Vec<Pubkey>>::new();
+        for (peer, msgs) in &self.messages_to_be_saved {
+            for msg in msgs {
+                if self.has_dependencies_available(msg) {
+                    recheck_complete.entry(msg.clone()).or_default().push(*peer);
+                }
+            }
+        }
+        let mut recheck_complete = recheck_complete.into_iter().collect::<Vec<_>>();
+        recheck_complete.sort_unstable_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
+        for (message, peers) in recheck_complete {
+            if self.should_defer_message_verification(&message) {
+                continue;
+            }
+            if let Ok((verified_message, is_newly_applied)) = verify_and_save_broadcast_message(
+                &message,
+                &self.store,
+                &self.chain_actor,
+                &self.chain_client,
+            )
+            .await
+            {
+                self.remove_pending_message(&message, &peers);
+                if is_newly_applied {
+                    self.latest_remote_broadcast_timestamp
+                        .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
+                    observe_applied_broadcast_message();
+                    observe_applied_propagation_latency(&verified_message);
+                } else {
+                    observe_duplicate_broadcast_message();
+                }
+                verified_sorted_messages.push(verified_message);
+            }
+        }
+
         self.messages_to_be_saved
             .retain(|_, messages| !messages.is_empty());
 
@@ -2146,6 +2210,10 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         let mut skipped_ckb_deferred = 0usize;
         let mut skipped_duplicate_cached = 0usize;
 
+        // First pass: insert messages into cache, check deps, collect
+        // messages that are ready for verification.
+        let mut to_verify: Vec<(BroadcastMessage, bool)> = Vec::with_capacity(messages.len());
+
         for message in messages {
             if !self.allow_inbound_remote_broadcast_message(peer, &message, now_ms) {
                 result = Some(ActiveSyncSaveMessagesResult::Pending);
@@ -2153,9 +2221,30 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             }
 
             match self.insert_message_to_be_saved_list(peer, &message).await {
-                Ok(InsertMessageStatus::Inserted) => {}
+                Ok(InsertMessageStatus::Inserted) => {
+                    if !self.has_dependencies_available(&message) {
+                        skipped_no_deps += 1;
+                        observe_missing_dependency_message(broadcast_message_type(&message));
+                        continue;
+                    }
+                    if self.should_defer_message_verification(&message) {
+                        skipped_deferred += 1;
+                        continue;
+                    }
+                    to_verify.push((message, true));
+                }
                 Ok(InsertMessageStatus::InsertedDuplicate) => {
                     observe_duplicate_broadcast_message();
+                    if !self.has_dependencies_available(&message) {
+                        skipped_no_deps += 1;
+                        observe_missing_dependency_message(broadcast_message_type(&message));
+                        continue;
+                    }
+                    if self.should_defer_message_verification(&message) {
+                        skipped_deferred += 1;
+                        continue;
+                    }
+                    to_verify.push((message, false));
                 }
                 Ok(InsertMessageStatus::Duplicate) => {
                     observe_duplicate_broadcast_message();
@@ -2193,70 +2282,91 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     break;
                 }
             }
+        }
 
-            if !self.has_dependencies_available(&message) {
-                skipped_no_deps += 1;
-                observe_missing_dependency_message(broadcast_message_type(&message));
-                continue;
-            }
-            if self.should_defer_message_verification(&message) {
-                skipped_deferred += 1;
-                continue;
+        // Second pass: verify messages concurrently.
+        if !to_verify.is_empty() {
+            let store = self.store.clone();
+            let chain_actor = self.chain_actor.clone();
+            let chain_client = self.chain_client.clone();
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+
+            use futures::stream::{FuturesUnordered, StreamExt};
+            let mut tasks = FuturesUnordered::new();
+
+            for (message, is_inserted) in to_verify {
+                let store = store.clone();
+                let chain_actor = chain_actor.clone();
+                let chain_client = chain_client.clone();
+                let permit = semaphore.clone();
+                tasks.push(async move {
+                    let _permit = permit.acquire().await.unwrap();
+                    let r = verify_and_save_broadcast_message(
+                        &message,
+                        &store,
+                        &chain_actor,
+                        &chain_client,
+                    )
+                    .await;
+                    (message, is_inserted, r)
+                });
             }
 
-            match verify_and_save_broadcast_message(
-                &message,
-                &self.store,
-                &self.chain_actor,
-                &self.chain_client,
-            )
-            .await
-            {
-                Ok((verified_message, is_newly_applied)) => {
-                    self.remove_pending_message(&message, &[*peer]);
-                    latest_validated_cursor = Some(verified_message.cursor());
-                    if is_newly_applied {
-                        self.latest_remote_broadcast_timestamp
-                            .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
-                        observe_applied_broadcast_message();
-                        observe_applied_propagation_latency(&verified_message);
-                    } else {
-                        observe_duplicate_broadcast_message();
+            while let Some((message, is_inserted, verify_result)) = tasks.next().await {
+                match verify_result {
+                    Ok((verified_message, is_newly_applied)) => {
+                        self.remove_pending_message(&message, &[*peer]);
+                        latest_validated_cursor = Some(verified_message.cursor());
+                        if is_newly_applied {
+                            self.latest_remote_broadcast_timestamp
+                                .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
+                            observe_applied_broadcast_message();
+                            observe_applied_propagation_latency(&verified_message);
+                        } else {
+                            observe_duplicate_broadcast_message();
+                        }
+                        verified_messages.push(verified_message);
                     }
-                    verified_messages.push(verified_message);
-                }
-                Err(
-                    error @ VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
-                        _,
-                        _,
-                    ),
-                ) => {
-                    skipped_ckb_deferred += 1;
-                    warn!(
-                        "Deferred active sync CA verification for {:?}: {:?}",
-                        message, error
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    self.remove_pending_message(&message, &[*peer]);
-                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
-                    trace!(
-                        "Failed to verify and save message {:?}: {:?}",
-                        message,
+                    Err(
                         error
-                    );
-                    let violation =
-                        classify_verify_and_save_broadcast_message_error(&message, &error)
-                            .unwrap_or(GossipViolation::InvalidBroadcastMessage);
-                    self.gossip_actor
-                        .send_message(GossipActorMessage::MaliciousPeerFound {
-                            peer: *peer,
-                            violation,
-                        })
-                        .expect("gossip actor alive");
-                    result = Some(ActiveSyncSaveMessagesResult::Rejected(violation));
-                    break;
+                        @ VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                            _,
+                            _,
+                        ),
+                    ) => {
+                        skipped_ckb_deferred += 1;
+                        warn!(
+                            "Deferred active sync CA verification for {:?}: {:?}",
+                            message, error
+                        );
+                    }
+                    Err(error) => {
+                        if is_inserted {
+                            self.remove_pending_message(&message, &[*peer]);
+                        }
+                        observe_rejected_broadcast_message(
+                            error.rejected_broadcast_metrics_reason(),
+                        );
+                        trace!(
+                            "Failed to verify and save message {:?}: {:?}",
+                            message,
+                            error
+                        );
+                        if let Some(violation) =
+                            classify_verify_and_save_broadcast_message_error(&message, &error)
+                        {
+                            self.gossip_actor
+                                .send_message(GossipActorMessage::MaliciousPeerFound {
+                                    peer: *peer,
+                                    violation,
+                                })
+                                .expect("gossip actor alive");
+                            result = Some(ActiveSyncSaveMessagesResult::Rejected(violation));
+                        } else {
+                            result = Some(ActiveSyncSaveMessagesResult::Pending);
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -2361,7 +2471,9 @@ struct ExtendedGossipMessageStoreActor<S, C> {
     phantom: PhantomData<(S, C)>,
 }
 
-impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreActor<S, C> {
+impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
+    ExtendedGossipMessageStoreActor<S, C>
+{
     fn new() -> Self {
         Self {
             phantom: Default::default(),
@@ -2370,8 +2482,10 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreActor<S
 }
 
 #[async_trait::async_trait]
-impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + Sync + 'static> Actor
-    for ExtendedGossipMessageStoreActor<S, C>
+impl<
+        S: GossipMessageStore + Send + Sync + Clone + 'static,
+        C: CkbChainClient + Send + Sync + Clone + 'static,
+    > Actor for ExtendedGossipMessageStoreActor<S, C>
 {
     type Msg = ExtendedGossipMessageStoreMessage;
     type State = ExtendedGossipMessageStoreState<S, C>;
