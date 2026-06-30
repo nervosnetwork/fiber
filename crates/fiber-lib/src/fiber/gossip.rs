@@ -3171,7 +3171,7 @@ fn get_existing_newer_broadcast_message<S: GossipMessageStore>(
 }
 
 // Verify and save broadcast messages to the store.
-// Note that we can't relialy verify a message until we have all the messages that it depends on.
+// Note that we can't reliably verify a message until we have all the messages that it depends on.
 // So this function should be called by the dependency order of the messages.
 // E.g. channel updates depends on channel announcements to obtain the node public keys,
 // so we should call this method to save and verify channel announcements before channel updates.
@@ -3234,6 +3234,13 @@ async fn verify_and_save_broadcast_message<S: GossipMessageStore>(
     Ok(((message.clone(), timestamp).into(), is_newly_applied))
 }
 
+async fn is_funding_outpoint_live(outpoint: &OutPoint, client: &impl CkbChainClient) -> bool {
+    match client.get_live_cell(outpoint.clone().into(), false).await {
+        Ok(cell) => cell.cell.is_some() && cell.status == "live",
+        _ => false,
+    }
+}
+
 async fn get_channel_tx(
     outpoint: &OutPoint,
     chain: &ActorRef<CkbChainMessage>,
@@ -3259,7 +3266,7 @@ async fn get_channel_tx(
     #[cfg(not(any(test, feature = "bench")))]
     let _ = chain;
 
-    let is_live = is_funding_outpoint_live(outpoint, client).await?;
+    let is_live = is_funding_outpoint_live(outpoint, client).await;
     if !is_live {
         return Err(VerifyBroadcastMessageError::InvalidParameter(format!(
             "Channel announcement funding outpoint {:?} is not live",
