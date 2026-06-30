@@ -98,6 +98,7 @@ ckb-hash = { version = "1", features = [
   "blake2b-ref",
 ], default-features = false }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 jsonrpsee = { version = "0.25.1", features = [
   "macros",
   "server-core",

@@ -1,4 +1,6 @@
 use crate::ckb::config::new_ckb_rpc_async_client;
+#[cfg(target_arch = "wasm32")]
+use crate::ckb::config::CKB_RPC_TIMEOUT;
 use crate::ckb::CkbConfig;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_sdk::rpc::ckb_indexer::{Cell, CellType, Order, Pagination, ScriptType, SearchKey, Tx};
@@ -213,15 +215,72 @@ async fn find_first_input_tx_hash_async(
     }
 }
 
+/// On WASM, reqwest ClientBuilder lacks timeout, and
+/// tokio::time::timeout panics (std::time::Instant not available).
+/// Use gloo_timers future which works in both window and worker contexts.
+/// Native keeps builder.timeout() for OS-level socket timeout.
+#[cfg(target_arch = "wasm32")]
+mod wasm_timeout {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
+    pub fn timeout<F>(dur: Duration, fut: F) -> WasmTimeout<F> {
+        WasmTimeout {
+            fut,
+            timer: gloo_timers::future::TimeoutFuture::new(dur.as_millis() as u32),
+        }
+    }
+
+    pub struct WasmTimeout<F> {
+        fut: F,
+        timer: gloo_timers::future::TimeoutFuture,
+    }
+
+    impl<F: Future> Future for WasmTimeout<F> {
+        type Output = Result<F::Output, ()>;
+        fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let this = unsafe { self.get_unchecked_mut() };
+            match unsafe { Pin::new_unchecked(&mut this.fut) }.poll(cx) {
+                Poll::Ready(v) => Poll::Ready(Ok(v)),
+                Poll::Pending => match Pin::new(&mut this.timer).poll(cx) {
+                    Poll::Ready(()) => Poll::Ready(Err(())),
+                    Poll::Pending => Poll::Pending,
+                },
+            }
+        }
+    }
+
+    // Safety: F is Send and TimeoutFuture is Send
+    unsafe impl<F: Send> Send for WasmTimeout<F> {}
+}
+
+async fn with_ckb_rpc_timeout<F, T, E>(fut: F) -> Result<T, anyhow::Error>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    #[cfg(target_arch = "wasm32")]
+    {
+        wasm_timeout::timeout(CKB_RPC_TIMEOUT, fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("CKB RPC timed out after {:?}", CKB_RPC_TIMEOUT))?
+            .map_err(Into::into)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        fut.await.map_err(Into::into)
+    }
+}
+
 #[async_trait::async_trait]
 impl CkbChainClient for CkbRpcClient {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error> {
         let client = self.config.ckb_rpc_client();
-        client
-            .get_only_committed_packed_transaction(hash)
+        with_ckb_rpc_timeout(client.get_only_committed_packed_transaction(hash))
             .await
             .map(|resp| GetTxResponse::from(Some(resp)))
-            .map_err(Into::into)
     }
 
     async fn get_cells(
@@ -240,8 +299,7 @@ impl CkbChainClient for CkbRpcClient {
 
     async fn get_block_timestamp(&self, block_hash: Hash256) -> Result<Option<u64>, anyhow::Error> {
         let client = self.config.ckb_rpc_client();
-        client
-            .get_packed_header(block_hash.into())
+        with_ckb_rpc_timeout(client.get_packed_header(block_hash.into()))
             .await
             .map(|maybe_bytes| {
                 maybe_bytes.and_then(|bytes| {
@@ -258,7 +316,6 @@ impl CkbChainClient for CkbRpcClient {
                     }
                 })
             })
-            .map_err(Into::into)
     }
 
     async fn get_shutdown_tx(
