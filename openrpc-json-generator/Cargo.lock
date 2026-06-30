@@ -2159,6 +2159,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "tokio_with_wasm",
  "tonic 0.11.0",
  "torut",
  "tower 0.5.3",
