@@ -6099,7 +6099,8 @@ where
         let mut service = {
             let mut builder = ServiceBuilder::default()
                 .insert_protocol(fiber_handle.create_meta())
-                .handshake_type(secio_kp.into());
+                .handshake_type(secio_kp.into())
+                .timeout(std::time::Duration::from_secs(60));
             if let Some(gossip_handle) = gossip_handle_opt {
                 builder = builder.insert_protocol(gossip_handle.create_meta());
             }
