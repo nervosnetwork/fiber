@@ -92,6 +92,10 @@ const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
 
 pub(crate) const DEFAULT_NUM_OF_BROADCAST_MESSAGE: u16 = 100;
 const MAX_INCOMPLETE_GOSSIP_MESSAGES_PER_PEER: usize = 1000;
+#[cfg(target_arch = "wasm32")]
+const MAX_CONCURRENT_CA_VERIFICATION: usize = 5;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CONCURRENT_CA_VERIFICATION: usize = 10;
 const MAX_INCOMPLETE_GOSSIP_MESSAGES_TOTAL: usize = 10_000;
 
 const MAX_NUM_OF_ACTIVE_SYNCING_PEERS: usize = 3;
@@ -1712,7 +1716,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
         let chain_client = self.chain_client.clone();
 
         // Limit concurrent CKB RPC calls to avoid overwhelming the CKB node.
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CA_VERIFICATION));
 
         use futures::stream::{FuturesUnordered, StreamExt};
         let mut tasks = FuturesUnordered::new();
@@ -2208,7 +2212,6 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
         let mut skipped_no_deps = 0usize;
         let mut skipped_deferred = 0usize;
         let mut skipped_ckb_deferred = 0usize;
-        let mut skipped_duplicate_cached = 0usize;
 
         // First pass: insert messages into cache, check deps, collect
         // messages that are ready for verification.
@@ -2254,7 +2257,6 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
                             continue;
                         }
                         None => {
-                            skipped_duplicate_cached += 1;
                             continue;
                         }
                     }
@@ -2289,7 +2291,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
             let store = self.store.clone();
             let chain_actor = self.chain_actor.clone();
             let chain_client = self.chain_client.clone();
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(10));
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CA_VERIFICATION));
 
             use futures::stream::{FuturesUnordered, StreamExt};
             let mut tasks = FuturesUnordered::new();
@@ -2372,11 +2374,7 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
         }
 
         self.broadcast_messages(&verified_messages);
-        if skipped_no_deps > 0
-            || skipped_deferred > 0
-            || skipped_ckb_deferred > 0
-            || skipped_duplicate_cached > 0
-        {
+        if skipped_no_deps > 0 || skipped_deferred > 0 || skipped_ckb_deferred > 0 {
             ActiveSyncSaveMessagesResult::Pending
         } else {
             result.unwrap_or_else(|| {
