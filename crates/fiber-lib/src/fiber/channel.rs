@@ -3131,7 +3131,7 @@ where
                 }
                 // Only TLCs that made it onto the on-chain commitment can be settled on-chain.
                 if tlc.is_offered() {
-                    tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
+                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 } else {
                     matches!(
                         tlc.inbound_status(),
@@ -3202,6 +3202,8 @@ where
                 }
                 TLCId::Received(id) => {
                     state.tlc_state.set_received_tlc_removed(id, fulfill);
+                    self.store
+                        .remove_payment_hold_tlc(&tlc.payment_hash, &state.id, id);
                 }
             }
 
@@ -3251,7 +3253,10 @@ where
                 matches!(
                     tlc.removed_reason,
                     Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                ) && matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
+                ) && matches!(
+                    tlc.inbound_status(),
+                    InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+                )
             })
             .filter_map(|tlc| {
                 let TLCId::Received(id) = tlc.tlc_id else {
@@ -3274,9 +3279,9 @@ where
         }
     }
 
-    /// Mark an invoice paid when its received TLCs on this force-closed channel have been fulfilled
-    /// on-chain and together satisfy the invoice amount. No-op when there is no local invoice for the
-    /// payment hash (e.g. forwarded or payer TLCs) or it is already paid.
+    /// Mark an invoice paid when its received TLCs have been fulfilled on-chain and together
+    /// satisfy the invoice amount. No-op when there is no local invoice for the payment hash
+    /// (e.g. forwarded or payer TLCs) or it is already paid.
     fn settle_onchain_invoice_if_fulfilled(
         &self,
         state: &ChannelActorState,
@@ -3288,18 +3293,14 @@ where
         if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid) {
             return;
         }
-        let fulfilled_received_tlcs = state.tlc_state.received_tlcs.tlcs.iter().filter(|tlc| {
-            tlc.payment_hash == payment_hash
-                && matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                )
-        });
-        if is_invoice_fulfilled(&invoice, fulfilled_received_tlcs) {
+        let fulfilled_received_tlcs =
+            collect_fulfilled_received_tlcs_for_invoice(&self.store, state, payment_hash);
+        if is_invoice_fulfilled(&invoice, fulfilled_received_tlcs.iter()) {
             debug!(
-                "Channel {:?} marking invoice {:?} paid from on-chain fulfilled TLCs",
+                "Channel {:?} marking invoice {:?} paid from {} on-chain fulfilled TLC(s)",
                 state.get_id(),
-                payment_hash
+                payment_hash,
+                fulfilled_received_tlcs.len(),
             );
             self.store
                 .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
@@ -5098,9 +5099,56 @@ struct OnChainFulfilledTlc {
     preimage: Hash256,
 }
 
+fn collect_fulfilled_received_tlcs_for_invoice(
+    store: &impl ChannelActorStateStore,
+    current_state: &ChannelActorState,
+    payment_hash: Hash256,
+) -> Vec<TlcInfo> {
+    let current_channel_id = current_state.get_id();
+    let mut fulfilled: Vec<_> = current_state
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .filter(|tlc| {
+            tlc.payment_hash == payment_hash
+                && matches!(
+                    tlc.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                )
+        })
+        .cloned()
+        .collect();
+
+    fulfilled.extend(
+        store
+            .get_channel_states(None)
+            .into_iter()
+            .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
+            .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
+            .flat_map(|state| state.tlc_state.received_tlcs.tlcs.clone().into_iter())
+            .filter(|tlc| {
+                tlc.payment_hash == payment_hash
+                    && matches!(
+                        tlc.removed_reason,
+                        Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                    )
+            }),
+    );
+
+    fulfilled
+}
+
+pub(crate) struct OnChainFulfillableUpstreamTlc {
+    pub downstream_tlc_id: u64,
+    pub payment_hash: Hash256,
+    pub forwarding_channel_id: Hash256,
+    pub forwarding_tlc_id: u64,
+    pub payment_preimage: Hash256,
+}
+
 /// Collect the upstream forwarded TLCs on a force-closed channel that can be fulfilled because the
-/// watchtower observed their preimage being revealed on-chain. Returns
-/// `(upstream_channel_id, upstream_tlc_id, payment_preimage)` for each claimable TLC.
+/// watchtower observed their preimage being revealed on-chain.
 ///
 /// The on-chain preimage discovery is the success signal; it is mutually exclusive with the
 /// on-chain fail marker when no preimage was discovered, so this never overlaps the fail path. This
@@ -5111,14 +5159,14 @@ struct OnChainFulfilledTlc {
 pub(crate) fn collect_onchain_fulfillable_upstream_tlcs(
     state: &ChannelActorState,
     store: &impl ChannelActorStateStore,
-) -> Vec<(Hash256, u64, Hash256)> {
+) -> Vec<OnChainFulfillableUpstreamTlc> {
     state
         .tlc_state
         .offered_tlcs
         .tlcs
         .iter()
         .filter(|tlc| {
-            tlc.outbound_status() != OutboundTlcStatus::LocalAnnounced
+            matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 && tlc.removed_reason.is_none()
                 && tlc.removed_confirmed_at.is_none()
         })
@@ -5126,7 +5174,13 @@ pub(crate) fn collect_onchain_fulfillable_upstream_tlcs(
             let (forwarding_channel_id, forwarding_tlc_id) = tlc.forwarding_tlc?;
             let preimage =
                 store.get_on_chain_discovered_preimage(&state.get_id(), &tlc.payment_hash)?;
-            Some((forwarding_channel_id, forwarding_tlc_id, preimage))
+            Some(OnChainFulfillableUpstreamTlc {
+                downstream_tlc_id: tlc.id(),
+                payment_hash: tlc.payment_hash,
+                forwarding_channel_id,
+                forwarding_tlc_id,
+                payment_preimage: preimage,
+            })
         })
         .collect()
 }
@@ -10341,6 +10395,32 @@ mod tests {
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::ADD,
         }
+    }
+
+    #[test]
+    fn onchain_received_fulfill_can_mark_announce_wait_ack_tlc() {
+        let mut tlc_state = TlcState::default();
+        let mut tlc = committed_tlc(TLCId::Received(0), 10);
+        let payment_hash = tlc.payment_hash;
+        tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
+        tlc_state.received_tlcs.tlcs.push(tlc);
+
+        tlc_state.set_received_tlc_removed(
+            0,
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: Hash256::from([42; 32]),
+            }),
+        );
+
+        let tlc = tlc_state
+            .get(&TLCId::Received(0))
+            .expect("received TLC remains in state");
+        assert_eq!(tlc.payment_hash, payment_hash);
+        assert!(matches!(
+            tlc.removed_reason,
+            Some(RemoveTlcReason::RemoveTlcFulfill(..))
+        ));
+        assert_eq!(tlc.inbound_status(), InboundTlcStatus::LocalRemoved);
     }
 
     #[test]

@@ -5111,6 +5111,141 @@ async fn test_payee_invoice_paid_from_onchain_preimage() {
     ));
 }
 
+// On-chain fulfillment can happen independently on multiple force-closed channels for a single
+// MPP invoice. The invoice should be marked paid once all fulfilled parts across channels satisfy
+// the total amount; checking only the current channel would leave it stuck at Received/Open.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10_000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10_000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(20_000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_1.pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(payment_secret)
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build MPP hold invoice");
+    node_1.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let mut custom_records = PaymentCustomRecords::default();
+    BasicMppPaymentData::new(payment_secret, 20_000).write(&mut custom_records);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 10_000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(node_1.pubkey),
+            hash_algorithm,
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: 10_000,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            hash_algorithm,
+            custom_records: Some(custom_records),
+            ..Default::default()
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        node_0.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    for channel_id in channels.iter().copied() {
+        call!(node_0.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount: 10_000,
+                            hash_algorithm,
+                            payment_hash,
+                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                            onion_packet: packet.next.clone(),
+                            shared_secret: packet.shared_secret,
+                            is_trampoline_hop: false,
+                            previous_tlc: None,
+                            attempt_id: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node alive")
+        .expect("add MPP TLC");
+    }
+
+    wait_until_timeout(30_000, || {
+        node_1.store.get_payment_hold_tlcs(payment_hash).len() == 2
+    })
+    .await;
+
+    for channel_id in channels.iter().copied() {
+        node_1
+            .send_shutdown(channel_id, true)
+            .await
+            .expect("force shutdown payee channel");
+        wait_until_timeout(10_000, || {
+            matches!(
+                node_1.get_channel_actor_state(channel_id).state,
+                ChannelState::Closed(flags)
+                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+            )
+        })
+        .await;
+    }
+
+    node_1
+        .store
+        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(30_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid)
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn test_forwarded_payment_relays_remove_to_upstream() {
     init_tracing();
@@ -5337,6 +5472,118 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
         .get_tlc(channels[0], TLCId::Received(previous_tlc_id))
         .and_then(|tlc| tlc.removed_reason)
         .is_some());
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_check_channels_onchain_fulfillment_fallback_marks_downstream_tlc() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let downstream_tlc_id = node_1
+        .get_channel_actor_state(channels[1])
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .map(|tlc| tlc.id())
+        .expect("downstream tlc exists");
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_1
+        .store
+        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        ))
+        .expect("network actor alive");
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(30_000, || {
+        node_0
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Success)
+    })
+    .await;
+
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[1], TLCId::Offered(downstream_tlc_id))
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFulfill(..))
+    ));
 }
 
 #[tokio::test]

@@ -2268,7 +2268,9 @@ where
                                 CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE
                             )
                     ) {
-                        if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
+                        if let Some(mut actor_state) =
+                            self.store.get_channel_actor_state(&channel_id)
+                        {
                             let delay_epoch = EpochNumberWithFraction::from_full_value(
                                 actor_state.commitment_delay_epoch,
                             );
@@ -2341,27 +2343,42 @@ where
                                 &actor_state,
                                 &self.store,
                             );
-                            for (forwarding_channel_id, forwarding_tlc_id, payment_preimage) in
-                                fulfilled_tlcs
-                            {
+                            let mut actor_state_changed = false;
+                            for fulfilled_tlc in fulfilled_tlcs {
+                                let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                    payment_preimage: fulfilled_tlc.payment_preimage,
+                                });
                                 if let Err(err) = self
                                     .send_remove_tlc_to_channel(
                                         state,
-                                        forwarding_channel_id,
+                                        fulfilled_tlc.forwarding_channel_id,
                                         RemoveTlcCommand {
-                                            id: forwarding_tlc_id,
-                                            reason: RemoveTlcReason::RemoveTlcFulfill(
-                                                RemoveTlcFulfill { payment_preimage },
-                                            ),
+                                            id: fulfilled_tlc.forwarding_tlc_id,
+                                            reason: fulfill.clone(),
                                         },
                                     )
                                     .await
                                 {
                                     error!(
                                         "Failed to fulfill upstream tlc {:?} for channel {:?}: {}",
-                                        forwarding_tlc_id, forwarding_channel_id, err
+                                        fulfilled_tlc.forwarding_tlc_id,
+                                        fulfilled_tlc.forwarding_channel_id,
+                                        err
                                     );
+                                } else {
+                                    self.store.insert_preimage(
+                                        fulfilled_tlc.payment_hash,
+                                        fulfilled_tlc.payment_preimage,
+                                    );
+                                    actor_state.tlc_state.set_offered_tlc_removed(
+                                        fulfilled_tlc.downstream_tlc_id,
+                                        fulfill,
+                                    );
+                                    actor_state_changed = true;
                                 }
+                            }
+                            if actor_state_changed {
+                                self.store.insert_channel_actor_state(actor_state);
                             }
                         }
                     }

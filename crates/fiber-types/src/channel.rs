@@ -752,7 +752,10 @@ impl TlcState {
 
     pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
         let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
-        assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
+        assert!(matches!(
+            tlc.inbound_status(),
+            InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+        ));
         tlc.removed_reason = Some(reason);
         tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
         tlc.payment_hash
