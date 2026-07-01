@@ -5005,6 +5005,19 @@ async fn test_payer_payment_success_from_onchain_preimage() {
             .and_then(|tlc| tlc.removed_reason),
         Some(RemoveTlcReason::RemoveTlcFulfill(..))
     ));
+
+    let preimage_record = crate::store::store_impl::KeyValue::Preimage(payment_hash, hold_preimage);
+    let persisted_preimage = fiber_store::backend::StorageBackend::get(
+        &node_0.store,
+        crate::store::store_impl::StoreKeyValue::key(&preimage_record),
+    );
+    assert_eq!(
+        persisted_preimage,
+        Some(crate::store::store_impl::StoreKeyValue::value(
+            &preimage_record
+        )),
+        "on-chain payment success must persist a normal preimage record so CCH observes the same success signal as off-chain fulfillment"
+    );
 }
 
 // When the payee's channel is force-closed with a still-pending received TLC, the payee claims it

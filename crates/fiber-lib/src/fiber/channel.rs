@@ -3168,6 +3168,10 @@ where
         }
 
         for tlc in fulfilled {
+            // Mirror the on-chain preimage into the regular preimage store so local observers
+            // see the same success signal as they do for off-chain fulfillment.
+            self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
+
             let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                 payment_preimage: tlc.preimage,
             });
