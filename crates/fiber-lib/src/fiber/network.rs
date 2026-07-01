@@ -6152,7 +6152,7 @@ where
                 .handshake_type(secio_kp.into())
                 // Sets forever to true so the network service won't be shutdown due to no incoming connections
                 .forever(true)
-                .timeout(std::time::Duration::from_secs(30));
+                .timeout(std::time::Duration::from_secs(60));
             if let Some(gossip_handle) = gossip_handle_opt {
                 builder = builder.insert_protocol(gossip_handle.create_meta());
             }
