@@ -861,6 +861,31 @@ async fn test_set_and_get_block_timestamp() {
     assert_eq!(timestamp, now);
 }
 
+#[tokio::test]
+async fn test_mock_ckb_chain_client_reports_dead_live_cell() {
+    let shared_state = Arc::new(RwLock::new(MockChainState::new()));
+    let client = MockCkbChainClient::new(shared_state.clone());
+    let out_point = OutPoint::new_builder()
+        .tx_hash(H256::default())
+        .index(0u32)
+        .build();
+
+    {
+        let mut state = shared_state.write().unwrap();
+        state
+            .cell_status
+            .insert(out_point.clone(), CellStatus::Consumed);
+    }
+
+    let result = client
+        .get_live_cell(out_point.clone().into(), false)
+        .await
+        .expect("get live cell");
+
+    assert_eq!(result.status, "dead");
+    assert!(result.cell.is_none());
+}
+
 #[derive(Clone, Debug)]
 pub struct MockCkbChainClient {
     pub state: Arc<RwLock<MockChainState>>,
