@@ -101,6 +101,13 @@ impl Store {
             watcher(change);
         }
     }
+
+    fn channel_owns_attempt(&self, channel_outpoint: &OutPoint, attempt: &Attempt) -> bool {
+        self.get_channel_state_by_outpoint(channel_outpoint)
+            .is_some_and(|channel_state| {
+                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+            })
+    }
 }
 
 impl StorageBackend for Store {
@@ -1295,13 +1302,15 @@ impl NetworkGraphStateStore for Store {
                         .ok()?,
                 );
 
-                // Channel-ready retries should only wake attempts that previously failed
-                // retryably. Fresh Created attempts may still be in their first send path.
                 let attempt = self.get_attempt(payment_hash, attempt_id)?;
-                if matches!(attempt.status, AttemptStatus::Retrying) {
-                    Some(attempt)
-                } else {
-                    None
+                match attempt.status {
+                    AttemptStatus::Retrying => Some(attempt),
+                    AttemptStatus::Created
+                        if !self.channel_owns_attempt(channel_outpoint, &attempt) =>
+                    {
+                        Some(attempt)
+                    }
+                    _ => None,
                 }
             })
             .collect()
