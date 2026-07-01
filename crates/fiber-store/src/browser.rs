@@ -187,12 +187,14 @@ impl BatchWriter for Batch {
     }
 
     fn commit(self) {
-        self.chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete { keys: self.delete })
-            .expect("Failed to delete batch");
-        self.chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put { kvs: self.puts })
-            .expect("Failed to put batch");
+        if !self.delete.is_empty() || !self.puts.is_empty() {
+            self.chan
+                .dispatch_database_command(DbCommandRequestWithTakeWhile::BatchWrite {
+                    deletes: self.delete,
+                    puts: self.puts,
+                })
+                .expect("Failed to commit batch");
+        }
     }
 }
 
@@ -297,6 +299,9 @@ impl CommunicationChannel {
             DbCommandRequestWithTakeWhile::Delete { keys } => {
                 (DbCommandRequest::Delete { keys }, None)
             }
+            DbCommandRequestWithTakeWhile::BatchWrite { deletes, puts } => {
+                (DbCommandRequest::BatchWrite { deletes, puts }, None)
+            }
             DbCommandRequestWithTakeWhile::Iterator {
                 start,
                 direction,
@@ -374,6 +379,10 @@ pub enum DbCommandRequestWithTakeWhile {
     },
     Delete {
         keys: Vec<Vec<u8>>,
+    },
+    BatchWrite {
+        deletes: Vec<Vec<u8>>,
+        puts: Vec<KV>,
     },
     Iterator {
         start: Vec<u8>,
