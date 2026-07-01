@@ -2204,6 +2204,8 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
         peer: &Pubkey,
         messages: Vec<BroadcastMessage>,
     ) -> ActiveSyncSaveMessagesResult {
+        let _start = now_timestamp_as_millis_u64();
+        let _total = messages.len();
         let mut verified_messages = Vec::new();
         let mut result = None;
         let mut latest_validated_cursor = None;
@@ -2374,15 +2376,24 @@ impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
         }
 
         self.broadcast_messages(&verified_messages);
-        if skipped_no_deps > 0 || skipped_deferred > 0 || skipped_ckb_deferred > 0 {
-            ActiveSyncSaveMessagesResult::Pending
-        } else {
-            result.unwrap_or_else(|| {
-                latest_validated_cursor
-                    .map(ActiveSyncSaveMessagesResult::Validated)
-                    .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
-            })
-        }
+        let final_result =
+            if skipped_no_deps > 0 || skipped_deferred > 0 || skipped_ckb_deferred > 0 {
+                ActiveSyncSaveMessagesResult::Pending
+            } else {
+                result.unwrap_or_else(|| {
+                    latest_validated_cursor
+                        .map(ActiveSyncSaveMessagesResult::Validated)
+                        .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
+                })
+            };
+        info!(
+            "save_active_sync_msgs: {}/{} verified in {}ms, skipped(no_deps={}, deferred={}, ckb_deferred={})",
+            verified_messages.len(),
+            _total,
+            now_timestamp_as_millis_u64().saturating_sub(_start),
+            skipped_no_deps, skipped_deferred, skipped_ckb_deferred,
+        );
+        final_result
     }
 
     fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
@@ -2703,16 +2714,23 @@ impl<
             }
 
             ExtendedGossipMessageStoreMessage::Tick => {
+                let _tick_start = now_timestamp_as_millis_u64();
+                let _total_cached: usize =
+                    state.messages_to_be_saved.values().map(|s| s.len()).sum();
                 trace!(
                     "Gossip store maintenance ticked: #subscriptions = {},  #messages_to_be_saved = {}",
-                    state.output_ports.len(),
-                    state.messages_to_be_saved.values().map(|s| s.len()).sum::<usize>(),
+                    state.output_ports.len(), _total_cached,
                 );
 
-                // These are the messages that have complete dependencies and can be sent to the subscribers.
                 let complete_messages = state.prune_messages_to_be_saved().await;
                 state.broadcast_messages(&complete_messages);
                 state.spawn_query_tasks(&myself);
+                info!(
+                    "Tick done in {}ms: cached={}, verified={}",
+                    now_timestamp_as_millis_u64().saturating_sub(_tick_start),
+                    _total_cached,
+                    complete_messages.len(),
+                );
             }
         }
         Ok(())
