@@ -112,6 +112,7 @@ pub enum DbCommandResponse {
     },
     Put,
     Delete,
+    BatchWrite,
     /// Response for Iterator command: the collected key-value pairs.
     Iterator {
         kvs: Vec<KV>,
@@ -133,6 +134,13 @@ pub enum DbCommandRequest {
     /// Input: Keys to remove
     /// Output: None
     Delete { keys: Vec<Vec<u8>> },
+    /// Atomically delete keys then write kv pairs.
+    /// Input: Deletes list and puts list
+    /// Output: None
+    BatchWrite {
+        deletes: Vec<Vec<u8>>,
+        puts: Vec<KV>,
+    },
     /// Iterate over key-value pairs, with `take_while` evaluated via IPC callback.
     /// The worker iterates from `start` in `direction`, calling back to the client
     /// for each key to evaluate `take_while`. Stops when `take_while` returns false
