@@ -5878,6 +5878,72 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
     );
 }
 
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payment_succeeds_when_onchain_preimage_arrives_before_settlement_completion() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_1.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build hold invoice");
+    node_1.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
+
+    node_0
+        .send_shutdown(channels[0], true)
+        .await
+        .expect("force shutdown payer channel");
+    wait_until(|| {
+        matches!(
+            node_0.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_0
+        .store
+        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(30_000, || {
+        node_0
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Success)
+    })
+    .await;
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Success
+    );
+}
+
 #[tokio::test]
 async fn test_send_payment_shutdown_cooperative() {
     init_tracing();

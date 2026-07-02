@@ -73,9 +73,8 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    collect_fulfilled_received_tlcs_for_invoice, collect_onchain_fulfillable_upstream_tlcs,
-    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
-    ChannelInitializationOperation, OfflineChannelRestoreMode,
+    collect_onchain_fulfillable_upstream_tlcs, tlc_expiry_delay, AddTlcResponse, ChannelActorState,
+    ChannelEphemeralConfig, ChannelInitializationOperation, OfflineChannelRestoreMode,
     OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
     MAX_TLC_NUMBER_IN_FLIGHT,
 };
@@ -90,12 +89,14 @@ use crate::fiber::types::{
     pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
     TxSignatures,
 };
-use crate::fiber::{settle_tlc_set_command::TlcSettlement, SettleTlcSetCommand};
+use crate::fiber::{
+    settle_tlc_set_command::{SettleOnChainFulfilledInvoiceCommand, TlcSettlement},
+    SettleTlcSetCommand,
+};
 use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
-use crate::utils::payment::is_invoice_fulfilled;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
@@ -622,6 +623,8 @@ pub enum NetworkActorCommand {
     SettleHoldTlcSet(Hash256),
     // Retry settling a hold tlc set after the invoice has already been marked Received.
     SettleReceivedHoldTlcSet(Hash256),
+    // Settle an invoice from received TLCs already reconciled as fulfilled on-chain.
+    SettleOnChainFulfilledInvoice(Hash256),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(Pubkey, SessionId),
     // For internal use and debugging only. Most of the messages requires some
@@ -2402,6 +2405,9 @@ where
             NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash) => {
                 self.settle_received_hold_tlc_set(state, payment_hash).await;
             }
+            NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash) => {
+                self.settle_onchain_fulfilled_invoice(payment_hash);
+            }
             NetworkActorCommand::SettleTlcSet(payment_hash, channel_tlc_ids) => {
                 self.settle_tlc_set(state, payment_hash, channel_tlc_ids)
                     .await;
@@ -2953,30 +2959,15 @@ where
                         .set_received_tlc_removed(id, fulfill);
                     self.store
                         .remove_payment_hold_tlc(&payment_hash, &channel_id, id);
-                    self.settle_onchain_invoice_if_fulfilled(channel_state, payment_hash);
+                    self.store.insert_channel_actor_state(channel_state.clone());
+                    self.settle_onchain_fulfilled_invoice(payment_hash);
                 }
             }
         }
     }
 
-    fn settle_onchain_invoice_if_fulfilled(
-        &self,
-        channel_state: &ChannelActorState,
-        payment_hash: Hash256,
-    ) {
-        let Some(invoice) = self.store.get_invoice(&payment_hash) else {
-            return;
-        };
-        if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid) {
-            return;
-        }
-        let fulfilled_received_tlcs =
-            collect_fulfilled_received_tlcs_for_invoice(&self.store, channel_state, payment_hash);
-        if is_invoice_fulfilled(&invoice, fulfilled_received_tlcs.iter()) {
-            self.store
-                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
-                .expect("update invoice status failed");
-        }
+    fn settle_onchain_fulfilled_invoice(&self, payment_hash: Hash256) {
+        SettleOnChainFulfilledInvoiceCommand::new(payment_hash, &self.store).run();
     }
 
     fn retry_hold_tlc_sets(&self, myself: &ActorRef<NetworkActorMessage>) {
