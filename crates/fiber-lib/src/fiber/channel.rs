@@ -3327,6 +3327,7 @@ where
         }
 
         self.maintain_waiting_onchain_settlement_tlcs(state);
+        self.settle_onchain_fulfilled_tlcs(state);
         flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
         state.update_state(ChannelState::Closed(flags));
         info!("Channel {:?} on-chain settlement completed", state.get_id());
@@ -5099,7 +5100,7 @@ struct OnChainFulfilledTlc {
     preimage: Hash256,
 }
 
-fn collect_fulfilled_received_tlcs_for_invoice(
+pub(crate) fn collect_fulfilled_received_tlcs_for_invoice(
     store: &impl ChannelActorStateStore,
     current_state: &ChannelActorState,
     payment_hash: Hash256,

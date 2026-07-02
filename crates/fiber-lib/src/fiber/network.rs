@@ -73,8 +73,9 @@ use crate::ckb::contracts::{
 };
 use crate::ckb::{CkbChainMessage, FundingError, FundingRequest, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    collect_onchain_fulfillable_upstream_tlcs, tlc_expiry_delay, AddTlcResponse, ChannelActorState,
-    ChannelEphemeralConfig, ChannelInitializationOperation, OfflineChannelRestoreMode,
+    collect_fulfilled_received_tlcs_for_invoice, collect_onchain_fulfillable_upstream_tlcs,
+    tlc_expiry_delay, AddTlcResponse, ChannelActorState, ChannelEphemeralConfig,
+    ChannelInitializationOperation, OfflineChannelRestoreMode,
     OpenChannelWithExternalFundingParameter, TxCollaborationCommand, TxUpdateCommand,
     MAX_TLC_NUMBER_IN_FLIGHT,
 };
@@ -94,6 +95,7 @@ use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
+use crate::utils::payment::is_invoice_fulfilled;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
@@ -102,11 +104,11 @@ use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
     ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
-    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos,
+    FeatureVector, Hash256, InboundTlcStatus, NodeAnnouncement, OutboundTlcStatus,
+    PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState,
+    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevocationData, RouterHop, SettlementData, ShuttingDownFlags, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1706,6 +1708,11 @@ where
                 {
                     if let ChannelState::Closed(mut flags) = actor_state.state {
                         if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+                            self.reconcile_onchain_fulfilled_tlcs_without_live_actor(
+                                state,
+                                &mut actor_state,
+                            )
+                            .await;
                             flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
                             actor_state.state = ChannelState::Closed(flags);
                             self.store.insert_channel_actor_state(actor_state);
@@ -2268,6 +2275,9 @@ where
                                 CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE
                             )
                     ) {
+                        if state.channels.contains_key(&channel_id) {
+                            continue;
+                        }
                         if let Some(mut actor_state) =
                             self.store.get_channel_actor_state(&channel_id)
                         {
@@ -2837,14 +2847,136 @@ where
         channel_id: Hash256,
         remove_tlc_command: RemoveTlcCommand,
     ) -> crate::Result<()> {
-        let (send, _recv) = oneshot::channel();
+        let (send, recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
         state
             .send_command_to_channel(
                 channel_id,
                 ChannelCommand::RemoveTlc(remove_tlc_command, rpc_reply),
             )
-            .await
+            .await?;
+        match recv.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(Error::ChannelError(err)),
+            Err(err) => Err(Error::ChannelError(ProcessingChannelError::InvalidState(
+                format!("RemoveTlc reply dropped for channel {channel_id:?}: {err}"),
+            ))),
+        }
+    }
+
+    async fn reconcile_onchain_fulfilled_tlcs_without_live_actor(
+        &self,
+        network_state: &mut NetworkActorState<S, C>,
+        channel_state: &mut ChannelActorState,
+    ) {
+        let channel_id = channel_state.get_id();
+        let fulfilled: Vec<_> = channel_state
+            .tlc_state
+            .all_tlcs()
+            .filter(|tlc| {
+                if tlc.removed_reason.is_some() || tlc.removed_confirmed_at.is_some() {
+                    return false;
+                }
+                if tlc.is_offered() {
+                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
+                } else {
+                    matches!(
+                        tlc.inbound_status(),
+                        InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+                    )
+                }
+            })
+            .filter_map(|tlc| {
+                let preimage = self
+                    .store
+                    .get_on_chain_discovered_preimage(&channel_id, &tlc.payment_hash)?;
+                Some((
+                    tlc.tlc_id,
+                    tlc.forwarding_tlc,
+                    tlc.payment_hash,
+                    tlc.attempt_id,
+                    preimage,
+                ))
+            })
+            .collect();
+
+        for (tlc_id, forwarding_tlc, payment_hash, attempt_id, preimage) in fulfilled {
+            let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: preimage,
+            });
+            match tlc_id {
+                TLCId::Offered(id) => {
+                    if let Some((forwarding_channel_id, forwarding_tlc_id)) = forwarding_tlc {
+                        match self
+                            .send_remove_tlc_to_channel(
+                                network_state,
+                                forwarding_channel_id,
+                                RemoveTlcCommand {
+                                    id: forwarding_tlc_id,
+                                    reason: fulfill.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                self.store.insert_preimage(payment_hash, preimage);
+                                channel_state.tlc_state.set_offered_tlc_removed(id, fulfill);
+                            }
+                            Err(err) => {
+                                error!(
+                                    "Failed to reconcile on-chain fulfilled upstream tlc {:?} for channel {:?}: {}",
+                                    forwarding_tlc_id, forwarding_channel_id, err
+                                );
+                            }
+                        }
+                    } else {
+                        self.store.insert_preimage(payment_hash, preimage);
+                        channel_state
+                            .tlc_state
+                            .set_offered_tlc_removed(id, fulfill.clone());
+                        network_state
+                            .network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::TlcRemoveReceived(
+                                    payment_hash,
+                                    attempt_id,
+                                    fulfill,
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+                }
+                TLCId::Received(id) => {
+                    self.store.insert_preimage(payment_hash, preimage);
+                    channel_state
+                        .tlc_state
+                        .set_received_tlc_removed(id, fulfill);
+                    self.store
+                        .remove_payment_hold_tlc(&payment_hash, &channel_id, id);
+                    self.settle_onchain_invoice_if_fulfilled(channel_state, payment_hash);
+                }
+            }
+        }
+    }
+
+    fn settle_onchain_invoice_if_fulfilled(
+        &self,
+        channel_state: &ChannelActorState,
+        payment_hash: Hash256,
+    ) {
+        let Some(invoice) = self.store.get_invoice(&payment_hash) else {
+            return;
+        };
+        if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid) {
+            return;
+        }
+        let fulfilled_received_tlcs =
+            collect_fulfilled_received_tlcs_for_invoice(&self.store, channel_state, payment_hash);
+        if is_invoice_fulfilled(&invoice, fulfilled_received_tlcs.iter()) {
+            self.store
+                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+                .expect("update invoice status failed");
+        }
     }
 
     fn retry_hold_tlc_sets(&self, myself: &ActorRef<NetworkActorMessage>) {

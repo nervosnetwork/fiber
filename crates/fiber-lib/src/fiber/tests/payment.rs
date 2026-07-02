@@ -5586,6 +5586,298 @@ async fn test_check_channels_onchain_fulfillment_fallback_marks_downstream_tlc()
     ));
 }
 
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_check_channels_fallback_does_not_mark_downstream_when_upstream_rejects_remove() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let downstream_tlc = node_1
+        .get_channel_actor_state(channels[1])
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("downstream tlc exists");
+    let (upstream_channel_id, upstream_tlc_id) = downstream_tlc
+        .forwarding_tlc
+        .expect("downstream tlc should track upstream tlc");
+    assert_eq!(upstream_channel_id, channels[0]);
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        ))
+        .expect("network actor alive");
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let mut upstream_state = node_1.get_channel_actor_state(upstream_channel_id);
+    upstream_state.reestablishing = true;
+    node_1
+        .update_channel_actor_state(
+            upstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_1
+        .store
+        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .expect("network actor alive");
+    node_1.node_info().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(
+        node_1
+            .get_tlc(channels[1], TLCId::Offered(downstream_tlc.id()))
+            .and_then(|tlc| tlc.removed_reason)
+            .is_none(),
+        "downstream TLC must not be marked fulfilled until upstream RemoveTlc is actually accepted"
+    );
+    assert!(
+        node_1
+            .get_tlc(upstream_channel_id, TLCId::Received(upstream_tlc_id))
+            .and_then(|tlc| tlc.removed_reason)
+            .is_none(),
+        "upstream actor is reestablishing and should reject the RemoveTlcCommand"
+    );
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_check_channels_fallback_does_not_mutate_live_downstream_actor_state() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let downstream_tlc_id = node_1
+        .get_channel_actor_state(channels[1])
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .map(|tlc| tlc.id())
+        .expect("downstream tlc exists");
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_1
+        .store
+        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .expect("network actor alive");
+    node_1.node_info().await;
+
+    assert!(
+        node_1
+            .get_tlc(channels[1], TLCId::Offered(downstream_tlc_id))
+            .and_then(|tlc| tlc.removed_reason)
+            .is_none(),
+        "CheckChannels fallback must not mutate a closed channel while its actor is still live"
+    );
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_actor_stops() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_1.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build hold invoice");
+    node_1.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
+
+    node_0
+        .send_shutdown(channels[0], true)
+        .await
+        .expect("force shutdown payer channel");
+    wait_until(|| {
+        matches!(
+            node_0.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_0.node_info().await;
+    node_0
+        .store
+        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(10_000, || {
+        matches!(
+            node_0.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Success,
+        "settlement completion must reconcile the observed on-chain preimage before stopping the channel actor"
+    );
+}
+
 #[tokio::test]
 async fn test_send_payment_shutdown_cooperative() {
     init_tracing();
