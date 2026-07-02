@@ -2656,14 +2656,15 @@ where
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {
-                    let message = state.get_or_create_new_node_announcement_message();
-                    myself
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessageWithTimestamp::NodeAnnouncement(message),
-                            ]),
-                        ))
-                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    if let Some(message) = state.get_or_create_new_node_announcement_message() {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::BroadcastMessages(vec![
+                                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                                ]),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
                 }
             },
             NetworkActorCommand::NodeInfo(_, rpc) => {
@@ -4128,7 +4129,13 @@ where
         }
     }
 
-    pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
+    pub fn get_or_create_new_node_announcement_message(&mut self) -> Option<NodeAnnouncement> {
+        if self.announced_addrs.is_empty() {
+            debug!("Skipping node announcement because no announced address is configured");
+            self.last_node_announcement_message = None;
+            return None;
+        }
+
         let now = now_timestamp_as_millis_u64();
         match self.last_node_announcement_message {
             // If the last node announcement message is still relatively new, we don't need to create a new one.
@@ -4160,9 +4167,7 @@ where
                 self.last_node_announcement_message = Some(announcement);
             }
         }
-        self.last_node_announcement_message
-            .clone()
-            .expect("last node announcement message is present")
+        self.last_node_announcement_message.clone()
     }
 
     pub fn get_public_key(&self) -> Pubkey {
@@ -5360,16 +5365,17 @@ where
         }
 
         if self.auto_announce {
-            let message = self.get_or_create_new_node_announcement_message();
-            debug!(
-                "Auto announcing our node to peer {:?} (message: {:?})",
-                remote_pubkey, &message
-            );
-            let _ = self.network.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![
-                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
-                ]),
-            ));
+            if let Some(message) = self.get_or_create_new_node_announcement_message() {
+                debug!(
+                    "Auto announcing our node to peer {:?} (message: {:?})",
+                    remote_pubkey, &message
+                );
+                let _ = self.network.send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                    ]),
+                ));
+            }
         } else {
             debug!(
                 "Auto announcing is disabled, skipping node announcement to peer {:?}",
@@ -6351,8 +6357,7 @@ where
             inflight_tracers: Default::default(),
         };
 
-        let node_announcement = state.get_or_create_new_node_announcement_message();
-        {
+        if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
             let mut graph = self.network_graph.write().await;
             graph.process_node_announcement(node_announcement);
         }
