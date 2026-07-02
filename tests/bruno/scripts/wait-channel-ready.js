@@ -29,7 +29,7 @@ async function waitChannelReady({
   intervalMs = 1000,
 }) {
   const channelId = bru.getVar(channelIdVar);
-  const urls = rpcUrls || [rpcUrl];
+  const urls = (rpcUrls || [rpcUrl]).map((url) => bru.getEnvVar(url) || url);
   const lastStates = new Map();
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
