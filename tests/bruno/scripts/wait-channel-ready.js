@@ -22,21 +22,33 @@ async function rpc(url, method, params) {
 async function waitChannelReady({
   bru,
   rpcUrl,
+  rpcUrls,
   peerPubkey,
   channelIdVar = "CHANNEL_ID",
   maxAttempts = 90,
   intervalMs = 1000,
 }) {
   const channelId = bru.getVar(channelIdVar);
-  let lastState;
+  const urls = rpcUrls || [rpcUrl];
+  const lastStates = new Map();
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const result = await rpc(rpcUrl, "list_channels", [{ pubkey: peerPubkey }]);
-    const channels = result.channels || [];
-    const channel = channels.find((item) => item.channel_id === channelId);
-    lastState = channel && channel.state && channel.state.state_name;
+    let allReady = true;
 
-    if (lastState === "ChannelReady") {
+    for (const url of urls) {
+      const params = rpcUrls ? [{}] : [{ pubkey: peerPubkey }];
+      const result = await rpc(url, "list_channels", params);
+      const channels = result.channels || [];
+      const channel = channels.find((item) => item.channel_id === channelId);
+      const lastState = channel && channel.state && channel.state.state_name;
+      lastStates.set(url, lastState);
+
+      if (lastState !== "ChannelReady") {
+        allReady = false;
+      }
+    }
+
+    if (allReady) {
       return;
     }
 
@@ -44,7 +56,7 @@ async function waitChannelReady({
   }
 
   throw new Error(
-    `channel did not reach ChannelReady, channel_id=${channelId}, attempts=${maxAttempts}, last_state=${String(lastState)}`,
+    `channel did not reach ChannelReady, channel_id=${channelId}, attempts=${maxAttempts}, last_states=${JSON.stringify(Object.fromEntries(lastStates))}`,
   );
 }
 

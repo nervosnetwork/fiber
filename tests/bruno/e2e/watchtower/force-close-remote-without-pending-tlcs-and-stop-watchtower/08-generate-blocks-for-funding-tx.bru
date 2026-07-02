@@ -34,7 +34,6 @@ script:post-response {
   await new Promise(r => setTimeout(r, 5000));
   await waitChannelReady({
     bru,
-    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
-    peerPubkey: bru.getEnvVar("NODE1_PUBKEY"),
+    rpcUrls: [bru.getEnvVar("NODE1_RPC_URL"), bru.getEnvVar("NODE2_RPC_URL")],
   });
 }
