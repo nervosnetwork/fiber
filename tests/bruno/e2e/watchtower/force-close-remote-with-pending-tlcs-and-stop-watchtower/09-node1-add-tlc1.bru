@@ -37,13 +37,6 @@ assert {
 }
 
 script:pre-request {
-  const { waitChannelReady } = require(process.cwd() + "/scripts/wait-channel-ready");
-
-  await waitChannelReady({
-    bru,
-    rpcUrls: ["NODE1_RPC_URL", "NODE2_RPC_URL"],
-  });
-
   // 10 seconds expiry
   let expiry = "0x" + (Date.now() + 1000 * 10).toString(16);
   bru.setVar("expiry", expiry);

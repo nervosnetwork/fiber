@@ -32,11 +32,3 @@ body:json {
   }
 }
 
-script:pre-request {
-  const { waitChannelReady } = require(process.cwd() + "/scripts/wait-channel-ready");
-
-  await waitChannelReady({
-    bru,
-    rpcUrls: ["NODE1_RPC_URL", "NODE2_RPC_URL"],
-  });
-}
