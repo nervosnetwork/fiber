@@ -20,7 +20,7 @@ fn main() {
         info: Info {
             title: "Fiber Network RPC",
             description: "RPC interface for Fiber Network",
-            version: "0.9.0-rc6",
+            version: "0.9.0-rc7",
         },
         methods,
         components: generator.into_components(),

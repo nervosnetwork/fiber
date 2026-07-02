@@ -2299,7 +2299,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-bin"
-version = "0.9.0-rc6"
+version = "0.9.0-rc7"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2313,11 +2313,11 @@ dependencies = [
 
 [[package]]
 name = "fiber-json-types"
-version = "0.9.0-rc6"
+version = "0.9.0-rc7"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-types 0.9.0-rc6",
+ "fiber-types 0.9.0-rc7",
  "hex",
  "molecule",
  "musig2",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-store"
-version = "0.9.0-rc6"
+version = "0.9.0-rc7"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-types"
-version = "0.9.0-rc6"
+version = "0.9.0-rc7"
 dependencies = [
  "anyhow",
  "arcode",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.9.0-rc6"
+version = "0.9.0-rc7"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2588,7 +2588,7 @@ dependencies = [
  "fiber-json-types",
  "fiber-sphinx 3.0.0",
  "fiber-store",
- "fiber-types 0.9.0-rc6",
+ "fiber-types 0.9.0-rc7",
  "futures",
  "getrandom 0.3.4",
  "git-version",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "fnn-cli"
-version = "0.9.0-rc6"
+version = "0.9.0-rc7"
 dependencies = [
  "anyhow",
  "ckb-jsonrpc-types",
