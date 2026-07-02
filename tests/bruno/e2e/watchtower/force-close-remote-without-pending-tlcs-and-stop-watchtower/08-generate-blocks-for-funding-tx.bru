@@ -29,5 +29,12 @@ assert {
 }
 
 script:post-response {
+  const { waitChannelReady } = require(process.cwd() + "/scripts/wait-channel-ready");
+
   await new Promise(r => setTimeout(r, 5000));
+  await waitChannelReady({
+    bru,
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    peerPubkey: bru.getEnvVar("NODE1_PUBKEY"),
+  });
 }
