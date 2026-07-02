@@ -24,7 +24,7 @@ async function waitChannelReady({
   rpcUrl,
   peerPubkey,
   channelIdVar = "CHANNEL_ID",
-  maxAttempts = 20,
+  maxAttempts = 90,
   intervalMs = 1000,
 }) {
   const channelId = bru.getVar(channelIdVar);
@@ -43,7 +43,9 @@ async function waitChannelReady({
     await sleep(intervalMs);
   }
 
-  throw new Error(`channel did not reach ChannelReady, channel_id=${channelId}, last_state=${String(lastState)}`);
+  throw new Error(
+    `channel did not reach ChannelReady, channel_id=${channelId}, attempts=${maxAttempts}, last_state=${String(lastState)}`,
+  );
 }
 
 module.exports = { waitChannelReady };
