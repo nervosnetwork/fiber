@@ -1146,6 +1146,38 @@ async fn test_sync_node_announcement_of_connected_nodes() {
     assert!(node_info.is_some());
 }
 
+#[tokio::test]
+async fn test_node_without_announced_addresses_does_not_announce_itself() {
+    init_tracing();
+
+    let silent_node_config = NetworkNodeConfigBuilder::new()
+        .node_name(Some("silent-node".to_string()))
+        .fiber_config_updater(|config| {
+            config.announce_listening_addr = Some(false);
+            config.announce_private_addr = Some(false);
+            config.announced_addrs.clear();
+        })
+        .build();
+    let mut silent_node = NetworkNode::new_with_config(silent_node_config).await;
+    let mut observer = NetworkNode::new_with_node_name("observer").await;
+
+    silent_node.connect_to(&mut observer).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    assert_eq!(
+        silent_node.fiber_config.announced_addrs,
+        Vec::<String>::new()
+    );
+    assert!(silent_node
+        .get_store()
+        .get_latest_node_announcement(&silent_node.pubkey)
+        .is_none());
+    assert!(observer
+        .get_network_graph_node(&silent_node.pubkey)
+        .await
+        .is_none());
+}
+
 // Test that we can sync the network graph with peers.
 // We will first create a node and announce a fake node announcement to the network.
 // Then we will create another node and connect to the first node.
