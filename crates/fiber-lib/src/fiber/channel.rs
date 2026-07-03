@@ -14,6 +14,9 @@ use crate::fiber::fee::{
 };
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
+use crate::fiber::onchain_tlc_reconciliation::{
+    collect_onchain_fulfilled_tlcs, resolve_onchain_tlc, OnChainTlcResolution,
+};
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
@@ -3066,47 +3069,43 @@ where
             .tlc_state
             .get_expired_offered_tlcs(expect_expiry)
             .filter_map(|tlc| {
-                tlc.forwarding_tlc
-                    .map(|(forwarding_channel_id, forwarding_tlc_id)| {
-                        (
-                            forwarding_channel_id,
-                            forwarding_tlc_id,
-                            tlc.payment_hash,
-                            tlc.shared_secret,
-                        )
-                    })
+                let (forwarding_channel_id, forwarding_tlc_id) = tlc.forwarding_tlc?;
+                let resolution = resolve_onchain_tlc(
+                    &state.id,
+                    &self.store,
+                    tlc.tlc_id,
+                    tlc.payment_hash,
+                    tlc.hash_algorithm,
+                );
+                matches!(resolution, OnChainTlcResolution::SettledWithoutPreimage).then_some((
+                    forwarding_channel_id,
+                    forwarding_tlc_id,
+                    tlc.shared_secret,
+                ))
             })
             .collect();
-        for (forwarding_channel_id, forwarding_tlc_id, payment_hash, shared_secret) in expired_tlcs
-        {
-            if self.store.is_tlc_settled_on_chain(&state.id, &payment_hash)
-                && self
-                    .store
-                    .get_on_chain_discovered_preimage(&state.id, &payment_hash)
-                    .is_none()
-            {
-                let (send, _recv) = oneshot::channel();
-                let rpc_reply = RpcReplyPort::from(send);
-                if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
-                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                        channel_id: forwarding_channel_id,
-                        command: ChannelCommand::RemoveTlc(
-                            RemoveTlcCommand {
-                                id: forwarding_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                    &shared_secret,
-                                )),
-                            },
-                            rpc_reply,
-                        ),
-                    }),
-                )) {
-                    error!(
-                        "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                        forwarding_tlc_id, forwarding_channel_id, err
-                    );
-                }
+        for (forwarding_channel_id, forwarding_tlc_id, shared_secret) in expired_tlcs {
+            let (send, _recv) = oneshot::channel();
+            let rpc_reply = RpcReplyPort::from(send);
+            if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: forwarding_channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: forwarding_tlc_id,
+                            reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                &shared_secret,
+                            )),
+                        },
+                        rpc_reply,
+                    ),
+                }),
+            )) {
+                error!(
+                    "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                    forwarding_tlc_id, forwarding_channel_id, err
+                );
             }
         }
     }
@@ -3122,36 +3121,7 @@ where
     fn settle_onchain_fulfilled_tlcs(&self, state: &mut ChannelActorState) {
         let channel_id = state.get_id();
         // Collect first so we don't borrow `tlc_state` across the state mutations and message sends.
-        let fulfilled: Vec<OnChainFulfilledTlc> = state
-            .tlc_state
-            .all_tlcs()
-            .filter(|tlc| {
-                if tlc.removed_reason.is_some() || tlc.removed_confirmed_at.is_some() {
-                    return false;
-                }
-                // Only TLCs that made it onto the on-chain commitment can be settled on-chain.
-                if tlc.is_offered() {
-                    matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
-                } else {
-                    matches!(
-                        tlc.inbound_status(),
-                        InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
-                    )
-                }
-            })
-            .filter_map(|tlc| {
-                let preimage = self
-                    .store
-                    .get_on_chain_discovered_preimage(&channel_id, &tlc.payment_hash)?;
-                Some(OnChainFulfilledTlc {
-                    tlc_id: tlc.tlc_id,
-                    forwarding_tlc: tlc.forwarding_tlc,
-                    payment_hash: tlc.payment_hash,
-                    attempt_id: tlc.attempt_id,
-                    preimage,
-                })
-            })
-            .collect();
+        let fulfilled = collect_onchain_fulfilled_tlcs(state, &self.store);
 
         let has_fulfilled = !fulfilled.is_empty();
 
@@ -5086,61 +5056,6 @@ pub(crate) fn tlc_expiry_delay(delay_epoch: &EpochNumberWithFraction) -> u64 {
         * MILLI_SECONDS_PER_EPOCH as f64
         * 2.0
         / 3.0) as u64
-}
-
-/// A TLC on a force-closed channel whose preimage the watchtower observed being revealed on-chain.
-struct OnChainFulfilledTlc {
-    tlc_id: TLCId,
-    forwarding_tlc: Option<(Hash256, u64)>,
-    payment_hash: Hash256,
-    attempt_id: Option<u64>,
-    preimage: Hash256,
-}
-
-pub(crate) struct OnChainFulfillableUpstreamTlc {
-    pub downstream_tlc_id: u64,
-    pub payment_hash: Hash256,
-    pub forwarding_channel_id: Hash256,
-    pub forwarding_tlc_id: u64,
-    pub payment_preimage: Hash256,
-}
-
-/// Collect the upstream forwarded TLCs on a force-closed channel that can be fulfilled because the
-/// watchtower observed their preimage being revealed on-chain.
-///
-/// The on-chain preimage discovery is the success signal; it is mutually exclusive with the
-/// on-chain fail marker when no preimage was discovered, so this never overlaps the fail path. This
-/// is used by the network actor's `CheckChannels` sweep as a relay-only fallback for channels with
-/// no live actor (e.g. a preimage revealed after settlement was finalized); the live channel actor
-/// instead uses `settle_onchain_fulfilled_tlcs`, which additionally updates channel, payment, and
-/// invoice state.
-pub(crate) fn collect_onchain_fulfillable_upstream_tlcs(
-    state: &ChannelActorState,
-    store: &impl ChannelActorStateStore,
-) -> Vec<OnChainFulfillableUpstreamTlc> {
-    state
-        .tlc_state
-        .offered_tlcs
-        .tlcs
-        .iter()
-        .filter(|tlc| {
-            matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
-                && tlc.removed_reason.is_none()
-                && tlc.removed_confirmed_at.is_none()
-        })
-        .filter_map(|tlc| {
-            let (forwarding_channel_id, forwarding_tlc_id) = tlc.forwarding_tlc?;
-            let preimage =
-                store.get_on_chain_discovered_preimage(&state.get_id(), &tlc.payment_hash)?;
-            Some(OnChainFulfillableUpstreamTlc {
-                downstream_tlc_id: tlc.id(),
-                payment_hash: tlc.payment_hash,
-                forwarding_channel_id,
-                forwarding_tlc_id,
-                payment_preimage: preimage,
-            })
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
