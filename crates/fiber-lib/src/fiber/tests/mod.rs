@@ -14,6 +14,7 @@ mod invoice_settlement;
 #[cfg(not(target_arch = "wasm32"))]
 mod mpp;
 mod network;
+mod onchain_tlc_reconciliation_tests;
 mod path;
 mod payment;
 #[cfg(not(target_arch = "wasm32"))]
