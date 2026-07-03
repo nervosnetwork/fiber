@@ -10894,7 +10894,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
 
 /// UDT collaborative funding: peer-supplied funding cell CKB capacity must match negotiated totals.
 /// Reproduces the under-funded `output[0]` case (`local_reserved + 1` shannons) vs `is_tx_final` UDT branch.
-mod udt_funding_cell_capacity_tests {
+mod udt_funding_cell_capacity {
     use super::*;
     use crate::fiber::channel::ChannelActorState;
     use crate::time::SystemTime;
