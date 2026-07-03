@@ -82,7 +82,7 @@ use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconciliation::{
-    collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs,
+    collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs, OnChainFulfilledTlc,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
@@ -2336,47 +2336,16 @@ where
                                 collect_onchain_fulfilled_tlcs(&actor_state, &self.store);
                             let mut actor_state_changed = false;
                             for fulfilled_tlc in fulfilled_tlcs {
-                                let TLCId::Offered(downstream_tlc_id) = fulfilled_tlc.tlc_id else {
-                                    // This CheckChannels sweep is relay-only. Received TLCs require
-                                    // invoice and hold-TLC side effects handled by settlement
-                                    // completion reconciliation.
-                                    continue;
-                                };
-                                let Some((forwarding_channel_id, forwarding_tlc_id)) =
-                                    fulfilled_tlc.forwarding_tlc
-                                else {
-                                    // Final-hop offered TLCs require payment event side effects
-                                    // handled by settlement completion reconciliation.
-                                    continue;
-                                };
-                                let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                    payment_preimage: fulfilled_tlc.preimage,
-                                });
-                                if let Err(err) = self
-                                    .send_remove_tlc_to_channel(
+                                // This CheckChannels sweep is relay-only. Received TLCs and
+                                // final-hop offered TLCs carry invoice/payment side effects handled
+                                // by settlement-completion reconciliation; the helper skips them.
+                                actor_state_changed |= self
+                                    .relay_onchain_fulfilled_tlc_upstream(
                                         state,
-                                        forwarding_channel_id,
-                                        RemoveTlcCommand {
-                                            id: forwarding_tlc_id,
-                                            reason: fulfill.clone(),
-                                        },
+                                        &mut actor_state,
+                                        &fulfilled_tlc,
                                     )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to fulfill upstream tlc {:?} for channel {:?}: {}",
-                                        forwarding_tlc_id, forwarding_channel_id, err
-                                    );
-                                } else {
-                                    self.store.insert_preimage(
-                                        fulfilled_tlc.payment_hash,
-                                        fulfilled_tlc.preimage,
-                                    );
-                                    actor_state
-                                        .tlc_state
-                                        .set_offered_tlc_removed(downstream_tlc_id, fulfill);
-                                    actor_state_changed = true;
-                                }
+                                    .await;
                             }
                             if actor_state_changed {
                                 self.store.insert_channel_actor_state(actor_state);
@@ -2863,6 +2832,57 @@ where
         }
     }
 
+    /// Relay an on-chain discovered fulfillment to the upstream forwarding channel and mark the
+    /// local offered TLC removed on success. Returns true when `channel_state` was mutated and the
+    /// caller must persist it.
+    ///
+    /// `QueuedRetry` counts as success: `queue_retryable_remove_tlc` has already persisted both the
+    /// preimage and the retryable RemoveTlc operation in the upstream channel state, so the
+    /// fulfillment cannot be lost even if the upstream actor is not live yet.
+    async fn relay_onchain_fulfilled_tlc_upstream(
+        &self,
+        network_state: &mut NetworkActorState<S, C>,
+        channel_state: &mut ChannelActorState,
+        tlc: &OnChainFulfilledTlc,
+    ) -> bool {
+        let TLCId::Offered(downstream_tlc_id) = tlc.tlc_id else {
+            return false;
+        };
+        let Some((forwarding_channel_id, forwarding_tlc_id)) = tlc.forwarding_tlc else {
+            return false;
+        };
+        let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: tlc.preimage,
+        });
+
+        match self
+            .send_remove_tlc_to_channel(
+                network_state,
+                forwarding_channel_id,
+                RemoveTlcCommand {
+                    id: forwarding_tlc_id,
+                    reason: fulfill.clone(),
+                },
+            )
+            .await
+        {
+            Ok(RemoveTlcDelivery::Delivered) | Ok(RemoveTlcDelivery::QueuedRetry) => {
+                self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
+                channel_state
+                    .tlc_state
+                    .set_offered_tlc_removed(downstream_tlc_id, fulfill);
+                true
+            }
+            Err(err) => {
+                error!(
+                    "Failed to fulfill upstream tlc {:?} for channel {:?}: {}",
+                    forwarding_tlc_id, forwarding_channel_id, err
+                );
+                false
+            }
+        }
+    }
+
     async fn reconcile_onchain_fulfilled_tlcs_without_live_actor(
         &self,
         network_state: &mut NetworkActorState<S, C>,
@@ -2872,35 +2892,19 @@ where
         let fulfilled = collect_onchain_fulfilled_tlcs(channel_state, &self.store);
 
         for tlc in fulfilled {
-            let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                payment_preimage: tlc.preimage,
-            });
             match tlc.tlc_id {
                 TLCId::Offered(id) => {
-                    if let Some((forwarding_channel_id, forwarding_tlc_id)) = tlc.forwarding_tlc {
-                        match self
-                            .send_remove_tlc_to_channel(
-                                network_state,
-                                forwarding_channel_id,
-                                RemoveTlcCommand {
-                                    id: forwarding_tlc_id,
-                                    reason: fulfill.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                                channel_state.tlc_state.set_offered_tlc_removed(id, fulfill);
-                            }
-                            Err(err) => {
-                                error!(
-                                    "Failed to reconcile on-chain fulfilled upstream tlc {:?} for channel {:?}: {}",
-                                    forwarding_tlc_id, forwarding_channel_id, err
-                                );
-                            }
-                        }
+                    if tlc.forwarding_tlc.is_some() {
+                        self.relay_onchain_fulfilled_tlc_upstream(
+                            network_state,
+                            channel_state,
+                            &tlc,
+                        )
+                        .await;
                     } else {
+                        let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: tlc.preimage,
+                        });
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
                         channel_state
                             .tlc_state
@@ -2918,6 +2922,9 @@ where
                     }
                 }
                 TLCId::Received(id) => {
+                    let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                        payment_preimage: tlc.preimage,
+                    });
                     self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
                     channel_state
                         .tlc_state
