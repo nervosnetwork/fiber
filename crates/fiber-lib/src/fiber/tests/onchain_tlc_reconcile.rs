@@ -1,4 +1,4 @@
-use crate::fiber::onchain_tlc_reconciliation::{
+use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs, resolve_onchain_tlc,
     OnChainTlcResolution,
 };

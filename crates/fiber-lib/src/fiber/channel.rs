@@ -14,7 +14,7 @@ use crate::fiber::fee::{
 };
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::onchain_tlc_reconciliation::{
+use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};

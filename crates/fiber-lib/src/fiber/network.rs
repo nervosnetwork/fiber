@@ -81,7 +81,7 @@ use crate::fiber::channel::{
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
-use crate::fiber::onchain_tlc_reconciliation::{
+use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs, OnChainFulfilledTlc,
 };
 use crate::fiber::payment::{
