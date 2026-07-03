@@ -1291,6 +1291,36 @@ fn test_store_change_watcher() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_insert_preimage_replay_notifies_watcher() {
+    use crate::store::store_impl::StoreChange;
+    use std::sync::Arc;
+
+    let (mut store, _dir) = generate_store();
+    let saver = Arc::new(StoreChangeSaver::default());
+    let saver_clone = saver.clone();
+    store.set_watcher(Arc::new(move |change: StoreChange| {
+        saver_clone.changes.write().unwrap().push(change);
+    }));
+
+    let payment_hash = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+
+    store.insert_preimage(payment_hash, preimage);
+    store.insert_preimage(payment_hash, preimage);
+
+    let changes = saver.changes.read().unwrap();
+    let put_preimage_count = changes
+        .iter()
+        .filter(
+            |e| matches!(e, StoreChange::PutPreimage { payment_hash: h, payment_preimage: i } if h == &payment_hash && i == &preimage),
+        )
+        .count();
+    assert_eq!(put_preimage_count, 2);
+    assert_eq!(store.get_preimage(&payment_hash), Some(preimage));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_store_sample_channel_actor_state() {
     let samples = ChannelActorState::samples(42);
     assert!(!samples.is_empty());

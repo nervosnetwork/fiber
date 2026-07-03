@@ -1074,9 +1074,29 @@ impl InvoiceStore for Store {
 
 impl PreimageStore for Store {
     fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
-        let mut batch = self.batch();
         let kv = KeyValue::Preimage(payment_hash, preimage);
-        batch.put(kv.key(), kv.value());
+        let key = kv.key();
+        if let Some(existing) = self
+            .get(&key)
+            .map(|v| deserialize_from::<Hash256>(v.as_ref(), "Preimage"))
+        {
+            if existing == preimage {
+                // Watchers are in-memory. Replaying the same persisted preimage after restart must
+                // still emit PutPreimage so CCH/payment tracking can recover success events.
+                self.notify(StoreChange::PutPreimage {
+                    payment_hash,
+                    payment_preimage: preimage,
+                });
+                return;
+            }
+            tracing::warn!(
+                "Overwriting preimage for payment hash {:?}: existing value differs",
+                payment_hash
+            );
+        }
+
+        let mut batch = self.batch();
+        batch.put(key, kv.value());
         batch.commit();
         self.notify(StoreChange::PutPreimage {
             payment_hash,
