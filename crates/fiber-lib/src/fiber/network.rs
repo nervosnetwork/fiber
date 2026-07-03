@@ -2290,67 +2290,8 @@ where
                         if state.channels.contains_key(&channel_id) {
                             continue;
                         }
-                        if let Some(mut actor_state) =
-                            self.store.get_channel_actor_state(&channel_id)
-                        {
-                            let delay_epoch = EpochNumberWithFraction::from_full_value(
-                                actor_state.commitment_delay_epoch,
-                            );
-                            let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-                            let expect_expiry = now + epoch_delay_milliseconds;
-                            // Collect TLC data before async operations to avoid holding iterator across await
-                            let expired_tlcs = collect_onchain_expired_settled_tlcs(
-                                &actor_state,
-                                &self.store,
-                                expect_expiry,
-                            );
-                            for tlc in expired_tlcs {
-                                if let Err(err) = self
-                                    .send_remove_tlc_to_channel(
-                                        state,
-                                        tlc.forwarding_channel_id,
-                                        RemoveTlcCommand {
-                                            id: tlc.forwarding_tlc_id,
-                                            reason: RemoveTlcReason::RemoveTlcFail(
-                                                TlcErrPacket::new(
-                                                    TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                                    &tlc.shared_secret,
-                                                ),
-                                            ),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    error!(
-                                        "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                                        tlc.forwarding_tlc_id, tlc.forwarding_channel_id, err
-                                    );
-                                }
-                            }
-
-                            // Fulfill upstream forwarded TLCs whose preimage is now known
-                            // (e.g. discovered on-chain by the watchtower). Acts as soon as the
-                            // preimage is available, without waiting for expiry, and is mutually
-                            // exclusive with the on-chain fail path above when no preimage exists.
-                            let fulfilled_tlcs =
-                                collect_onchain_fulfilled_tlcs(&actor_state, &self.store);
-                            let mut actor_state_changed = false;
-                            for fulfilled_tlc in fulfilled_tlcs {
-                                // This CheckChannels sweep is relay-only. Received TLCs and
-                                // final-hop offered TLCs carry invoice/payment side effects handled
-                                // by settlement-completion reconciliation; the helper skips them.
-                                actor_state_changed |= self
-                                    .relay_onchain_fulfilled_tlc_upstream(
-                                        state,
-                                        &mut actor_state,
-                                        &fulfilled_tlc,
-                                    )
-                                    .await;
-                            }
-                            if actor_state_changed {
-                                self.store.insert_channel_actor_state(actor_state);
-                            }
-                        }
+                        self.reconcile_onchain_tlcs_for_closed_channel(state, channel_id, now)
+                            .await;
                     }
                 }
 
@@ -2880,6 +2821,61 @@ where
                 );
                 false
             }
+        }
+    }
+
+    /// CheckChannels sweep for a force-closed channel with no live actor: fail upstream TLCs whose
+    /// downstream leg was consumed on-chain via the timeout path, and relay upstream fulfillments
+    /// for preimages the watchtower discovered on-chain.
+    async fn reconcile_onchain_tlcs_for_closed_channel(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        now: u64,
+    ) {
+        let Some(mut actor_state) = self.store.get_channel_actor_state(&channel_id) else {
+            return;
+        };
+
+        let delay_epoch =
+            EpochNumberWithFraction::from_full_value(actor_state.commitment_delay_epoch);
+        let expect_expiry = now + tlc_expiry_delay(&delay_epoch);
+        let expired_tlcs =
+            collect_onchain_expired_settled_tlcs(&actor_state, &self.store, expect_expiry);
+        for tlc in expired_tlcs {
+            if let Err(err) = self
+                .send_remove_tlc_to_channel(
+                    state,
+                    tlc.forwarding_channel_id,
+                    RemoveTlcCommand {
+                        id: tlc.forwarding_tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                            &tlc.shared_secret,
+                        )),
+                    },
+                )
+                .await
+            {
+                error!(
+                    "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                    tlc.forwarding_tlc_id, tlc.forwarding_channel_id, err
+                );
+            }
+        }
+
+        // Fulfill upstream forwarded TLCs whose preimage is now known. This CheckChannels sweep is
+        // relay-only; received TLCs and final-hop offered TLCs carry invoice/payment side effects
+        // handled by settlement-completion reconciliation, so the helper skips them.
+        let fulfilled_tlcs = collect_onchain_fulfilled_tlcs(&actor_state, &self.store);
+        let mut actor_state_changed = false;
+        for fulfilled_tlc in fulfilled_tlcs {
+            actor_state_changed |= self
+                .relay_onchain_fulfilled_tlc_upstream(state, &mut actor_state, &fulfilled_tlc)
+                .await;
+        }
+        if actor_state_changed {
+            self.store.insert_channel_actor_state(actor_state);
         }
     }
 
