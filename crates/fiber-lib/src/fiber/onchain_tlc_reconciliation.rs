@@ -18,6 +18,15 @@ pub(crate) struct OnChainFulfilledTlc {
     pub preimage: Hash256,
 }
 
+/// A forwarded TLC that expired on a force-closed channel and was consumed on-chain via the
+/// timeout path (no preimage revealed), so the upstream TLC must be failed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OnChainExpiredSettledTlc {
+    pub forwarding_channel_id: Hash256,
+    pub forwarding_tlc_id: u64,
+    pub shared_secret: [u8; 32],
+}
+
 pub(crate) fn resolve_onchain_tlc(
     channel_id: &Hash256,
     store: &impl ChannelActorStateStore,
@@ -69,6 +78,36 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
                 payment_hash: tlc.payment_hash,
                 attempt_id: tlc.attempt_id,
                 preimage,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn collect_onchain_expired_settled_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+    expect_expiry: u64,
+) -> Vec<OnChainExpiredSettledTlc> {
+    let channel_id = state.get_id();
+    state
+        .tlc_state
+        .get_expired_offered_tlcs(expect_expiry)
+        .filter_map(|tlc| {
+            let (forwarding_channel_id, forwarding_tlc_id) = tlc.forwarding_tlc?;
+            matches!(
+                resolve_onchain_tlc(
+                    &channel_id,
+                    store,
+                    tlc.tlc_id,
+                    tlc.payment_hash,
+                    tlc.hash_algorithm,
+                ),
+                OnChainTlcResolution::SettledWithoutPreimage
+            )
+            .then_some(OnChainExpiredSettledTlc {
+                forwarding_channel_id,
+                forwarding_tlc_id,
+                shared_secret: tlc.shared_secret,
             })
         })
         .collect()

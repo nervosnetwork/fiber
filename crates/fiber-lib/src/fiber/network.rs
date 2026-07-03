@@ -82,7 +82,7 @@ use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconciliation::{
-    collect_onchain_fulfilled_tlcs, resolve_onchain_tlc, OnChainTlcResolution,
+    collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
@@ -2299,43 +2299,22 @@ where
                             let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
                             let expect_expiry = now + epoch_delay_milliseconds;
                             // Collect TLC data before async operations to avoid holding iterator across await
-                            let expired_tlcs: Vec<_> = actor_state
-                                .tlc_state
-                                .get_expired_offered_tlcs(expect_expiry)
-                                .filter_map(|tlc| {
-                                    let (forwarding_channel_id, forwarding_tlc_id) =
-                                        tlc.forwarding_tlc?;
-                                    let resolution = resolve_onchain_tlc(
-                                        &channel_id,
-                                        &self.store,
-                                        tlc.tlc_id,
-                                        tlc.payment_hash,
-                                        tlc.hash_algorithm,
-                                    );
-                                    matches!(
-                                        resolution,
-                                        OnChainTlcResolution::SettledWithoutPreimage
-                                    )
-                                    .then_some((
-                                        forwarding_channel_id,
-                                        forwarding_tlc_id,
-                                        tlc.shared_secret,
-                                    ))
-                                })
-                                .collect();
-                            for (forwarding_channel_id, forwarding_tlc_id, shared_secret) in
-                                expired_tlcs
-                            {
+                            let expired_tlcs = collect_onchain_expired_settled_tlcs(
+                                &actor_state,
+                                &self.store,
+                                expect_expiry,
+                            );
+                            for tlc in expired_tlcs {
                                 if let Err(err) = self
                                     .send_remove_tlc_to_channel(
                                         state,
-                                        forwarding_channel_id,
+                                        tlc.forwarding_channel_id,
                                         RemoveTlcCommand {
-                                            id: forwarding_tlc_id,
+                                            id: tlc.forwarding_tlc_id,
                                             reason: RemoveTlcReason::RemoveTlcFail(
                                                 TlcErrPacket::new(
                                                     TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                                    &shared_secret,
+                                                    &tlc.shared_secret,
                                                 ),
                                             ),
                                         },
@@ -2344,7 +2323,7 @@ where
                                 {
                                     error!(
                                         "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                                        forwarding_tlc_id, forwarding_channel_id, err
+                                        tlc.forwarding_tlc_id, tlc.forwarding_channel_id, err
                                     );
                                 }
                             }

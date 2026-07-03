@@ -15,7 +15,7 @@ use crate::fiber::fee::{
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconciliation::{
-    collect_onchain_fulfilled_tlcs, resolve_onchain_tlc, OnChainTlcResolution,
+    collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::time::{SystemTime, UNIX_EPOCH};
@@ -3065,37 +3065,19 @@ where
             return;
         };
         // Collect TLC data before async operations to avoid holding iterator across await
-        let expired_tlcs: Vec<_> = state
-            .tlc_state
-            .get_expired_offered_tlcs(expect_expiry)
-            .filter_map(|tlc| {
-                let (forwarding_channel_id, forwarding_tlc_id) = tlc.forwarding_tlc?;
-                let resolution = resolve_onchain_tlc(
-                    &state.id,
-                    &self.store,
-                    tlc.tlc_id,
-                    tlc.payment_hash,
-                    tlc.hash_algorithm,
-                );
-                matches!(resolution, OnChainTlcResolution::SettledWithoutPreimage).then_some((
-                    forwarding_channel_id,
-                    forwarding_tlc_id,
-                    tlc.shared_secret,
-                ))
-            })
-            .collect();
-        for (forwarding_channel_id, forwarding_tlc_id, shared_secret) in expired_tlcs {
+        let expired_tlcs = collect_onchain_expired_settled_tlcs(state, &self.store, expect_expiry);
+        for tlc in expired_tlcs {
             let (send, _recv) = oneshot::channel();
             let rpc_reply = RpcReplyPort::from(send);
             if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                    channel_id: forwarding_channel_id,
+                    channel_id: tlc.forwarding_channel_id,
                     command: ChannelCommand::RemoveTlc(
                         RemoveTlcCommand {
-                            id: forwarding_tlc_id,
+                            id: tlc.forwarding_tlc_id,
                             reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                 TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                &shared_secret,
+                                &tlc.shared_secret,
                             )),
                         },
                         rpc_reply,
@@ -3104,7 +3086,7 @@ where
             )) {
                 error!(
                     "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                    forwarding_tlc_id, forwarding_channel_id, err
+                    tlc.forwarding_tlc_id, tlc.forwarding_channel_id, err
                 );
             }
         }
