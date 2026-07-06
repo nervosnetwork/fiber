@@ -713,7 +713,8 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                 }
             }
             Err(err) => {
-                error!("Failed to get cells: {:?}", err);
+                error!("Failed to get cells: {:?}, aborting settlement scan", err);
+                break;
             }
         }
     }
@@ -776,7 +777,11 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
                 }
             }
             Err(err) => {
-                error!("Failed to get transactions: {:?}", err);
+                error!(
+                    "Failed to get transactions: {:?}, aborting settlement scan",
+                    err
+                );
+                break;
             }
         }
     }
