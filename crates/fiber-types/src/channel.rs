@@ -1183,6 +1183,7 @@ pub fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privke
 }
 
 /// Derive a public key by tweaking a base key with a commitment point.
+#[deprecated(note = "use `try_derive_public_key` instead to avoid panicking on invalid keys")]
 pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
@@ -1196,7 +1197,9 @@ pub fn try_derive_public_key(
 }
 
 /// Derive the TLC public key from a base key and commitment point.
+#[deprecated(note = "use `try_derive_tlc_pubkey` instead to avoid panicking on invalid keys")]
 pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    #[allow(deprecated)]
     derive_public_key(base_key, commitment_point)
 }
 

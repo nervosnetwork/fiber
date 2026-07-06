@@ -54,13 +54,13 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand, AppliedFlags,
-    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus,
-    ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, InboundTlcStatus,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc,
-    RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
-    NO_SHARED_SECRET,
+    derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
+    AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
+    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
+    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
+    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
@@ -268,7 +268,8 @@ fn test_derive_private_and_public_tlc_keys() {
     let privkey = Privkey::from(&[1; 32]);
     let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
     let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
-    let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
+    let derived_pubkey =
+        try_derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point).expect("honest keys");
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
 }
 
@@ -326,7 +327,7 @@ fn test_try_derive_tlc_pubkey_rejects_malicious_keys() {
 
 #[test]
 fn test_revoke_and_ack_bypass_safe_initial_keys_with_malicious_later_key() {
-    use fiber_types::derive_tlc_pubkey;
+    use fiber_types::try_derive_tlc_pubkey;
     let (malicious_tlc_basepoint, bad_commitment_point) =
         malicious_tlc_basepoint_and_commitment_point();
 
@@ -348,12 +349,9 @@ fn test_revoke_and_ack_bypass_safe_initial_keys_with_malicious_later_key() {
         "malicious next_per_commitment_point in RevokeAndAck should be rejected by the fix"
     );
 
-    let result = std::panic::catch_unwind(|| {
-        let _ = derive_tlc_pubkey(&malicious_tlc_basepoint, &bad_commitment_point);
-    });
     assert!(
-        result.is_err(),
-        "without validation, the malicious next_per_commitment_point would cause a panic"
+        try_derive_tlc_pubkey(&malicious_tlc_basepoint, &bad_commitment_point).is_err(),
+        "without validation, the malicious next_per_commitment_point should be rejected"
     );
 }
 
