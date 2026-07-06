@@ -189,7 +189,7 @@ pub struct TlcNotification {
 #[derive(Debug, AsRefStr)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
-    FundingTxSigned(Transaction),
+    FundingTxSigned(Transaction, RpcReplyPort<Result<(), String>>),
     CommitmentSigned(Option<RpcReplyPort<Result<(), String>>>),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
@@ -213,7 +213,7 @@ impl Display for ChannelCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChannelCommand::TxCollaborationCommand(_) => write!(f, "TxCollaborationCommand"),
-            ChannelCommand::FundingTxSigned(_) => write!(f, "FundingTxSigned"),
+            ChannelCommand::FundingTxSigned(_, _) => write!(f, "FundingTxSigned"),
             ChannelCommand::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
@@ -237,6 +237,7 @@ impl ChannelCommand {
     pub fn rpc_reply_port(self) -> Option<RpcReplyPort<Result<(), String>>> {
         match self {
             ChannelCommand::CommitmentSigned(Some(port)) => Some(port),
+            ChannelCommand::FundingTxSigned(_, port) => Some(port),
             ChannelCommand::Shutdown(_, port) => Some(port),
             ChannelCommand::Update(_, port) => Some(port),
             _ => None,
@@ -2758,24 +2759,10 @@ where
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::FundingTxSigned(tx) => {
-                match state.state {
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
-                        state.funding_tx = Some(tx);
-                        state.update_state(ChannelState::AwaitingTxSignatures(flags));
-                    }
-                    ChannelState::AwaitingChannelReady(_)
-                        if state.ephemeral_config.external_funding.enabled
-                            && state.ephemeral_config.external_funding.signed_submitted =>
-                    {
-                        state.funding_tx = Some(tx);
-                    }
-                    _ => {
-                        error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but got {:?}", state.state);
-                    }
-                }
-                Ok(())
+            ChannelCommand::FundingTxSigned(tx, reply) => {
+                let result = state.apply_funding_tx_signed(tx);
+                let _ = reply.send(result.clone().map_err(|err| err.to_string()));
+                result
             }
             ChannelCommand::CommitmentSigned(rpc_reply) => {
                 let result = self.handle_commitment_signed_command(myself, state).await;
@@ -4891,6 +4878,28 @@ enum TlcUpdateAction {
 
 // Constructors for the channel actor state.
 impl ChannelActorState {
+    pub(crate) fn apply_funding_tx_signed(&mut self, tx: Transaction) -> ProcessingChannelResult {
+        match self.state {
+            ChannelState::AwaitingTxSignatures(flags) => {
+                let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
+                self.funding_tx = Some(tx);
+                self.update_state(ChannelState::AwaitingTxSignatures(flags));
+                Ok(())
+            }
+            ChannelState::AwaitingChannelReady(_)
+                if self.ephemeral_config.external_funding.enabled
+                    && self.ephemeral_config.external_funding.signed_submitted =>
+            {
+                self.funding_tx = Some(tx);
+                Ok(())
+            }
+            _ => Err(ProcessingChannelError::InvalidState(format!(
+                "Expected channel state to accept FundingTxSigned, got {:?}",
+                self.state
+            ))),
+        }
+    }
+
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
         self.network
             .as_ref()
