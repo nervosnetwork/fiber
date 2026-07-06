@@ -1187,9 +1187,25 @@ pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
+/// Fallibly derive a public key by tweaking a base key with a commitment point.
+pub fn try_derive_public_key(
+    base_key: &Pubkey,
+    commitment_point: &Pubkey,
+) -> Result<Pubkey, String> {
+    base_key.try_tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
 /// Derive the TLC public key from a base key and commitment point.
 pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
+}
+
+/// Fallibly derive the TLC public key from a base key and commitment point.
+pub fn try_derive_tlc_pubkey(
+    base_key: &Pubkey,
+    commitment_point: &Pubkey,
+) -> Result<Pubkey, String> {
+    try_derive_public_key(base_key, commitment_point)
 }
 
 /// Check if the TLC key derivation for a given base key and commitment point

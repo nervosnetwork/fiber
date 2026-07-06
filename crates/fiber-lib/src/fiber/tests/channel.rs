@@ -314,17 +314,13 @@ fn test_is_tlc_key_derivation_safe_accepts_honest_keys() {
 }
 
 #[test]
-fn test_malicious_keys_would_have_caused_panic() {
-    use fiber_types::derive_tlc_pubkey;
+fn test_try_derive_tlc_pubkey_rejects_malicious_keys() {
+    use fiber_types::try_derive_tlc_pubkey;
     let (tlc_basepoint, commitment_point) = malicious_tlc_basepoint_and_commitment_point();
 
-    let result = std::panic::catch_unwind(|| {
-        let _ = derive_tlc_pubkey(&tlc_basepoint, &commitment_point);
-    });
-
     assert!(
-        result.is_err(),
-        "malicious TLC basepoint and commitment point should cause a panic in derive_tlc_pubkey"
+        try_derive_tlc_pubkey(&tlc_basepoint, &commitment_point).is_err(),
+        "malicious TLC basepoint and commitment point should be rejected"
     );
 }
 
