@@ -4084,6 +4084,7 @@ pub struct NetworkActorState<S, C> {
     // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
+    invalid_channel_msg_count: HashMap<Pubkey, u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -5441,6 +5442,7 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
+        self.invalid_channel_msg_count.remove(&pubkey);
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
@@ -5475,6 +5477,16 @@ where
             return;
         }
         self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
+    }
+
+    async fn disconnect_and_ban_peer(&mut self, pubkey: Pubkey) {
+        if let Some(peer) = self.peer_session_map.remove(&pubkey) {
+            self.invalid_channel_msg_count.remove(&pubkey);
+            self.requested_disconnect_peers.insert(pubkey);
+            if let Err(err) = self.control.disconnect(peer.session_id).await {
+                error!("Failed to disconnect peer {:?}: {:?}", pubkey, err);
+            }
+        }
     }
 
     pub(crate) fn get_peer_addresses_by_pubkey(&self, pubkey: &Pubkey) -> HashSet<Multiaddr> {
@@ -5990,6 +6002,21 @@ where
                     }
                 }
                 (message, _) => {
+                    if let Some(pubkey) = peer_pubkey {
+                        let count = self
+                            .invalid_channel_msg_count
+                            .entry(pubkey)
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                        if *count > 20 {
+                            warn!(
+                                "Disconnecting peer {:?} after {} repeated messages for non-existent channel {:?}",
+                                pubkey, *count, channel_id
+                            );
+                            self.disconnect_and_ban_peer(pubkey).await;
+                            return;
+                        }
+                    }
                     error!(
                         "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
                         &channel_id, &message,
@@ -6374,6 +6401,7 @@ where
             last_channel_ready_scan: Default::default(),
             pending_channel_ready_retry_scans: Default::default(),
             inflight_tracers: Default::default(),
+            invalid_channel_msg_count: Default::default(),
         };
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
