@@ -1061,6 +1061,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             }
 
                             if pending_tlcs_count == 0 {
+                                if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                    > current_epoch.to_rational()
+                                {
+                                    debug!(
+                                        "Commitment cell: {:?} is not ready to settle local",
+                                        commitment_cell.out_point.tx_hash
+                                    );
+                                    return Ok(None);
+                                }
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: 0xFF,
@@ -1162,6 +1171,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         }
 
                         if pending_tlcs_count == 0 {
+                            if cell_header_epoch.to_rational() + delay_epoch.to_rational()
+                                > current_epoch.to_rational()
+                            {
+                                debug!(
+                                    "Commitment cell: {:?} is not ready to settle remote",
+                                    commitment_cell.out_point.tx_hash
+                                );
+                                return Ok(None);
+                            }
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: 0xFE,
@@ -2083,6 +2101,7 @@ fn mul(
 mod tests {
     use std::sync::Mutex;
 
+    use ckb_jsonrpc_types::{JsonBytes, Uint32, Uint64};
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
 
     use super::*;
@@ -2223,6 +2242,98 @@ mod tests {
             unlock.to_witness().as_slice(),
         ]
         .concat()
+    }
+
+    fn commitment_cell(delay_epoch: EpochNumberWithFraction) -> Cell {
+        let since = Since::new(
+            SinceType::EpochNumberWithFraction,
+            delay_epoch.full_value(),
+            true,
+        )
+        .value();
+        let mut lock_args = vec![2u8; 20];
+        lock_args.extend_from_slice(&since.to_le_bytes());
+        lock_args.extend_from_slice(&0u64.to_be_bytes());
+        lock_args.extend_from_slice(&[3u8; 20]);
+        lock_args.push(1);
+
+        Cell {
+            output: CellOutput::new_builder()
+                .lock(
+                    Script::new_builder()
+                        .code_hash(Byte32::from([1u8; 32]))
+                        .hash_type(ScriptHashType::Type)
+                        .args(lock_args.pack())
+                        .build(),
+                )
+                .capacity(Capacity::shannons(10_000_000_000).pack())
+                .build()
+                .into(),
+            output_data: Some(JsonBytes::default()),
+            out_point: OutPoint::new([9u8; 32].pack(), 0).into(),
+            block_number: Uint64::from(0),
+            tx_index: Uint32::from(0),
+        }
+    }
+
+    fn test_channel_data(local_settlement_key: Privkey) -> ChannelData {
+        let settlement_data = SettlementData {
+            local_amount: 3_000,
+            remote_amount: 2_000,
+            tlcs: vec![],
+        };
+
+        ChannelData {
+            channel_id: [8u8; 32].into(),
+            funding_udt_type_script: None,
+            local_settlement_key,
+            remote_settlement_key: Privkey::from(&[2; 32]).pubkey(),
+            local_funding_pubkey: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding_pubkey: Privkey::from(&[4; 32]).pubkey(),
+            remote_settlement_data: settlement_data.clone(),
+            pending_remote_settlement_data: settlement_data.clone(),
+            local_settlement_data: settlement_data,
+            revocation_data: None,
+        }
+    }
+
+    #[test]
+    fn non_first_final_balance_waits_full_commitment_delay() {
+        let local_settlement_key = Privkey::from(&[1; 32]);
+        let local_settlement_pubkey_hash =
+            blake160(local_settlement_key.pubkey().serialize().as_ref()).0;
+        let settlement_witness = SettlementWitness {
+            pending_htlc_count: 0,
+            pending_htlcs: vec![],
+            settlement_remote_pubkey_hash: local_settlement_pubkey_hash,
+            settlement_remote_amount: 2_000,
+            settlement_local_pubkey_hash: [7u8; 20],
+            settlement_local_amount: 3_000,
+            unlocks: vec![],
+        };
+        let delay_epoch = EpochNumberWithFraction::new(3, 0, 1);
+        let mut cell_collector = DefaultCellCollector::new("http://127.0.0.1:0");
+        let store = TestWatchtowerStore::default();
+
+        let tx = build_settlement_tx(
+            commitment_cell(delay_epoch),
+            EpochNumberWithFraction::new(0, 0, 1),
+            EpochNumberWithFraction::new(1, 0, 1),
+            0,
+            &NodeId::local(),
+            false,
+            test_channel_data(local_settlement_key),
+            Some(settlement_witness),
+            &LocalSigner::new(Privkey::from(&[9; 32]).0),
+            &mut cell_collector,
+            &store,
+        )
+        .expect("settlement builder should not error before full delay");
+
+        assert!(
+            tx.is_none(),
+            "follow-up final settlement must wait full delay"
+        );
     }
 
     fn tx_with_input_output_and_witness(
