@@ -66,6 +66,7 @@ use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
     InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
 };
+use crate::actors::log_actor_failed;
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfosExt;
 use crate::ckb::contracts::{
@@ -6520,7 +6521,7 @@ where
                 debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                log_actor_failed(who, err);
             }
             _ => {}
         }

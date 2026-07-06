@@ -37,6 +37,7 @@ use tokio::sync::oneshot;
 use tokio_util::codec::length_delimited;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::actors::log_actor_failed;
 #[cfg(any(test, feature = "bench"))]
 use crate::fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT;
 use crate::{
@@ -3911,7 +3912,7 @@ where
                 debug!("{:?} terminated", who);
             }
             SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                log_actor_failed(who, err);
             }
             _ => {}
         }
