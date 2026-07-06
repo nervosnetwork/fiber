@@ -3055,17 +3055,17 @@ where
         }
     }
 
-    fn onchain_settlement_expect_expiry(state: &ChannelActorState) -> Option<u64> {
+    fn onchain_settlement_expect_expiry(state: &ChannelActorState, now: u64) -> Option<u64> {
         let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
         let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-        now_timestamp_as_millis_u64().checked_add(epoch_delay_milliseconds)
+        now.checked_add(epoch_delay_milliseconds)
     }
 
-    fn maintain_waiting_onchain_settlement_tlcs(&self, state: &mut ChannelActorState) {
+    fn maintain_waiting_onchain_settlement_tlcs(&self, state: &mut ChannelActorState, now: u64) {
         if !state.is_waiting_onchain_settlement() {
             return;
         }
-        let Some(expect_expiry) = Self::onchain_settlement_expect_expiry(state) else {
+        let Some(expect_expiry) = Self::onchain_settlement_expect_expiry(state, now) else {
             error!(
                 "Failed to calculate onchain settlement TLC expiry: epoch_delay_milliseconds {}",
                 tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
@@ -3308,8 +3308,8 @@ where
     }
 
     /// Returns true when no reconcilable TLC remains unresolved on this channel.
-    fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState) -> bool {
-        self.maintain_waiting_onchain_settlement_tlcs(state);
+    fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState, now: u64) -> bool {
+        self.maintain_waiting_onchain_settlement_tlcs(state, now);
         self.settle_onchain_fulfilled_tlcs(state);
         self.finalize_onchain_timed_out_received_tlcs(state);
         !has_unresolved_onchain_tlcs(state)
@@ -3334,7 +3334,8 @@ where
         }
 
         state.onchain_settlement_confirmed = true;
-        if self.reconcile_onchain_tlcs(state) {
+        let now = now_timestamp_as_millis_u64();
+        if self.reconcile_onchain_tlcs(state, now) {
             flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
             state.update_state(ChannelState::Closed(flags));
             state.onchain_settlement_confirmed = false;
@@ -3683,10 +3684,11 @@ where
                 }
             }
             ChannelEvent::MaintainChannelTlcs => {
+                let now = now_timestamp_as_millis_u64();
                 if state.is_ready() {
                     self.maintain_ready_channel_tlcs(myself, state).await;
                 } else {
-                    self.maintain_waiting_onchain_settlement_tlcs(state);
+                    self.maintain_waiting_onchain_settlement_tlcs(state, now);
                 }
                 // Only closed or shutting-down channels can have on-chain TLC settlement
                 // signals. Scanning all TLCs against the watchtower store every tick on a
