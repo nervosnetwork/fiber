@@ -4443,7 +4443,10 @@ impl ServiceProtocol for GossipProtocolHandle {
                     ));
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Peer disconnected without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
@@ -4463,7 +4466,10 @@ impl ServiceProtocol for GossipProtocolHandle {
                     ));
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Received gossip message without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
