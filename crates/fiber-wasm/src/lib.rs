@@ -222,6 +222,10 @@ pub async fn fiber(
                 .expect("get default funding lock script should be ok");
 
             info!("Starting fiber");
+            if let Err(err) = fiber_config.validate_standalone_watchtower_rpc() {
+                return js_err(err);
+            }
+
             let network_actor = start_network(
                 fiber_config.clone(),
                 chain_client,

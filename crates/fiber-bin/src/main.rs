@@ -216,6 +216,10 @@ async fn run_node(
 
             info!("Starting fiber");
 
+            fiber_config
+                .validate_standalone_watchtower_rpc()
+                .map_err(ExitMessage)?;
+
             let chain_client = CkbRpcClient::new(&ckb_config);
             let network_actor: ActorRef<NetworkActorMessage> = start_network(
                 fiber_config.clone(),

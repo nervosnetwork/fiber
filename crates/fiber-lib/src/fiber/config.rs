@@ -599,6 +599,17 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
     }
 
+    pub fn validate_standalone_watchtower_rpc(&self) -> std::result::Result<(), String> {
+        if self.standalone_watchtower_rpc_url.is_some() {
+            return Err(
+                "standalone watchtower RPC is disabled because it exports settlement private keys; use the built-in watchtower instead"
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn gen_node_features(&self) -> FeatureVector {
         // TODO: override default features from config settings
         // ...
@@ -643,5 +654,33 @@ impl FromStr for FiberScript {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         serde_json::from_str(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_watchtower_rpc_url_is_rejected() {
+        let config = FiberConfig {
+            standalone_watchtower_rpc_url: Some("http://127.0.0.1:8227".to_string()),
+            ..Default::default()
+        };
+
+        let error = config
+            .validate_standalone_watchtower_rpc()
+            .expect_err("standalone watchtower RPC should be disabled");
+
+        assert!(error.contains("standalone watchtower RPC is disabled"));
+    }
+
+    #[test]
+    fn built_in_watchtower_config_is_allowed() {
+        let config = FiberConfig::default();
+
+        config
+            .validate_standalone_watchtower_rpc()
+            .expect("built-in watchtower config should be allowed");
     }
 }
