@@ -2297,9 +2297,10 @@ where
                 }
             };
 
-            let shutdown_fee_rate = command
-                .fee_rate
-                .unwrap_or(FeeRate::from_u64(state.commitment_fee_rate));
+            let shutdown_fee_rate = command.fee_rate.unwrap_or_else(|| {
+                let capped = u64::min(state.commitment_fee_rate, state.funding_fee_rate);
+                FeeRate::from_u64(capped)
+            });
             let close_script = command
                 .close_script
                 .clone()
