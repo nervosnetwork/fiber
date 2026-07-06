@@ -7,6 +7,7 @@ use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
 use crate::fiber::ChannelConnectivityState;
@@ -58,6 +59,28 @@ use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
+
+#[cfg(feature = "watchtower")]
+fn insert_onchain_preimage<S: WatchtowerStore>(
+    store: &S,
+    channel_id: &Hash256,
+    payment_hash: Hash256,
+    preimage: Hash256,
+) {
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+        .try_into()
+        .expect("20-byte payment hash prefix");
+    store.insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, preimage);
+    store.insert_onchain_tlc_settlement(
+        channel_id,
+        payment_hash_prefix,
+        OnChainTlcSettlement {
+            preimage: Some(preimage),
+            tx_hash: Some(gen_rand_sha256_hash()),
+            tlc_index: Some(0),
+        },
+    );
+}
 
 struct RemoveTlcFailEventFixture {
     node: NetworkNode,
@@ -4747,9 +4770,15 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
         .try_into()
         .expect("20-byte payment hash prefix");
-    node_1
-        .store
-        .update_tlc_settled(&channels[1], payment_hash_prefix);
+    node_1.store.insert_onchain_tlc_settlement(
+        &channels[1],
+        payment_hash_prefix,
+        OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: Some(gen_rand_sha256_hash()),
+            tlc_index: Some(0),
+        },
+    );
 
     node_1
         .network_actor
@@ -4866,9 +4895,7 @@ async fn test_closed_channel_upstream_fulfillment_from_onchain_preimage() {
     // Simulate watchtower on-chain preimage discovery: only the preimage is stored, NOT the
     // `WithoutPreimage` (no-preimage) marker. The two are mutually exclusive; writing the settled
     // marker here would instead trip the fail path and drop the preimage.
-    node_1
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
 
     node_1
         .network_actor
@@ -4973,9 +5000,7 @@ async fn test_payer_payment_success_from_onchain_preimage() {
     .await;
 
     // Simulate the watchtower observing the preimage on-chain on the payer's own channel.
-    node_0
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
 
     node_0
         .network_actor
@@ -5083,9 +5108,7 @@ async fn test_payee_invoice_paid_from_onchain_preimage() {
     .await;
 
     // Simulate the watchtower observing the payee's on-chain claim (preimage revealed on-chain).
-    node_1
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_1.store, &channels[0], payment_hash, hold_preimage);
 
     node_1
         .network_actor
@@ -5216,9 +5239,9 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
         .await;
     }
 
-    node_1
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    for channel_id in channels.iter() {
+        insert_onchain_preimage(&node_1.store, channel_id, payment_hash, hold_preimage);
+    }
 
     node_1
         .network_actor
@@ -5437,9 +5460,15 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
         .try_into()
         .expect("20-byte payment hash prefix");
-    node_1
-        .store
-        .update_tlc_settled(&channels[1], payment_hash_prefix);
+    node_1.store.insert_onchain_tlc_settlement(
+        &channels[1],
+        payment_hash_prefix,
+        OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: Some(gen_rand_sha256_hash()),
+            tlc_index: Some(0),
+        },
+    );
 
     node_1
         .network_actor
@@ -5453,7 +5482,7 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
             node_1.get_channel_actor_state(channels[1]).state,
             ChannelState::Closed(flags)
                 if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
-                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
         )
     })
     .await;
@@ -5545,9 +5574,7 @@ async fn test_check_channels_onchain_fulfillment_fallback_marks_downstream_tlc()
     })
     .await;
 
-    node_1
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
     node_1
         .network_actor
         .send_message(NetworkActorMessage::Event(
@@ -5559,7 +5586,7 @@ async fn test_check_channels_onchain_fulfillment_fallback_marks_downstream_tlc()
             node_1.get_channel_actor_state(channels[1]).state,
             ChannelState::Closed(flags)
                 if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
-                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
         )
     })
     .await;
@@ -5672,7 +5699,7 @@ async fn test_check_channels_fallback_does_not_mark_downstream_when_upstream_rej
             node_1.get_channel_actor_state(channels[1]).state,
             ChannelState::Closed(flags)
                 if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
-                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
         )
     })
     .await;
@@ -5688,9 +5715,7 @@ async fn test_check_channels_fallback_does_not_mark_downstream_when_upstream_rej
         )
         .await;
 
-    node_1
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
     node_1
         .network_actor
         .send_message(NetworkActorMessage::Command(
@@ -5787,9 +5812,7 @@ async fn test_check_channels_fallback_does_not_mutate_live_downstream_actor_stat
     })
     .await;
 
-    node_1
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_1.store, &channels[1], payment_hash, hold_preimage);
     node_1
         .network_actor
         .send_message(NetworkActorMessage::Command(
@@ -5852,9 +5875,7 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
     .await;
 
     node_0.node_info().await;
-    node_0
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
     node_0
         .network_actor
         .send_message(NetworkActorMessage::Event(
@@ -5922,9 +5943,7 @@ async fn test_payment_succeeds_when_onchain_preimage_arrives_before_settlement_c
     })
     .await;
 
-    node_0
-        .store
-        .insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, hold_preimage);
+    insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
     node_0
         .network_actor
         .send_message(NetworkActorMessage::Event(

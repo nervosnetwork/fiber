@@ -1,6 +1,6 @@
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs, resolve_onchain_tlc,
-    OnChainTlcResolution,
+    collect_onchain_fulfilled_tlcs, collect_onchain_timeout_settled_tlcs,
+    has_unresolved_onchain_tlcs, resolve_onchain_tlc, OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
@@ -59,7 +59,7 @@ fn resolve_returns_fulfilled_when_preimage_matches() {
     let preimage = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
     let payment_hash = payment_hash_for(preimage, hash_algorithm);
-    let store = MockStore::new().with_onchain_preimage(payment_hash, preimage);
+    let store = MockStore::new().with_onchain_preimage(channel_id, payment_hash, preimage);
 
     assert_eq!(
         resolve_onchain_tlc(
@@ -80,9 +80,7 @@ fn resolve_falls_through_to_settled_when_preimage_mismatches() {
     let wrong_preimage = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
     let payment_hash = payment_hash_for(correct_preimage, hash_algorithm);
-    let store = MockStore::new()
-        .with_onchain_preimage(payment_hash, wrong_preimage)
-        .with_onchain_settled(payment_hash);
+    let store = MockStore::new().with_onchain_preimage(channel_id, payment_hash, wrong_preimage);
 
     assert_eq!(
         resolve_onchain_tlc(
@@ -100,7 +98,7 @@ fn resolve_falls_through_to_settled_when_preimage_mismatches() {
 fn resolve_returns_settled_without_preimage() {
     let channel_id = gen_rand_sha256_hash();
     let payment_hash = gen_rand_sha256_hash();
-    let store = MockStore::new().with_onchain_settled(payment_hash);
+    let store = MockStore::new().with_onchain_settled(channel_id, payment_hash);
 
     assert_eq!(
         resolve_onchain_tlc(
@@ -127,6 +125,47 @@ fn resolve_returns_unknown_by_default() {
             TLCId::Offered(0),
             payment_hash,
             HashAlgorithm::CkbHash,
+        ),
+        OnChainTlcResolution::Unknown
+    );
+}
+
+#[test]
+fn resolve_is_channel_scoped() {
+    let channel_id = gen_rand_sha256_hash();
+    let other_channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let store = MockStore::new().with_onchain_preimage(channel_id, payment_hash, preimage);
+
+    assert_eq!(
+        resolve_onchain_tlc(
+            &other_channel_id,
+            &store,
+            TLCId::Offered(0),
+            payment_hash,
+            hash_algorithm,
+        ),
+        OnChainTlcResolution::Unknown
+    );
+}
+
+#[test]
+fn resolve_ignores_locally_known_preimage_without_settlement_record() {
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let store = MockStore::new().with_preimage(payment_hash, preimage);
+
+    assert_eq!(
+        resolve_onchain_tlc(
+            &channel_id,
+            &store,
+            TLCId::Offered(0),
+            payment_hash,
+            hash_algorithm,
         ),
         OnChainTlcResolution::Unknown
     );
@@ -168,9 +207,9 @@ fn collect_skips_removed_and_uncommitted_tlcs() {
     let mut state = empty_channel_state(channel_id);
     state.tlc_state.offered_tlcs.tlcs = vec![active, removed, uncommitted];
     let store = MockStore::new()
-        .with_onchain_preimage(active_hash, active_preimage)
-        .with_onchain_preimage(removed_hash, removed_preimage)
-        .with_onchain_preimage(uncommitted_hash, uncommitted_preimage);
+        .with_onchain_preimage(channel_id, active_hash, active_preimage)
+        .with_onchain_preimage(channel_id, removed_hash, removed_preimage)
+        .with_onchain_preimage(channel_id, uncommitted_hash, uncommitted_preimage);
 
     let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
 
@@ -180,7 +219,7 @@ fn collect_skips_removed_and_uncommitted_tlcs() {
 }
 
 #[test]
-fn collect_expired_settled_requires_forwarding_and_settled_marker() {
+fn collect_timeout_settled_includes_forwarded_and_origin_payer() {
     let channel_id = gen_rand_sha256_hash();
     let upstream_channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
@@ -224,14 +263,77 @@ fn collect_expired_settled_requires_forwarding_and_settled_marker() {
     let mut state = empty_channel_state(channel_id);
     state.tlc_state.offered_tlcs.tlcs = vec![matched, no_forwarding, not_settled, not_expired];
     let store = MockStore::new()
-        .with_onchain_settled(matched_hash)
-        .with_onchain_settled(no_forwarding_hash)
-        .with_onchain_settled(not_expired_hash);
+        .with_onchain_settled(channel_id, matched_hash)
+        .with_onchain_settled(channel_id, no_forwarding_hash)
+        .with_onchain_settled(channel_id, not_expired_hash);
 
-    let expired = collect_onchain_expired_settled_tlcs(&state, &store, 100);
+    let expired = collect_onchain_timeout_settled_tlcs(&state, &store, 100);
 
-    assert_eq!(expired.len(), 1);
-    assert_eq!(expired[0].forwarding_channel_id, upstream_channel_id);
-    assert_eq!(expired[0].forwarding_tlc_id, 42);
+    assert_eq!(expired.len(), 2);
+    assert_eq!(expired[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(
+        expired[0].role,
+        OnChainTimeoutTlcRole::Forwarded {
+            forwarding_channel_id: upstream_channel_id,
+            forwarding_tlc_id: 42,
+        }
+    );
     assert_eq!(expired[0].shared_secret, TEST_SHARED_SECRET);
+    assert_eq!(expired[1].tlc_id, TLCId::Offered(1));
+    assert_eq!(
+        expired[1].role,
+        OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
+    );
+}
+
+#[test]
+fn collect_timeout_settled_skips_already_removed() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = gen_rand_sha256_hash();
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash,
+        hash_algorithm,
+    );
+    tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: gen_rand_sha256_hash(),
+    }));
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_settled(channel_id, payment_hash);
+
+    assert!(collect_onchain_timeout_settled_tlcs(&state, &store, 100).is_empty());
+}
+
+#[test]
+fn collect_skips_ambiguous_payment_hash_prefixes() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let first_hash_bytes = [1u8; 32];
+    let mut second_hash_bytes = [2u8; 32];
+    second_hash_bytes[..20].copy_from_slice(&first_hash_bytes[..20]);
+    let first_hash = Hash256::from(first_hash_bytes);
+    let second_hash = Hash256::from(second_hash_bytes);
+
+    let first = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        first_hash,
+        hash_algorithm,
+    );
+    let second = tlc_info(
+        TLCId::Offered(1),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        second_hash,
+        hash_algorithm,
+    );
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![first, second];
+    let store = MockStore::new().with_onchain_settled(channel_id, first_hash);
+
+    assert!(collect_onchain_timeout_settled_tlcs(&state, &store, 100).is_empty());
+    assert!(has_unresolved_onchain_tlcs(&state));
 }

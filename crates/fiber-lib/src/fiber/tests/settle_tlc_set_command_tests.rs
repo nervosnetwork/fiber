@@ -1,6 +1,7 @@
 //! Tests for SettleTlcSetCommand
 
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore, CommitDiff};
+use crate::fiber::onchain_tlc_reconcile::{payment_hash_prefix, OnChainTlcSettlement};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
@@ -18,7 +19,7 @@ use fiber_types::{
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, TlcErr, TlcErrorCode};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const TEST_SHARED_SECRET: [u8; 32] = [42u8; 32];
 
@@ -29,8 +30,7 @@ pub(crate) struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
-    pub(crate) onchain_settled: RefCell<HashSet<Hash256>>,
-    pub(crate) onchain_preimages: RefCell<HashMap<Hash256, Hash256>>,
+    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, [u8; 20]), OnChainTlcSettlement>>,
 }
 
 impl MockStore {
@@ -41,8 +41,7 @@ impl MockStore {
             preimages: RefCell::new(HashMap::new()),
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
-            onchain_settled: RefCell::new(HashSet::new()),
-            onchain_preimages: RefCell::new(HashMap::new()),
+            onchain_settlements: RefCell::new(HashMap::new()),
         }
     }
 
@@ -68,7 +67,7 @@ impl MockStore {
         self
     }
 
-    fn with_preimage(self, payment_hash: Hash256, preimage: Hash256) -> Self {
+    pub(crate) fn with_preimage(self, payment_hash: Hash256, preimage: Hash256) -> Self {
         self.preimages.borrow_mut().insert(payment_hash, preimage);
         self
     }
@@ -79,16 +78,45 @@ impl MockStore {
         self
     }
 
-    pub(crate) fn with_onchain_settled(self, payment_hash: Hash256) -> Self {
-        self.onchain_settled.borrow_mut().insert(payment_hash);
+    pub(crate) fn with_onchain_settlement(
+        self,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+        settlement: OnChainTlcSettlement,
+    ) -> Self {
+        self.onchain_settlements
+            .borrow_mut()
+            .insert((channel_id, payment_hash_prefix(&payment_hash)), settlement);
         self
     }
 
-    pub(crate) fn with_onchain_preimage(self, payment_hash: Hash256, preimage: Hash256) -> Self {
-        self.onchain_preimages
-            .borrow_mut()
-            .insert(payment_hash, preimage);
-        self
+    pub(crate) fn with_onchain_settled(self, channel_id: Hash256, payment_hash: Hash256) -> Self {
+        self.with_onchain_settlement(
+            channel_id,
+            payment_hash,
+            OnChainTlcSettlement {
+                preimage: None,
+                tx_hash: None,
+                tlc_index: None,
+            },
+        )
+    }
+
+    pub(crate) fn with_onchain_preimage(
+        self,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Self {
+        self.with_onchain_settlement(
+            channel_id,
+            payment_hash,
+            OnChainTlcSettlement {
+                preimage: Some(preimage),
+                tx_hash: None,
+                tlc_index: None,
+            },
+        )
     }
 }
 
@@ -211,16 +239,15 @@ impl ChannelActorStateStore for MockStore {
         HashMap::new()
     }
 
-    fn is_tlc_settled_on_chain(&self, _channel_id: &Hash256, payment_hash: &Hash256) -> bool {
-        self.onchain_settled.borrow().contains(payment_hash)
-    }
-
-    fn get_on_chain_discovered_preimage(
+    fn get_onchain_tlc_settlement(
         &self,
-        _channel_id: &Hash256,
+        channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<Hash256> {
-        self.onchain_preimages.borrow().get(payment_hash).cloned()
+    ) -> Option<OnChainTlcSettlement> {
+        self.onchain_settlements
+            .borrow()
+            .get(&(*channel_id, payment_hash_prefix(payment_hash)))
+            .cloned()
     }
 
     fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {
@@ -316,6 +343,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
             tlc_state,
             retryable_tlc_operations: std::collections::VecDeque::new(),
             waiting_forward_tlc_tasks: HashMap::new(),
+            onchain_settlement_confirmed: false,
             remote_shutdown_script: None,
             local_shutdown_script: Script::default(),
             last_committed_remote_nonce: None,

@@ -11,6 +11,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
@@ -631,7 +632,9 @@ impl Store {
         channel_data: &ChannelData,
         payment_hash: &Hash256,
     ) -> bool {
-        if self.is_tlc_settled(&channel_data.channel_id, payment_hash) {
+        if WatchtowerStore::get_onchain_tlc_settlement(self, &channel_data.channel_id, payment_hash)
+            .is_some()
+        {
             return false;
         }
 
@@ -935,27 +938,14 @@ impl ChannelActorStateStore for Store {
             )
     }
 
-    fn is_tlc_settled_on_chain(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
-        #[cfg(feature = "watchtower")]
-        {
-            WatchtowerStore::is_tlc_settled(self, channel_id, payment_hash)
-        }
-        #[cfg(not(feature = "watchtower"))]
-        {
-            let _ = (channel_id, payment_hash);
-            false
-        }
-    }
-
-    fn get_on_chain_discovered_preimage(
+    fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<Hash256> {
+    ) -> Option<OnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
-            let _ = channel_id;
-            WatchtowerStore::get_watch_preimage(self, &NodeId::local(), payment_hash)
+            WatchtowerStore::get_onchain_tlc_settlement(self, channel_id, payment_hash)
         }
         #[cfg(not(feature = "watchtower"))]
         {
@@ -1579,28 +1569,61 @@ impl WatchtowerStore for Store {
             .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
     }
 
-    fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]) {
+    fn insert_onchain_tlc_settlement(
+        &self,
+        channel_id: &Hash256,
+        payment_hash_prefix: [u8; 20],
+        settlement: OnChainTlcSettlement,
+    ) {
+        let key = Self::tlc_on_chain_settled_key(channel_id, &payment_hash_prefix);
+        if settlement.preimage.is_none() {
+            if let Some(existing) = self.get(&key) {
+                let existing = if existing.is_empty() {
+                    OnChainTlcSettlement {
+                        preimage: None,
+                        tx_hash: None,
+                        tlc_index: None,
+                    }
+                } else {
+                    deserialize_from(existing.as_ref(), "OnChainTlcSettlement")
+                };
+                if existing.preimage.is_some() {
+                    return;
+                }
+            }
+        }
+
         let mut batch = self.batch();
-        batch.put(
-            Self::tlc_on_chain_settled_key(channel_id, &payment_hash),
-            [],
-        );
+        batch.put(key, serialize_to_vec(&settlement, "OnChainTlcSettlement"));
         batch.commit();
-        self.cleanup_unused_watch_preimages(
-            None,
-            WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash),
-        );
+        if settlement.preimage.is_none() {
+            self.cleanup_unused_watch_preimages(
+                None,
+                WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash_prefix),
+            );
+        }
     }
 
-    fn is_tlc_settled(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
+    fn get_onchain_tlc_settlement(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<OnChainTlcSettlement> {
         let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
             .try_into()
             .expect("payment hash prefix");
-        self.get(Store::tlc_on_chain_settled_key(
+        let value = self.get(Store::tlc_on_chain_settled_key(
             channel_id,
             &payment_hash_prefix,
-        ))
-        .is_some()
+        ))?;
+        if value.is_empty() {
+            return Some(OnChainTlcSettlement {
+                preimage: None,
+                tx_hash: None,
+                tlc_index: None,
+            });
+        }
+        Some(deserialize_from(value.as_ref(), "OnChainTlcSettlement"))
     }
 }
 

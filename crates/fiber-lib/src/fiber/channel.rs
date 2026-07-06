@@ -15,7 +15,9 @@ use crate::fiber::fee::{
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs,
+    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, OnChainTimeoutTlcRole,
+    OnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::time::{SystemTime, UNIX_EPOCH};
@@ -2809,6 +2811,10 @@ where
                     .await
                 {
                     Ok(_) => {
+                        // Persist before acking: on-chain relay callers treat this reply as
+                        // proof that the upstream removal is durable. The handler-end persist
+                        // would leave a crash window between reply and disk.
+                        self.store.insert_channel_actor_state(state.clone());
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
@@ -3049,45 +3055,67 @@ where
         }
     }
 
+    fn onchain_settlement_expect_expiry(state: &ChannelActorState) -> Option<u64> {
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+        now_timestamp_as_millis_u64().checked_add(epoch_delay_milliseconds)
+    }
+
     fn maintain_waiting_onchain_settlement_tlcs(&self, state: &mut ChannelActorState) {
         if !state.is_waiting_onchain_settlement() {
             return;
         }
-        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
-        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-        let Some(expect_expiry) =
-            now_timestamp_as_millis_u64().checked_add(epoch_delay_milliseconds)
-        else {
+        let Some(expect_expiry) = Self::onchain_settlement_expect_expiry(state) else {
             error!(
                 "Failed to calculate onchain settlement TLC expiry: epoch_delay_milliseconds {}",
-                epoch_delay_milliseconds
+                tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
+                    state.commitment_delay_epoch
+                ))
             );
             return;
         };
         // Collect TLC data before async operations to avoid holding iterator across await
-        let expired_tlcs = collect_onchain_expired_settled_tlcs(state, &self.store, expect_expiry);
+        let expired_tlcs = collect_onchain_timeout_settled_tlcs(state, &self.store, expect_expiry);
         for tlc in expired_tlcs {
-            let (send, _recv) = oneshot::channel();
-            let rpc_reply = RpcReplyPort::from(send);
-            if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                    channel_id: tlc.forwarding_channel_id,
-                    command: ChannelCommand::RemoveTlc(
-                        RemoveTlcCommand {
-                            id: tlc.forwarding_tlc_id,
-                            reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-                                &tlc.shared_secret,
-                            )),
-                        },
-                        rpc_reply,
-                    ),
-                }),
-            )) {
-                error!(
-                    "Failed to remove settled tlc {:?} for channel {:?}: {}",
-                    tlc.forwarding_tlc_id, tlc.forwarding_channel_id, err
-                );
+            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                &tlc.shared_secret,
+            ));
+            match tlc.role {
+                OnChainTimeoutTlcRole::Forwarded {
+                    forwarding_channel_id,
+                    forwarding_tlc_id,
+                } => {
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::RelayOnChainTlcRemove {
+                                downstream_channel_id: state.get_id(),
+                                downstream_tlc_id: tlc.tlc_id,
+                                forwarding_channel_id,
+                                forwarding_tlc_id,
+                                payment_hash: tlc.payment_hash,
+                                reason,
+                            },
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+                OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
+                    // TODO(durable-outbox): this payment-session notification is an
+                    // in-memory mailbox event, unlike the forwarded upstream relay which is
+                    // durably delivered or queued before local finalization.
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::TlcRemoveReceived(
+                                tlc.payment_hash,
+                                attempt_id,
+                                reason.clone(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    if let TLCId::Offered(id) = tlc.tlc_id {
+                        state.tlc_state.set_offered_tlc_removed(id, reason);
+                    }
+                }
             }
         }
     }
@@ -3122,39 +3150,44 @@ where
         let mut onchain_fulfilled_invoice_hashes = HashSet::new();
 
         for tlc in fulfilled {
-            // Mirror the on-chain preimage into the regular preimage store so local observers
-            // see the same success signal as they do for off-chain fulfillment.
-            self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-
             let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                 payment_preimage: tlc.preimage,
             });
 
             match tlc.tlc_id {
                 TLCId::Offered(id) => {
-                    state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
                     if let Some((forwarding_channel_id, forwarding_tlc_id)) = tlc.forwarding_tlc {
-                        // Forwarded TLC: relay the fulfillment upstream. The retryable relay keeps
-                        // trying if the upstream channel is momentarily unavailable.
-                        let _ = self.register_retryable_relay_tlc_remove(
-                            TLCId::Received(forwarding_tlc_id),
-                            forwarding_channel_id,
-                            fulfill.clone(),
-                        );
+                        self.network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::RelayOnChainTlcRemove {
+                                    downstream_channel_id: state.get_id(),
+                                    downstream_tlc_id: tlc.tlc_id,
+                                    forwarding_channel_id,
+                                    forwarding_tlc_id,
+                                    payment_hash: tlc.payment_hash,
+                                    reason: fulfill,
+                                },
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     } else {
-                        // Original payer: drive the payment session to success.
+                        self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
+                        // TODO(durable-outbox): this payment-session notification is an
+                        // in-memory mailbox event. A durable payment outbox would close the
+                        // remaining gap with LND's resolution store for source payments.
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::TlcRemoveReceived(
                                     tlc.payment_hash,
                                     tlc.attempt_id,
-                                    fulfill,
+                                    fulfill.clone(),
                                 ),
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        state.tlc_state.set_offered_tlc_removed(id, fulfill);
                     }
                 }
                 TLCId::Received(id) => {
+                    self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
                     state.tlc_state.set_received_tlc_removed(id, fulfill);
                     self.store
                         .remove_payment_hold_tlc(&tlc.payment_hash, &state.id, id);
@@ -3166,6 +3199,9 @@ where
         if !onchain_fulfilled_invoice_hashes.is_empty() {
             self.store.insert_channel_actor_state(state.clone());
             for payment_hash in onchain_fulfilled_invoice_hashes {
+                // TODO(durable-outbox): invoice settlement is still an in-memory actor command;
+                // `sync_already_fulfilled_onchain_tlcs` re-emits it on restart, but a durable
+                // resolver outbox would make this side effect explicit.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash),
@@ -3248,6 +3284,7 @@ where
         if !invoice_hashes.is_empty() {
             self.store.insert_channel_actor_state(state.clone());
             for payment_hash in invoice_hashes {
+                // TODO(durable-outbox): see the on-chain invoice settlement send above.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash),
@@ -3255,6 +3292,27 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
         }
+    }
+
+    fn finalize_onchain_timed_out_received_tlcs(&self, state: &mut ChannelActorState) {
+        let channel_id = state.get_id();
+        for tlc in collect_onchain_received_timeout_settled_tlcs(state, &self.store) {
+            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                &NO_SHARED_SECRET,
+            ));
+            let payment_hash = state.tlc_state.set_received_tlc_removed(tlc.tlc_id, reason);
+            self.store
+                .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc.tlc_id);
+        }
+    }
+
+    /// Returns true when no reconcilable TLC remains unresolved on this channel.
+    fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState) -> bool {
+        self.maintain_waiting_onchain_settlement_tlcs(state);
+        self.settle_onchain_fulfilled_tlcs(state);
+        self.finalize_onchain_timed_out_received_tlcs(state);
+        !has_unresolved_onchain_tlcs(state)
     }
 
     async fn finalize_onchain_settlement(
@@ -3275,12 +3333,19 @@ where
             )));
         }
 
-        self.maintain_waiting_onchain_settlement_tlcs(state);
-        self.settle_onchain_fulfilled_tlcs(state);
-        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
-        state.update_state(ChannelState::Closed(flags));
-        info!("Channel {:?} on-chain settlement completed", state.get_id());
-        myself.stop(Some("OnChainSettlementCompleted".to_string()));
+        state.onchain_settlement_confirmed = true;
+        if self.reconcile_onchain_tlcs(state) {
+            flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+            state.update_state(ChannelState::Closed(flags));
+            state.onchain_settlement_confirmed = false;
+            info!("Channel {:?} on-chain settlement completed", state.get_id());
+            myself.stop(Some("OnChainSettlementCompleted".to_string()));
+        } else {
+            info!(
+                "Channel {:?} on-chain settlement reconciliation incomplete; keeping WAITING_ONCHAIN_SETTLEMENT",
+                state.get_id()
+            );
+        }
         Ok(())
     }
 
@@ -3629,10 +3694,28 @@ where
                 // regression in PR #1254).
                 if state.is_closed() || matches!(state.state, ChannelState::ShuttingDown(_)) {
                     self.settle_onchain_fulfilled_tlcs(state);
+                    self.finalize_onchain_timed_out_received_tlcs(state);
+                }
+                if state.is_waiting_onchain_settlement() && state.onchain_settlement_confirmed {
+                    self.finalize_onchain_settlement(myself, state).await?;
                 }
             }
             ChannelEvent::OnChainSettlementCompleted => {
                 self.finalize_onchain_settlement(myself, state).await?;
+            }
+            ChannelEvent::OnChainTlcRelayConfirmed(tlc_id, reason) => {
+                if let TLCId::Offered(id) = tlc_id {
+                    if state
+                        .tlc_state
+                        .get(&tlc_id)
+                        .is_some_and(|tlc| tlc.removed_reason.is_none())
+                    {
+                        state.tlc_state.set_offered_tlc_removed(id, reason);
+                    }
+                }
+                if state.is_waiting_onchain_settlement() && state.onchain_settlement_confirmed {
+                    self.finalize_onchain_settlement(myself, state).await?;
+                }
             }
             ChannelEvent::CheckFundingTimeout => {
                 // A stale timeout message may arrive after state transitions (e.g. external
@@ -4839,6 +4922,9 @@ pub enum ChannelEvent {
     CheckActiveChannel,
     MaintainChannelTlcs,
     OnChainSettlementCompleted,
+    /// The network actor confirmed that the upstream RemoveTlc for this on-chain-resolved
+    /// downstream TLC was delivered or durably queued.
+    OnChainTlcRelayConfirmed(TLCId, RemoveTlcReason),
     CheckFundingTimeout,
 }
 
@@ -5699,6 +5785,7 @@ impl ChannelActorState {
                 tlc_state: Default::default(),
                 retryable_tlc_operations: Default::default(),
                 waiting_forward_tlc_tasks: Default::default(),
+                onchain_settlement_confirmed: false,
                 local_shutdown_script,
                 local_channel_public_keys: local_base_pubkeys,
                 signer,
@@ -5799,6 +5886,7 @@ impl ChannelActorState {
                 tlc_state: Default::default(),
                 retryable_tlc_operations: Default::default(),
                 waiting_forward_tlc_tasks: Default::default(),
+                onchain_settlement_confirmed: false,
                 signer,
                 local_channel_public_keys: local_pubkeys,
                 local_constraints: ChannelConstraints::new(
@@ -9885,27 +9973,17 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    /// Returns whether the watchtower has recorded this TLC as settled on-chain without a preimage.
+    /// Returns the channel-scoped on-chain settlement proof for this TLC.
     ///
     /// This reads state populated by the in-process watchtower. When the watchtower is disabled or
-    /// not running, this always returns `false`. Features that depend on on-chain settlement
-    /// signals—including updating TLC, invoice, and payment status, and resolving or rejecting
-    /// upstream forwarding TLCs—will not work in that configuration.
-    fn is_tlc_settled_on_chain(&self, channel_id: &Hash256, payment_hash: &Hash256) -> bool {
-        let _ = (channel_id, payment_hash);
-        false
-    }
-    /// Returns the payment preimage the watchtower observed being revealed on-chain for this TLC.
-    ///
-    /// This reads state populated by the in-process watchtower. When the watchtower is disabled or
-    /// not running, this always returns `None`. Features that depend on on-chain preimage
-    /// discovery—including updating TLC, invoice, and payment status, and resolving upstream
+    /// not running, this always returns `None`. Features that depend on on-chain settlement
+    /// signals—including updating TLC, invoice, and payment status, and resolving upstream
     /// forwarding TLCs—will not work in that configuration.
-    fn get_on_chain_discovered_preimage(
+    fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<Hash256> {
+    ) -> Option<OnChainTlcSettlement> {
         let _ = (channel_id, payment_hash);
         None
     }
@@ -10153,6 +10231,7 @@ mod tests {
                 tlc_state: TlcState::default(),
                 retryable_tlc_operations: VecDeque::new(),
                 waiting_forward_tlc_tasks: HashMap::new(),
+                onchain_settlement_confirmed: false,
                 remote_shutdown_script: None,
                 local_shutdown_script: Script::default(),
                 last_committed_remote_nonce: None,

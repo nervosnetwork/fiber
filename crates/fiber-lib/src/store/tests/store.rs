@@ -2,6 +2,7 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
@@ -37,7 +38,9 @@ use ckb_types::prelude::*;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
+use fiber_store::backend::StorageBackend;
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 use fiber_types::CloseFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{SettlementTlc, TLCId};
@@ -611,10 +614,111 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
     );
 
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20].try_into().unwrap();
-    store.update_tlc_settled(&channel_id, payment_hash_prefix);
+    store.insert_onchain_tlc_settlement(
+        &channel_id,
+        payment_hash_prefix,
+        OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: Some(gen_rand_sha256_hash()),
+            tlc_index: Some(0),
+        },
+    );
     assert!(
         store.get_watch_preimage(&node_id, &payment_hash).is_none(),
         "watchtower GC removes the preimage after the watched TLC is settled"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_onchain_tlc_settlement_roundtrip() {
+    let path = TempDir::new("test-onchain-tlc-settlement-roundtrip");
+    let store = open_store(path).expect("created store failed");
+    let channel_id = Hash256::from([1u8; 32]);
+    let other_channel_id = Hash256::from([2u8; 32]);
+    let payment_hash = Hash256::from([3u8; 32]);
+    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
+
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        None
+    );
+
+    let settlement = OnChainTlcSettlement {
+        preimage: Some(Hash256::from([9u8; 32])),
+        tx_hash: Some(Hash256::from([7u8; 32])),
+        tlc_index: Some(2),
+    };
+    store.insert_onchain_tlc_settlement(&channel_id, prefix, settlement.clone());
+
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        Some(settlement)
+    );
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &other_channel_id, &payment_hash),
+        None
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
+    let path = TempDir::new("test-onchain-tlc-settlement-no-downgrade");
+    let store = open_store(path).expect("created store failed");
+    let channel_id = Hash256::from([1u8; 32]);
+    let payment_hash = Hash256::from([3u8; 32]);
+    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
+
+    let with_preimage = OnChainTlcSettlement {
+        preimage: Some(Hash256::from([9u8; 32])),
+        tx_hash: Some(Hash256::from([7u8; 32])),
+        tlc_index: Some(0),
+    };
+    store.insert_onchain_tlc_settlement(&channel_id, prefix, with_preimage.clone());
+    store.insert_onchain_tlc_settlement(
+        &channel_id,
+        prefix,
+        OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: Some(Hash256::from([8u8; 32])),
+            tlc_index: Some(0),
+        },
+    );
+
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        Some(with_preimage)
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_onchain_tlc_settlement_legacy_empty_value() {
+    let path = TempDir::new("test-onchain-tlc-settlement-legacy");
+    let store = open_store(path).expect("created store failed");
+    let channel_id = Hash256::from([1u8; 32]);
+    let payment_hash = Hash256::from([3u8; 32]);
+    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
+    let key = [
+        &[WATCHTOWER_TLC_SETTLED_PREFIX],
+        channel_id.as_ref(),
+        prefix.as_ref(),
+    ]
+    .concat();
+
+    store.put(key, []);
+
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        Some(OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: None,
+            tlc_index: None,
+        })
     );
 }
 
@@ -757,6 +861,7 @@ fn test_channel_actor_state_store() {
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
+            onchain_settlement_confirmed: false,
             local_shutdown_script: Script::default(),
             local_channel_public_keys: ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -905,6 +1010,7 @@ fn sample_channel_actor_state(
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
+            onchain_settlement_confirmed: false,
             local_shutdown_script: Script::default(),
             local_channel_public_keys: ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),

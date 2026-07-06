@@ -1525,6 +1525,12 @@ pub struct ChannelActorData {
     pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
     pub waiting_forward_tlc_tasks: HashMap<TLCId, [u8; 32]>,
 
+    /// Set once the on-chain settlement of a force-closed channel has confirmed while
+    /// TLC reconciliation is still incomplete. Maintenance retries finalization while
+    /// this is set and clears it when `WAITING_ONCHAIN_SETTLEMENT` is removed.
+    #[serde(default)]
+    pub onchain_settlement_confirmed: bool,
+
     /// The remote lock script for close channel, setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
