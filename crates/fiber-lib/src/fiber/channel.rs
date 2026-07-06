@@ -58,7 +58,7 @@ use ckb_types::{
     H256,
 };
 use fiber_types::{
-    blake2b_hash_with_salt, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand,
+    blake2b_hash_with_salt, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData,
     ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState,
     ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
@@ -6769,35 +6769,41 @@ impl ChannelActorState {
     // The offerer who offered this tlc will have the first pubkey, and the receiver
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
-    pub fn get_tlc_pubkeys(&self, tlc: &TlcInfo) -> (Pubkey, Pubkey) {
+    pub fn get_tlc_pubkeys(
+        &self,
+        tlc: &TlcInfo,
+    ) -> Result<(Pubkey, Pubkey), ProcessingChannelError> {
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
-        let local_pubkey = derive_tlc_pubkey(
+        let local_pubkey = try_derive_tlc_pubkey(
             &self.get_local_channel_public_keys().tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
-        );
-        let remote_pubkey = derive_tlc_pubkey(
+        )
+        .map_err(ProcessingChannelError::InvalidParameter)?;
+        let remote_pubkey = try_derive_tlc_pubkey(
             &self.get_remote_channel_public_keys().tlc_base_key,
             &self.get_remote_commitment_point(local_commitment_number),
-        );
-        (local_pubkey, remote_pubkey)
+        )
+        .map_err(ProcessingChannelError::InvalidParameter)?;
+        Ok((local_pubkey, remote_pubkey))
     }
 
-    fn get_tlc_keys(&self, tlc: &TlcInfo) -> (Privkey, Pubkey) {
+    fn get_tlc_keys(&self, tlc: &TlcInfo) -> Result<(Privkey, Pubkey), ProcessingChannelError> {
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
 
-        (
+        Ok((
             self.signer.derive_tlc_key(remote_commitment_number),
-            derive_tlc_pubkey(
+            try_derive_tlc_pubkey(
                 &self.get_remote_channel_public_keys().tlc_base_key,
                 &self.get_remote_commitment_point(local_commitment_number),
-            ),
-        )
+            )
+            .map_err(ProcessingChannelError::InvalidParameter)?,
+        ))
     }
 
     // We are using tlc base key for settlement keys, since settlement
@@ -6829,12 +6835,15 @@ impl ChannelActorState {
         [a, b].concat()
     }
 
-    fn get_active_tlcs_for_settlement(&self, for_remote: bool) -> Vec<SettlementTlc> {
+    fn get_active_tlcs_for_settlement(
+        &self,
+        for_remote: bool,
+    ) -> Result<Vec<SettlementTlc>, ProcessingChannelError> {
         let tlcs = self.get_active_tlcs(for_remote);
         tlcs.into_iter()
             .map(|tlc| {
-                let (local_key, remote_key) = self.get_tlc_keys(&tlc);
-                SettlementTlc {
+                let (local_key, remote_key) = self.get_tlc_keys(&tlc)?;
+                Ok(SettlementTlc {
                     tlc_id: tlc.tlc_id,
                     hash_algorithm: tlc.hash_algorithm,
                     payment_amount: tlc.amount,
@@ -6842,7 +6851,7 @@ impl ChannelActorState {
                     expiry: tlc.expiry,
                     local_key,
                     remote_key,
-                }
+                })
             })
             .collect()
     }
@@ -8272,11 +8281,10 @@ impl ChannelActorState {
             .update_for_revoke_and_ack(commitment_numbers);
         self.set_waiting_ack(myself, false);
 
-        let tlcs = self.get_active_tlcs_for_settlement(true);
         info!(
             "After RevokeAndAckReceived settlement data for commitment_number: {}, tlcs count: {}, tlc_state: {:?}",
             self.get_local_commitment_number(),
-            tlcs.len(),
+            settlement_data.tlcs.len(),
             self.tlc_state
                 .all_tlcs()
                 .map(|tlc| tlc.status.clone())
@@ -9443,7 +9451,7 @@ impl ChannelActorState {
         Ok(SettlementData {
             local_amount: to_local_value,
             remote_amount: to_remote_value,
-            tlcs: self.get_active_tlcs_for_settlement(for_remote),
+            tlcs: self.get_active_tlcs_for_settlement(for_remote)?,
         })
     }
 
