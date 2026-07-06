@@ -104,9 +104,6 @@ const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 const MIN_NUM_OF_PASSIVE_SYNCING_PEERS: usize = 3;
 
 const NUM_SIMULTANEOUS_GET_REQUESTS: usize = 1;
-#[cfg(test)]
-const GET_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(not(test))]
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 // The maximum number of concurrent query tasks to run. We will wait for query previous task to exit
@@ -116,10 +113,6 @@ const MAX_NUM_CONCURRENT_QUERY_TASKS: usize = 10;
 const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_PEER_FILTER_RETRY_DELAY: Duration = Duration::from_millis(500);
 const DEFERRED_SYNC_CURSOR_RETRY_DELAY: Duration = Duration::from_millis(500);
-#[cfg(test)]
-const MAX_CONSECUTIVE_ACTIVE_SYNC_NO_PROGRESS: usize = 3;
-#[cfg(not(test))]
-const MAX_CONSECUTIVE_ACTIVE_SYNC_NO_PROGRESS: usize = 20;
 #[cfg(test)]
 const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
@@ -745,6 +738,11 @@ where
     }
 }
 
+#[derive(Debug, Default)]
+struct SyncingPeerState {
+    failed_times: usize,
+}
+
 #[derive(Clone, Debug)]
 struct DelayedGossipMessage {
     target: Pubkey,
@@ -869,9 +867,10 @@ pub struct GossipSyncingActorState<S> {
     // Of course, using different cursor for different peers will waste
     // some bandwidth by requesting the same messages from different peers.
     cursor: Cursor,
+    peer_state: SyncingPeerState,
     request_id: u64,
     inflight_requests: HashMap<u64, InflightGetBroadcastMessagesRequest>,
-    consecutive_no_progress: usize,
+    pending_retry_count: u32,
 }
 
 struct InflightGetBroadcastMessagesRequest {
@@ -900,9 +899,10 @@ impl<S> GossipSyncingActorState<S> {
             gossip_actor,
             store,
             cursor,
+            peer_state: Default::default(),
             inflight_requests: Default::default(),
             request_id: 0,
-            consecutive_no_progress: 0,
+            pending_retry_count: 0,
         }
     }
 
@@ -914,40 +914,6 @@ impl<S> GossipSyncingActorState<S> {
         let id = self.request_id;
         self.request_id += 1;
         id
-    }
-
-    fn update_cursor_if_advanced(&mut self, cursor: Cursor) -> bool {
-        if cursor <= self.cursor {
-            return false;
-        }
-        self.cursor = cursor;
-        self.consecutive_no_progress = 0;
-        true
-    }
-
-    fn record_no_progress(
-        &mut self,
-        myself: &ActorRef<GossipSyncingActorMessage>,
-        reason: &'static str,
-    ) -> bool {
-        self.consecutive_no_progress = self.consecutive_no_progress.saturating_add(1);
-        if self.consecutive_no_progress < MAX_CONSECUTIVE_ACTIVE_SYNC_NO_PROGRESS {
-            return false;
-        }
-
-        warn!(
-            "Aborting active sync with peer {:?} after {} consecutive no-progress events: {}",
-            &self.peer_pubkey, self.consecutive_no_progress, reason
-        );
-        self.gossip_actor
-            .send_message(GossipActorMessage::ActiveSyncingAborted {
-                peer: self.peer_pubkey,
-                session_id: self.session_id,
-                sync_id: self.sync_id,
-            })
-            .expect("gossip actor alive");
-        myself.stop(Some(format!("Active sync made no progress: {reason}")));
-        true
     }
 }
 
@@ -1022,13 +988,10 @@ where
         );
         match message {
             GossipSyncingActorMessage::RequestTimeout(request_id) => {
-                if state.inflight_requests.remove(&request_id).is_none() {
-                    return Ok(());
-                }
+                state.inflight_requests.remove(&request_id);
+                // TODO: When the peer failed for too many times, we should consider disconnecting from the peer.
+                state.peer_state.failed_times += 1;
                 observe_active_sync_timeout();
-                if state.record_no_progress(&myself, "request timed out") {
-                    return Ok(());
-                }
                 myself
                     .send_message(GossipSyncingActorMessage::NewGetRequest())
                     .expect("gossip syncing actor alive");
@@ -1077,20 +1040,47 @@ where
                         return Ok(());
                     }
 
-                    let no_progress_reason = match call!(
+                    match call!(
                         &state.store.actor,
                         ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
                         state.peer_pubkey,
                         messages
                     ) {
                         Ok(ActiveSyncSaveMessagesResult::Validated(cursor)) => {
-                            if state.update_cursor_if_advanced(cursor) {
-                                None
-                            } else {
-                                Some("validated cursor did not advance")
-                            }
+                            state.cursor = cursor;
+                            state.pending_retry_count = 0;
                         }
-                        Ok(ActiveSyncSaveMessagesResult::Pending) => Some("messages are pending"),
+                        Ok(ActiveSyncSaveMessagesResult::Pending) => {
+                            state.pending_retry_count += 1;
+                            if state.pending_retry_count > 100 {
+                                warn!(
+                                    "Active sync peer {:?} exceeded pending retry limit, aborting",
+                                    &state.peer_pubkey
+                                );
+                                state
+                                    .gossip_actor
+                                    .send_message(GossipActorMessage::ActiveSyncingAborted {
+                                        peer: state.peer_pubkey,
+                                        session_id: state.session_id,
+                                        sync_id: state.sync_id,
+                                    })
+                                    .expect("gossip actor alive");
+                                myself.stop(Some(
+                                    "Active sync pending retry limit exceeded".to_string(),
+                                ));
+                                return Ok(());
+                            }
+                            trace!(
+                                "Deferring active sync cursor advancement for peer {:?}",
+                                &state.peer_pubkey
+                            );
+                            std::mem::drop(
+                                myself.send_after(DEFERRED_SYNC_CURSOR_RETRY_DELAY, || {
+                                    GossipSyncingActorMessage::NewGetRequest()
+                                }),
+                            );
+                            return Ok(());
+                        }
                         Ok(ActiveSyncSaveMessagesResult::Rejected(violation)) => {
                             warn!(
                                 "Active sync response from peer {:?} rejected: {:?}",
@@ -1130,20 +1120,6 @@ where
                             myself.stop(Some("Failed to save active sync messages".to_string()));
                             return Ok(());
                         }
-                    };
-                    if let Some(reason) = no_progress_reason {
-                        if state.record_no_progress(&myself, reason) {
-                            return Ok(());
-                        }
-                        trace!(
-                            "Deferring active sync cursor advancement for peer {:?}: {}",
-                            &state.peer_pubkey,
-                            reason
-                        );
-                        std::mem::drop(myself.send_after(DEFERRED_SYNC_CURSOR_RETRY_DELAY, || {
-                            GossipSyncingActorMessage::NewGetRequest()
-                        }));
-                        return Ok(());
                     }
                     trace!(
                         "Sending new GetBroadcastMessages request after receiving response: pubkey {:?}",
@@ -4019,7 +3995,6 @@ where
                     &pubkey,
                     now_timestamp_as_millis_u64(),
                 );
-                state.policy.remove_outbound_peer(&pubkey);
                 state.schedule_next_delayed_flush();
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
