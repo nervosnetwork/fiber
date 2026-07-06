@@ -11253,4 +11253,50 @@ mod udt_funding_cell_capacity_tests {
             "under-filled funding cell must not be considered final (UDT capacity bypass)"
         );
     }
+
+    #[test]
+    fn waiting_forward_result_excludes_received_tlc_from_expiry_sweep() {
+        let mut state = minimal_udt_channel_state();
+        state.core.state = ChannelState::ChannelReady;
+        let tlc_id = TLCId::Received(0);
+        let expired_tlc = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+            tlc_id,
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            shared_secret: NO_SHARED_SECRET,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            forwarding_tlc: None,
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            onion_packet: None,
+            is_trampoline_hop: false,
+            removed_reason: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
+        };
+        state.tlc_state.received_tlcs.tlcs.push(expired_tlc);
+        state
+            .waiting_forward_tlc_tasks
+            .insert(tlc_id, NO_SHARED_SECRET);
+
+        assert!(state.is_waiting_forward_result_for_received_tlc(tlc_id));
+        let expired: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < now_timestamp_as_millis_u64()
+            })
+            .collect();
+
+        assert!(expired.is_empty());
+    }
 }

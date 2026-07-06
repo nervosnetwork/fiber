@@ -2974,7 +2974,11 @@ where
         let expired_tlcs: Vec<_> = state
             .tlc_state
             .get_committed_received_tlcs()
-            .filter(|tlc| tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry)
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < expect_expiry
+            })
             .collect();
         for tlc in expired_tlcs {
             info!(
