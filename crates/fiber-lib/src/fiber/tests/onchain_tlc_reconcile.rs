@@ -2,7 +2,9 @@ use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_expired_settled_tlcs, collect_onchain_fulfilled_tlcs, resolve_onchain_tlc,
     OnChainTlcResolution,
 };
-use crate::fiber::tests::settle_tlc_set_command::{create_test_channel_state_with_tlc, MockStore};
+use crate::fiber::tests::settle_tlc_set_command_tests::{
+    create_test_channel_state_with_tlc, MockStore,
+};
 use crate::gen_rand_sha256_hash;
 
 use fiber_types::{
