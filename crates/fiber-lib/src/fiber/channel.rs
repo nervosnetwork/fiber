@@ -1081,20 +1081,18 @@ where
         let previous_remote_nonce = state.last_committed_remote_nonce.clone();
         let next_commitment_nonce = commitment_signed.next_commitment_nonce.clone();
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        let commitment_signed_processed = match state
-            .verify_commitment_signed_and_send_ack(commitment_signed.clone())
-        {
-            Ok(processed) => processed,
-            Err(err) => {
-                error!(
-                        "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
+        let commitment_signed_processed =
+            match state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
+                Ok(processed) => processed,
+                Err(err) => {
+                    error!(
+                        "Failed to verify commitment_signed message: {:?} for channel {}",
                         err,
                         state.get_id()
                     );
-                self.notify_network_actor_shutdown_me(state);
-                return Err(err);
-            }
-        };
+                    return Err(err);
+                }
+            };
         if !commitment_signed_processed {
             return Ok(());
         }
