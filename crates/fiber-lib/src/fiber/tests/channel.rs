@@ -11226,6 +11226,17 @@ mod udt_funding_cell_capacity_tests {
     }
 
     #[test]
+    fn funding_tx_signed_rejects_invalid_state() {
+        let mut state = minimal_udt_channel_state();
+        state.core.state = ChannelState::Closed(CloseFlags::FUNDING_ABORTED);
+
+        let result = state.apply_funding_tx_signed(Transaction::default());
+
+        assert!(result.is_err());
+        assert!(state.funding_tx.is_none());
+    }
+
+    #[test]
     fn udt_funding_tx_is_final_when_capacity_matches_total_reserved() {
         let state = minimal_udt_channel_state();
         let total = LOCAL_RESERVED_SHANNONS + REMOTE_RESERVED_SHANNONS;

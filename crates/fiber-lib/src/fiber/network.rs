@@ -52,7 +52,7 @@ use super::channel::{
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, PEER_CHANNEL_RESPONSE_TIMEOUT,
 };
 use super::gossip::{
     get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
@@ -3906,6 +3906,39 @@ where
         let funding_tx = signed_funding_tx.take().expect("take tx");
         let witnesses = funding_tx.witnesses();
 
+        let Some(channel_actor) = state.channels.get(&channel_id).cloned() else {
+            debug!(
+                "Skipping signed funding tx for channel {:?}: channel actor no longer exists",
+                channel_id
+            );
+            return Ok(());
+        };
+
+        match call_t!(
+            channel_actor,
+            |reply| ChannelActorMessage::Command(ChannelCommand::FundingTxSigned(
+                funding_tx.data(),
+                reply,
+            )),
+            PEER_CHANNEL_RESPONSE_TIMEOUT
+        ) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(
+                    "Discarding signed funding tx for channel {:?}: channel rejected FundingTxSigned: {}",
+                    channel_id, err
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(
+                    "Discarding signed funding tx for channel {:?}: failed to acknowledge FundingTxSigned: {}",
+                    channel_id, err
+                );
+                return Ok(());
+            }
+        }
+
         if has_partial_witnesses {
             let outpoint = funding_tx
                 .output_pts_iter()
@@ -3939,19 +3972,6 @@ where
         state
             .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
             .await?;
-
-        if let Err(err) = state
-            .send_command_to_channel(
-                channel_id,
-                ChannelCommand::FundingTxSigned(funding_tx.data()),
-            )
-            .await
-        {
-            error!(
-                "Failed to update signed funding tx {:?}: {}",
-                channel_id, err
-            );
-        }
 
         myself
             .send_message(NetworkActorMessage::new_command(
