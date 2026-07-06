@@ -10959,7 +10959,6 @@ mod udt_funding_cell_capacity {
                 tlc_state: TlcState::default(),
                 retryable_tlc_operations: VecDeque::new(),
                 waiting_forward_tlc_tasks: HashMap::new(),
-                onchain_settlement_confirmed: false,
                 remote_shutdown_script: None,
                 local_shutdown_script: Script::default(),
                 last_committed_remote_nonce: None,

@@ -112,6 +112,8 @@ bitflags! {
         const FUNDING_ABORTED = 1 << 3;
         const UNCOOPERATIVE_REMOTE = 1 << 4;
         const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
+        /// The on-chain settlement spend is confirmed and TLC reconciliation is still pending.
+        const WAITING_ONCHAIN_RECONCILIATION = 1 << 6;
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -1524,12 +1526,6 @@ pub struct ChannelActorData {
     /// The retryable tlc operations that are waiting to be processed.
     pub retryable_tlc_operations: VecDeque<RetryableTlcOperation>,
     pub waiting_forward_tlc_tasks: HashMap<TLCId, [u8; 32]>,
-
-    /// Set once the on-chain settlement of a force-closed channel has confirmed while
-    /// TLC reconciliation is still incomplete. Maintenance retries finalization while
-    /// this is set and clears it when `WAITING_ONCHAIN_SETTLEMENT` is removed.
-    #[serde(default)]
-    pub onchain_settlement_confirmed: bool,
 
     /// The remote lock script for close channel, setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]

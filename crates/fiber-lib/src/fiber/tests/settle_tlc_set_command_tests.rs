@@ -343,7 +343,6 @@ pub(crate) fn create_test_channel_state_with_tlc(
             tlc_state,
             retryable_tlc_operations: std::collections::VecDeque::new(),
             waiting_forward_tlc_tasks: HashMap::new(),
-            onchain_settlement_confirmed: false,
             remote_shutdown_script: None,
             local_shutdown_script: Script::default(),
             last_committed_remote_nonce: None,

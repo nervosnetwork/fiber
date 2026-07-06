@@ -3333,17 +3333,19 @@ where
             )));
         }
 
-        state.onchain_settlement_confirmed = true;
+        flags.insert(CloseFlags::WAITING_ONCHAIN_RECONCILIATION);
         let now = now_timestamp_as_millis_u64();
         if self.reconcile_onchain_tlcs(state, now) {
-            flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+            flags.remove(
+                CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::WAITING_ONCHAIN_RECONCILIATION,
+            );
             state.update_state(ChannelState::Closed(flags));
-            state.onchain_settlement_confirmed = false;
             info!("Channel {:?} on-chain settlement completed", state.get_id());
             myself.stop(Some("OnChainSettlementCompleted".to_string()));
         } else {
+            state.update_state(ChannelState::Closed(flags));
             info!(
-                "Channel {:?} on-chain settlement reconciliation incomplete; keeping WAITING_ONCHAIN_SETTLEMENT",
+                "Channel {:?} on-chain settlement reconciliation incomplete; keeping WAITING_ONCHAIN_RECONCILIATION",
                 state.get_id()
             );
         }
@@ -3698,7 +3700,9 @@ where
                     self.settle_onchain_fulfilled_tlcs(state);
                     self.finalize_onchain_timed_out_received_tlcs(state);
                 }
-                if state.is_waiting_onchain_settlement() && state.onchain_settlement_confirmed {
+                if state.is_waiting_onchain_settlement()
+                    && state.is_waiting_onchain_reconciliation()
+                {
                     self.finalize_onchain_settlement(myself, state).await?;
                 }
             }
@@ -3715,7 +3719,9 @@ where
                         state.tlc_state.set_offered_tlc_removed(id, reason);
                     }
                 }
-                if state.is_waiting_onchain_settlement() && state.onchain_settlement_confirmed {
+                if state.is_waiting_onchain_settlement()
+                    && state.is_waiting_onchain_reconciliation()
+                {
                     self.finalize_onchain_settlement(myself, state).await?;
                 }
             }
@@ -5166,6 +5172,14 @@ impl ChannelActorState {
         )
     }
 
+    pub fn is_waiting_onchain_reconciliation(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION)
+        )
+    }
+
     pub fn offline_restore_mode(&self) -> Option<OfflineChannelRestoreMode> {
         match self.state {
             ChannelState::ChannelReady
@@ -5787,7 +5801,6 @@ impl ChannelActorState {
                 tlc_state: Default::default(),
                 retryable_tlc_operations: Default::default(),
                 waiting_forward_tlc_tasks: Default::default(),
-                onchain_settlement_confirmed: false,
                 local_shutdown_script,
                 local_channel_public_keys: local_base_pubkeys,
                 signer,
@@ -5888,7 +5901,6 @@ impl ChannelActorState {
                 tlc_state: Default::default(),
                 retryable_tlc_operations: Default::default(),
                 waiting_forward_tlc_tasks: Default::default(),
-                onchain_settlement_confirmed: false,
                 signer,
                 local_channel_public_keys: local_pubkeys,
                 local_constraints: ChannelConstraints::new(
@@ -10233,7 +10245,6 @@ mod tests {
                 tlc_state: TlcState::default(),
                 retryable_tlc_operations: VecDeque::new(),
                 waiting_forward_tlc_tasks: HashMap::new(),
-                onchain_settlement_confirmed: false,
                 remote_shutdown_script: None,
                 local_shutdown_script: Script::default(),
                 last_committed_remote_nonce: None,

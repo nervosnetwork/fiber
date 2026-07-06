@@ -861,7 +861,6 @@ fn test_channel_actor_state_store() {
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
-            onchain_settlement_confirmed: false,
             local_shutdown_script: Script::default(),
             local_channel_public_keys: ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
@@ -1010,7 +1009,6 @@ fn sample_channel_actor_state(
             tlc_state: Default::default(),
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
-            onchain_settlement_confirmed: false,
             local_shutdown_script: Script::default(),
             local_channel_public_keys: ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),

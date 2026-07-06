@@ -1740,7 +1740,8 @@ where
                 {
                     if let ChannelState::Closed(mut flags) = actor_state.state {
                         if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
-                            actor_state.onchain_settlement_confirmed = true;
+                            flags.insert(CloseFlags::WAITING_ONCHAIN_RECONCILIATION);
+                            actor_state.state = ChannelState::Closed(flags);
                             let complete = self
                                 .reconcile_onchain_tlcs_without_live_actor(
                                     state,
@@ -1749,9 +1750,11 @@ where
                                 )
                                 .await;
                             if complete {
-                                flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                                flags.remove(
+                                    CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+                                        | CloseFlags::WAITING_ONCHAIN_RECONCILIATION,
+                                );
                                 actor_state.state = ChannelState::Closed(flags);
-                                actor_state.onchain_settlement_confirmed = false;
                                 state.channels_funding_lock_script_cache.remove(&channel_id);
                                 info!(
                                     "Channel {channel_id:?} on-chain settlement completed without a live actor"
@@ -2289,6 +2292,7 @@ where
                         channel_state,
                         ChannelState::Closed(flags)
                             if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                                && !flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             // Spawn async task for concurrent RPC call
@@ -2327,12 +2331,14 @@ where
                         let complete = self
                             .reconcile_onchain_tlcs_without_live_actor(state, &mut actor_state, now)
                             .await;
-                        if complete && actor_state.onchain_settlement_confirmed {
+                        if complete {
                             if let ChannelState::Closed(mut flags) = actor_state.state {
-                                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
-                                    flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+                                if flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION) {
+                                    flags.remove(
+                                        CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+                                            | CloseFlags::WAITING_ONCHAIN_RECONCILIATION,
+                                    );
                                     actor_state.state = ChannelState::Closed(flags);
-                                    actor_state.onchain_settlement_confirmed = false;
                                     state.channels_funding_lock_script_cache.remove(&channel_id);
                                     self.store.insert_channel_actor_state(actor_state);
                                 }
@@ -3343,7 +3349,9 @@ where
         let ChannelState::Closed(flags) = state.state else {
             return;
         };
-        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+            || flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION)
+        {
             return;
         }
 
