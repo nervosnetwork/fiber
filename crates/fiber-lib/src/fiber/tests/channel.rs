@@ -10604,10 +10604,6 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
         .funding_tx
         .as_ref()
         .map(|tx| tx.as_slice().to_vec());
-    let latest_commitment_bytes_before = state_before
-        .latest_commitment_transaction
-        .as_ref()
-        .map(|tx| tx.as_slice().to_vec());
 
     node_a
         .network_actor
@@ -10635,14 +10631,6 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
     assert_eq!(
         funding_tx_bytes_after, funding_tx_bytes_before,
         "funding_tx must not be mutated by a stale peer TxSignatures"
-    );
-    let latest_commitment_bytes_after = state_after
-        .latest_commitment_transaction
-        .as_ref()
-        .map(|tx| tx.as_slice().to_vec());
-    assert_eq!(
-        latest_commitment_bytes_after, latest_commitment_bytes_before,
-        "latest_commitment_transaction must be unchanged by a stale peer TxSignatures"
     );
 }
 

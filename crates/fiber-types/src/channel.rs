@@ -1560,8 +1560,10 @@ pub struct ChannelActorData {
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub remote_revocation_nonce_for_next: Option<PubNonce>,
 
-    /// The latest commitment transaction we're holding,
-    /// it can be broadcasted to blockchain by us to force close the channel.
+    /// The latest commitment transaction we're holding.
+    /// This field is no longer persisted; the transaction is reconstructed from
+    /// state on demand via `build_commitment_tx_and_settlement_data`.
+    #[serde(default)]
     #[serde_as(as = "Option<EntityHex>")]
     pub latest_commitment_transaction: Option<Transaction>,
 

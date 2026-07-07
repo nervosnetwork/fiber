@@ -7815,7 +7815,6 @@ impl ChannelActorState {
             }
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
-        self.latest_commitment_transaction = Some(commitment_tx.data());
         Ok(true)
     }
 
@@ -7971,17 +7970,6 @@ impl ChannelActorState {
         match self.state {
             ChannelState::AwaitingChannelReady(flags) => {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    // Defense-in-depth: refuse to advertise readiness if we never received the
-                    // peer's CommitmentSigned (which is what populates
-                    // latest_commitment_transaction). Without this, get_latest_commitment_transaction
-                    // would panic on force-close. See GHSA-x6rw-txsignatures-verification.
-                    if self.latest_commitment_transaction.is_none() {
-                        error!(
-                            "Refusing to advance to ChannelReady for channel {:?}: latest_commitment_transaction is not set; the peer likely skipped sending CommitmentSigned",
-                            self.get_id()
-                        );
-                        return;
-                    }
                     if !self.is_public() {
                         self.on_new_channel_ready(myself);
                     } else {
@@ -9487,16 +9475,8 @@ impl ChannelActorState {
     pub async fn get_latest_commitment_transaction(
         &self,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let tx = self
-            .latest_commitment_transaction
-            .clone()
-            .expect("latest_commitment_transaction should exist");
-        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
-            .await
-            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
-        let raw_tx = tx.raw().as_builder().cell_deps(cell_deps).build();
-        let tx = tx.as_builder().raw(raw_tx).build();
-        Ok(tx.into_view())
+        let (commitment_tx, _) = self.build_commitment_tx_and_settlement_data(false)?;
+        Ok(commitment_tx)
     }
 
     /// Verify the partial signature from the peer and create a complete transaction
