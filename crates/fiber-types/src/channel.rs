@@ -112,8 +112,8 @@ bitflags! {
         const FUNDING_ABORTED = 1 << 3;
         const UNCOOPERATIVE_REMOTE = 1 << 4;
         const WAITING_ONCHAIN_SETTLEMENT = 1 << 5;
-        /// The on-chain settlement spend is confirmed and TLC reconciliation is still pending.
-        const WAITING_ONCHAIN_RECONCILIATION = 1 << 6;
+        /// The on-chain settlement spend has been confirmed.
+        const ONCHAIN_SETTLEMENT_CONFIRMED = 1 << 6;
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

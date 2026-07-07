@@ -1740,7 +1740,7 @@ where
                 {
                     if let ChannelState::Closed(mut flags) = actor_state.state {
                         if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
-                            flags.insert(CloseFlags::WAITING_ONCHAIN_RECONCILIATION);
+                            flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
                             actor_state.state = ChannelState::Closed(flags);
                             let complete = self
                                 .reconcile_onchain_tlcs_without_live_actor(
@@ -1752,7 +1752,7 @@ where
                             if complete {
                                 flags.remove(
                                     CloseFlags::WAITING_ONCHAIN_SETTLEMENT
-                                        | CloseFlags::WAITING_ONCHAIN_RECONCILIATION,
+                                        | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
                                 );
                                 actor_state.state = ChannelState::Closed(flags);
                                 state.channels_funding_lock_script_cache.remove(&channel_id);
@@ -2292,7 +2292,7 @@ where
                         channel_state,
                         ChannelState::Closed(flags)
                             if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-                                && !flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION)
+                                && !flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             // Spawn async task for concurrent RPC call
@@ -2333,10 +2333,10 @@ where
                             .await;
                         if complete {
                             if let ChannelState::Closed(mut flags) = actor_state.state {
-                                if flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION) {
+                                if flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED) {
                                     flags.remove(
                                         CloseFlags::WAITING_ONCHAIN_SETTLEMENT
-                                            | CloseFlags::WAITING_ONCHAIN_RECONCILIATION,
+                                            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
                                     );
                                     actor_state.state = ChannelState::Closed(flags);
                                     state.channels_funding_lock_script_cache.remove(&channel_id);
@@ -3350,7 +3350,7 @@ where
             return;
         };
         if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-            || flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION)
+            || flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
         {
             return;
         }

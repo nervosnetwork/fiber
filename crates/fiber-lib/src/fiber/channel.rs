@@ -3333,11 +3333,11 @@ where
             )));
         }
 
-        flags.insert(CloseFlags::WAITING_ONCHAIN_RECONCILIATION);
+        flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
         let now = now_timestamp_as_millis_u64();
         if self.reconcile_onchain_tlcs(state, now) {
             flags.remove(
-                CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::WAITING_ONCHAIN_RECONCILIATION,
+                CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
             state.update_state(ChannelState::Closed(flags));
             info!("Channel {:?} on-chain settlement completed", state.get_id());
@@ -3345,7 +3345,7 @@ where
         } else {
             state.update_state(ChannelState::Closed(flags));
             info!(
-                "Channel {:?} on-chain settlement reconciliation incomplete; keeping WAITING_ONCHAIN_RECONCILIATION",
+                "Channel {:?} on-chain settlement reconciliation incomplete; keeping ONCHAIN_SETTLEMENT_CONFIRMED",
                 state.get_id()
             );
         }
@@ -3700,8 +3700,7 @@ where
                     self.settle_onchain_fulfilled_tlcs(state);
                     self.finalize_onchain_timed_out_received_tlcs(state);
                 }
-                if state.is_waiting_onchain_settlement()
-                    && state.is_waiting_onchain_reconciliation()
+                if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
                     self.finalize_onchain_settlement(myself, state).await?;
                 }
@@ -3719,8 +3718,7 @@ where
                         state.tlc_state.set_offered_tlc_removed(id, reason);
                     }
                 }
-                if state.is_waiting_onchain_settlement()
-                    && state.is_waiting_onchain_reconciliation()
+                if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
                     self.finalize_onchain_settlement(myself, state).await?;
                 }
@@ -5172,11 +5170,10 @@ impl ChannelActorState {
         )
     }
 
-    pub fn is_waiting_onchain_reconciliation(&self) -> bool {
+    pub fn is_onchain_settlement_confirmed(&self) -> bool {
         matches!(
             self.state,
-            ChannelState::Closed(flags)
-                if flags.contains(CloseFlags::WAITING_ONCHAIN_RECONCILIATION)
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
         )
     }
 
