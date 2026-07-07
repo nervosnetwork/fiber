@@ -23,6 +23,7 @@ pub mod cch;
 pub use cch::{CchActor, CchConfig};
 
 pub mod invoice;
+pub mod liquidity;
 pub mod rpc;
 pub mod store;
 #[cfg(feature = "watchtower")]
