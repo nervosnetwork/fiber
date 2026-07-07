@@ -1463,6 +1463,36 @@ impl PendingNotifySettleTlc {
     }
 }
 
+/// Immutable channel parameters set during channel opening and never changed.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChannelImmutableData {
+    pub local_pubkey: Pubkey,
+    pub remote_pubkey: Pubkey,
+    pub id: Hash256,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_tx: Option<Transaction>,
+    pub funding_tx_confirmed_at: Option<(H256, u32, u64)>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_udt_type_script: Option<Script>,
+    pub is_acceptor: bool,
+    pub is_one_way: bool,
+    pub local_reserved_ckb_amount: u64,
+    pub remote_reserved_ckb_amount: u64,
+    pub commitment_fee_rate: u64,
+    pub commitment_delay_epoch: u64,
+    pub funding_fee_rate: u64,
+    pub signer: InMemorySigner,
+    pub local_channel_public_keys: ChannelBasePublicKeys,
+    pub local_constraints: ChannelConstraints,
+    pub remote_constraints: ChannelConstraints,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_shutdown_script: Option<Script>,
+    #[serde_as(as = "EntityHex")]
+    pub local_shutdown_script: Script,
+    pub created_at: SystemTime,
+}
+
 /// The core serializable state of a channel actor.
 ///
 /// This struct contains all the persistable fields of a channel.
