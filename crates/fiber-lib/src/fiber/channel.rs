@@ -20,6 +20,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     OnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
+use crate::store::actor::StoreActorMessage;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::utils::arithmetic::{
@@ -63,7 +64,7 @@ use ckb_types::{
     H256,
 };
 use fiber_types::{
-    blake2b_hash_with_salt, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand,
+    blake2b_hash_with_salt, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData,
     ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState,
     ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
@@ -194,7 +195,7 @@ pub struct TlcNotification {
 #[derive(Debug, AsRefStr)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
-    FundingTxSigned(Transaction),
+    FundingTxSigned(Transaction, RpcReplyPort<Result<(), String>>),
     CommitmentSigned(Option<RpcReplyPort<Result<(), String>>>),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
@@ -218,7 +219,7 @@ impl Display for ChannelCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChannelCommand::TxCollaborationCommand(_) => write!(f, "TxCollaborationCommand"),
-            ChannelCommand::FundingTxSigned(_) => write!(f, "FundingTxSigned"),
+            ChannelCommand::FundingTxSigned(_, _) => write!(f, "FundingTxSigned"),
             ChannelCommand::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
@@ -242,6 +243,7 @@ impl ChannelCommand {
     pub fn rpc_reply_port(self) -> Option<RpcReplyPort<Result<(), String>>> {
         match self {
             ChannelCommand::CommitmentSigned(Some(port)) => Some(port),
+            ChannelCommand::FundingTxSigned(_, port) => Some(port),
             ChannelCommand::Shutdown(_, port) => Some(port),
             ChannelCommand::Update(_, port) => Some(port),
             _ => None,
@@ -438,6 +440,7 @@ pub struct ChannelActor<S> {
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
 }
 
 impl<S> ChannelActor<S>
@@ -449,12 +452,14 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
+            store_actor,
         }
     }
 
@@ -1903,13 +1908,7 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            // Keep the preimage for outbound forwarded TLCs until the inbound side finishes.
-            // For inbound forwarded TLCs, keep it while another same-hash TLC still needs
-            // on-chain settlement.
-            let should_remove_preimage = tlc_info.forwarding_tlc.is_none()
-                || (tlc_info.is_received()
-                    && !self.has_onchain_tlc_for_payment_hash(state, tlc_info.payment_hash));
-            if should_remove_preimage {
+            if !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash) {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
@@ -1951,45 +1950,6 @@ where
             }
         }
         Ok(())
-    }
-
-    fn has_onchain_tlc_for_payment_hash(
-        &self,
-        current_state: &ChannelActorState,
-        payment_hash: Hash256,
-    ) -> bool {
-        let is_waiting_onchain_resolution = |channel_state: &ChannelState| {
-            matches!(
-                channel_state,
-                ChannelState::Closed(flags)
-                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-            ) || matches!(
-                channel_state,
-                ChannelState::ShuttingDown(flags)
-                    if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
-            )
-        };
-        let has_onchain_tlc = |state: &ChannelActorState| {
-            is_waiting_onchain_resolution(&state.state)
-                && state
-                    .tlc_state
-                    .all_tlcs()
-                    .any(|tlc| tlc.payment_hash == payment_hash)
-        };
-
-        if has_onchain_tlc(current_state) {
-            return true;
-        }
-
-        let current_channel_id = current_state.get_id();
-        self.store
-            .get_channel_states(None)
-            .into_iter()
-            .filter(|(_, channel_id, channel_state)| {
-                *channel_id != current_channel_id && is_waiting_onchain_resolution(channel_state)
-            })
-            .filter_map(|(_, channel_id, _)| self.store.get_channel_actor_state(&channel_id))
-            .any(|state| has_onchain_tlc(&state))
     }
 
     fn remove_preimage(&self, payment_hash: Hash256) {
@@ -2763,24 +2723,10 @@ where
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::FundingTxSigned(tx) => {
-                match state.state {
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
-                        state.funding_tx = Some(tx);
-                        state.update_state(ChannelState::AwaitingTxSignatures(flags));
-                    }
-                    ChannelState::AwaitingChannelReady(_)
-                        if state.ephemeral_config.external_funding.enabled
-                            && state.ephemeral_config.external_funding.signed_submitted =>
-                    {
-                        state.funding_tx = Some(tx);
-                    }
-                    _ => {
-                        error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but got {:?}", state.state);
-                    }
-                }
-                Ok(())
+            ChannelCommand::FundingTxSigned(tx, reply) => {
+                let result = state.apply_funding_tx_signed(tx);
+                let _ = reply.send(result.clone().map_err(|err| err.to_string()));
+                result
             }
             ChannelCommand::CommitmentSigned(rpc_reply) => {
                 let result = self.handle_commitment_signed_command(myself, state).await;
@@ -2996,7 +2942,11 @@ where
         let expired_tlcs: Vec<_> = state
             .tlc_state
             .get_committed_received_tlcs()
-            .filter(|tlc| tlc.forwarding_tlc.is_none() && tlc.expiry < expect_expiry)
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < expect_expiry
+            })
             .collect();
         for tlc in expired_tlcs {
             info!(
@@ -4216,6 +4166,23 @@ where
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());
 
+                let reestablish_channel = ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: channel.get_local_commitment_number(),
+                    remote_commitment_number: channel.get_remote_commitment_number(),
+                };
+
+                if channel.state != ChannelState::Stale {
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
+                                FiberMessage::reestablish_channel(reestablish_channel),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+
                 channel
             }
             ChannelInitializationOperation::OpenChannelWithExternalFunding(
@@ -4440,6 +4407,15 @@ where
             state.persist_external_funding_state();
         }
         self.store.insert_channel_actor_state(state.clone());
+
+        if state.needs_backup {
+            if let Some(ref store_actor) = self.store_actor {
+                store_actor
+                    .cast(StoreActorMessage::RequestBackup)
+                    .map_err(|e| e.to_string())?;
+            }
+            state.needs_backup = false;
+        }
 
         let channel_id = state.get_id();
         let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
@@ -4798,6 +4774,11 @@ pub struct ChannelActorState {
     // signing key
     #[doc = "skip_store"]
     pub private_key: Option<Privkey>,
+
+    // Indicates that the state has changed and a backup should be triggered
+    // at the end of the current message processing loop.
+    #[doc = "skip_store"]
+    pub needs_backup: bool,
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
@@ -4861,6 +4842,7 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         };
         state.hydrate_external_funding_runtime();
         Ok(state)
@@ -5132,6 +5114,28 @@ enum TlcUpdateAction {
 
 // Constructors for the channel actor state.
 impl ChannelActorState {
+    pub(crate) fn apply_funding_tx_signed(&mut self, tx: Transaction) -> ProcessingChannelResult {
+        match self.state {
+            ChannelState::AwaitingTxSignatures(flags) => {
+                let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
+                self.funding_tx = Some(tx);
+                self.update_state(ChannelState::AwaitingTxSignatures(flags));
+                Ok(())
+            }
+            ChannelState::AwaitingChannelReady(_)
+                if self.ephemeral_config.external_funding.enabled
+                    && self.ephemeral_config.external_funding.signed_submitted =>
+            {
+                self.funding_tx = Some(tx);
+                Ok(())
+            }
+            _ => Err(ProcessingChannelError::InvalidState(format!(
+                "Expected channel state to accept FundingTxSigned, got {:?}",
+                self.state
+            ))),
+        }
+    }
+
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
         self.network
             .as_ref()
@@ -5174,9 +5178,8 @@ impl ChannelActorState {
             | ChannelState::SigningCommitment(..)
             | ChannelState::AwaitingTxSignatures(..)
             | ChannelState::AwaitingChannelReady(..)
-            | ChannelState::CollaboratingFundingTx(..) => {
-                Some(OfflineChannelRestoreMode::ReestablishPeer)
-            }
+            | ChannelState::CollaboratingFundingTx(..)
+            | ChannelState::Stale => Some(OfflineChannelRestoreMode::ReestablishPeer),
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) =>
             {
@@ -5198,6 +5201,13 @@ impl ChannelActorState {
 
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
         self.local_tlc_info.enabled
+    }
+
+    pub fn is_risk_of_penalty(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+        )
     }
 
     pub fn set_waiting_peer_response(&mut self) {
@@ -5835,6 +5845,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: Some(private_key),
+            needs_backup: true,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -5930,6 +5941,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: Some(private_key),
+            needs_backup: true,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
@@ -6226,11 +6238,14 @@ impl ChannelActorState {
     }
 
     pub(crate) fn update_state(&mut self, new_state: ChannelState) {
-        debug!(
-            "Updating channel state from {:?} to {:?}",
-            &self.state, &new_state
-        );
-        self.state = new_state;
+        if self.state != new_state {
+            debug!(
+                "Updating channel state from {:?} to {:?}",
+                &self.state, &new_state
+            );
+            self.state = new_state;
+            self.needs_backup = true;
+        }
         if matches!(
             self.state,
             ChannelState::ChannelReady | ChannelState::Closed(_)
@@ -7008,35 +7023,41 @@ impl ChannelActorState {
     // The offerer who offered this tlc will have the first pubkey, and the receiver
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
-    pub fn get_tlc_pubkeys(&self, tlc: &TlcInfo) -> (Pubkey, Pubkey) {
+    pub fn get_tlc_pubkeys(
+        &self,
+        tlc: &TlcInfo,
+    ) -> Result<(Pubkey, Pubkey), ProcessingChannelError> {
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
-        let local_pubkey = derive_tlc_pubkey(
+        let local_pubkey = try_derive_tlc_pubkey(
             &self.get_local_channel_public_keys().tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
-        );
-        let remote_pubkey = derive_tlc_pubkey(
+        )
+        .map_err(ProcessingChannelError::InvalidParameter)?;
+        let remote_pubkey = try_derive_tlc_pubkey(
             &self.get_remote_channel_public_keys().tlc_base_key,
             &self.get_remote_commitment_point(local_commitment_number),
-        );
-        (local_pubkey, remote_pubkey)
+        )
+        .map_err(ProcessingChannelError::InvalidParameter)?;
+        Ok((local_pubkey, remote_pubkey))
     }
 
-    fn get_tlc_keys(&self, tlc: &TlcInfo) -> (Privkey, Pubkey) {
+    fn get_tlc_keys(&self, tlc: &TlcInfo) -> Result<(Privkey, Pubkey), ProcessingChannelError> {
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
 
-        (
+        Ok((
             self.signer.derive_tlc_key(remote_commitment_number),
-            derive_tlc_pubkey(
+            try_derive_tlc_pubkey(
                 &self.get_remote_channel_public_keys().tlc_base_key,
                 &self.get_remote_commitment_point(local_commitment_number),
-            ),
-        )
+            )
+            .map_err(ProcessingChannelError::InvalidParameter)?,
+        ))
     }
 
     // We are using tlc base key for settlement keys, since settlement
@@ -7068,12 +7089,15 @@ impl ChannelActorState {
         [a, b].concat()
     }
 
-    fn get_active_tlcs_for_settlement(&self, for_remote: bool) -> Vec<SettlementTlc> {
+    fn get_active_tlcs_for_settlement(
+        &self,
+        for_remote: bool,
+    ) -> Result<Vec<SettlementTlc>, ProcessingChannelError> {
         let tlcs = self.get_active_tlcs(for_remote);
         tlcs.into_iter()
             .map(|tlc| {
-                let (local_key, remote_key) = self.get_tlc_keys(&tlc);
-                SettlementTlc {
+                let (local_key, remote_key) = self.get_tlc_keys(&tlc)?;
+                Ok(SettlementTlc {
                     tlc_id: tlc.tlc_id,
                     hash_algorithm: tlc.hash_algorithm,
                     payment_amount: tlc.amount,
@@ -7081,7 +7105,7 @@ impl ChannelActorState {
                     expiry: tlc.expiry,
                     local_key,
                     remote_key,
-                }
+                })
             })
             .collect()
     }
@@ -8511,11 +8535,10 @@ impl ChannelActorState {
             .update_for_revoke_and_ack(commitment_numbers);
         self.set_waiting_ack(myself, false);
 
-        let tlcs = self.get_active_tlcs_for_settlement(true);
         info!(
             "After RevokeAndAckReceived settlement data for commitment_number: {}, tlcs count: {}, tlc_state: {:?}",
             self.get_local_commitment_number(),
-            tlcs.len(),
+            settlement_data.tlcs.len(),
             self.tlc_state
                 .all_tlcs()
                 .map(|tlc| tlc.status.clone())
@@ -8875,6 +8898,36 @@ impl ChannelActorState {
                     self.on_reestablished_channel_ready(myself);
                     debug_event!(network, "Reestablished channel in ChannelReady");
                 }
+            }
+            ChannelState::Stale => {
+                let my_local = self.get_local_commitment_number();
+                let my_remote = self.get_remote_commitment_number();
+                let peer_local = reestablish_channel.local_commitment_number;
+                let peer_remote = reestablish_channel.remote_commitment_number;
+
+                if peer_local.abs_diff(my_remote) > 1 || peer_remote.abs_diff(my_local) > 1 {
+                    error!(
+                        "Audit Failed for Stale channel: Local(L:{}, R:{}), Peer(L:{}, R:{})",
+                        my_local, my_remote, peer_local, peer_remote
+                    );
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "reestablish channel message with invalid commitment numbers during audit"
+                            .to_string(),
+                    ));
+                }
+
+                info!(
+                    "Passive audit passed for channel {}. Resuming to Ready.",
+                    self.get_id()
+                );
+                self.update_state(ChannelState::ChannelReady);
+
+                return Box::pin(self.handle_reestablish_channel_message(
+                    myself,
+                    reestablish_channel,
+                    pending_commit_diff,
+                ))
+                .await;
             }
             ChannelState::ShuttingDown(flags) => {
                 // Resend the shutdown message to the peer if we have not received the peer's shutdown message.
@@ -9682,7 +9735,7 @@ impl ChannelActorState {
         Ok(SettlementData {
             local_amount: to_local_value,
             remote_amount: to_remote_value,
-            tlcs: self.get_active_tlcs_for_settlement(for_remote),
+            tlcs: self.get_active_tlcs_for_settlement(for_remote)?,
         })
     }
 
@@ -9930,6 +9983,34 @@ impl ChannelActorState {
     }
 }
 
+pub(crate) fn has_pending_tlc_for_payment_hash<S>(
+    store: &S,
+    current_state: &ChannelActorState,
+    payment_hash: Hash256,
+) -> bool
+where
+    S: ChannelActorStateStore,
+{
+    let has_matching_tlc = |state: &ChannelActorState| {
+        state
+            .tlc_state
+            .all_tlcs()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    };
+
+    if has_matching_tlc(current_state) {
+        return true;
+    }
+
+    let current_channel_id = current_state.get_id();
+    store
+        .get_channel_states(None)
+        .into_iter()
+        .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
+        .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
+        .any(|state| has_matching_tlc(&state))
+}
+
 pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
@@ -9964,6 +10045,7 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState>;
     fn insert_payment_custom_records(
         &self,
         payment_hash: &Hash256,
@@ -10255,6 +10337,7 @@ mod tests {
             ephemeral_config: ChannelEphemeralConfig::default(),
             funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         }
     }
 

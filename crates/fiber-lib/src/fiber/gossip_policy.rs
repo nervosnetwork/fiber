@@ -507,6 +507,10 @@ impl DiscreteTokenBucket {
         self.available -= 1;
         true
     }
+
+    fn is_full(&self) -> bool {
+        self.available == self.capacity
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -549,7 +553,15 @@ impl ChannelUpdateLimiter {
         }
 
         if self.buckets.len() >= self.max_entries {
-            self.evict_oldest_entry();
+            self.prune_idle_entries(now_ms);
+        }
+
+        if self.buckets.len() >= self.max_entries {
+            warn!(
+                max_entries = self.max_entries,
+                "Rejecting channel update rate-limit key due to capacity limit"
+            );
+            return false;
         }
 
         let mut entry = ChannelUpdateLimiterEntry {
@@ -561,16 +573,11 @@ impl ChannelUpdateLimiter {
         allowed
     }
 
-    fn evict_oldest_entry(&mut self) {
-        let Some(oldest_key) = self
-            .buckets
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_used_ms)
-            .map(|(key, _)| key.clone())
-        else {
-            return;
-        };
-        self.buckets.remove(&oldest_key);
+    fn prune_idle_entries(&mut self, now_ms: u64) {
+        self.buckets.retain(|_, entry| {
+            entry.bucket.refill(now_ms);
+            !entry.bucket.is_full()
+        });
     }
 
     #[cfg(test)]
@@ -723,6 +730,22 @@ impl GossipPolicyState {
 
     pub(crate) fn outbound_delay_queue_capacity(&self) -> usize {
         self.outbound_delay_queue_capacity
+    }
+
+    pub(crate) fn outbound_global_delayed_byte_capacity(&self) -> Option<u64> {
+        if self.global_outbound.is_disabled() {
+            None
+        } else {
+            Some(self.global_outbound.burst_bytes())
+        }
+    }
+
+    pub(crate) fn outbound_peer_delayed_byte_capacity(&self) -> Option<u64> {
+        if self.peer_outbound_config.is_disabled() {
+            None
+        } else {
+            Some(self.peer_outbound_config.burst_bytes)
+        }
     }
 }
 

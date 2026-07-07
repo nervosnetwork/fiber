@@ -1579,6 +1579,7 @@ impl NetworkNode {
                 event_sender,
                 chain_actor.clone(),
                 store.clone(),
+                None,
                 network_graph.clone(),
                 chain_client.clone(),
             ),
@@ -1661,6 +1662,7 @@ impl NetworkNode {
                     Some(network_actor.clone()),
                     None,
                     store.clone(),
+                    None,
                     Some(network_graph.clone()),
                     root.get_cell(),
                     None,
@@ -2057,6 +2059,11 @@ impl NetworkNode {
 
     pub fn get_store(&self) -> &Store {
         &self.store
+    }
+
+    #[cfg(test)]
+    pub fn get_actor(&self) -> ActorRef<NetworkActorMessage> {
+        self.network_actor.clone()
     }
 }
 

@@ -1,3 +1,6 @@
+use std::path::Path;
+
+use crate::error::StoreError;
 use crate::iterator::{IteratorDirection, KVPair, PrefixIterator};
 
 /// A function that determines whether to keep taking items during iteration.
@@ -72,4 +75,10 @@ pub trait StorageBackend: Send + Sync {
     ) -> PrefixIterator<'_, Self> {
         PrefixIterator::new_from(self, prefix.into(), start_key.into())
     }
+
+    /// Backup the node database to a specified path.
+    fn backup(&self, path: &Path) -> Result<(), StoreError>;
+
+    /// Restore the node database with a specified path.
+    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError>;
 }

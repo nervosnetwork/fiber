@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
 use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
+use crate::error::StoreError;
 use crate::iterator::{IteratorDirection, KVPair};
 
 /// SQLite-backed key-value store.
@@ -140,6 +141,90 @@ impl StorageBackend for Store {
             results.push(KVPair { key, value });
         }
         results
+    }
+
+    fn backup(&self, path: &Path) -> Result<(), StoreError> {
+        let target_dir = PathBuf::from(&path);
+
+        if target_dir.exists() {
+            return Err(StoreError::BackupError(format!(
+                "Backup directory: {:?} already exists",
+                path
+            )));
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&target_dir) {
+            return Err(StoreError::BackupError(format!(
+                "Failed to create backup directory: {}",
+                e
+            )));
+        }
+
+        let db_file_path = target_dir.join("data.sqlite");
+        let db_file_str = db_file_path
+            .to_str()
+            .ok_or_else(|| StoreError::BackupError("Invalid backup path encoding".to_string()))?;
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::BackupError("lock poisoned".to_string()))?;
+
+        conn.execute("VACUUM INTO ?1", [db_file_str])
+            .map_err(|e| StoreError::BackupError(format!("SQLite VACUUM INTO failed: {}", e)))?;
+
+        Ok(())
+    }
+
+    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        // Restore source: restore_path/data.sqlite
+        let source_file = restore_path.join("data.sqlite");
+        // Target db file: db_path/data.sqlite
+        let target_file = db_path.join("data.sqlite");
+
+        if !source_file.exists() || !source_file.is_file() {
+            return Err(StoreError::RestoreError(format!(
+                "Backup source file not found at: {:?}",
+                source_file
+            )));
+        }
+
+        if !db_path.exists() {
+            std::fs::create_dir_all(db_path).map_err(|e| {
+                StoreError::RestoreError(format!("Failed to create DB directory: {}", e))
+            })?;
+        }
+
+        if target_file.exists() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("Duration since unix epoch")
+                .as_millis() as u64;
+            // Prevent accidental deletion of the current database
+            let backup_name = format!("data.sqlite.bak.{}", now);
+            let safety_bak_path = db_path.join(backup_name);
+
+            std::fs::rename(&target_file, &safety_bak_path).map_err(|e| {
+                StoreError::RestoreError(format!("Failed to backup current DB: {}", e))
+            })?;
+
+            // Old logs and indexes must be deleted to prevent offset conflicts when the new database is started.
+            let wal_file = db_path.join("data.sqlite-wal");
+            let shm_file = db_path.join("data.sqlite-shm");
+
+            if wal_file.exists() {
+                let _ = std::fs::remove_file(wal_file);
+            }
+            if shm_file.exists() {
+                let _ = std::fs::remove_file(shm_file);
+            }
+        }
+
+        std::fs::copy(&source_file, &target_file).map_err(|e| {
+            StoreError::RestoreError(format!("Failed to copy database file: {}", e))
+        })?;
+
+        Ok(())
     }
 }
 

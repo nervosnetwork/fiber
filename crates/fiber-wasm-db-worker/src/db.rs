@@ -129,9 +129,9 @@ where
         DbCommandRequest::Read { .. } | DbCommandRequest::Iterator { .. } => {
             TransactionMode::ReadOnly
         }
-        DbCommandRequest::Put { .. } | DbCommandRequest::Delete { .. } => {
-            TransactionMode::ReadWrite
-        }
+        DbCommandRequest::Put { .. }
+        | DbCommandRequest::Delete { .. }
+        | DbCommandRequest::BatchWrite { .. } => TransactionMode::ReadWrite,
     };
     let tran = db
         .transaction(&[&store_name], tx_mode)
@@ -181,6 +181,26 @@ where
                     .map_err(|e| anyhow!("Failed to delete: {:?}", e))?;
             }
             DbCommandResponse::Delete
+        }
+        DbCommandRequest::BatchWrite { deletes, puts } => {
+            for key in deletes {
+                let key = serde_wasm_bindgen::to_value(&key).unwrap();
+                store
+                    .delete(key)
+                    .map_err(|e| anyhow!("Failed to send delete request: {:?}", e))?
+                    .await
+                    .map_err(|e| anyhow!("Failed to delete: {:?}", e))?;
+            }
+            for KV { key, value } in puts {
+                let key = serde_wasm_bindgen::to_value(&key).unwrap();
+                let value = serde_wasm_bindgen::to_value(&value).unwrap();
+                store
+                    .put(&value, Some(&key))
+                    .map_err(|e| anyhow!("Failed to send put request: {:?}", e))?
+                    .await
+                    .map_err(|e| anyhow!("Failed to put: {:?}", e))?;
+            }
+            DbCommandResponse::BatchWrite
         }
         DbCommandRequest::Iterator {
             start,

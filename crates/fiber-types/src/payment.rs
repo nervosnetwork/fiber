@@ -1020,6 +1020,22 @@ impl PaymentSession {
         self.request.amount.saturating_sub(sent_amount)
     }
 
+    /// Amount to use when rebuilding a route for a retrying attempt.
+    ///
+    /// For sender-side trampoline routing, the visible route receiver is the first
+    /// trampoline hop and may include trampoline fee budget, so retry the original
+    /// payment amount instead of the visible route receiver amount.
+    pub fn retry_amount(&self, attempt: &Attempt) -> Option<u128> {
+        if self.request.use_trampoline_routing() {
+            // trampoline routing will only have one attempt,
+            // so we can use the original amount for retrying
+            Some(self.request.amount)
+        } else {
+            self.remain_amount()
+                .checked_add(attempt.route.receiver_amount())
+        }
+    }
+
     pub fn new_attempt(
         &self,
         attempt_id: u64,

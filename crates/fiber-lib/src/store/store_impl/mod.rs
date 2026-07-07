@@ -4,6 +4,7 @@ use ckb_types::packed::Script;
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
+use fiber_store::StoreError;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -132,6 +133,14 @@ impl StorageBackend for Store {
     ) -> Vec<KVPair> {
         self.inner
             .collect_iterator(start, direction, take_while_fn, limit)
+    }
+
+    fn backup(&self, path: &Path) -> Result<(), StoreError> {
+        self.inner.backup(path)
+    }
+
+    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        self.inner.restore(restore_path, db_path)
     }
 }
 
@@ -413,6 +422,10 @@ pub enum StoreChange {
     PutPaymentSession {
         payment_hash: Hash256,
         payment_session: PaymentSession,
+    },
+    PutAttempt {
+        payment_hash: Hash256,
+        attempt_status: AttemptStatus,
     },
 }
 
@@ -873,6 +886,14 @@ impl ChannelActorStateStore for Store {
             .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
     }
 
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState> {
+        let prefix = &[CHANNEL_ACTOR_STATE_PREFIX];
+        self.collect_by_prefix(prefix)
+            .into_iter()
+            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelActorState"))
+            .collect()
+    }
+
     fn insert_payment_custom_records(
         &self,
         payment_hash: &Hash256,
@@ -1220,6 +1241,10 @@ impl NetworkGraphStateStore for Store {
         }
 
         batch.commit();
+        self.notify(StoreChange::PutAttempt {
+            payment_hash: attempt.payment_hash,
+            attempt_status: attempt.status,
+        });
     }
 
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {

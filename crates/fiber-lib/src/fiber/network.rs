@@ -1,3 +1,4 @@
+use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
@@ -52,7 +53,7 @@ use super::channel::{
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, PEER_CHANNEL_RESPONSE_TIMEOUT,
 };
 use super::gossip::{
     get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
@@ -66,6 +67,7 @@ use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
     InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
 };
+use crate::actors::log_actor_failed;
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfosExt;
 use crate::ckb::contracts::{
@@ -213,11 +215,85 @@ const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
 /// rapidly reconnects/reestablishes.
 const CHANNEL_READY_RETRY_DEBOUNCE_MS: u64 = 60_000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelReadyRetryScanDecision {
+    ScanNow,
+    ScheduleTrailing(Duration),
+    AlreadyScheduled,
+}
+
+fn decide_channel_ready_retry_scan(
+    last_channel_ready_scan: &mut HashMap<OutPoint, u64>,
+    pending_channel_ready_retry_scans: &mut HashSet<OutPoint>,
+    channel_outpoint: OutPoint,
+    now: u64,
+) -> ChannelReadyRetryScanDecision {
+    let should_scan = last_channel_ready_scan
+        .get(&channel_outpoint)
+        .is_none_or(|last| now.saturating_sub(*last) >= CHANNEL_READY_RETRY_DEBOUNCE_MS);
+
+    if should_scan {
+        last_channel_ready_scan.insert(channel_outpoint.clone(), now);
+        pending_channel_ready_retry_scans.remove(&channel_outpoint);
+        return ChannelReadyRetryScanDecision::ScanNow;
+    }
+
+    if !pending_channel_ready_retry_scans.insert(channel_outpoint.clone()) {
+        return ChannelReadyRetryScanDecision::AlreadyScheduled;
+    }
+
+    let elapsed = last_channel_ready_scan
+        .get(&channel_outpoint)
+        .map(|last| now.saturating_sub(*last))
+        .unwrap_or(0);
+    let remaining = CHANNEL_READY_RETRY_DEBOUNCE_MS.saturating_sub(elapsed);
+
+    ChannelReadyRetryScanDecision::ScheduleTrailing(Duration::from_millis(remaining))
+}
+
 fn funding_retry_delay(retry_count: u32) -> Duration {
     let shift = retry_count.min(63);
     let factor = 1u64 << shift;
     let delay = FUNDING_RETRY_BASE_MILLIS.saturating_mul(factor);
     Duration::from_millis(delay.min(FUNDING_RETRY_MAX_MILLIS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_ready_retry_debounce_coalesces_pending_trailing_scan() {
+        let outpoint = OutPoint::default();
+        let mut last_scans = HashMap::from([(outpoint.clone(), 1_000)]);
+        let mut pending_trailing_scans = HashSet::new();
+
+        let first_decision = decide_channel_ready_retry_scan(
+            &mut last_scans,
+            &mut pending_trailing_scans,
+            outpoint.clone(),
+            2_000,
+        );
+
+        assert_eq!(
+            first_decision,
+            ChannelReadyRetryScanDecision::ScheduleTrailing(Duration::from_millis(59_000))
+        );
+        assert!(pending_trailing_scans.contains(&outpoint));
+
+        let second_decision = decide_channel_ready_retry_scan(
+            &mut last_scans,
+            &mut pending_trailing_scans,
+            outpoint,
+            3_000,
+        );
+
+        assert_eq!(
+            second_decision,
+            ChannelReadyRetryScanDecision::AlreadyScheduled
+        );
+        assert_eq!(last_scans.get(&OutPoint::default()), Some(&1_000));
+    }
 }
 
 /// Handles a `FundingError` with retry logic.  If the error is temporary and
@@ -997,6 +1073,8 @@ pub enum NetworkActorEvent {
     ExternalFundingTxReady(Hash256, Transaction),
     /// A channel is ready to use.
     ChannelReady(Hash256, Pubkey, OutPoint),
+    /// Retry pending payment attempts for a ChannelReady outpoint after debounce.
+    RetryPendingPaymentsForChannel(OutPoint),
     /// A channel is going to be closed, waiting the closing transaction to be broadcasted and confirmed.
     ClosingTransactionPending(Hash256, Pubkey, TransactionView, bool),
 
@@ -1089,6 +1167,7 @@ pub struct NetworkActor<S, C> {
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
 }
@@ -1112,6 +1191,7 @@ where
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
     ) -> Self {
@@ -1119,6 +1199,7 @@ where
             event_sender,
             chain_actor,
             store: store.clone(),
+            store_actor,
             network_graph,
             chain_client,
         }
@@ -1514,61 +1595,33 @@ where
                 // reestablish events. Uses trailing-edge: when suppressed,
                 // schedules a deferred scan so the trailing ChannelReady
                 // (e.g. from a real reconnect) is never lost.
-                let now = now_timestamp_as_millis_u64();
-                let should_scan = state
-                    .last_channel_ready_scan
-                    .get(&channel_outpoint)
-                    .is_none_or(|last| {
-                        now.saturating_sub(*last) >= CHANNEL_READY_RETRY_DEBOUNCE_MS
-                    });
-                if should_scan {
-                    state
-                        .last_channel_ready_scan
-                        .insert(channel_outpoint.clone(), now);
-                    for attempt in self
-                        .store
-                        .get_pending_attempts_by_channel_outpoint(&channel_outpoint)
-                    {
-                        debug!(
-                            "Retrying payment attempt {:?} for channel {:?} reestablished",
-                            attempt.payment_hash, channel_outpoint
-                        );
-                        if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::RetrySendPayment(
-                                attempt.payment_hash,
-                                Some(attempt.id),
-                            ),
-                        )) {
-                            debug!(
-                                "Failed to register payment retry for {:?}: {:?}",
-                                attempt.payment_hash, err
-                            );
-                        }
+                match decide_channel_ready_retry_scan(
+                    &mut state.last_channel_ready_scan,
+                    &mut state.pending_channel_ready_retry_scans,
+                    channel_outpoint.clone(),
+                    now_timestamp_as_millis_u64(),
+                ) {
+                    ChannelReadyRetryScanDecision::ScanNow => {
+                        state.retry_pending_payments_for_channel(&myself, &channel_outpoint);
                     }
-                } else {
-                    // Trailing edge: schedule a deferred scan at cooldown expiry
-                    // so the last ChannelReady in a burst isn't lost.
-                    let elapsed = state
-                        .last_channel_ready_scan
-                        .get(&channel_outpoint)
-                        .map(|last| now.saturating_sub(*last))
-                        .unwrap_or(0);
-                    let remaining = CHANNEL_READY_RETRY_DEBOUNCE_MS.saturating_sub(elapsed);
-                    if remaining > 0 {
+                    ChannelReadyRetryScanDecision::ScheduleTrailing(delay) => {
                         let ch_outpoint = channel_outpoint.clone();
-                        let ch_id = channel_id;
-                        let pk = pubkey;
                         debug!(
                             "Debounced ChannelReady retry scan for {:?}, scheduling deferred scan in {}ms",
-                            ch_outpoint, remaining
+                            ch_outpoint,
+                            delay.as_millis()
                         );
-                        myself.send_after(Duration::from_millis(remaining), move || {
-                            NetworkActorMessage::new_event(NetworkActorEvent::ChannelReady(
-                                ch_id,
-                                pk,
-                                ch_outpoint,
-                            ))
+                        myself.send_after(delay, move || {
+                            NetworkActorMessage::new_event(
+                                NetworkActorEvent::RetryPendingPaymentsForChannel(ch_outpoint),
+                            )
                         });
+                    }
+                    ChannelReadyRetryScanDecision::AlreadyScheduled => {
+                        trace!(
+                            "Debounced ChannelReady retry scan for {:?}, trailing scan already scheduled",
+                            channel_outpoint
+                        );
                     }
                 }
 
@@ -1671,6 +1724,18 @@ where
                     PaymentActorMessage::RetrySendPayment(attempt_id),
                 )
                 .await;
+            }
+            NetworkActorEvent::RetryPendingPaymentsForChannel(channel_outpoint) => {
+                if state
+                    .pending_channel_ready_retry_scans
+                    .remove(&channel_outpoint)
+                    && state.outpoint_channel_map.contains_key(&channel_outpoint)
+                {
+                    state
+                        .last_channel_ready_scan
+                        .insert(channel_outpoint.clone(), now_timestamp_as_millis_u64());
+                    state.retry_pending_payments_for_channel(&myself, &channel_outpoint);
+                }
             }
             NetworkActorEvent::AddTlcResult(
                 payment_hash,
@@ -2653,14 +2718,15 @@ where
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {
-                    let message = state.get_or_create_new_node_announcement_message();
-                    myself
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessageWithTimestamp::NodeAnnouncement(message),
-                            ]),
-                        ))
-                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    if let Some(message) = state.get_or_create_new_node_announcement_message() {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::BroadcastMessages(vec![
+                                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                                ]),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
                 }
             },
             NetworkActorCommand::NodeInfo(_, rpc) => {
@@ -3103,6 +3169,13 @@ where
         // before higher-level payment or invoice notifications are emitted.
         if actor_state_changed {
             self.store.insert_channel_actor_state(actor_state.clone());
+            if let Some(ref store_actor) = state.store_actor {
+                if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
+                    error!(
+                        "Failed to request store backup after on-chain TLC reconciliation: {err}"
+                    );
+                }
+            }
             settlement_state_changed = false;
         }
         for payment_hash in invoice_hashes {
@@ -3132,6 +3205,11 @@ where
 
         if settlement_state_changed {
             self.store.insert_channel_actor_state(actor_state.clone());
+            if let Some(ref store_actor) = state.store_actor {
+                if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
+                    error!("Failed to request store backup after on-chain settlement finalization: {err}");
+                }
+            }
         }
     }
 
@@ -4211,6 +4289,39 @@ where
         let funding_tx = signed_funding_tx.take().expect("take tx");
         let witnesses = funding_tx.witnesses();
 
+        let Some(channel_actor) = state.channels.get(&channel_id).cloned() else {
+            debug!(
+                "Skipping signed funding tx for channel {:?}: channel actor no longer exists",
+                channel_id
+            );
+            return Ok(());
+        };
+
+        match call_t!(
+            channel_actor,
+            |reply| ChannelActorMessage::Command(ChannelCommand::FundingTxSigned(
+                funding_tx.data(),
+                reply,
+            )),
+            PEER_CHANNEL_RESPONSE_TIMEOUT
+        ) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(
+                    "Discarding signed funding tx for channel {:?}: channel rejected FundingTxSigned: {}",
+                    channel_id, err
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(
+                    "Discarding signed funding tx for channel {:?}: failed to acknowledge FundingTxSigned: {}",
+                    channel_id, err
+                );
+                return Ok(());
+            }
+        }
+
         if has_partial_witnesses {
             let outpoint = funding_tx
                 .output_pts_iter()
@@ -4245,19 +4356,6 @@ where
             .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
             .await?;
 
-        if let Err(err) = state
-            .send_command_to_channel(
-                channel_id,
-                ChannelCommand::FundingTxSigned(funding_tx.data()),
-            )
-            .await
-        {
-            error!(
-                "Failed to update signed funding tx {:?}: {}",
-                channel_id, err
-            );
-        }
-
         myself
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
@@ -4290,6 +4388,7 @@ where
 pub struct NetworkActorState<S, C> {
     store: S,
     state_to_be_persisted: PersistentNetworkActorState,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     announced_addrs: Vec<Multiaddr>,
@@ -4364,6 +4463,7 @@ pub struct NetworkActorState<S, C> {
         HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 
     last_channel_ready_scan: HashMap<OutPoint, u64>,
+    pending_channel_ready_retry_scans: HashSet<OutPoint>,
     // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
@@ -4409,7 +4509,37 @@ where
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
-    pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
+    fn retry_pending_payments_for_channel(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        channel_outpoint: &OutPoint,
+    ) {
+        for attempt in self
+            .store
+            .get_pending_attempts_by_channel_outpoint(channel_outpoint)
+        {
+            debug!(
+                "Retrying payment attempt {:?} for channel {:?} reestablished",
+                attempt.payment_hash, channel_outpoint
+            );
+            if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::RetrySendPayment(attempt.payment_hash, Some(attempt.id)),
+            )) {
+                debug!(
+                    "Failed to register payment retry for {:?}: {:?}",
+                    attempt.payment_hash, err
+                );
+            }
+        }
+    }
+
+    pub fn get_or_create_new_node_announcement_message(&mut self) -> Option<NodeAnnouncement> {
+        if self.announced_addrs.is_empty() {
+            debug!("Skipping node announcement because no announced address is configured");
+            self.last_node_announcement_message = None;
+            return None;
+        }
+
         let now = now_timestamp_as_millis_u64();
         match self.last_node_announcement_message {
             // If the last node announcement message is still relatively new, we don't need to create a new one.
@@ -4441,9 +4571,7 @@ where
                 self.last_node_announcement_message = Some(announcement);
             }
         }
-        self.last_node_announcement_message
-            .clone()
-            .expect("last node announcement message is present")
+        self.last_node_announcement_message.clone()
     }
 
     pub fn get_public_key(&self) -> Pubkey {
@@ -4729,7 +4857,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
@@ -4840,7 +4974,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
@@ -4932,7 +5072,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                     funding_amount,
@@ -5475,6 +5621,11 @@ where
                                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
                             ));
                             self.store.insert_channel_actor_state(state);
+                            if let Some(ref store_actor) = self.store_actor {
+                                store_actor
+                                    .cast(StoreActorMessage::RequestBackup)
+                                    .map_err(|e| Error::DBInternalError(e.to_string()))?;
+                            }
 
                             let _ = rpc_reply.send(Ok(()));
                             Ok(())
@@ -5560,6 +5711,7 @@ where
                 remote_pubkey,
                 self.network.clone(),
                 self.store.clone(),
+                self.store_actor.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
@@ -5647,16 +5799,17 @@ where
         }
 
         if self.auto_announce {
-            let message = self.get_or_create_new_node_announcement_message();
-            debug!(
-                "Auto announcing our node to peer {:?} (message: {:?})",
-                remote_pubkey, &message
-            );
-            let _ = self.network.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![
-                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
-                ]),
-            ));
+            if let Some(message) = self.get_or_create_new_node_announcement_message() {
+                debug!(
+                    "Auto announcing our node to peer {:?} (message: {:?})",
+                    remote_pubkey, &message
+                );
+                let _ = self.network.send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                    ]),
+                ));
+            }
         } else {
             debug!(
                 "Auto announcing is disabled, skipping node announcement to peer {:?}",
@@ -5942,6 +6095,7 @@ where
         {
             self.pending_channels.remove(outpoint);
             self.last_channel_ready_scan.remove(outpoint);
+            self.pending_channel_ready_retry_scans.remove(outpoint);
         }
         self.outpoint_channel_map.retain(|_, id| *id != channel_id);
     }
@@ -6586,6 +6740,7 @@ where
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
+            store_actor: self.store_actor.clone(),
             node_name: config.announced_node_name,
             announced_addrs,
             auto_announce: config.auto_announce_node(),
@@ -6631,11 +6786,11 @@ where
             inflight_payments: Default::default(),
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
+            pending_channel_ready_retry_scans: Default::default(),
             inflight_tracers: Default::default(),
         };
 
-        let node_announcement = state.get_or_create_new_node_announcement_message();
-        {
+        if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
             let mut graph = self.network_graph.write().await;
             graph.process_node_announcement(node_announcement);
         }
@@ -6780,7 +6935,7 @@ where
                 debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                log_actor_failed(who, err);
             }
             _ => {}
         }
@@ -6843,7 +6998,10 @@ impl ServiceProtocol for FiberProtocolHandle {
                 );
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Peer disconnected without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
@@ -6861,7 +7019,10 @@ impl ServiceProtocol for FiberProtocolHandle {
                 );
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Received message without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
@@ -6959,6 +7120,7 @@ pub async fn start_network<
     tracker: TaskTracker,
     root_actor: ActorCell,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
@@ -6970,6 +7132,7 @@ pub async fn start_network<
             event_sender,
             chain_actor,
             store,
+            store_actor,
             network_graph,
             chain_client,
         ),

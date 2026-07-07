@@ -1,6 +1,8 @@
 //! Tests for SettleTlcSetCommand
 
-use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore, CommitDiff};
+use crate::fiber::channel::{
+    has_pending_tlc_for_payment_hash, ChannelActorState, ChannelActorStateStore, CommitDiff,
+};
 use crate::fiber::onchain_tlc_reconcile::{payment_hash_prefix, OnChainTlcSettlement};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
@@ -191,11 +193,19 @@ impl ChannelActorStateStore for MockStore {
     }
 
     fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
-        vec![]
+        self.channel_states
+            .borrow()
+            .values()
+            .map(|state| (state.remote_pubkey, state.id, state.state))
+            .collect()
     }
 
     fn get_channel_state_by_outpoint(&self, _id: &OutPoint) -> Option<ChannelActorState> {
         None
+    }
+
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState> {
+        vec![]
     }
 
     fn insert_payment_custom_records(
@@ -374,6 +384,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         ephemeral_config: Default::default(),
         funding_abort_detail: None,
         private_key: None,
+        needs_backup: false,
     }
 }
 
@@ -394,6 +405,42 @@ fn get_error_code(settlement: &TlcSettlement) -> Option<TlcErrorCode> {
         }
         _ => None,
     }
+}
+
+#[test]
+fn test_preimage_cleanup_detects_pending_same_hash_tlc_in_other_channel() {
+    let payment_hash = gen_rand_sha256_hash();
+    let current_channel_id = gen_rand_sha256_hash();
+    let other_channel_id = gen_rand_sha256_hash();
+    let mut current_state =
+        create_test_channel_state_with_tlc(current_channel_id, 0, 1000, payment_hash, None);
+    current_state.tlc_state.apply_remove_tlc(TLCId::Received(0));
+    let other_state =
+        create_test_channel_state_with_tlc(other_channel_id, 0, 1000, payment_hash, None);
+    let store = MockStore::new()
+        .with_channel_state(current_state.clone())
+        .with_channel_state(other_state);
+
+    assert!(
+        has_pending_tlc_for_payment_hash(&store, &current_state, payment_hash),
+        "preimage should stay while another channel has a same-hash tlc"
+    );
+}
+
+#[test]
+fn test_preimage_cleanup_ignores_stale_current_channel_state() {
+    let payment_hash = gen_rand_sha256_hash();
+    let current_channel_id = gen_rand_sha256_hash();
+    let persisted_current_state =
+        create_test_channel_state_with_tlc(current_channel_id, 0, 1000, payment_hash, None);
+    let mut current_state = persisted_current_state.clone();
+    current_state.tlc_state.apply_remove_tlc(TLCId::Received(0));
+    let store = MockStore::new().with_channel_state(persisted_current_state);
+
+    assert!(
+        !has_pending_tlc_for_payment_hash(&store, &current_state, payment_hash),
+        "stale persisted state for the channel currently applying removal must not keep preimage"
+    );
 }
 
 #[test]

@@ -210,6 +210,55 @@ async fn test_expiry_skips_final_orders() {
 }
 
 #[tokio::test]
+async fn test_expiry_skips_non_pending_active_orders() {
+    let (scheduler, store, _) = setup_scheduler().await;
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expiry_delta_seconds = 3600;
+    let created_at = current_time - expiry_delta_seconds - 100;
+
+    for (idx, status) in [
+        CchOrderStatus::IncomingAccepted,
+        CchOrderStatus::OutgoingInFlight,
+        CchOrderStatus::OutgoingSuccess,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let payment_hash = test_payment_hash(20 + idx as u8);
+        let order = create_test_order(payment_hash, created_at, expiry_delta_seconds, status);
+        store.insert_cch_order(order).unwrap();
+
+        scheduler
+            .send_message(SchedulerMessage::ScheduleExpiry {
+                payment_hash,
+                created_at,
+                expiry_delta_seconds,
+            })
+            .unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for (idx, status) in [
+        CchOrderStatus::IncomingAccepted,
+        CchOrderStatus::OutgoingInFlight,
+        CchOrderStatus::OutgoingSuccess,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let payment_hash = test_payment_hash(20 + idx as u8);
+        let order_after = store.get_cch_order(&payment_hash).unwrap();
+        assert_eq!(order_after.status, status);
+        assert!(order_after.failure_reason.is_none());
+    }
+}
+
+#[tokio::test]
 async fn test_schedule_prune_job() {
     let (scheduler, store, _) = setup_scheduler().await;
 

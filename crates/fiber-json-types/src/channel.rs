@@ -405,6 +405,9 @@ pub enum ChannelState {
     ShuttingDown(#[schemars(schema_with = "schema_as_string")] ShuttingDownFlags),
     /// This channel is closed.
     Closed(#[schemars(schema_with = "schema_as_string")] CloseFlags),
+    /// The channel state is potentially outdated (e.g., after a database restore).
+    /// We must perform a passive audit with the peer before resuming operations.
+    Stale,
 }
 
 /// The channel data structure.

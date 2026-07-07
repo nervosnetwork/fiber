@@ -112,6 +112,7 @@ pub enum DbCommandResponse {
     },
     Put,
     Delete,
+    BatchWrite,
     /// Response for Iterator command: the collected key-value pairs.
     Iterator {
         kvs: Vec<KV>,
@@ -133,6 +134,13 @@ pub enum DbCommandRequest {
     /// Input: Keys to remove
     /// Output: None
     Delete { keys: Vec<Vec<u8>> },
+    /// Atomically delete keys then write kv pairs.
+    /// Input: Deletes list and puts list
+    /// Output: None
+    BatchWrite {
+        deletes: Vec<Vec<u8>>,
+        puts: Vec<KV>,
+    },
     /// Iterate over key-value pairs, with `take_while` evaluated via IPC callback.
     /// The worker iterates from `start` in `direction`, calling back to the client
     /// for each key to evaluate `take_while`. Stops when `take_while` returns false
@@ -163,13 +171,33 @@ pub fn write_command_with_payload<T: Serialize>(
     let result_buf = bincode::serde::encode_to_vec(&data, bincode::config::standard())
         .with_context(|| anyhow!("Failed to serialize command payload"))?;
 
-    i32arr.set_index(1, result_buf.len() as i32);
+    store_i32(i32arr, 1, result_buf.len() as i32)?;
     u8arr
         .subarray(8, 8 + result_buf.len() as u32)
         .copy_from(&result_buf);
-    i32arr.set_index(0, cmd);
+    store_command(i32arr, cmd)?;
     Atomics::notify(i32arr, 0).map_err(|e| anyhow!("Failed to notify: {e:?}"))?;
     Ok(())
+}
+
+/// Atomically load the command word from a shared IPC buffer.
+pub fn load_command(i32arr: &Int32Array) -> anyhow::Result<i32> {
+    load_i32(i32arr, 0)
+}
+
+/// Atomically store the command word in a shared IPC buffer.
+pub fn store_command(i32arr: &Int32Array, cmd: i32) -> anyhow::Result<()> {
+    store_i32(i32arr, 0, cmd)
+}
+
+fn load_i32(i32arr: &Int32Array, index: u32) -> anyhow::Result<i32> {
+    Atomics::load(i32arr, index).map_err(|e| anyhow!("Failed to load IPC word {index}: {e:?}"))
+}
+
+fn store_i32(i32arr: &Int32Array, index: u32, value: i32) -> anyhow::Result<()> {
+    Atomics::store(i32arr, index, value)
+        .map(|_| ())
+        .map_err(|e| anyhow!("Failed to store IPC word {index}: {e:?}"))
 }
 
 /// Read the payload from the given input buffer/output buffer.
@@ -179,7 +207,7 @@ pub fn read_command_payload<T: DeserializeOwned>(
     i32arr: &Int32Array,
     u8arr: &Uint8Array,
 ) -> anyhow::Result<T> {
-    let length = i32arr.get_index(1) as u32;
+    let length = load_i32(i32arr, 1)? as u32;
     let mut buf = vec![0u8; length as usize];
     u8arr.subarray(8, 8 + length).copy_to(&mut buf);
 

@@ -523,4 +523,20 @@ impl Pubkey {
         let point = result.not_inf().expect("valid public key");
         PublicKey::from(point).into()
     }
+
+    /// Fallibly tweak this public key by a scalar.
+    pub fn try_tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Result<Self, String> {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar).map_err(|err| {
+            format!(
+                "Value {:?} must be within secp256k1 scalar range: {}",
+                &scalar, err
+            )
+        })?;
+        let result = Point::from(self) + scalar.base_point_mul();
+        let point = result
+            .not_inf()
+            .map_err(|_| "derived public key is point at infinity".to_string())?;
+        Ok(PublicKey::from(point).into())
+    }
 }

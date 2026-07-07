@@ -37,6 +37,7 @@ use tokio::sync::oneshot;
 use tokio_util::codec::length_delimited;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::actors::log_actor_failed;
 #[cfg(any(test, feature = "bench"))]
 use crate::fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT;
 use crate::{
@@ -92,6 +93,10 @@ const MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS: u64 =
 
 pub(crate) const DEFAULT_NUM_OF_BROADCAST_MESSAGE: u16 = 100;
 const MAX_INCOMPLETE_GOSSIP_MESSAGES_PER_PEER: usize = 1000;
+#[cfg(target_arch = "wasm32")]
+const MAX_CONCURRENT_CA_VERIFICATION: usize = 5;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CONCURRENT_CA_VERIFICATION: usize = 10;
 const MAX_INCOMPLETE_GOSSIP_MESSAGES_TOTAL: usize = 10_000;
 
 const MAX_NUM_OF_ACTIVE_SYNCING_PEERS: usize = 3;
@@ -749,7 +754,8 @@ struct DelayedGossipMessage {
 #[derive(Debug, Default)]
 struct DelayedGossipMessageQueue {
     per_peer_capacity: usize,
-    per_peer_counts: HashMap<Pubkey, usize>,
+    per_peer_bytes: HashMap<Pubkey, u64>,
+    total_bytes: u64,
     messages: VecDeque<DelayedGossipMessage>,
 }
 
@@ -757,7 +763,8 @@ impl DelayedGossipMessageQueue {
     fn new(capacity: usize) -> Self {
         Self {
             per_peer_capacity: capacity,
-            per_peer_counts: HashMap::new(),
+            per_peer_bytes: HashMap::new(),
+            total_bytes: 0,
             messages: VecDeque::new(),
         }
     }
@@ -766,13 +773,37 @@ impl DelayedGossipMessageQueue {
         if self.is_full_for_peer(&message.target) {
             return false;
         }
-        *self.per_peer_counts.entry(message.target).or_default() += 1;
+        self.add_message_accounting(&message);
         self.messages.push_back(message);
         true
     }
 
+    fn add_message_accounting(&mut self, message: &DelayedGossipMessage) {
+        let peer_bytes = self.per_peer_bytes.entry(message.target).or_default();
+        *peer_bytes = peer_bytes.saturating_add(message.reserved_bytes);
+        self.total_bytes = self.total_bytes.saturating_add(message.reserved_bytes);
+    }
+
     fn is_full_for_peer(&self, peer: &Pubkey) -> bool {
-        self.per_peer_counts.get(peer).copied().unwrap_or_default() >= self.per_peer_capacity
+        self.messages
+            .iter()
+            .filter(|message| &message.target == peer)
+            .count()
+            >= self.per_peer_capacity
+    }
+
+    fn queued_bytes_for_peer(&self, peer: &Pubkey) -> u64 {
+        self.per_peer_bytes.get(peer).copied().unwrap_or_default()
+    }
+
+    fn exceeds_peer_byte_capacity(&self, peer: &Pubkey, bytes: u64, capacity: Option<u64>) -> bool {
+        capacity.is_some_and(|capacity| {
+            self.queued_bytes_for_peer(peer).saturating_add(bytes) > capacity
+        })
+    }
+
+    fn exceeds_global_byte_capacity(&self, bytes: u64, capacity: Option<u64>) -> bool {
+        capacity.is_some_and(|capacity| self.total_bytes.saturating_add(bytes) > capacity)
     }
 
     fn next_ready_at_ms(&self) -> Option<u64> {
@@ -787,7 +818,7 @@ impl DelayedGossipMessageQueue {
         let mut pending = VecDeque::with_capacity(self.messages.len());
         while let Some(message) = self.messages.pop_front() {
             if message.ready_at_ms <= now_ms {
-                self.decrement_peer_count(&message.target);
+                self.remove_message_accounting(&message);
                 ready.push(message);
             } else {
                 pending.push_back(message);
@@ -802,24 +833,25 @@ impl DelayedGossipMessageQueue {
         let mut retained = VecDeque::with_capacity(self.messages.len());
         while let Some(message) = self.messages.pop_front() {
             if &message.target == peer {
+                self.remove_message_accounting(&message);
                 removed.push(message);
             } else {
                 retained.push_back(message);
             }
         }
         self.messages = retained;
-        self.per_peer_counts.remove(peer);
         removed
     }
 
-    fn decrement_peer_count(&mut self, peer: &Pubkey) {
-        let Some(count) = self.per_peer_counts.get_mut(peer) else {
-            return;
-        };
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-            self.per_peer_counts.remove(peer);
+    fn remove_message_accounting(&mut self, message: &DelayedGossipMessage) {
+        let peer = &message.target;
+        if let Some(bytes) = self.per_peer_bytes.get_mut(peer) {
+            *bytes = bytes.saturating_sub(message.reserved_bytes);
+            if *bytes == 0 {
+                self.per_peer_bytes.remove(peer);
+            }
         }
+        self.total_bytes = self.total_bytes.saturating_sub(message.reserved_bytes);
     }
 }
 
@@ -1626,7 +1658,9 @@ pub struct ExtendedGossipMessageStoreState<S, C> {
     num_query_tasks_running: usize,
 }
 
-impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S, C> {
+impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
+    ExtendedGossipMessageStoreState<S, C>
+{
     fn new(
         announce_private_addr: bool,
         inbound_channel_update: ChannelUpdateRateLimitConfig,
@@ -1675,6 +1709,19 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         );
 
         let mut verified_sorted_messages = Vec::with_capacity(complete_messages.len());
+
+        // Clone data for concurrent verification, so we don't hold &mut self
+        // while futures are in-flight (CAs need slow CKB RPCs).
+        let store = self.store.clone();
+        let chain_actor = self.chain_actor.clone();
+        let chain_client = self.chain_client.clone();
+
+        // Limit concurrent CKB RPC calls to avoid overwhelming the CKB node.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CA_VERIFICATION));
+
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let mut tasks = FuturesUnordered::new();
+
         for (message, peers) in complete_messages {
             if self.should_defer_message_verification(&message) {
                 trace!(
@@ -1683,14 +1730,25 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 );
                 continue;
             }
-            match verify_and_save_broadcast_message(
-                &message,
-                &self.store,
-                &self.chain_actor,
-                &self.chain_client,
-            )
-            .await
-            {
+            let store = store.clone();
+            let chain_actor = chain_actor.clone();
+            let chain_client = chain_client.clone();
+            let permit = semaphore.clone();
+            tasks.push(async move {
+                let _permit = permit.acquire().await.unwrap();
+                let result = verify_and_save_broadcast_message(
+                    &message,
+                    &store,
+                    &chain_actor,
+                    &chain_client,
+                )
+                .await;
+                (message, peers, result)
+            });
+        }
+
+        while let Some((message, peers, result)) = tasks.next().await {
+            match result {
                 Ok((verified_message, is_newly_applied)) => {
                     self.remove_pending_message(&message, &peers);
                     if is_newly_applied {
@@ -1740,6 +1798,44 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                 }
             }
         }
+
+        // After concurrent verification, some CUs may now have their CAs
+        // available (just verified above). Re-check and process remaining.
+        let mut recheck_complete = HashMap::<BroadcastMessage, Vec<Pubkey>>::new();
+        for (peer, msgs) in &self.messages_to_be_saved {
+            for msg in msgs {
+                if self.has_dependencies_available(msg) {
+                    recheck_complete.entry(msg.clone()).or_default().push(*peer);
+                }
+            }
+        }
+        let mut recheck_complete = recheck_complete.into_iter().collect::<Vec<_>>();
+        recheck_complete.sort_unstable_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
+        for (message, peers) in recheck_complete {
+            if self.should_defer_message_verification(&message) {
+                continue;
+            }
+            if let Ok((verified_message, is_newly_applied)) = verify_and_save_broadcast_message(
+                &message,
+                &self.store,
+                &self.chain_actor,
+                &self.chain_client,
+            )
+            .await
+            {
+                self.remove_pending_message(&message, &peers);
+                if is_newly_applied {
+                    self.latest_remote_broadcast_timestamp
+                        .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
+                    observe_applied_broadcast_message();
+                    observe_applied_propagation_latency(&verified_message);
+                } else {
+                    observe_duplicate_broadcast_message();
+                }
+                verified_sorted_messages.push(verified_message);
+            }
+        }
+
         self.messages_to_be_saved
             .retain(|_, messages| !messages.is_empty());
 
@@ -2114,6 +2210,14 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
         let mut latest_validated_cursor = None;
         let now_ms = now_timestamp_as_millis_u64();
 
+        let mut skipped_no_deps = 0usize;
+        let mut skipped_deferred = 0usize;
+        let mut skipped_ckb_deferred = 0usize;
+
+        // First pass: insert messages into cache, check deps, collect
+        // messages that are ready for verification.
+        let mut to_verify: Vec<(BroadcastMessage, bool)> = Vec::with_capacity(messages.len());
+
         for message in messages {
             if !self.allow_inbound_remote_broadcast_message(peer, &message, now_ms) {
                 result = Some(ActiveSyncSaveMessagesResult::Pending);
@@ -2121,9 +2225,30 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
             }
 
             match self.insert_message_to_be_saved_list(peer, &message).await {
-                Ok(InsertMessageStatus::Inserted) => {}
+                Ok(InsertMessageStatus::Inserted) => {
+                    if !self.has_dependencies_available(&message) {
+                        skipped_no_deps += 1;
+                        observe_missing_dependency_message(broadcast_message_type(&message));
+                        continue;
+                    }
+                    if self.should_defer_message_verification(&message) {
+                        skipped_deferred += 1;
+                        continue;
+                    }
+                    to_verify.push((message, true));
+                }
                 Ok(InsertMessageStatus::InsertedDuplicate) => {
                     observe_duplicate_broadcast_message();
+                    if !self.has_dependencies_available(&message) {
+                        skipped_no_deps += 1;
+                        observe_missing_dependency_message(broadcast_message_type(&message));
+                        continue;
+                    }
+                    if self.should_defer_message_verification(&message) {
+                        skipped_deferred += 1;
+                        continue;
+                    }
+                    to_verify.push((message, false));
                 }
                 Ok(InsertMessageStatus::Duplicate) => {
                     observe_duplicate_broadcast_message();
@@ -2133,8 +2258,7 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                             continue;
                         }
                         None => {
-                            result = Some(ActiveSyncSaveMessagesResult::Pending);
-                            break;
+                            continue;
                         }
                     }
                 }
@@ -2161,81 +2285,105 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreState<S
                     break;
                 }
             }
+        }
 
-            if !self.has_dependencies_available(&message) {
-                observe_missing_dependency_message(broadcast_message_type(&message));
-                result = Some(ActiveSyncSaveMessagesResult::Pending);
-                break;
-            }
-            if self.should_defer_message_verification(&message) {
-                result = Some(ActiveSyncSaveMessagesResult::Pending);
-                break;
+        // Second pass: verify messages concurrently.
+        if !to_verify.is_empty() {
+            let store = self.store.clone();
+            let chain_actor = self.chain_actor.clone();
+            let chain_client = self.chain_client.clone();
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CA_VERIFICATION));
+
+            use futures::stream::{FuturesUnordered, StreamExt};
+            let mut tasks = FuturesUnordered::new();
+
+            for (message, is_inserted) in to_verify {
+                let store = store.clone();
+                let chain_actor = chain_actor.clone();
+                let chain_client = chain_client.clone();
+                let permit = semaphore.clone();
+                tasks.push(async move {
+                    let _permit = permit.acquire().await.unwrap();
+                    let r = verify_and_save_broadcast_message(
+                        &message,
+                        &store,
+                        &chain_actor,
+                        &chain_client,
+                    )
+                    .await;
+                    (message, is_inserted, r)
+                });
             }
 
-            match verify_and_save_broadcast_message(
-                &message,
-                &self.store,
-                &self.chain_actor,
-                &self.chain_client,
-            )
-            .await
-            {
-                Ok((verified_message, is_newly_applied)) => {
-                    self.remove_pending_message(&message, &[*peer]);
-                    latest_validated_cursor = Some(verified_message.cursor());
-                    if is_newly_applied {
-                        self.latest_remote_broadcast_timestamp
-                            .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
-                        observe_applied_broadcast_message();
-                        observe_applied_propagation_latency(&verified_message);
-                    } else {
-                        observe_duplicate_broadcast_message();
+            while let Some((message, is_inserted, verify_result)) = tasks.next().await {
+                match verify_result {
+                    Ok((verified_message, is_newly_applied)) => {
+                        self.remove_pending_message(&message, &[*peer]);
+                        latest_validated_cursor = Some(verified_message.cursor());
+                        if is_newly_applied {
+                            self.latest_remote_broadcast_timestamp
+                                .fetch_max(verified_message.cursor().timestamp, Ordering::AcqRel);
+                            observe_applied_broadcast_message();
+                            observe_applied_propagation_latency(&verified_message);
+                        } else {
+                            observe_duplicate_broadcast_message();
+                        }
+                        verified_messages.push(verified_message);
                     }
-                    verified_messages.push(verified_message);
-                }
-                Err(
-                    error @ VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
-                        _,
-                        _,
-                    ),
-                ) => {
-                    trace!(
-                        "Deferring active sync message verification for {:?}: {:?}",
-                        message,
+                    Err(
                         error
-                    );
-                    result = Some(ActiveSyncSaveMessagesResult::Pending);
-                    break;
-                }
-                Err(error) => {
-                    self.remove_pending_message(&message, &[*peer]);
-                    observe_rejected_broadcast_message(error.rejected_broadcast_metrics_reason());
-                    trace!(
-                        "Failed to verify and save message {:?}: {:?}",
-                        message,
-                        error
-                    );
-                    let violation =
-                        classify_verify_and_save_broadcast_message_error(&message, &error)
-                            .unwrap_or(GossipViolation::InvalidBroadcastMessage);
-                    self.gossip_actor
-                        .send_message(GossipActorMessage::MaliciousPeerFound {
-                            peer: *peer,
-                            violation,
-                        })
-                        .expect("gossip actor alive");
-                    result = Some(ActiveSyncSaveMessagesResult::Rejected(violation));
-                    break;
+                        @ VerifyBroadcastMessageError::DeferredChannelAnnouncementVerification(
+                            _,
+                            _,
+                        ),
+                    ) => {
+                        skipped_ckb_deferred += 1;
+                        warn!(
+                            "Deferred active sync CA verification for {:?}: {:?}",
+                            message, error
+                        );
+                    }
+                    Err(error) => {
+                        if is_inserted {
+                            self.remove_pending_message(&message, &[*peer]);
+                        }
+                        observe_rejected_broadcast_message(
+                            error.rejected_broadcast_metrics_reason(),
+                        );
+                        trace!(
+                            "Failed to verify and save message {:?}: {:?}",
+                            message,
+                            error
+                        );
+                        if let Some(violation) =
+                            classify_verify_and_save_broadcast_message_error(&message, &error)
+                        {
+                            self.gossip_actor
+                                .send_message(GossipActorMessage::MaliciousPeerFound {
+                                    peer: *peer,
+                                    violation,
+                                })
+                                .expect("gossip actor alive");
+                            result = Some(ActiveSyncSaveMessagesResult::Rejected(violation));
+                        } else {
+                            result = Some(ActiveSyncSaveMessagesResult::Pending);
+                        }
+                        break;
+                    }
                 }
             }
         }
 
         self.broadcast_messages(&verified_messages);
-        result.unwrap_or_else(|| {
-            latest_validated_cursor
-                .map(ActiveSyncSaveMessagesResult::Validated)
-                .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
-        })
+        if skipped_no_deps > 0 || skipped_deferred > 0 || skipped_ckb_deferred > 0 {
+            ActiveSyncSaveMessagesResult::Pending
+        } else {
+            result.unwrap_or_else(|| {
+                latest_validated_cursor
+                    .map(ActiveSyncSaveMessagesResult::Validated)
+                    .unwrap_or(ActiveSyncSaveMessagesResult::Pending)
+            })
+        }
     }
 
     fn has_dependencies_available(&self, message: &BroadcastMessage) -> bool {
@@ -2322,7 +2470,9 @@ struct ExtendedGossipMessageStoreActor<S, C> {
     phantom: PhantomData<(S, C)>,
 }
 
-impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreActor<S, C> {
+impl<S: GossipMessageStore + Clone, C: CkbChainClient + Clone>
+    ExtendedGossipMessageStoreActor<S, C>
+{
     fn new() -> Self {
         Self {
             phantom: Default::default(),
@@ -2331,8 +2481,10 @@ impl<S: GossipMessageStore, C: CkbChainClient> ExtendedGossipMessageStoreActor<S
 }
 
 #[async_trait::async_trait]
-impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + Sync + 'static> Actor
-    for ExtendedGossipMessageStoreActor<S, C>
+impl<
+        S: GossipMessageStore + Send + Sync + Clone + 'static,
+        C: CkbChainClient + Send + Sync + Clone + 'static,
+    > Actor for ExtendedGossipMessageStoreActor<S, C>
 {
     type Msg = ExtendedGossipMessageStoreMessage;
     type State = ExtendedGossipMessageStoreState<S, C>;
@@ -2486,6 +2638,13 @@ impl<S: GossipMessageStore + Send + Sync + 'static, C: CkbChainClient + Send + S
                 let now_ms = now_timestamp_as_millis_u64();
                 for message in messages {
                     if !state.allow_inbound_remote_broadcast_message(&peer, &message, now_ms) {
+                        state
+                            .gossip_actor
+                            .send_message(GossipActorMessage::MaliciousPeerFound {
+                                peer,
+                                violation: GossipViolation::PolicyRejectedMessage,
+                            })
+                            .expect("gossip actor alive");
                         continue;
                     }
                     match state.insert_message_to_be_saved_list(&peer, &message).await {
@@ -3074,6 +3233,36 @@ fn reserve_or_delay_outbound_message(
         );
         return Err(Error::InternalError(anyhow::anyhow!(
             "delayed outbound gossip queue is full for peer"
+        )));
+    }
+
+    if delayed_outbound_messages.exceeds_peer_byte_capacity(
+        pubkey,
+        bytes,
+        policy.outbound_peer_delayed_byte_capacity(),
+    ) {
+        trace!(
+            peer = format!("{pubkey:?}"),
+            bytes,
+            delay_ms,
+            "Rejecting delayed outbound gossip payload due to full per-peer byte budget"
+        );
+        return Err(Error::InternalError(anyhow::anyhow!(
+            "delayed outbound gossip queue peer byte budget is full"
+        )));
+    }
+
+    if delayed_outbound_messages
+        .exceeds_global_byte_capacity(bytes, policy.outbound_global_delayed_byte_capacity())
+    {
+        trace!(
+            peer = format!("{pubkey:?}"),
+            bytes,
+            delay_ms,
+            "Rejecting delayed outbound gossip payload due to full global byte budget"
+        );
+        return Err(Error::InternalError(anyhow::anyhow!(
+            "delayed outbound gossip queue global byte budget is full"
         )));
     }
 
@@ -3723,7 +3912,7 @@ where
                 debug!("{:?} terminated", who);
             }
             SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                log_actor_failed(who, err);
             }
             _ => {}
         }
@@ -4254,7 +4443,10 @@ impl ServiceProtocol for GossipProtocolHandle {
                     ));
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Peer disconnected without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
@@ -4274,18 +4466,51 @@ impl ServiceProtocol for GossipProtocolHandle {
                     ));
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Received gossip message without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fiber::types::ChannelUpdateChannelFlags, ChannelTestContext};
+    use crate::{
+        fiber::{
+            gossip_policy::{ByteRateLimitConfig, GossipBanConfig},
+            types::ChannelUpdateChannelFlags,
+        },
+        tests::gen_utils::gen_rand_fiber_public_key,
+        ChannelTestContext,
+    };
+
+    fn chargeable_response(id: u64) -> GossipMessage {
+        GossipMessage::QueryBroadcastMessagesResult(QueryBroadcastMessagesResult {
+            id,
+            messages: Vec::new(),
+            missing_queries: vec![0, 1, 2],
+        })
+    }
+
+    fn outbound_policy(global_burst_bytes: u64, peer_burst_bytes: u64) -> GossipPolicyState {
+        GossipPolicyState::new(GossipPolicyConfig {
+            ban: GossipBanConfig::default(),
+            outbound_global: ByteRateLimitConfig {
+                rate_bytes_per_sec: 1,
+                burst_bytes: global_burst_bytes,
+            },
+            outbound_peer: ByteRateLimitConfig {
+                rate_bytes_per_sec: 1,
+                burst_bytes: peer_burst_bytes,
+            },
+            outbound_delay_queue_capacity: 16,
+            inbound_channel_update: ChannelUpdateRateLimitConfig::default(),
+        })
+    }
 
     #[test]
     fn test_broadcast_result_len_validation_enforces_request_and_protocol_limit() {
@@ -4354,5 +4579,88 @@ mod tests {
         );
 
         assert_eq!(replayed, vec![update_with_dependency]);
+    }
+
+    #[test]
+    fn test_delayed_outbound_queue_rejects_peer_byte_budget_overflow() {
+        let peer = gen_rand_fiber_public_key();
+        let message = chargeable_response(0);
+        let bytes = outbound_gossip_message_cost(&message).expect("chargeable response");
+        assert!(bytes > 0);
+
+        let mut policy = outbound_policy(bytes * 10, bytes);
+        let mut delayed_messages = DelayedGossipMessageQueue::new(16);
+
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer,
+            message.clone(),
+            0,
+        )
+        .expect("immediate send")
+        .is_some());
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer,
+            message.clone(),
+            0,
+        )
+        .expect("first delayed payload")
+        .is_none());
+        assert!(
+            reserve_or_delay_outbound_message(
+                &mut policy,
+                &mut delayed_messages,
+                &peer,
+                message,
+                0,
+            )
+            .is_err(),
+            "queued bytes for one peer must be capped, not only queued item count"
+        );
+    }
+
+    #[test]
+    fn test_delayed_outbound_queue_rejects_global_byte_budget_overflow() {
+        let peer1 = gen_rand_fiber_public_key();
+        let peer2 = gen_rand_fiber_public_key();
+        let message = chargeable_response(0);
+        let bytes = outbound_gossip_message_cost(&message).expect("chargeable response");
+        assert!(bytes > 0);
+
+        let mut policy = outbound_policy(bytes, bytes * 10);
+        let mut delayed_messages = DelayedGossipMessageQueue::new(16);
+
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer1,
+            message.clone(),
+            0,
+        )
+        .expect("immediate send")
+        .is_some());
+        assert!(reserve_or_delay_outbound_message(
+            &mut policy,
+            &mut delayed_messages,
+            &peer1,
+            message.clone(),
+            0,
+        )
+        .expect("first delayed payload")
+        .is_none());
+        assert!(
+            reserve_or_delay_outbound_message(
+                &mut policy,
+                &mut delayed_messages,
+                &peer2,
+                message,
+                0,
+            )
+            .is_err(),
+            "queued bytes across peers must be globally capped"
+        );
     }
 }

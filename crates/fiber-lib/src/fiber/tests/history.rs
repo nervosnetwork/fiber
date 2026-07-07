@@ -1464,3 +1464,25 @@ fn test_history_can_not_send_with_time() {
     let res = history.cannot_send(90, before, 100);
     assert_eq!(res, 100);
 }
+
+#[test]
+fn record_payment_fail_with_index_does_not_panic_on_empty_route() {
+    let mut result = InternalResult::default();
+    let nodes: Vec<SessionRouteNode> = vec![];
+    let tlc_err = TlcErr::new(TlcErrorCode::TemporaryChannelFailure);
+    let need_retry = result.record_payment_fail(&nodes, tlc_err);
+    assert!(!need_retry);
+}
+
+#[test]
+fn record_payment_fail_with_index_does_not_panic_on_single_node_route() {
+    let mut result = InternalResult::default();
+    let nodes = vec![SessionRouteNode {
+        pubkey: gen_rand_fiber_public_key(),
+        amount: 100,
+        channel_outpoint: gen_rand_channel_outpoint(),
+    }];
+    let tlc_err = TlcErr::new(TlcErrorCode::TemporaryChannelFailure);
+    let need_retry = result.record_payment_fail(&nodes, tlc_err);
+    assert!(!need_retry);
+}
