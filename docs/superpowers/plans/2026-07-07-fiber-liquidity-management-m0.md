@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Historical note:** M0 has already been executed in commit `25fc2826`. Do not
+> replay this plan or repost its GitHub issue comment. Use this file only as a
+> record of how the canonical M0 spec was produced.
+
 **Goal:** Produce the M0 protocol and product specification for Fiber liquidity management so M1-M3 implementation plans can be written without unresolved protocol choices.
 
 **Architecture:** This plan does not add runtime code. It creates a durable protocol spec that fixes the Loop In/Loop Out state machines, CKB+UDT asset model, on-chain swap primitive requirements, RPC contracts, persistence model, and p2p compatibility boundary.
@@ -198,6 +202,15 @@ Replace the empty sections with this text:
 
 Loop Out moves Fiber channel balance to an on-chain CKB address or UDT receiver.
 
+Preimage ownership and reveal sequence:
+
+- The provider generates the preimage and `payment_hash`.
+- The provider locks the on-chain payout in a swap cell claimable by the client
+  with the preimage and refundable by the provider after `refund_after_lock_time`.
+- The client pays the provider through Fiber using the same `payment_hash`.
+- A successful Fiber payment reveals the preimage to the client.
+- The client claims the provider's on-chain swap cell with that preimage.
+
 Sequence:
 
 ```mermaid
@@ -210,24 +223,27 @@ sequenceDiagram
     C->>P: quote_loop_out(asset_id, amount, receiver)
     P-->>C: quote(payment_hash, fees, expiry, payout terms)
     C->>P: loop_out(quote_id)
+    P->>L: lock payout in swap cell
+    L-->>C: payout lock confirmed
     C->>F: pay provider invoice/payment_hash
-    F-->>P: payment settled, preimage available to provider-side invoice logic
-    P->>L: create payout transaction to client receiver
-    L-->>P: payout confirmed
+    F-->>C: payment settled, preimage revealed
+    C->>L: claim payout with preimage
+    L-->>C: claim confirmed
     P-->>C: swap settled
 ```
 
 Safety rules:
 
-- The provider must not broadcast the on-chain payout before the Fiber payment is
-  settled or otherwise irreversibly claimable under the agreed hashlock flow.
-- The client must not treat Loop Out as settled until the payout transaction is
+- The client must not send the Fiber payment before the provider's payout lock is
+  confirmed under the quote's confirmation policy.
+- The provider can refund the payout lock after `refund_after_lock_time` if the
+  Fiber payment does not settle.
+- The client must not treat Loop Out as settled until the claim transaction is
   confirmed under the quote's confirmation policy.
 - If the Fiber payment fails before settlement, both sides mark the swap failed
-  and release reserved capacity.
-- If the provider payment path settles but the payout transaction is not
-  confirmed before the payout deadline, recovery must continue after restart and
-  surface the order as non-terminal.
+  after the provider refund path is safe or complete.
+- If the provider payout lock is not confirmed before `payout_deadline`, the
+  order remains non-terminal and recovery must continue after restart.
 
 ## Loop In Protocol
 
@@ -359,10 +375,12 @@ Shared states:
 | --- | --- |
 | `Created` | Local order record exists before external side effects. |
 | `Quoted` | Provider quote is accepted and capacity is reserved. |
-| `OnchainLockPending` | A required on-chain lock or payout transaction is broadcast but not confirmed. |
-| `OnchainLocked` | Required on-chain lock is confirmed. |
+| `OnchainLockPending` | Loop In client on-chain lock transaction is broadcast but not confirmed. |
+| `OnchainLocked` | Loop In client on-chain lock is confirmed. |
+| `PayoutPending` | Loop Out provider payout lock transaction is broadcast but not confirmed. |
+| `PayoutLocked` | Loop Out provider payout lock is confirmed. |
 | `PaymentInFlight` | Fiber payment has been sent and is waiting for result. |
-| `PaymentSettled` | Fiber payment settled and a valid preimage is known where required. |
+| `PaymentSettled` | Fiber payment settled and the 32-byte preimage is known. |
 | `ClaimPending` | Claim transaction is broadcast but not confirmed. |
 | `RefundPending` | Refund transaction is broadcast but not confirmed. |
 | `Success` | Swap completed successfully. |
@@ -378,16 +396,19 @@ stateDiagram-v2
     [*] --> Created
     Created --> Quoted
     Quoted --> OnchainLockPending
-    Quoted --> PaymentInFlight
+    Quoted --> PayoutPending
     OnchainLockPending --> OnchainLocked
     OnchainLocked --> PaymentInFlight
+    PayoutPending --> PayoutLocked
+    PayoutLocked --> PaymentInFlight
     PaymentInFlight --> PaymentSettled
     PaymentInFlight --> Failed
     PaymentSettled --> ClaimPending
-    PaymentSettled --> Success
     ClaimPending --> Success
     OnchainLockPending --> RefundPending
     OnchainLocked --> RefundPending
+    PayoutPending --> RefundPending
+    PayoutLocked --> RefundPending
     PaymentInFlight --> RefundPending
     RefundPending --> Refunded
 ```
