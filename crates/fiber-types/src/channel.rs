@@ -1568,7 +1568,7 @@ pub struct ChannelActorData {
     /// Witnesses of the latest commitment tx, used to reconstruct the full tx
     /// from state without storing the complete transaction body.
     #[serde(default)]
-    pub latest_commitment_tx_witnesses: Option<Vec<Vec<u8>>>,
+    pub latest_commitment_tx_witnesses: Option<Vec<u8>>,
 
     /// All the commitment point that are sent from the counterparty.
     /// We need to save all these points to derive the keys for the commitment transactions.

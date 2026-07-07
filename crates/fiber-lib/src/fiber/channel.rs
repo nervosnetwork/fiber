@@ -7772,11 +7772,11 @@ impl ChannelActorState {
             }
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
-        let witnesses: Vec<Vec<u8>> = commitment_tx
+        let witnesses: Vec<u8> = commitment_tx
             .witnesses()
-            .into_iter()
-            .map(|x| x.unpack())
-            .collect();
+            .get(0)
+            .map(|w| w.unpack())
+            .unwrap_or_default();
         self.latest_commitment_tx_witnesses = Some(witnesses);
         Ok(true)
     }
@@ -9451,11 +9451,11 @@ impl ChannelActorState {
     pub async fn get_latest_commitment_transaction(
         &self,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        if let Some(witnesses) = &self.latest_commitment_tx_witnesses {
+        if let Some(witness) = &self.latest_commitment_tx_witnesses {
             let mut commitment_tx = self.build_commitment_tx_and_settlement_data(false)?.0;
             commitment_tx = commitment_tx
                 .as_advanced_builder()
-                .set_witnesses(witnesses.iter().map(|w| w.clone().pack()).collect())
+                .set_witnesses(vec![witness.clone().pack()])
                 .build();
             let cell_deps =
                 get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
