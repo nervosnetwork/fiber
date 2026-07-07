@@ -3100,9 +3100,6 @@ where
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
                 OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
-                    // TODO(durable-outbox): this payment-session notification is an
-                    // in-memory mailbox event, unlike the forwarded upstream relay which is
-                    // durably delivered or queued before local finalization.
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::TlcRemoveReceived(
@@ -3171,9 +3168,6 @@ where
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     } else {
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                        // TODO(durable-outbox): this payment-session notification is an
-                        // in-memory mailbox event. A durable payment outbox would close the
-                        // remaining gap with LND's resolution store for source payments.
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::TlcRemoveReceived(
@@ -3199,9 +3193,6 @@ where
         if !onchain_fulfilled_invoice_hashes.is_empty() {
             self.store.insert_channel_actor_state(state.clone());
             for payment_hash in onchain_fulfilled_invoice_hashes {
-                // TODO(durable-outbox): invoice settlement is still an in-memory actor command;
-                // `sync_already_fulfilled_onchain_tlcs` re-emits it on restart, but a durable
-                // resolver outbox would make this side effect explicit.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash),
@@ -3284,7 +3275,6 @@ where
         if !invoice_hashes.is_empty() {
             self.store.insert_channel_actor_state(state.clone());
             for payment_hash in invoice_hashes {
-                // TODO(durable-outbox): see the on-chain invoice settlement send above.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash),

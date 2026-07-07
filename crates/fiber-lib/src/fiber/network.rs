@@ -144,6 +144,18 @@ struct OnChainTlcRemoveRelay {
     reason: RemoveTlcReason,
 }
 
+pub(crate) fn onchain_upstream_removed_reason_matches(
+    state: &ChannelActorState,
+    tlc_id: u64,
+    reason: &RemoveTlcReason,
+) -> bool {
+    state
+        .tlc_state
+        .get(&TLCId::Received(tlc_id))
+        .and_then(|tlc| tlc.removed_reason.as_ref())
+        .is_some_and(|removed_reason| removed_reason == reason)
+}
+
 // (128 + 2) KB, 2 KB for custom records
 pub const MAX_SERVICE_PROTOCOAL_DATA_SIZE: usize = 1024 * (128 + 2);
 pub const MAX_CUSTOM_RECORDS_SIZE: usize = 2 * 1024; // 2 KB
@@ -2864,30 +2876,26 @@ where
                 forwarding_channel_id,
                 RemoveTlcCommand {
                     id: forwarding_tlc_id,
-                    reason,
+                    reason: reason.clone(),
                 },
             )
             .await
         {
             Ok(RemoveTlcDelivery::Delivered) | Ok(RemoveTlcDelivery::QueuedRetry) => true,
             Err(err) => {
-                let already_removed = self
+                let already_removed_with_same_reason = self
                     .store
                     .get_channel_actor_state(&forwarding_channel_id)
-                    .map(|state| {
-                        state
-                            .tlc_state
-                            .get(&TLCId::Received(forwarding_tlc_id))
-                            .is_none_or(|tlc| tlc.removed_reason.is_some())
-                    })
-                    .unwrap_or(false);
-                if !already_removed {
+                    .is_some_and(|state| {
+                        onchain_upstream_removed_reason_matches(&state, forwarding_tlc_id, &reason)
+                    });
+                if !already_removed_with_same_reason {
                     error!(
                         "Failed to relay on-chain resolved tlc {:?} upstream to channel {:?}: {}; will retry on next maintenance tick",
                         forwarding_tlc_id, forwarding_channel_id, err
                     );
                 }
-                already_removed
+                already_removed_with_same_reason
             }
         }
     }
@@ -3005,10 +3013,6 @@ where
                         .await;
                 }
                 OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
-                    // TODO(durable-outbox): this payment-session notification is an
-                    // in-memory mailbox event. The forwarded relay path has durable
-                    // delivery before marking; source-payment outbox durability is a
-                    // follow-up.
                     state
                         .network
                         .send_message(NetworkActorMessage::new_event(
@@ -3055,8 +3059,6 @@ where
                             .tlc_state
                             .set_offered_tlc_removed(id, fulfill.clone());
                         actor_state_changed = true;
-                        // TODO(durable-outbox): this payment-session notification is an
-                        // in-memory mailbox event.
                         state
                             .network
                             .send_message(NetworkActorMessage::new_event(
@@ -3101,7 +3103,6 @@ where
             settlement_state_changed = false;
         }
         for payment_hash in invoice_hashes {
-            // TODO(durable-outbox): invoice settlement is still an in-memory side effect.
             self.settle_onchain_fulfilled_invoice(payment_hash);
         }
 
