@@ -9974,20 +9974,12 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    /// Returns the channel-scoped on-chain settlement proof for this TLC.
-    ///
-    /// This reads state populated by the in-process watchtower. When the watchtower is disabled or
-    /// not running, this always returns `None`. Features that depend on on-chain settlement
-    /// signals—including updating TLC, invoice, and payment status, and resolving upstream
-    /// forwarding TLCs—will not work in that configuration.
+    /// Returns the channel-scoped confirmed on-chain settlement proof for this TLC.
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<OnChainTlcSettlement> {
-        let _ = (channel_id, payment_hash);
-        None
-    }
+    ) -> Option<OnChainTlcSettlement>;
 
     /// Store a pending CommitDiff for channel reestablishment
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);
