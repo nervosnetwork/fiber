@@ -3,6 +3,7 @@ use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc};
 
 use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use crate::iterator::{IteratorDirection, KVPair};
+use crate::StoreError;
 
 #[derive(Clone)]
 pub struct Store {
@@ -111,6 +112,18 @@ impl StorageBackend for Store {
         limit: usize,
     ) -> Vec<KVPair> {
         self.collect_from_btree(start, direction, &take_while_fn, limit)
+    }
+
+    fn backup(&self, _path: &Path) -> Result<(), StoreError> {
+        Err(StoreError::BackupError(
+            "Not supported on browser yet".into(),
+        ))
+    }
+
+    fn restore(&self, _restore_path: &Path, _db_path: &Path) -> Result<(), StoreError> {
+        Err(StoreError::RestoreError(
+            "Not supported on browser yet".into(),
+        ))
     }
 }
 

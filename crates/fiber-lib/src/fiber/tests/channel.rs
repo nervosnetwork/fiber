@@ -62,6 +62,7 @@ use fiber_types::{
     ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
     TlcStatus, NO_SHARED_SECRET,
 };
+
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};
@@ -236,6 +237,7 @@ fn test_channel_state_bincode_compatibility() {
         ChannelState::Closed(CloseFlags::empty()),
         &[7, 0, 0, 0, 0, 0, 0, 0],
     );
+    assert_channel_state_encoding(ChannelState::Stale, &[8, 0, 0, 0]);
     assert_channel_state_encoding(
         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
         &[0, 0, 0, 0, 4, 0, 0, 0],
@@ -10232,6 +10234,137 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
     assert!(
         state.is_some(),
         "channel should not be aborted by stale external funding timeout"
+    );
+}
+
+#[tokio::test]
+async fn test_channel_stale_passive_wait_no_proactive_send() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+    let state_b = node_a.get_channel_actor_state(channel_id);
+    let peer_commitment_number = state_b.get_local_commitment_number();
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: peer_commitment_number,
+                    remote_commitment_number: peer_commitment_number,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(current_state.state, ChannelState::Stale);
+}
+
+#[tokio::test]
+async fn test_channel_stale_audit_success_resumes_ready() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("disconnect sent");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        current_state.state,
+        ChannelState::ChannelReady,
+        "Should resume to ChannelReady"
+    );
+    assert!(
+        !current_state.reestablishing,
+        "Reestablishing should be finished"
+    );
+}
+
+#[tokio::test]
+async fn test_channel_stale_audit_failure_blocks_channel() {
+    init_tracing();
+
+    let (mut node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+
+    let mut state_a_stale = state_a.clone();
+    state_a_stale.state = ChannelState::Stale;
+    state_a_stale.reestablishing = true;
+    state_b.commitment_numbers.remote = original_cn + 5;
+
+    node_a.store.insert_channel_actor_state(state_a_stale);
+    node_b.store.insert_channel_actor_state(state_b);
+
+    node_a.restart().await;
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn + 5,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+
+    assert_eq!(
+        current_state.state,
+        ChannelState::Stale,
+        "Audit should fail and stay in Stale"
+    );
+    assert!(
+        current_state.reestablishing,
+        "Should still be in reestablishing phase"
     );
 }
 

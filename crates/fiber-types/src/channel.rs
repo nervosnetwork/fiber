@@ -256,6 +256,9 @@ pub enum ChannelState {
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
+    /// The channel state is potentially outdated (e.g., after a database restore).
+    /// We must perform a passive audit with the peer before resuming operations.
+    Stale,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

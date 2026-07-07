@@ -15,6 +15,7 @@ use crate::fiber::fee::{
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
+use crate::store::actor::StoreActorMessage;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::utils::arithmetic::{
@@ -434,6 +435,7 @@ pub struct ChannelActor<S> {
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
 }
 
 impl<S> ChannelActor<S>
@@ -445,12 +447,14 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
+            store_actor,
         }
     }
 
@@ -3924,6 +3928,23 @@ where
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());
 
+                let reestablish_channel = ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: channel.get_local_commitment_number(),
+                    remote_commitment_number: channel.get_remote_commitment_number(),
+                };
+
+                if channel.state != ChannelState::Stale {
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
+                                FiberMessage::reestablish_channel(reestablish_channel),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
+
                 channel
             }
             ChannelInitializationOperation::OpenChannelWithExternalFunding(
@@ -4148,6 +4169,15 @@ where
             state.persist_external_funding_state();
         }
         self.store.insert_channel_actor_state(state.clone());
+
+        if state.needs_backup {
+            if let Some(ref store_actor) = self.store_actor {
+                store_actor
+                    .cast(StoreActorMessage::RequestBackup)
+                    .map_err(|e| e.to_string())?;
+            }
+            state.needs_backup = false;
+        }
 
         let channel_id = state.get_id();
         let mut immediate_tlc_sets = HashMap::<Hash256, Vec<(Hash256, u64)>>::new();
@@ -4506,6 +4536,11 @@ pub struct ChannelActorState {
     // signing key
     #[doc = "skip_store"]
     pub private_key: Option<Privkey>,
+
+    // Indicates that the state has changed and a backup should be triggered
+    // at the end of the current message processing loop.
+    #[doc = "skip_store"]
+    pub needs_backup: bool,
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
@@ -4569,6 +4604,7 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         };
         state.hydrate_external_funding_runtime();
         Ok(state)
@@ -4894,9 +4930,8 @@ impl ChannelActorState {
             | ChannelState::SigningCommitment(..)
             | ChannelState::AwaitingTxSignatures(..)
             | ChannelState::AwaitingChannelReady(..)
-            | ChannelState::CollaboratingFundingTx(..) => {
-                Some(OfflineChannelRestoreMode::ReestablishPeer)
-            }
+            | ChannelState::CollaboratingFundingTx(..)
+            | ChannelState::Stale => Some(OfflineChannelRestoreMode::ReestablishPeer),
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) =>
             {
@@ -4918,6 +4953,13 @@ impl ChannelActorState {
 
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
         self.local_tlc_info.enabled
+    }
+
+    pub fn is_risk_of_penalty(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+        )
     }
 
     pub fn set_waiting_peer_response(&mut self) {
@@ -5555,6 +5597,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: Some(private_key),
+            needs_backup: true,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -5650,6 +5693,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: Some(private_key),
+            needs_backup: true,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
@@ -5946,11 +5990,14 @@ impl ChannelActorState {
     }
 
     pub(crate) fn update_state(&mut self, new_state: ChannelState) {
-        debug!(
-            "Updating channel state from {:?} to {:?}",
-            &self.state, &new_state
-        );
-        self.state = new_state;
+        if self.state != new_state {
+            debug!(
+                "Updating channel state from {:?} to {:?}",
+                &self.state, &new_state
+            );
+            self.state = new_state;
+            self.needs_backup = true;
+        }
         if matches!(
             self.state,
             ChannelState::ChannelReady | ChannelState::Closed(_)
@@ -8604,6 +8651,36 @@ impl ChannelActorState {
                     debug_event!(network, "Reestablished channel in ChannelReady");
                 }
             }
+            ChannelState::Stale => {
+                let my_local = self.get_local_commitment_number();
+                let my_remote = self.get_remote_commitment_number();
+                let peer_local = reestablish_channel.local_commitment_number;
+                let peer_remote = reestablish_channel.remote_commitment_number;
+
+                if peer_local.abs_diff(my_remote) > 1 || peer_remote.abs_diff(my_local) > 1 {
+                    error!(
+                        "Audit Failed for Stale channel: Local(L:{}, R:{}), Peer(L:{}, R:{})",
+                        my_local, my_remote, peer_local, peer_remote
+                    );
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "reestablish channel message with invalid commitment numbers during audit"
+                            .to_string(),
+                    ));
+                }
+
+                info!(
+                    "Passive audit passed for channel {}. Resuming to Ready.",
+                    self.get_id()
+                );
+                self.update_state(ChannelState::ChannelReady);
+
+                return Box::pin(self.handle_reestablish_channel_message(
+                    myself,
+                    reestablish_channel,
+                    pending_commit_diff,
+                ))
+                .await;
+            }
             ChannelState::ShuttingDown(flags) => {
                 // Resend the shutdown message to the peer if we have not received the peer's shutdown message.
                 if !flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) {
@@ -9720,6 +9797,7 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState>;
     fn insert_payment_custom_records(
         &self,
         payment_hash: &Hash256,

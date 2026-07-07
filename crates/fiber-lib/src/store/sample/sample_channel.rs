@@ -39,6 +39,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         }
     }
 
@@ -63,6 +64,7 @@ impl ChannelActorState {
             ephemeral_config: Default::default(),
             funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         }
     }
 }
