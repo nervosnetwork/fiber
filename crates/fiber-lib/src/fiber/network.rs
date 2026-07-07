@@ -1738,35 +1738,13 @@ where
                 } else if let Some(mut actor_state) =
                     self.store.get_channel_actor_state(&channel_id)
                 {
-                    if let ChannelState::Closed(mut flags) = actor_state.state {
-                        if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
-                            flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
-                            actor_state.state = ChannelState::Closed(flags);
-                            let complete = self
-                                .reconcile_onchain_tlcs_without_live_actor(
-                                    state,
-                                    &mut actor_state,
-                                    now_timestamp_as_millis_u64(),
-                                )
-                                .await;
-                            if complete {
-                                flags.remove(
-                                    CloseFlags::WAITING_ONCHAIN_SETTLEMENT
-                                        | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
-                                );
-                                actor_state.state = ChannelState::Closed(flags);
-                                state.channels_funding_lock_script_cache.remove(&channel_id);
-                                info!(
-                                    "Channel {channel_id:?} on-chain settlement completed without a live actor"
-                                );
-                            } else {
-                                info!(
-                                    "Channel {channel_id:?} on-chain reconciliation incomplete; CheckChannels will retry"
-                                );
-                            }
-                            self.store.insert_channel_actor_state(actor_state);
-                        }
-                    }
+                    self.reconcile_onchain_tlcs_without_live_actor(
+                        state,
+                        &mut actor_state,
+                        now_timestamp_as_millis_u64(),
+                        true,
+                    )
+                    .await;
                 }
             }
             NetworkActorEvent::ChannelAcceptedForExternalFunding {
@@ -2328,22 +2306,13 @@ where
                         else {
                             continue;
                         };
-                        let complete = self
-                            .reconcile_onchain_tlcs_without_live_actor(state, &mut actor_state, now)
-                            .await;
-                        if complete {
-                            if let ChannelState::Closed(mut flags) = actor_state.state {
-                                if flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED) {
-                                    flags.remove(
-                                        CloseFlags::WAITING_ONCHAIN_SETTLEMENT
-                                            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
-                                    );
-                                    actor_state.state = ChannelState::Closed(flags);
-                                    state.channels_funding_lock_script_cache.remove(&channel_id);
-                                    self.store.insert_channel_actor_state(actor_state);
-                                }
-                            }
-                        }
+                        self.reconcile_onchain_tlcs_without_live_actor(
+                            state,
+                            &mut actor_state,
+                            now,
+                            false,
+                        )
+                        .await;
                     }
                 }
 
@@ -2977,14 +2946,33 @@ where
     }
 
     /// Reconcile on-chain resolved TLCs for a force-closed channel without a live actor.
-    /// Returns true when nothing reconcilable remains unresolved.
+    /// When `mark_settlement_confirmed` is set, this also records the settlement confirmation.
+    /// Once all on-chain TLCs are resolved, this clears the waiting flags and finalizes the
+    /// closed channel state.
     async fn reconcile_onchain_tlcs_without_live_actor(
         &self,
         state: &mut NetworkActorState<S, C>,
         actor_state: &mut ChannelActorState,
         now: u64,
-    ) -> bool {
+        mark_settlement_confirmed: bool,
+    ) {
         let channel_id = actor_state.get_id();
+        let mut settlement_state_changed = false;
+
+        if mark_settlement_confirmed {
+            let ChannelState::Closed(mut flags) = actor_state.state else {
+                return;
+            };
+            if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+                return;
+            }
+            if !flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED) {
+                flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
+                actor_state.state = ChannelState::Closed(flags);
+                settlement_state_changed = true;
+            }
+        }
+
         let delay_epoch =
             EpochNumberWithFraction::from_full_value(actor_state.commitment_delay_epoch);
         let expect_expiry = now.saturating_add(tlc_expiry_delay(&delay_epoch));
@@ -3110,13 +3098,35 @@ where
 
         if actor_state_changed {
             self.store.insert_channel_actor_state(actor_state.clone());
+            settlement_state_changed = false;
         }
         for payment_hash in invoice_hashes {
             // TODO(durable-outbox): invoice settlement is still an in-memory side effect.
             self.settle_onchain_fulfilled_invoice(payment_hash);
         }
 
-        !has_unresolved_onchain_tlcs(actor_state)
+        if has_unresolved_onchain_tlcs(actor_state) {
+            if mark_settlement_confirmed {
+                info!(
+                    "Channel {channel_id:?} on-chain reconciliation incomplete; CheckChannels will retry"
+                );
+            }
+        } else if let ChannelState::Closed(mut flags) = actor_state.state {
+            if flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED) {
+                flags.remove(
+                    CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+                        | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+                );
+                actor_state.state = ChannelState::Closed(flags);
+                settlement_state_changed = true;
+                state.channels_funding_lock_script_cache.remove(&channel_id);
+                info!("Channel {channel_id:?} on-chain settlement completed without a live actor");
+            }
+        }
+
+        if settlement_state_changed {
+            self.store.insert_channel_actor_state(actor_state.clone());
+        }
     }
 
     fn settle_onchain_fulfilled_invoice(&self, payment_hash: Hash256) {
