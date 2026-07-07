@@ -219,6 +219,39 @@ fn collect_skips_removed_and_uncommitted_tlcs() {
 }
 
 #[test]
+fn collect_fulfilled_allows_non_unique_prefix_when_full_hash_matches() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+
+    let first = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash,
+        hash_algorithm,
+    );
+    let second = tlc_info(
+        TLCId::Offered(1),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash,
+        hash_algorithm,
+    );
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![first, second];
+    let store = MockStore::new().with_onchain_preimage(channel_id, payment_hash, preimage);
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
+
+    assert_eq!(fulfilled.len(), 2);
+    assert_eq!(fulfilled[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(fulfilled[0].preimage, preimage);
+    assert_eq!(fulfilled[1].tlc_id, TLCId::Offered(1));
+    assert_eq!(fulfilled[1].preimage, preimage);
+}
+
+#[test]
 fn collect_timeout_settled_includes_forwarded_and_origin_payer() {
     let channel_id = gen_rand_sha256_hash();
     let upstream_channel_id = gen_rand_sha256_hash();
@@ -309,7 +342,7 @@ fn collect_timeout_settled_skips_already_removed() {
 }
 
 #[test]
-fn collect_skips_non_unique_onchain_settlement_prefixes() {
+fn collect_timeout_skips_non_unique_onchain_settlement_prefixes() {
     let channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
     let first_hash_bytes = [1u8; 32];

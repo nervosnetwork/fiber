@@ -1,8 +1,8 @@
 //! On-chain identity invariant: a settlement witness only exposes a 20-byte payment-hash
 //! prefix and an unlock index, so on-chain resolution maps to TLCs via
-//! `(channel_id, payment_hash[0..20])`. Resolution is only sound while a channel has at
-//! most one pending TLC per prefix; collectors skip non-unique settlement keys instead
-//! of acting on a settlement record that cannot be attributed to a unique TLC.
+//! `(channel_id, payment_hash[0..20])`. Fulfillment with a preimage is additionally
+//! validated against the full 32-byte payment hash; timeout/no-preimage resolution is
+//! only sound while a channel has at most one pending TLC per prefix.
 
 use std::collections::{HashMap, HashSet};
 
@@ -100,15 +100,11 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
     store: &impl ChannelActorStateStore,
 ) -> Vec<OnChainFulfilledTlc> {
     let channel_id = state.get_id();
-    let non_unique_prefixes = non_unique_onchain_settlement_prefixes(state);
     state
         .tlc_state
         .all_tlcs()
         .filter(|tlc| can_reconcile_onchain_fulfillment(tlc))
         .filter_map(|tlc| {
-            if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
-                return None;
-            }
             let OnChainTlcResolution::Fulfilled(preimage) = resolve_onchain_tlc(
                 &channel_id,
                 store,
@@ -270,8 +266,9 @@ pub(crate) fn payment_hash_prefix(payment_hash: &Hash256) -> [u8; 20] {
 
 /// Returns true when this TLC's current settlement lookup key is not unique within the channel.
 ///
-/// Callers skip such TLCs because applying a prefix-keyed settlement record could otherwise mutate
-/// the wrong TLC, relay the wrong upstream remove, or complete the wrong payment/invoice state.
+/// No-preimage callers skip such TLCs because applying a prefix-keyed settlement record could
+/// otherwise mutate the wrong TLC, relay the wrong upstream remove, or complete the wrong
+/// payment/invoice state.
 pub(crate) fn has_non_unique_onchain_settlement_key(
     channel_id: &Hash256,
     non_unique_prefixes: &HashSet<[u8; 20]>,
