@@ -5536,6 +5536,7 @@ impl ChannelActorState {
                     remote_max_tlc_number_in_flight,
                 ),
                 latest_commitment_transaction: None,
+                latest_commitment_tx_witnesses: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 last_revoke_ack_msg: None,
@@ -5631,6 +5632,7 @@ impl ChannelActorState {
                 local_reserved_ckb_amount,
                 remote_reserved_ckb_amount: 0,
                 latest_commitment_transaction: None,
+                latest_commitment_tx_witnesses: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 last_revoke_ack_msg: None,
@@ -7770,7 +7772,12 @@ impl ChannelActorState {
             }
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
-        self.latest_commitment_transaction = Some(commitment_tx.data());
+        let witnesses: Vec<Vec<u8>> = commitment_tx
+            .witnesses()
+            .into_iter()
+            .map(|x| x.unpack())
+            .collect();
+        self.latest_commitment_tx_witnesses = Some(witnesses);
         Ok(true)
     }
 
@@ -7930,7 +7937,9 @@ impl ChannelActorState {
                     // peer's CommitmentSigned (which is what populates
                     // latest_commitment_transaction). Without this, get_latest_commitment_transaction
                     // would panic on force-close. See GHSA-x6rw-txsignatures-verification.
-                    if self.latest_commitment_transaction.is_none() {
+                    if self.latest_commitment_tx_witnesses.is_none()
+                        && self.latest_commitment_transaction.is_none()
+                    {
                         error!(
                             "Refusing to advance to ChannelReady for channel {:?}: latest_commitment_transaction is not set; the peer likely skipped sending CommitmentSigned",
                             self.get_id()
@@ -9442,6 +9451,27 @@ impl ChannelActorState {
     pub async fn get_latest_commitment_transaction(
         &self,
     ) -> Result<TransactionView, ProcessingChannelError> {
+        if let Some(witnesses) = &self.latest_commitment_tx_witnesses {
+            let mut commitment_tx = self.build_commitment_tx_and_settlement_data(false)?.0;
+            commitment_tx = commitment_tx
+                .as_advanced_builder()
+                .set_witnesses(witnesses.iter().map(|w| w.clone().pack()).collect())
+                .build();
+            let cell_deps =
+                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+                    .await
+                    .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
+            let raw_tx = commitment_tx
+                .data()
+                .raw()
+                .as_builder()
+                .cell_deps(cell_deps)
+                .build();
+            let tx = commitment_tx.data().as_builder().raw(raw_tx).build();
+            return Ok(tx.into_view());
+        }
+
+        // Fallback: use the old persisted full transaction
         let tx = self
             .latest_commitment_transaction
             .clone()
@@ -9983,6 +10013,7 @@ mod tests {
                 remote_revocation_nonce_for_send: None,
                 remote_revocation_nonce_for_next: None,
                 latest_commitment_transaction: None,
+                latest_commitment_tx_witnesses: None,
                 remote_commitment_points: Vec::new(),
                 remote_channel_public_keys: Some(remote_signer.get_base_public_keys()),
                 local_shutdown_info: None,

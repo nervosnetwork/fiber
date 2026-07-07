@@ -310,6 +310,7 @@ fn create_test_channel_state_with_tlc(
             remote_shutdown_info: None,
             shutdown_transaction_hash: None,
             latest_commitment_transaction: None,
+            latest_commitment_tx_witnesses: None,
             reestablishing: false,
             connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,

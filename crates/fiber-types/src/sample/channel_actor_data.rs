@@ -112,6 +112,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         remote_revocation_nonce_for_send: None,
         remote_revocation_nonce_for_next: None,
         latest_commitment_transaction: None,
+        latest_commitment_tx_witnesses: None,
         remote_commitment_points: vec![],
         remote_channel_public_keys: None,
         local_shutdown_info: None,
@@ -332,6 +333,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         remote_revocation_nonce_for_send: Some(deterministic_pub_nonce(seed, 402)),
         remote_revocation_nonce_for_next: Some(deterministic_pub_nonce(seed, 403)),
         latest_commitment_transaction: Some(ckb_types::packed::Transaction::default()),
+        latest_commitment_tx_witnesses: None,
         remote_commitment_points: vec![
             (0, deterministic_pubkey(seed, 500)),
             (1, deterministic_pubkey(seed, 501)),

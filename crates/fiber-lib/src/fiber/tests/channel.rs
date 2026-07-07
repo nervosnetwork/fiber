@@ -11044,6 +11044,7 @@ mod udt_funding_cell_capacity_tests {
                 remote_shutdown_info: None,
                 shutdown_transaction_hash: None,
                 latest_commitment_transaction: None,
+                latest_commitment_tx_witnesses: None,
                 reestablishing: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 last_revoke_ack_msg: None,
