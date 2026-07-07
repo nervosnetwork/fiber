@@ -105,13 +105,14 @@ Expected high-level flow:
 1. Client requests a Loop Out quote from a provider.
 2. Provider validates asset whitelist, capacity, amount, expiry, and fee policy.
 3. Provider returns quote terms, payment request details, and on-chain payout terms.
-4. Client pays provider through Fiber using normal payment machinery.
-5. Provider completes the on-chain payout to the client's CKB address or UDT receiver.
-6. Both sides record the terminal order state.
+4. Provider locks the on-chain payout in a swap cell.
+5. Client pays provider through Fiber using normal payment machinery.
+6. Client uses the revealed preimage to claim the provider's on-chain payout lock.
+7. Both sides record the terminal order state.
 
-The exact hashlock and preimage ordering must be specified in the protocol spec
-so neither side can claim funds without satisfying the agreed payment and timeout
-conditions.
+The canonical protocol spec fixes the preimage sequence: the provider generates
+the Loop Out preimage, locks the payout first, and the client learns the preimage
+only after paying through Fiber.
 
 ## Loop In Flow
 
@@ -360,15 +361,16 @@ recovery with the smallest useful end-to-end scope.
 Loop In, provider hardening, planning, and automation should follow only after
 Loop Out is safe and recoverable.
 
-## Decisions Deferred To M0 Protocol Spec
+## Decisions Deferred Beyond Milestone Design
 
 This milestone design fixes the product decomposition and architecture boundary.
-The following details are intentionally assigned to M0 and must be resolved
-before implementation starts:
+The canonical M0 protocol spec resolves the product-facing protocol boundary.
+Some implementation choices remain assigned to later implementation milestones:
 
-- Exact on-chain script design for CKB and UDT swap cells.
-- Exact preimage ownership and reveal sequence for Loop In and Loop Out.
-- Confirmation policy for different assets and networks.
-- Whether quote negotiation uses existing JSON-RPC only or an additional HTTP API.
-- How much of CCH tracker and state-machine code should be reused directly.
-- Storage key layout and migration requirements.
+- M1 resolves the concrete CKB script design in `../fiber-scripts`.
+- M1 resolves transaction-builder details for CKB and UDT swap cells in this repo.
+- M2 resolves storage key layout and migration requirements.
+- M3 and M4 validate the protocol spec's preimage reveal sequence in complete
+  Loop Out and Loop In flows.
+- M5 and later resolve operational policy, provider hardening, and market-mode
+  discovery details.

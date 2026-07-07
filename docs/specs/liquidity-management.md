@@ -57,20 +57,52 @@ Common quote fields:
 | `quote_id` | Hash256 hex | Provider-generated identifier. |
 | `swap_kind` | `loop_in` or `loop_out` | Direction requested by the client. |
 | `asset_id` | string | Asset registry identifier. |
-| `amount` | u128 decimal string | Raw amount the client wants to swap before provider fee. |
+| `amount` | u128 decimal string | Raw amount the client wants to receive in the destination domain before routing fees. |
 | `provider_fee` | u128 decimal string | Fee charged in the swapped asset. |
 | `routing_fee_limit` | u128 decimal string | Maximum Fiber routing fee in the swapped asset. |
 | `onchain_fee_estimate_ckb` | u64 decimal string | Estimated CKB transaction fee. |
 | `capacity_requirement_ckb` | u64 decimal string | CKB capacity required for CKB or UDT cells. |
-| `payment_hash` | Hash256 hex | Hash used by the Fiber payment and on-chain claim path. |
+| `payment_hash` | Hash256 hex | CKB-hash of the 32-byte preimage used by the Fiber payment and on-chain claim path. |
 | `expires_at` | u64 milliseconds | Quote expiry time. |
-| `refund_after_lock_time` | u64 | Chain lock time after which refund is valid. |
+
+Direction-specific quote fields:
+
+| Field | Direction | Type | Meaning |
+| --- | --- | --- | --- |
+| `payout_deadline` | Loop Out | u64 milliseconds | Deadline for confirming the provider's on-chain payout lock. |
+| `refund_after_lock_time` | Loop In and Loop Out | u64 | Chain lock time after which the on-chain funder can refund. |
+
+Fee semantics:
+
+- For Loop Out, `amount` is the on-chain amount the client should receive. The
+  client pays `amount + provider_fee + actual_routing_fee` through Fiber, capped
+  by `routing_fee_limit`.
+- For Loop In, `amount` is the Fiber amount the client should receive. The client
+  locks `amount + provider_fee` on-chain, and the provider sends `amount` through
+  Fiber while paying actual routing fees up to `routing_fee_limit`.
+- For CKB swaps, `amount` and `provider_fee` are measured in shannons.
+- For UDT swaps, `amount` and `provider_fee` are measured in raw UDT units; CKB
+  capacity and chain fees remain separate.
+- `onchain_fee_estimate_ckb` is informational for fee budgeting and is not added
+  to the swapped asset amount.
+
+Hashlock semantics:
+
+- The preimage is exactly 32 bytes.
+- `payment_hash` is `HashAlgorithm::CkbHash.hash(preimage)` using Fiber's CKB
+  hash algorithm.
+- Fiber invoices or keysend payments used for liquidity swaps must use the same
+  hash algorithm and preimage bytes as the on-chain swap cell.
+- M1 script tests in `../fiber-scripts` and Fiber integration tests in this repo
+  must share the same preimage/hash test vectors.
 
 Quote validation rules:
 
 - `asset_id` must exist and be enabled in the provider registry.
 - `amount` must be between `min_amount` and `max_amount`.
-- `amount + provider_fee + routing_fee_limit` must fit in u128.
+- Loop Out Fiber payment gross amount, `amount + provider_fee + routing_fee_limit`,
+  must fit in u128.
+- Loop In on-chain lock gross amount, `amount + provider_fee`, must fit in u128.
 - `expires_at` must be later than the current node time.
 - For UDT assets, the quote must include the registry's exact `udt_type_script`.
 - The provider must reserve quoted capacity until the quote expires or the swap
@@ -79,6 +111,15 @@ Quote validation rules:
 ## Loop Out Protocol
 
 Loop Out moves Fiber channel balance to an on-chain CKB address or UDT receiver.
+
+Preimage ownership and reveal sequence:
+
+- The provider generates the preimage and `payment_hash`.
+- The provider locks the on-chain payout in a swap cell claimable by the client
+  with the preimage and refundable by the provider after `refund_after_lock_time`.
+- The client pays the provider through Fiber using the same `payment_hash`.
+- A successful Fiber payment reveals the preimage to the client.
+- The client claims the provider's on-chain swap cell with that preimage.
 
 Sequence:
 
@@ -92,28 +133,41 @@ sequenceDiagram
     C->>P: quote_loop_out(asset_id, amount, receiver)
     P-->>C: quote(payment_hash, fees, expiry, payout terms)
     C->>P: loop_out(quote_id)
+    P->>L: lock payout in swap cell
+    L-->>C: payout lock confirmed
     C->>F: pay provider invoice/payment_hash
-    F-->>P: payment settled, preimage available to provider-side invoice logic
-    P->>L: create payout transaction to client receiver
-    L-->>P: payout confirmed
+    F-->>C: payment settled, preimage revealed
+    C->>L: claim payout with preimage
+    L-->>C: claim confirmed
     P-->>C: swap settled
 ```
 
 Safety rules:
 
-- The provider must not broadcast the on-chain payout before the Fiber payment is
-  settled or otherwise irreversibly claimable under the agreed hashlock flow.
-- The client must not treat Loop Out as settled until the payout transaction is
+- The client must not send the Fiber payment before the provider's payout lock is
+  confirmed under the quote's confirmation policy.
+- The provider can refund the payout lock after `refund_after_lock_time` if the
+  Fiber payment does not settle.
+- The client must not treat Loop Out as settled until the claim transaction is
   confirmed under the quote's confirmation policy.
 - If the Fiber payment fails before settlement, both sides mark the swap failed
-  and release reserved capacity.
-- If the provider payment path settles but the payout transaction is not
-  confirmed before the payout deadline, recovery must continue after restart and
-  surface the order as non-terminal.
+  after the provider refund path is safe or complete.
+- If the provider payout lock is not confirmed before `payout_deadline`, the
+  order remains non-terminal and recovery must continue after restart.
 
 ## Loop In Protocol
 
 Loop In moves on-chain CKB or UDT into Fiber channel balance.
+
+Preimage ownership and reveal sequence:
+
+- The client generates the preimage and `payment_hash` by creating the Fiber
+  invoice it wants the provider to pay.
+- The client locks the on-chain funds in a swap cell claimable by the provider
+  with the preimage and refundable by the client after `refund_after_lock_time`.
+- The provider pays the client's Fiber invoice using the same `payment_hash`.
+- The Fiber payment settlement reveals the preimage to the provider.
+- The provider claims the client's on-chain swap cell with that preimage.
 
 Sequence:
 
@@ -154,7 +208,8 @@ tests.
 
 Common requirements:
 
-- Claim path: spender provides a preimage whose hash equals `payment_hash`.
+- Claim path: spender provides a 32-byte preimage whose Fiber CKB-hash equals
+  `payment_hash`.
 - Refund path: original funder can spend after `refund_after_lock_time`.
 - The lock must bind the intended claimant and refund identity.
 - The transaction builder must reject cells whose asset does not match the quote.
@@ -171,7 +226,8 @@ UDT swap requirements:
 
 - The cell must use the exact `udt_type_script` from the provider asset registry.
 - The UDT amount in cell data must equal the quote's raw amount after applying
-  the direction-specific fee rule.
+  the direction-specific gross amount rule: `amount` for Loop Out provider
+  payouts, `amount + provider_fee` for Loop In client locks.
 - The CKB capacity in the UDT cell is operational capacity, not swapped value.
 - Claim and refund outputs must preserve the UDT type script and amount.
 
@@ -193,10 +249,12 @@ Shared states:
 | --- | --- |
 | `Created` | Local order record exists before external side effects. |
 | `Quoted` | Provider quote is accepted and capacity is reserved. |
-| `OnchainLockPending` | A required on-chain lock or payout transaction is broadcast but not confirmed. |
-| `OnchainLocked` | Required on-chain lock is confirmed. |
+| `OnchainLockPending` | Loop In client on-chain lock transaction is broadcast but not confirmed. |
+| `OnchainLocked` | Loop In client on-chain lock is confirmed. |
+| `PayoutPending` | Loop Out provider payout lock transaction is broadcast but not confirmed. |
+| `PayoutLocked` | Loop Out provider payout lock is confirmed. |
 | `PaymentInFlight` | Fiber payment has been sent and is waiting for result. |
-| `PaymentSettled` | Fiber payment settled and a valid preimage is known where required. |
+| `PaymentSettled` | Fiber payment settled and the 32-byte preimage is known. |
 | `ClaimPending` | Claim transaction is broadcast but not confirmed. |
 | `RefundPending` | Refund transaction is broadcast but not confirmed. |
 | `Success` | Swap completed successfully. |
@@ -212,16 +270,19 @@ stateDiagram-v2
     [*] --> Created
     Created --> Quoted
     Quoted --> OnchainLockPending
-    Quoted --> PaymentInFlight
+    Quoted --> PayoutPending
     OnchainLockPending --> OnchainLocked
     OnchainLocked --> PaymentInFlight
+    PayoutPending --> PayoutLocked
+    PayoutLocked --> PaymentInFlight
     PaymentInFlight --> PaymentSettled
     PaymentInFlight --> Failed
     PaymentSettled --> ClaimPending
-    PaymentSettled --> Success
     ClaimPending --> Success
     OnchainLockPending --> RefundPending
     OnchainLocked --> RefundPending
+    PayoutPending --> RefundPending
+    PayoutLocked --> RefundPending
     PaymentInFlight --> RefundPending
     RefundPending --> Refunded
 ```
@@ -244,11 +305,12 @@ Persisted fields:
 | `swap_kind` | `loop_in` or `loop_out`. |
 | `asset_id` | Asset registry identifier. |
 | `amount` | Raw swapped asset amount. |
-| `payment_hash` | Hash used by Fiber payment and claim path. |
+| `payment_hash` | Fiber CKB-hash of the 32-byte preimage used by Fiber payment and claim path. |
 | `payment_preimage` | Known after settlement or claim observation. |
 | `state` | Current state-machine state. |
 | `onchain_outpoint` | Swap, payout, claim, or refund outpoint when known. |
-| `refund_after_lock_time` | Lock time that enables refund. |
+| `payout_deadline` | Loop Out deadline for confirming provider payout lock; absent for Loop In. |
+| `refund_after_lock_time` | Lock time that enables on-chain funder refund. |
 | `expires_at` | Quote or order expiry. |
 | `created_at` | Creation timestamp in milliseconds. |
 | `updated_at` | Last state change timestamp in milliseconds. |
@@ -257,8 +319,11 @@ Persisted fields:
 Startup recovery rules:
 
 - Terminal orders are not retried.
-- `OnchainLockPending`, `ClaimPending`, and `RefundPending` resume chain watching.
+- `OnchainLockPending`, `PayoutPending`, `ClaimPending`, and `RefundPending` resume chain watching.
+- `PayoutPending` resumes chain watching for the provider payout lock and
+  remains non-terminal until it confirms or operator intervention is required.
 - `OnchainLocked` resumes the next Fiber payment or refund eligibility check.
+- `PayoutLocked` resumes the next Fiber payment or refund eligibility check.
 - `PaymentInFlight` reloads payment status from the payment store before retrying.
 - Refund is attempted only after `refund_after_lock_time` is reached.
 - Recovery must be idempotent when the same transaction was already broadcast.
