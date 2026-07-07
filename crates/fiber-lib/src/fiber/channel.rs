@@ -1899,13 +1899,7 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            // Keep the preimage for outbound forwarded TLCs until the inbound side finishes.
-            // For inbound forwarded TLCs, keep it while another same-hash TLC still needs
-            // on-chain settlement.
-            let should_remove_preimage = tlc_info.forwarding_tlc.is_none()
-                || (tlc_info.is_received()
-                    && !self.has_onchain_tlc_for_payment_hash(state, tlc_info.payment_hash));
-            if should_remove_preimage {
+            if !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash) {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
@@ -1947,45 +1941,6 @@ where
             }
         }
         Ok(())
-    }
-
-    fn has_onchain_tlc_for_payment_hash(
-        &self,
-        current_state: &ChannelActorState,
-        payment_hash: Hash256,
-    ) -> bool {
-        let is_waiting_onchain_resolution = |channel_state: &ChannelState| {
-            matches!(
-                channel_state,
-                ChannelState::Closed(flags)
-                    if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-            ) || matches!(
-                channel_state,
-                ChannelState::ShuttingDown(flags)
-                    if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
-            )
-        };
-        let has_onchain_tlc = |state: &ChannelActorState| {
-            is_waiting_onchain_resolution(&state.state)
-                && state
-                    .tlc_state
-                    .all_tlcs()
-                    .any(|tlc| tlc.payment_hash == payment_hash)
-        };
-
-        if has_onchain_tlc(current_state) {
-            return true;
-        }
-
-        let current_channel_id = current_state.get_id();
-        self.store
-            .get_channel_states(None)
-            .into_iter()
-            .filter(|(_, channel_id, channel_state)| {
-                *channel_id != current_channel_id && is_waiting_onchain_resolution(channel_state)
-            })
-            .filter_map(|(_, channel_id, _)| self.store.get_channel_actor_state(&channel_id))
-            .any(|state| has_onchain_tlc(&state))
     }
 
     fn remove_preimage(&self, payment_hash: Hash256) {
@@ -9701,6 +9656,34 @@ impl ChannelActorState {
 
         Ok(())
     }
+}
+
+pub(crate) fn has_pending_tlc_for_payment_hash<S>(
+    store: &S,
+    current_state: &ChannelActorState,
+    payment_hash: Hash256,
+) -> bool
+where
+    S: ChannelActorStateStore,
+{
+    let has_matching_tlc = |state: &ChannelActorState| {
+        state
+            .tlc_state
+            .all_tlcs()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    };
+
+    if has_matching_tlc(current_state) {
+        return true;
+    }
+
+    let current_channel_id = current_state.get_id();
+    store
+        .get_channel_states(None)
+        .into_iter()
+        .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
+        .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
+        .any(|state| has_matching_tlc(&state))
 }
 
 pub trait ChannelActorStateStore {
