@@ -2957,6 +2957,9 @@ where
         let channel_id = actor_state.get_id();
         let mut settlement_state_changed = false;
 
+        // Settlement-completed events are the durable chain signal that the channel close
+        // transaction has finished. Record that signal first, then let the normal reconciliation
+        // pass decide whether all TLC-level outcomes are known yet.
         if mark_settlement_confirmed {
             let ChannelState::Closed(mut flags) = actor_state.state else {
                 return;
@@ -2976,6 +2979,8 @@ where
         let expect_expiry = now.saturating_add(tlc_expiry_delay(&delay_epoch));
         let mut actor_state_changed = false;
 
+        // Resolve offered TLCs that have timed out on chain. Forwarded TLCs must first relay a
+        // matching failure upstream; origin-payer TLCs can notify the local payment state directly.
         let expired_tlcs =
             collect_onchain_timeout_settled_tlcs(actor_state, &self.store, expect_expiry);
         for tlc in expired_tlcs {
@@ -3021,6 +3026,9 @@ where
             }
         }
 
+        // Resolve fulfilled TLCs only from confirmed channel-scoped on-chain settlement records.
+        // Forwarded offered TLCs relay upstream before the downstream channel is marked removed;
+        // source payments and payee invoices are completed locally.
         let fulfilled = collect_onchain_fulfilled_tlcs(actor_state, &self.store);
         let mut invoice_hashes = Vec::new();
         for tlc in fulfilled {
@@ -3075,6 +3083,8 @@ where
             }
         }
 
+        // Received TLCs that timed out on chain are terminal for the payee side: remove the hold
+        // record and keep invoice settlement untouched.
         for tlc in collect_onchain_received_timeout_settled_tlcs(actor_state, &self.store) {
             let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                 TlcErr::new(TlcErrorCode::ExpiryTooSoon),
@@ -3088,6 +3098,9 @@ where
             actor_state_changed = true;
         }
 
+        // Persist channel TLC mutations before running invoice side effects. This keeps the
+        // no-live-actor path aligned with the live RemoveTlc ack ordering: channel state is durable
+        // before higher-level payment or invoice notifications are emitted.
         if actor_state_changed {
             self.store.insert_channel_actor_state(actor_state.clone());
             settlement_state_changed = false;
@@ -3096,6 +3109,8 @@ where
             self.settle_onchain_fulfilled_invoice(payment_hash);
         }
 
+        // Keep waiting while any TLC outcome is still unknown. Once the settlement was confirmed
+        // and every TLC is terminal, clear the close flags and drop the funding-script cache entry.
         if has_unresolved_onchain_tlcs(actor_state) {
             if mark_settlement_confirmed {
                 info!(
