@@ -11196,6 +11196,7 @@ mod udt_funding_cell_capacity_tests {
             ephemeral_config: Default::default(),
             private_key: None,
             funding_abort_detail: None,
+            needs_backup: false,
         }
     }
 
