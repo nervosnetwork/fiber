@@ -10085,6 +10085,7 @@ mod tests {
             ephemeral_config: ChannelEphemeralConfig::default(),
             funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         }
     }
 
