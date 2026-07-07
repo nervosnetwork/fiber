@@ -191,9 +191,25 @@ jobs:
         if: contains(matrix.os, 'windows')
         run: |
           vcpkg integrate install
-          vcpkg install openssl:x64-windows-static-md
+          vcpkg install openssl:x64-windows-static
       - name: Build with profile
+        env:
+          RUSTFLAGS: ${{ contains(matrix.os, 'windows') && '-C target-feature=+crt-static' || '' }}
         run: cargo build --locked --verbose --profile ${{ matrix.profile }}
+      - name: Smoke test Windows store open
+        if: contains(matrix.os, 'windows')
+        run: |
+          $profileDir = if ("${{ matrix.profile }}" -eq "release") { "release" } else { "debug" }
+          $smokeDir = Join-Path $env:RUNNER_TEMP "fnn-smoke-${{ matrix.profile }}"
+          Remove-Item $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path (Join-Path $smokeDir "fiber\store") -Force | Out-Null
+          $env:FIBER_SECRET_KEY_PASSWORD = "ci-smoke-test"
+          $output = & "target\$profileDir\fnn.exe" --check-validate -c config\testnet\config.yml -d $smokeDir 2>&1
+          $exitCode = $LASTEXITCODE
+          $output | Write-Output
+          if ($exitCode -eq 0) { exit 0 }
+          if ($exitCode -eq 1 -and $output -match "db validate failed") { exit 0 }
+          throw "Windows store smoke test failed with exit code $exitCode"
 
   benchmark:
     name: Benchmark (Non-Gossip)
