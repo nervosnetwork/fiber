@@ -2943,16 +2943,6 @@ where
         false
     }
 
-    async fn reconcile_onchain_tlc_remove_without_live_actor(
-        &self,
-        network_state: &mut NetworkActorState<S, C>,
-        channel_state: &mut ChannelActorState,
-        relay: OnChainTlcRemoveRelay,
-    ) -> bool {
-        self.relay_onchain_tlc_remove_upstream(network_state, channel_state, relay)
-            .await
-    }
-
     /// Reconcile on-chain resolved TLCs for a force-closed channel without a live actor.
     /// When `mark_settlement_confirmed` is set, this also records the settlement confirmation.
     /// Once all on-chain TLCs are resolved, this clears the waiting flags and finalizes the
@@ -2999,7 +2989,7 @@ where
                     forwarding_tlc_id,
                 } => {
                     actor_state_changed |= self
-                        .reconcile_onchain_tlc_remove_without_live_actor(
+                        .relay_onchain_tlc_remove_upstream(
                             state,
                             actor_state,
                             OnChainTlcRemoveRelay {
@@ -3041,7 +3031,7 @@ where
                     });
                     if let Some((forwarding_channel_id, forwarding_tlc_id)) = tlc.forwarding_tlc {
                         actor_state_changed |= self
-                            .reconcile_onchain_tlc_remove_without_live_actor(
+                            .relay_onchain_tlc_remove_upstream(
                                 state,
                                 actor_state,
                                 OnChainTlcRemoveRelay {
