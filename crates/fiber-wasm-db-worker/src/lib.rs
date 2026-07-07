@@ -2,7 +2,8 @@ use std::{cell::RefCell, str::FromStr};
 
 use db::{STORE_NAME, handle_db_command, open_database};
 use fiber_wasm_db_common::{
-    InputCommand, KV, OutputCommand, read_command_payload, write_command_with_payload,
+    InputCommand, KV, OutputCommand, load_command, read_command_payload, store_command,
+    write_command_with_payload,
 };
 use idb::Database;
 use log::info;
@@ -66,7 +67,8 @@ pub async fn main_loop(log_level: &str) {
             .await
             .expect("Unable to wait for command");
         // Clean it to avoid infinite loop
-        input_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(&input_i32_arr, InputCommand::Waiting as i32)
+            .expect("Unable to reset input command");
         match cmd {
             InputCommand::OpenDatabase => {
                 let database_name =
@@ -98,7 +100,8 @@ pub async fn main_loop(log_level: &str) {
                 let db_cmd = read_command_payload(&input_i32_arr, &input_u8_arr).unwrap();
                 let db = db.as_ref().expect("Database not opened yet");
                 let result = handle_db_command(db, STORE_NAME, db_cmd, |key| {
-                    input_i32_arr.set_index(0, InputCommand::Waiting as i32);
+                    store_command(&input_i32_arr, InputCommand::Waiting as i32)
+                        .expect("Unable to reset input command");
                     write_command_with_payload(
                         OutputCommand::RequestTakeWhile as i32,
                         key.to_vec(),
@@ -109,17 +112,20 @@ pub async fn main_loop(log_level: &str) {
                     // Sync wait here, so transaction of IndexedDB won't be committed (it will be committed once control flow was returned from sync call stack)
                     wait_for_command_sync(&input_i32_arr, InputCommand::Waiting).unwrap();
 
-                    let cmd = InputCommand::try_from(input_i32_arr.get_index(0))
-                        .expect("Invalid input command from client");
+                    let raw_cmd =
+                        load_command(&input_i32_arr).expect("Unable to load input command");
+                    let cmd =
+                        InputCommand::try_from(raw_cmd).expect("Invalid input command from client");
                     assert!(
                         matches!(cmd, InputCommand::ResponseTakeWhile),
                         "Expected ResponseTakeWhile, got {:?}",
-                        input_i32_arr.get_index(0)
+                        raw_cmd
                     );
 
                     let result =
                         read_command_payload::<bool>(&input_i32_arr, &input_u8_arr).unwrap();
-                    input_i32_arr.set_index(0, InputCommand::Waiting as i32);
+                    store_command(&input_i32_arr, InputCommand::Waiting as i32)
+                        .expect("Unable to reset input command");
                     result
                 })
                 .await;
@@ -141,7 +147,10 @@ pub async fn main_loop(log_level: &str) {
                 };
             }
             InputCommand::Shutdown => break,
-            InputCommand::Waiting | InputCommand::ResponseTakeWhile => unreachable!(),
+            InputCommand::Waiting => {}
+            InputCommand::ResponseTakeWhile => {
+                log::error!("Ignoring stale ResponseTakeWhile received in db worker main loop");
+            }
         }
     }
     info!("Db worker main loop exited");

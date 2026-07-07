@@ -1,7 +1,9 @@
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
+use fiber_wasm_db_common::load_command;
 use fiber_wasm_db_common::read_command_payload;
+use fiber_wasm_db_common::store_command;
 use fiber_wasm_db_common::write_command_with_payload;
 use fiber_wasm_db_common::DbCommandRequest;
 use fiber_wasm_db_common::DbCommandResponse;
@@ -66,7 +68,7 @@ impl Store {
             output_i32_arr,
             ..
         } = &self.chan;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(output_i32_arr, OutputCommand::Waiting as i32).unwrap();
         write_command_with_payload(
             InputCommand::Shutdown as i32,
             (),
@@ -257,7 +259,7 @@ impl CommunicationChannel {
             output_i32_arr,
             output_u8_arr,
         } = &self;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(output_i32_arr, OutputCommand::Waiting as i32).unwrap();
         write_command_with_payload(
             InputCommand::OpenDatabase as i32,
             store_name,
@@ -266,8 +268,14 @@ impl CommunicationChannel {
         )
         .with_context(|| anyhow!("Failed to write db command"))
         .unwrap();
-        Atomics::wait(output_i32_arr, 0, OutputCommand::Waiting as i32).unwrap();
-        let output_cmd = OutputCommand::try_from(output_i32_arr.get_index(0)).unwrap();
+        let output_cmd = loop {
+            Atomics::wait(output_i32_arr, 0, OutputCommand::Waiting as i32).unwrap();
+            let output_cmd =
+                OutputCommand::try_from(load_command(output_i32_arr).unwrap()).unwrap();
+            if !matches!(output_cmd, OutputCommand::Waiting) {
+                break output_cmd;
+            }
+        };
         match output_cmd {
             OutputCommand::OpenDatabaseResponse => {
                 DB_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -322,7 +330,7 @@ impl CommunicationChannel {
             output_i32_arr,
             output_u8_arr,
         } = self;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(output_i32_arr, OutputCommand::Waiting as i32).unwrap();
         write_command_with_payload(
             InputCommand::DbRequest as i32,
             ipc_cmd,
@@ -332,8 +340,11 @@ impl CommunicationChannel {
         .with_context(|| anyhow!("Failed to write db command"))?;
         loop {
             Atomics::wait(output_i32_arr, 0, OutputCommand::Waiting as i32).unwrap();
-            let output_cmd = OutputCommand::try_from(output_i32_arr.get_index(0)).unwrap();
-            output_i32_arr.set_index(0, 0);
+            let output_cmd = OutputCommand::try_from(load_command(output_i32_arr)?).unwrap();
+            if matches!(output_cmd, OutputCommand::Waiting) {
+                continue;
+            }
+            store_command(output_i32_arr, OutputCommand::Waiting as i32)?;
             match output_cmd {
                 OutputCommand::OpenDatabaseResponse | OutputCommand::Waiting => unreachable!(),
                 OutputCommand::RequestTakeWhile => {
