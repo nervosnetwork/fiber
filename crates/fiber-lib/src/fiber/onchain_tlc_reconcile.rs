@@ -1,8 +1,8 @@
 //! On-chain identity invariant: a settlement witness only exposes a 20-byte payment-hash
 //! prefix and an unlock index, so on-chain resolution maps to TLCs via
 //! `(channel_id, payment_hash[0..20])`. Resolution is only sound while a channel has at
-//! most one pending TLC per prefix; collectors skip ambiguous matches instead of acting
-//! on a settlement record that cannot be attributed to a unique TLC.
+//! most one pending TLC per prefix; collectors skip non-unique settlement keys instead
+//! of acting on a settlement record that cannot be attributed to a unique TLC.
 
 use std::collections::{HashMap, HashSet};
 
@@ -100,13 +100,13 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
     store: &impl ChannelActorStateStore,
 ) -> Vec<OnChainFulfilledTlc> {
     let channel_id = state.get_id();
-    let ambiguous = ambiguous_payment_hash_prefixes(state);
+    let non_unique_prefixes = non_unique_onchain_settlement_prefixes(state);
     state
         .tlc_state
         .all_tlcs()
         .filter(|tlc| can_reconcile_onchain_fulfillment(tlc))
         .filter_map(|tlc| {
-            if is_ambiguous_onchain_tlc(&channel_id, &ambiguous, tlc) {
+            if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
                 return None;
             }
             let OnChainTlcResolution::Fulfilled(preimage) = resolve_onchain_tlc(
@@ -135,13 +135,13 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
     expect_expiry: u64,
 ) -> Vec<OnChainTimeoutSettledTlc> {
     let channel_id = state.get_id();
-    let ambiguous = ambiguous_payment_hash_prefixes(state);
+    let non_unique_prefixes = non_unique_onchain_settlement_prefixes(state);
     state
         .tlc_state
         .get_expired_offered_tlcs(expect_expiry)
         .filter(|tlc| tlc.removed_reason.is_none())
         .filter_map(|tlc| {
-            if is_ambiguous_onchain_tlc(&channel_id, &ambiguous, tlc) {
+            if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
                 return None;
             }
             if !matches!(
@@ -184,7 +184,7 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
     store: &impl ChannelActorStateStore,
 ) -> Vec<OnChainReceivedTimeoutSettledTlc> {
     let channel_id = state.get_id();
-    let ambiguous = ambiguous_payment_hash_prefixes(state);
+    let non_unique_prefixes = non_unique_onchain_settlement_prefixes(state);
     state
         .tlc_state
         .received_tlcs
@@ -192,7 +192,7 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
         .iter()
         .filter(|tlc| tlc.removed_reason.is_none())
         .filter_map(|tlc| {
-            if is_ambiguous_onchain_tlc(&channel_id, &ambiguous, tlc) {
+            if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
                 return None;
             }
             matches!(
@@ -237,18 +237,26 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
     }
 }
 
-pub(crate) fn ambiguous_payment_hash_prefixes(state: &ChannelActorState) -> HashSet<[u8; 20]> {
-    let mut counts: HashMap<[u8; 20], u32> = HashMap::new();
+/// Returns payment-hash prefixes whose current on-chain settlement key is shared by more than one
+/// reconcilable TLC on this channel.
+///
+/// Settlement records are currently looked up by `(channel_id, payment_hash[0..20])`, not by full
+/// payment hash or witness TLC index. When multiple pending TLCs share that lookup key, the record
+/// cannot be safely attributed to exactly one local TLC.
+pub(crate) fn non_unique_onchain_settlement_prefixes(
+    state: &ChannelActorState,
+) -> HashSet<[u8; 20]> {
+    let mut counts_by_prefix: HashMap<[u8; 20], u32> = HashMap::new();
     for tlc in state
         .tlc_state
         .all_tlcs()
         .filter(|tlc| can_reconcile_onchain_fulfillment(tlc))
     {
-        *counts
+        *counts_by_prefix
             .entry(payment_hash_prefix(&tlc.payment_hash))
             .or_default() += 1;
     }
-    counts
+    counts_by_prefix
         .into_iter()
         .filter_map(|(prefix, count)| (count > 1).then_some(prefix))
         .collect()
@@ -260,15 +268,19 @@ pub(crate) fn payment_hash_prefix(payment_hash: &Hash256) -> [u8; 20] {
         .expect("payment hash prefix")
 }
 
-pub(crate) fn is_ambiguous_onchain_tlc(
+/// Returns true when this TLC's current settlement lookup key is not unique within the channel.
+///
+/// Callers skip such TLCs because applying a prefix-keyed settlement record could otherwise mutate
+/// the wrong TLC, relay the wrong upstream remove, or complete the wrong payment/invoice state.
+pub(crate) fn has_non_unique_onchain_settlement_key(
     channel_id: &Hash256,
-    ambiguous: &HashSet<[u8; 20]>,
+    non_unique_prefixes: &HashSet<[u8; 20]>,
     tlc: &TlcInfo,
 ) -> bool {
     let prefix = payment_hash_prefix(&tlc.payment_hash);
-    if ambiguous.contains(&prefix) {
+    if non_unique_prefixes.contains(&prefix) {
         warn!(
-            "Skipping on-chain reconciliation for channel {:?} tlc {:?}: payment hash prefix is shared by multiple pending TLCs",
+            "Skipping on-chain reconciliation for channel {:?} tlc {:?}: on-chain settlement key is shared by multiple pending TLCs",
             channel_id, tlc.tlc_id
         );
         return true;

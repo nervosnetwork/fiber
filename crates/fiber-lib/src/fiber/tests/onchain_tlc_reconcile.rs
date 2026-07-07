@@ -309,7 +309,7 @@ fn collect_timeout_settled_skips_already_removed() {
 }
 
 #[test]
-fn collect_skips_ambiguous_payment_hash_prefixes() {
+fn collect_skips_non_unique_onchain_settlement_prefixes() {
     let channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
     let first_hash_bytes = [1u8; 32];
