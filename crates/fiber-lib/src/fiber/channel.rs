@@ -9476,7 +9476,17 @@ impl ChannelActorState {
         &self,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let (commitment_tx, _) = self.build_commitment_tx_and_settlement_data(false)?;
-        Ok(commitment_tx)
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
+            .await
+            .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
+        let raw_tx = commitment_tx
+            .data()
+            .raw()
+            .as_builder()
+            .cell_deps(cell_deps)
+            .build();
+        let tx = commitment_tx.data().as_builder().raw(raw_tx).build();
+        Ok(tx.into_view())
     }
 
     /// Verify the partial signature from the peer and create a complete transaction
