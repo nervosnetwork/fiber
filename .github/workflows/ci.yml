@@ -200,16 +200,7 @@ jobs:
         if: contains(matrix.os, 'windows')
         run: |
           $profileDir = if ("${{ matrix.profile }}" -eq "release") { "release" } else { "debug" }
-          $smokeDir = Join-Path $env:RUNNER_TEMP "fnn-smoke-${{ matrix.profile }}"
-          Remove-Item $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path (Join-Path $smokeDir "fiber\store") -Force | Out-Null
-          $env:FIBER_SECRET_KEY_PASSWORD = "ci-smoke-test"
-          $output = & "target\$profileDir\fnn.exe" --check-validate -c config\testnet\config.yml -d $smokeDir 2>&1
-          $exitCode = $LASTEXITCODE
-          $output | Write-Output
-          if ($exitCode -eq 0) { exit 0 }
-          if ($exitCode -eq 1 -and $output -match "db validate failed") { exit 0 }
-          throw "Windows store smoke test failed with exit code $exitCode"
+          & .github/actions/build-release-package/helpers/smoke-test-windows-store.ps1 -Executable "target\$profileDir\fnn.exe" -Name "fnn-smoke-${{ matrix.profile }}"
 
   windows-release-test:
     name: Windows release package test
@@ -222,40 +213,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-release-test-${{ runner.os }}
-      - name: Install Dependencies
-        run: |
-          vcpkg integrate install
-          vcpkg install openssl:x64-windows-static
-      - name: Build Windows release binary
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release --locked
-      - name: Smoke test Windows store open
-        run: |
-          $smokeDir = Join-Path $env:RUNNER_TEMP "fnn-smoke"
-          Remove-Item $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path (Join-Path $smokeDir "fiber\store") -Force | Out-Null
-          $env:FIBER_SECRET_KEY_PASSWORD = "ci-smoke-test"
-          $output = & target\release\fnn.exe --check-validate -c config\testnet\config.yml -d $smokeDir 2>&1
-          $exitCode = $LASTEXITCODE
-          $output | Write-Output
-          if ($exitCode -eq 0) { exit 0 }
-          if ($exitCode -eq 1 -and $output -match "db validate failed") { exit 0 }
-          throw "Windows store smoke test failed with exit code $exitCode"
-      - name: Package Windows release binary
-        run: |
-          $packageDir = Join-Path $env:RUNNER_TEMP "fnn-windows"
-          Remove-Item $packageDir -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-          Copy-Item -Path target\release\fnn.exe -Destination $packageDir
-          Copy-Item -Path target\release\fnn-cli.exe -Destination $packageDir
-          Copy-Item -Path config -Destination (Join-Path $packageDir "config") -Recurse
-          tar -czf fnn_pr${{ github.event.pull_request.number }}_x86_64-windows.tar.gz -C $packageDir .
+      - name: Build Windows release package
+        id: package
+        uses: ./.github/actions/build-release-package
+        with:
+          os: windows-2022
+          package-name: fnn_pr${{ github.event.pull_request.number }}_x86_64-windows.tar.gz
+          bin-suffix: .exe
+          windows-dependencies: minimal
       - name: Upload Windows release binary
         uses: actions/upload-artifact@v4
         with:
           name: fnn-pr${{ github.event.pull_request.number }}-x86_64-windows
-          path: fnn_pr${{ github.event.pull_request.number }}_x86_64-windows.tar.gz
+          path: ${{ steps.package.outputs.package_name }}
 
   linux-release-test:
     name: Linux release package test (${{ matrix.pkg_suffix }})
@@ -268,13 +238,17 @@ jobs:
         include:
           - os: ubuntu-22.04
             pkg_suffix: x86_64-linux-portable
+            bin_suffix: ''
             portable: true
             openssl_configure: linux-x86_64 shared
           - os: ubuntu-24.04
             pkg_suffix: x86_64-linux
+            bin_suffix: ''
             portable: false
+            openssl_configure: ''
           - os: ubuntu-22.04-arm
             pkg_suffix: aarch64-linux-portable
+            bin_suffix: ''
             portable: true
             openssl_configure: linux-aarch64 shared
     steps:
@@ -283,38 +257,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-release-test-${{ matrix.pkg_suffix }}
-      - if: ${{ matrix.portable }}
-        name: Build Linux portable release binary
-        run: |
-          export PWD_DIR=$(pwd)
-          curl -LO https://www.openssl.org/source/openssl-1.1.1s.tar.gz
-          tar -xzf openssl-1.1.1s.tar.gz
-          cd openssl-1.1.1s
-          ./Configure ${{ matrix.openssl_configure }}
-          make
-          cd ..
-          export OPENSSL_LIB_DIR=${PWD_DIR}/openssl-1.1.1s
-          export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
-          export OPENSSL_STATIC=1
-          cargo build --release --locked --features portable
-      - if: ${{ !matrix.portable }}
-        name: Build Linux release binary
-        run: cargo build --release --locked
-      - name: Smoke test Linux release binary
-        run: |
-          target/release/fnn --version
-          target/release/fnn-cli --version
-      - name: Package Linux release binary
-        run: |
-          pkgname="fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz"
-          cp target/release/fnn fnn
-          cp target/release/fnn-cli fnn-cli
-          tar czvf "${pkgname}" fnn fnn-cli config
+      - name: Build Linux release package
+        id: package
+        uses: ./.github/actions/build-release-package
+        with:
+          os: ${{ matrix.os }}
+          package-name: fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz
+          bin-suffix: ${{ matrix.bin_suffix }}
+          portable: ${{ matrix.portable }}
+          openssl-configure: ${{ matrix.openssl_configure }}
       - name: Upload Linux release binary
         uses: actions/upload-artifact@v4
         with:
           name: fnn-pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}
-          path: fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz
+          path: ${{ steps.package.outputs.package_name }}
 
   macos-release-test:
     name: macOS release package test (${{ matrix.pkg_suffix }})
@@ -327,31 +283,34 @@ jobs:
         include:
           - os: macos-15
             pkg_suffix: aarch64-darwin-portable
+            bin_suffix: ''
+            portable: true
+            openssl_configure: ''
           - os: macos-15-intel
             pkg_suffix: x86_64-darwin-portable
+            bin_suffix: ''
+            portable: true
+            openssl_configure: ''
     steps:
       - uses: actions/checkout@v6
       - uses: dsherret/rust-toolchain-file@v1
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-release-test-${{ matrix.pkg_suffix }}
-      - name: Build macOS portable release binary
-        run: cargo build --release --locked --features portable
-      - name: Smoke test macOS release binary
-        run: |
-          target/release/fnn --version
-          target/release/fnn-cli --version
-      - name: Package macOS release binary
-        run: |
-          pkgname="fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz"
-          cp target/release/fnn fnn
-          cp target/release/fnn-cli fnn-cli
-          tar czvf "${pkgname}" fnn fnn-cli config
+      - name: Build macOS release package
+        id: package
+        uses: ./.github/actions/build-release-package
+        with:
+          os: ${{ matrix.os }}
+          package-name: fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz
+          bin-suffix: ${{ matrix.bin_suffix }}
+          portable: ${{ matrix.portable }}
+          openssl-configure: ${{ matrix.openssl_configure }}
       - name: Upload macOS release binary
         uses: actions/upload-artifact@v4
         with:
           name: fnn-pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}
-          path: fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz
+          path: ${{ steps.package.outputs.package_name }}
 
   benchmark:
     name: Benchmark (Non-Gossip)
