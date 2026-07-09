@@ -95,6 +95,23 @@ pub(crate) fn resolve_onchain_tlc(
     OnChainTlcResolution::SettledWithoutPreimage
 }
 
+pub(crate) fn onchain_fulfilled_preimage(
+    channel_id: &Hash256,
+    store: &impl ChannelActorStateStore,
+    tlc: &TlcInfo,
+) -> Option<Hash256> {
+    match resolve_onchain_tlc(
+        channel_id,
+        store,
+        tlc.tlc_id,
+        tlc.payment_hash,
+        tlc.hash_algorithm,
+    ) {
+        OnChainTlcResolution::Fulfilled(preimage) => Some(preimage),
+        OnChainTlcResolution::Unknown | OnChainTlcResolution::SettledWithoutPreimage => None,
+    }
+}
+
 pub(crate) fn collect_onchain_fulfilled_tlcs(
     state: &ChannelActorState,
     store: &impl ChannelActorStateStore,

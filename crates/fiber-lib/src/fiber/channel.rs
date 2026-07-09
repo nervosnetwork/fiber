@@ -16,8 +16,8 @@ use crate::fiber::fee::{
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, OnChainTimeoutTlcRole,
-    OnChainTlcSettlement,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    OnChainTimeoutTlcRole, OnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -3151,33 +3151,47 @@ where
             }
         }
 
-        // Synchronize TLC status and invoice state for any previously-fulfilled
-        // TLCs that still need removal applied.  When no new on-chain fulfillments
-        // were discovered this tick there is nothing to sync.
-        if has_fulfilled {
-            self.sync_already_fulfilled_onchain_tlcs(state);
+        // Synchronize TLC status and invoice state for any previously-fulfilled TLCs whose
+        // fulfillment is now confirmed by a channel-scoped on-chain settlement record.
+        self.sync_already_fulfilled_onchain_tlcs(state);
+    }
+
+    fn onchain_confirmed_fulfill_reason(
+        &self,
+        channel_id: &Hash256,
+        tlc: &TlcInfo,
+    ) -> Option<RemoveTlcReason> {
+        let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+            return None;
+        };
+        let preimage = onchain_fulfilled_preimage(channel_id, &self.store, tlc)?;
+        if preimage != fulfill.payment_preimage {
+            warn!(
+                "Skipping already-fulfilled TLC {:?} in channel {:?}: local preimage does not match on-chain preimage",
+                tlc.tlc_id, channel_id
+            );
+            return None;
         }
+        Some(RemoveTlcReason::RemoveTlcFulfill(*fulfill))
     }
 
     /// Sync TLC status fields and invoice state for TLCs already marked fulfilled (for example
     /// after a partial off-chain fulfill on a closing channel) but not yet reflected in RPC state.
     fn sync_already_fulfilled_onchain_tlcs(&self, state: &mut ChannelActorState) {
+        let channel_id = state.get_id();
         let offered_updates: Vec<(u64, RemoveTlcReason)> = state
             .tlc_state
             .offered_tlcs
             .tlcs
             .iter()
-            .filter(|tlc| {
-                matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                ) && matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
-            })
             .filter_map(|tlc| {
+                if !matches!(tlc.outbound_status(), OutboundTlcStatus::Committed) {
+                    return None;
+                }
                 let TLCId::Offered(id) = tlc.tlc_id else {
                     return None;
                 };
-                Some((id, tlc.removed_reason.clone()?))
+                Some((id, self.onchain_confirmed_fulfill_reason(&channel_id, tlc)?))
             })
             .collect();
         for (id, reason) in offered_updates {
@@ -3189,20 +3203,17 @@ where
             .received_tlcs
             .tlcs
             .iter()
-            .filter(|tlc| {
-                matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                ) && matches!(
+            .filter_map(|tlc| {
+                if !matches!(
                     tlc.inbound_status(),
                     InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
-                )
-            })
-            .filter_map(|tlc| {
+                ) {
+                    return None;
+                }
                 let TLCId::Received(id) = tlc.tlc_id else {
                     return None;
                 };
-                Some((id, tlc.removed_reason.clone()?))
+                Some((id, self.onchain_confirmed_fulfill_reason(&channel_id, tlc)?))
             })
             .collect();
         for (id, reason) in received_updates {
@@ -3215,12 +3226,13 @@ where
             .tlcs
             .iter()
             .filter(|tlc| {
-                matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                )
+                self.onchain_confirmed_fulfill_reason(&channel_id, tlc)
+                    .is_some()
             })
             .map(|tlc| tlc.payment_hash)
+            .filter(|payment_hash| {
+                self.store.get_invoice_status(payment_hash) != Some(CkbInvoiceStatus::Paid)
+            })
             .collect();
         if !invoice_hashes.is_empty() {
             self.store.insert_channel_actor_state(state.clone());

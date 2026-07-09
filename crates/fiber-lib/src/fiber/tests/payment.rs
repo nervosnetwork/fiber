@@ -39,6 +39,7 @@ use crate::tests::test_utils::*;
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
 use bech32::{encode, u5, Variant};
+use ckb_sdk::core::TransactionBuilder;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
 #[cfg(not(target_arch = "wasm32"))]
@@ -5389,6 +5390,339 @@ async fn test_payee_invoice_paid_from_onchain_preimage() {
     .await;
 
     // The received TLC is marked fulfilled in the payee's (force-closed) channel state.
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[0], received_tlc_id)
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFulfill(..))
+    ));
+}
+
+// Mirrors the CCH receive-btc force-close timing: the channel settlement completion can be
+// observed before the payee's on-chain preimage claim is discovered. The invoice must still
+// converge to Paid once the later on-chain preimage settlement is recorded.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payee_invoice_paid_when_onchain_preimage_arrives_after_settlement_completion() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_1.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build hold invoice");
+    node_1.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
+
+    let received_tlc_id = node_1
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .map(|tlc| tlc.tlc_id)
+        .expect("payee received tlc exists");
+
+    node_1
+        .send_shutdown(channels[0], true)
+        .await
+        .expect("force shutdown payee channel");
+    wait_until_timeout(10_000, || {
+        matches!(
+            node_1.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        ))
+        .expect("network actor alive");
+    wait_until_timeout(10_000, || {
+        matches!(
+            node_1.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    && flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
+        )
+    })
+    .await;
+    assert_ne!(
+        node_1.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid),
+        "the invoice cannot be marked paid until an on-chain preimage settlement is recorded"
+    );
+
+    insert_onchain_preimage(&node_1.store, &channels[0], payment_hash, hold_preimage);
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(30_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid)
+    })
+    .await;
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[0], received_tlc_id)
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFulfill(..))
+    ));
+}
+
+// Mirrors the receive-btc hold-invoice path: the payee created an invoice with only a payment
+// hash, the peer force-closed before the preimage was revealed, and the payee calls settle_invoice
+// only after the channel is already waiting for on-chain settlement.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_hold_invoice_paid_when_settled_after_remote_force_close_and_onchain_preimage() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(payment_preimage.as_ref()).into();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .payee_pub_key(node_1.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build hold invoice");
+    node_1.insert_invoice(hold_invoice.clone(), None);
+
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
+
+    let received_tlc_id = node_1
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .map(|tlc| tlc.tlc_id)
+        .expect("payee received tlc exists");
+
+    node_0
+        .send_shutdown(channels[0], true)
+        .await
+        .expect("peer force shutdown channel");
+    let tx_hash = TransactionBuilder::default().build().hash();
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                node_0.pubkey,
+                channels[0],
+                tx_hash,
+                true,
+                false,
+            ),
+        ))
+        .expect("node_1 network actor alive");
+    wait_until_timeout(30_000, || {
+        matches!(
+            node_1.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    node_1
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle invoice after remote force close");
+    assert_ne!(
+        node_1.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid),
+        "local preimage reveal alone must not mark a force-closed received TLC paid"
+    );
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[0]),
+        ))
+        .expect("network actor alive");
+    wait_until_timeout(10_000, || {
+        matches!(
+            node_1.get_channel_actor_state(channels[0]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                    && flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
+        )
+    })
+    .await;
+
+    insert_onchain_preimage(&node_1.store, &channels[0], payment_hash, payment_preimage);
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(30_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid)
+    })
+    .await;
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[0], received_tlc_id)
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFulfill(..))
+    ));
+}
+
+// Mirrors the E2E timing where the payee reveals the preimage locally after the peer has already
+// force-closed, but before the payee observes the close on chain. The received TLC is already
+// locally fulfilled, so later on-chain reconciliation must still settle the invoice once the
+// channel-scoped on-chain preimage proof appears.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_hold_invoice_paid_when_onchain_preimage_confirms_already_removed_received_tlc() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::Sha256.hash(payment_preimage.as_ref()).into();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::Sha256)
+        .payee_pub_key(node_1.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build hold invoice");
+    node_1.insert_invoice(hold_invoice.clone(), None);
+
+    node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
+
+    let received_tlc_id = node_1
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .map(|tlc| tlc.tlc_id)
+        .expect("payee received tlc exists");
+    let TLCId::Received(received_tlc_index) = received_tlc_id else {
+        panic!("payee tlc must be received");
+    };
+
+    let mut actor_state = node_1.get_channel_actor_state(channels[0]);
+    actor_state.tlc_state.set_received_tlc_removed(
+        received_tlc_index,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+    );
+    actor_state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    node_1
+        .update_channel_actor_state(
+            actor_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash),
+        ))
+        .expect("network actor alive");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_ne!(
+        node_1.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid),
+        "a local RemoveTlcFulfill without on-chain settlement evidence must not mark the invoice paid"
+    );
+
+    insert_onchain_preimage(&node_1.store, &channels[0], payment_hash, payment_preimage);
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(30_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Paid)
+    })
+    .await;
     assert!(matches!(
         node_1
             .get_tlc(channels[0], received_tlc_id)

@@ -1,5 +1,8 @@
 use crate::{
-    fiber::channel::{ChannelActorStateStore, RemoveTlcCommand},
+    fiber::{
+        channel::{ChannelActorStateStore, RemoveTlcCommand},
+        onchain_tlc_reconcile::onchain_fulfilled_preimage,
+    },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
     utils::payment::is_invoice_fulfilled,
 };
@@ -401,13 +404,25 @@ fn collect_onchain_fulfilled_received_tlcs(
         .get_channel_states(None)
         .into_iter()
         .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
-        .flat_map(|state| state.tlc_state.received_tlcs.tlcs.clone().into_iter())
-        .filter(|tlc| {
-            tlc.payment_hash == payment_hash
-                && matches!(
-                    tlc.removed_reason,
-                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
-                )
+        .flat_map(|state| {
+            let channel_id = state.get_id();
+            state
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .clone()
+                .into_iter()
+                .map(move |tlc| (channel_id, tlc))
+        })
+        .filter_map(|(channel_id, tlc)| {
+            if tlc.payment_hash != payment_hash {
+                return None;
+            }
+            let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                return None;
+            };
+            let preimage = onchain_fulfilled_preimage(&channel_id, store, &tlc)?;
+            (preimage == fulfill.payment_preimage).then_some(tlc)
         })
         .collect()
 }

@@ -85,7 +85,8 @@ use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epoc
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, OnChainTimeoutTlcRole,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
@@ -3009,6 +3010,37 @@ where
         false
     }
 
+    fn already_fulfilled_onchain_invoice_hashes(
+        &self,
+        actor_state: &ChannelActorState,
+    ) -> HashSet<Hash256> {
+        let channel_id = actor_state.get_id();
+        actor_state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .filter_map(|tlc| {
+                let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                    return None;
+                };
+                let preimage = onchain_fulfilled_preimage(&channel_id, &self.store, tlc)?;
+                if preimage != fulfill.payment_preimage {
+                    warn!(
+                        "Skipping already-fulfilled TLC {:?} in channel {:?}: local preimage does not match on-chain preimage",
+                        tlc.tlc_id, channel_id
+                    );
+                    return None;
+                }
+                if self.store.get_invoice_status(&tlc.payment_hash) == Some(CkbInvoiceStatus::Paid)
+                {
+                    return None;
+                }
+                Some(tlc.payment_hash)
+            })
+            .collect()
+    }
+
     /// Reconcile on-chain resolved TLCs for a force-closed channel without a live actor.
     /// When `mark_settlement_confirmed` is set, this also records the settlement confirmation.
     /// Once all on-chain TLCs are resolved, this clears the waiting flags and finalizes the
@@ -3148,6 +3180,7 @@ where
                 }
             }
         }
+        invoice_hashes.extend(self.already_fulfilled_onchain_invoice_hashes(actor_state));
 
         // Received TLCs that timed out on chain are terminal for the payee side: remove the hold
         // record and keep invoice settlement untouched.
