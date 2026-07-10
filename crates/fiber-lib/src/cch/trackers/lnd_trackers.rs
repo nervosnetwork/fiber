@@ -12,20 +12,23 @@
 //!
 //! ## Architecture
 //!
-//! The actor uses a message-passing model with two main message types:
+//! Tracking requests are submitted through these message types:
 //! - `TrackInvoice(Hash256)`: Adds invoice to tracking queue
 //! - `TrackPayment(Hash256)`: Starts an idempotent per-payment tracker
-//! - `InvoiceTrackerCompleted{...}`: Sent by spawned tracker tasks when they finish
 //!
-//! When a tracker task completes (successfully or with error), it ALWAYS sends
-//! `InvoiceTrackerCompleted` back to the actor. The actor maintains two data structures:
+//! Spawned tasks send completion messages back to the actor for lifecycle cleanup.
+//!
+//! When an invoice tracker task completes (successfully or with error), it ALWAYS sends
+//! `InvoiceTrackerCompleted` back to the actor. Invoice scheduling uses two data structures:
 //! - `invoice_queue`: VecDeque of pending invoice hashes
 //! - `active_invoice_trackers`: Number of active invoice trackers
 //!
-//! When completion message arrives:
+//! When an invoice completion message arrives:
 //! 1. Decrement `active_invoice_trackers` counter
 //! 2. Re-queue if failed
 //! 3. Dequeue invoices from the queue and start tracking
+//!
+//! Active payment trackers are keyed by payment hash and removed when their task completes.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -171,7 +174,8 @@ struct ActivePaymentTracker {
 /// It provides the following features:
 ///
 /// ## Payment Tracking
-/// - Automatically tracks all LND payments in the background
+/// - Tracks explicitly requested outgoing payments by payment hash
+/// - Deduplicates active trackers and reconnects until LND reports a terminal status
 /// - Sends `CchTrackingEvent::PaymentChanged` events to the output port
 ///
 /// ## Invoice Tracking
@@ -236,27 +240,15 @@ impl Actor for LndTrackerActor {
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let state = LndTrackerState {
-            port: args.port.clone(),
-            lnd_connection: args.lnd_connection.clone(),
-            token: args.token.clone(),
-            tracker: args.tracker.clone(),
+            port: args.port,
+            lnd_connection: args.lnd_connection,
+            token: args.token,
+            tracker: args.tracker,
             invoice_queue: VecDeque::new(),
             active_invoice_trackers: 0,
             active_payment_trackers: HashMap::new(),
             next_payment_tracker_id: 0,
         };
-
-        // Keep the global tracker as a fast notification path. Per-payment trackers
-        // provide the reliable reconnect/restart recovery path for active orders.
-        let payment_tracker = AllPaymentsTracker {
-            port: args.port,
-            lnd_connection: args.lnd_connection,
-            token: args.token,
-        };
-
-        args.tracker.spawn(async move {
-            payment_tracker.run().await;
-        });
 
         Ok(state)
     }
@@ -465,68 +457,9 @@ impl LndTrackerState {
     }
 }
 
-/// Internal struct for tracking payments
-struct AllPaymentsTracker {
-    port: Arc<OutputPort<CchTrackingEvent>>,
-    lnd_connection: LndConnectionInfo,
-    token: CancellationToken,
-}
-
-impl AllPaymentsTracker {
-    async fn run(self) {
-        let token = self.token.clone();
-        let fut = self.run_loop();
-        token.run_until_cancelled(fut).await;
-    }
-
-    async fn run_loop(self) {
-        tracing::debug!("PaymentTracker: will connect {}", self.lnd_connection.uri);
-
-        while let Err(err) = self.run_once().await {
-            tracing::error!(
-                "Error tracking LND payments, retry 15 seconds later: {:?}",
-                err
-            );
-            sleep(Duration::from_secs(15)).await;
-        }
-    }
-
-    async fn run_once(&self) -> Result<()> {
-        let mut client = self.lnd_connection.create_router_client().await?;
-        let mut stream = client
-            .track_payments(routerrpc::TrackPaymentsRequest {
-                no_inflight_updates: true,
-            })
-            .await?
-            .into_inner();
-
-        loop {
-            match stream.next().await {
-                Some(Ok(payment)) => self.on_payment(payment).await?,
-                Some(Err(err)) => return Err(err.into()),
-                None => return Err(anyhow!("unexpected closed stream")),
-            }
-        }
-    }
-
-    async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
-        let payment_hash = payment.payment_hash.clone();
-        let status = payment.status();
-        let has_payment_preimage = !is_payment_preimage_empty(&payment.payment_preimage, status);
-        tracing::debug!(
-            "payment changed payment_hash={} status={:?} has_payment_preimage={}",
-            payment_hash,
-            status,
-            has_payment_preimage
-        );
-        self.port.send(map_lnd_payment_changed_event(payment)?);
-        Ok(())
-    }
-}
-
-/// Tracks one outgoing payment by hash. Unlike `TrackPayments`, `TrackPaymentV2`
-/// returns the current state of the requested payment after every reconnect,
-/// including a terminal state reached while CCH or LND was unavailable.
+/// Tracks one outgoing payment by hash. `TrackPaymentV2` returns the current state
+/// of the requested payment after every reconnect, including a terminal state
+/// reached while CCH or LND was unavailable.
 struct PaymentTracker {
     port: Arc<OutputPort<CchTrackingEvent>>,
     payment_hash: Hash256,
