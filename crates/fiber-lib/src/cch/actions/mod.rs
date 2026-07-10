@@ -2,7 +2,7 @@ pub(crate) mod backend_dispatchers;
 pub(crate) mod send_outgoing_payment;
 pub(crate) mod settle_incoming_invoice;
 pub(crate) mod track_incoming_invoice;
-mod track_outgoing_payment;
+pub(crate) mod track_outgoing_payment;
 use fiber_types::{CchOrder, CchOrderStatus};
 use send_outgoing_payment::SendOutgoingPaymentDispatcher;
 use settle_incoming_invoice::SettleIncomingInvoiceDispatcher;

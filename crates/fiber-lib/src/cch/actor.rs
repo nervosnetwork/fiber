@@ -501,6 +501,12 @@ impl<S: CchOrderStore> CchState<S> {
 
     fn schedule_job_on_entering(&self, order: &CchOrder) {
         if order.is_final() {
+            // A final order no longer needs its dedicated LND payment stream. This
+            // also covers terminal transitions triggered by the incoming invoice
+            // or another tracker before the per-payment stream completes.
+            let _ = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTrackingPayment(order.payment_hash));
             self.schedule_job_for_final_order(order);
         } else {
             self.schedule_job_for_non_final_order(order);

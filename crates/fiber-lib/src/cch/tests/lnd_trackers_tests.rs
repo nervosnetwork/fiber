@@ -180,3 +180,63 @@ async fn test_timeout_requeues_active_invoices() {
     assert_eq!(final_state.invoice_queue_len, 0);
     assert_eq!(final_state.active_invoice_trackers, 1);
 }
+
+#[tokio::test]
+async fn test_duplicate_payment_tracking_is_idempotent() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(7);
+
+    actor_ref
+        .cast(LndTrackerMessage::TrackPayment(payment_hash))
+        .expect("Failed to send first TrackPayment");
+    actor_ref
+        .cast(LndTrackerMessage::TrackPayment(payment_hash))
+        .expect("Failed to send duplicate TrackPayment");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state = actor_ref
+        .call(
+            LndTrackerMessage::GetState,
+            Some(RactorDuration::from_millis(1000)),
+        )
+        .await
+        .expect("Failed to get state")
+        .expect("Failed to get state");
+    assert_eq!(state.active_payment_trackers, 1);
+}
+
+#[tokio::test]
+async fn test_payment_tracker_completion_and_cancellation_cleanup_state() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let completed_hash = test_payment_hash(8);
+    let cancelled_hash = test_payment_hash(9);
+
+    actor_ref
+        .cast(LndTrackerMessage::TrackPayment(completed_hash))
+        .expect("Failed to track completed payment");
+    actor_ref
+        .cast(LndTrackerMessage::TrackPayment(cancelled_hash))
+        .expect("Failed to track cancelled payment");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    actor_ref
+        .cast(LndTrackerMessage::PaymentTrackerCompleted {
+            payment_hash: completed_hash,
+            tracker_id: 0,
+        })
+        .expect("Failed to complete payment tracker");
+    actor_ref
+        .cast(LndTrackerMessage::StopTrackingPayment(cancelled_hash))
+        .expect("Failed to cancel payment tracker");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state = actor_ref
+        .call(
+            LndTrackerMessage::GetState,
+            Some(RactorDuration::from_millis(1000)),
+        )
+        .await
+        .expect("Failed to get state")
+        .expect("Failed to get state");
+    assert_eq!(state.active_payment_trackers, 0);
+}
