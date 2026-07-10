@@ -333,7 +333,9 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::GetCchOrder(payment_hash, port) => {
-                let result = state.store.get_cch_order(&payment_hash).map_err(Into::into);
+                let result = state.get_order_or_none(&payment_hash).and_then(|order| {
+                    order.ok_or_else(|| CchStoreError::NotFound(payment_hash).into())
+                });
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -450,7 +452,10 @@ impl<S: CchOrderStore> CchState<S> {
         match self.store.get_cch_order(payment_hash) {
             Err(CchStoreError::NotFound(_)) => Ok(None),
             Err(err) => Err(err.into()),
-            Ok(order) => Ok(Some(order)),
+            Ok(mut order) => {
+                order.normalize_amount_sats();
+                Ok(Some(order))
+            }
         }
     }
 
@@ -681,13 +686,13 @@ impl<S: CchOrderStore> CchState<S> {
             .and_then(|v| v.checked_div(1_000_000u128))
             .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
             .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
-        let total_msat = i64::try_from(
-            amount_sats
-                .checked_add(fee_sats)
-                .and_then(|s| s.checked_mul(1_000u128))
-                .unwrap_or(u128::MAX),
-        )
-        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
+        let total_sats = amount_sats
+            .checked_add(fee_sats)
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
+        let total_msat = total_sats
+            .checked_mul(1_000u128)
+            .and_then(|amount| i64::try_from(amount).ok())
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
 
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
@@ -789,7 +794,7 @@ impl<S: CchOrderStore> CchState<S> {
             outgoing_pay_req: receive_btc.fiber_pay_req,
             payment_preimage: None,
             status: CchOrderStatus::Pending,
-            amount_sats,
+            amount_sats: total_sats,
             fee_sats,
             payment_hash,
             wrapped_btc_type_script,

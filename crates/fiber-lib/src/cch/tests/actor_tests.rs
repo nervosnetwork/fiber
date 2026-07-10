@@ -130,6 +130,8 @@ struct MockNetworkState {
     sent_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Tracks the `max_fee_amount` of each outgoing Fiber SendPayment, keyed by payment hash.
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
+    /// Tracks the `max_fee_rate` of each outgoing Fiber SendPayment, keyed by payment hash.
+    sent_fiber_payment_fee_rates: Arc<Mutex<std::collections::HashMap<Hash256, Option<u64>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
     send_payment_status: Arc<Mutex<PaymentStatus>>,
 }
@@ -178,6 +180,11 @@ impl Actor for MockNetworkActor {
                         .lock()
                         .unwrap()
                         .insert(payment_hash, cmd.max_fee_amount);
+                    state
+                        .sent_fiber_payment_fee_rates
+                        .lock()
+                        .unwrap()
+                        .insert(payment_hash, cmd.max_fee_rate);
 
                     // Return success response - the executor will create CchTrackingEvent
                     let status = *state.send_payment_status.lock().unwrap();
@@ -314,6 +321,16 @@ impl TestHarness {
     fn fiber_payment_max_fee(&self, payment_hash: Hash256) -> Option<Option<u128>> {
         self.mock_state
             .sent_fiber_payment_fees
+            .lock()
+            .unwrap()
+            .get(&payment_hash)
+            .copied()
+    }
+
+    /// Return the `max_fee_rate` of the outgoing Fiber SendPayment for `payment_hash`, if sent.
+    fn fiber_payment_max_fee_rate(&self, payment_hash: Hash256) -> Option<Option<u64>> {
+        self.mock_state
+            .sent_fiber_payment_fee_rates
             .lock()
             .unwrap()
             .get(&payment_hash)
@@ -495,6 +512,7 @@ async fn setup_test_harness_with_config_and_store(
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        sent_fiber_payment_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
 
@@ -540,6 +558,7 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        sent_fiber_payment_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
 
@@ -584,17 +603,37 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
 fn create_test_lightning_invoice_with_payment_hash(
     payment_hash: Hash256,
 ) -> lightning_invoice::Bolt11Invoice {
+    create_test_lightning_invoice_with_payment_hash_and_amount(payment_hash, 100_000)
+}
+
+fn create_test_lightning_invoice_with_payment_hash_and_amount(
+    payment_hash: Hash256,
+    amount_sats: u64,
+) -> lightning_invoice::Bolt11Invoice {
     let duration_since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time");
-    create_test_lightning_invoice_with_payment_hash_and_timestamp(
+    create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
         payment_hash,
+        amount_sats,
         duration_since_epoch,
     )
 }
 
 fn create_test_lightning_invoice_with_payment_hash_and_timestamp(
     payment_hash: Hash256,
+    duration_since_epoch: std::time::Duration,
+) -> lightning_invoice::Bolt11Invoice {
+    create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
+        payment_hash,
+        100_000,
+        duration_since_epoch,
+    )
+}
+
+fn create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
+    payment_hash: Hash256,
+    amount_sats: u64,
     duration_since_epoch: std::time::Duration,
 ) -> lightning_invoice::Bolt11Invoice {
     use bitcoin::hashes::Hash as _;
@@ -620,7 +659,7 @@ fn create_test_lightning_invoice_with_payment_hash_and_timestamp(
         .payment_secret(payment_secret)
         .duration_since_epoch(duration_since_epoch)
         .min_final_cltv_expiry_delta(36)
-        .amount_milli_satoshis(100_000_000) // 100k sats
+        .amount_milli_satoshis(amount_sats * 1_000)
         .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build lightning invoice")
 }
@@ -1162,9 +1201,10 @@ async fn dispatch_fiber_outgoing_and_capture_fee(
     let (_preimage, payment_hash) = create_valid_preimage_pair(seed);
 
     let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
-    let lightning_invoice = create_test_lightning_invoice_with_cltv(
+    let lightning_invoice = create_test_lightning_invoice_with_cltv_and_amount(
         payment_hash,
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        u64::try_from(amount_sats).expect("test amount fits in u64"),
     );
     let order = CchOrder {
         created_at: SystemTime::now()
@@ -1245,6 +1285,113 @@ async fn test_receive_btc_outgoing_fiber_fee_scaled_by_percentage() {
         max_fee,
         Some(fee_sats * 50 / 100),
         "outgoing Fiber fee budget must be scaled by max_outgoing_fee_percentage"
+    );
+}
+
+/// The fee-rate denominator must remain the outgoing Fiber principal after `amount_sats` changes
+/// to represent the incoming total. The invoice is the source of truth for both legacy orders
+/// (`amount_sats == principal`) and fixed orders (`amount_sats == principal + CCH fee`).
+#[tokio::test]
+async fn test_receive_btc_outgoing_fiber_fee_rate_uses_outgoing_principal() {
+    let harness = setup_test_harness().await;
+    let principal_sats = 100_000;
+    let fee_sats = 30_000;
+    let expected_rate = 300; // ceil(30_000 * 1000 / 100_000)
+
+    for (seed, stored_amount_sats) in [(63, principal_sats), (64, principal_sats + fee_sats)] {
+        dispatch_fiber_outgoing_and_capture_fee(&harness, seed, stored_amount_sats, fee_sats).await;
+        let (_, payment_hash) = create_valid_preimage_pair(seed);
+        assert_eq!(
+            harness.fiber_payment_max_fee_rate(payment_hash),
+            Some(Some(expected_rate)),
+            "fee rate must be based on the outgoing principal for stored amount {}",
+            stored_amount_sats
+        );
+    }
+}
+
+/// Legacy ReceiveBTC orders stored the outgoing Fiber principal in `amount_sats`, even though
+/// the incoming Lightning invoice required the principal plus the CCH fee. Reading such an order
+/// must report the amount actually required by the persisted incoming invoice.
+#[tokio::test]
+async fn test_get_receive_btc_legacy_order_reports_incoming_invoice_amount() {
+    let harness = setup_test_harness().await;
+    let (_preimage, payment_hash) = create_valid_preimage_pair(62);
+    let principal_sats = 98_000;
+    let fee_sats = 2_000;
+    let incoming_amount_sats = 100_000;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_amount(payment_hash, principal_sats)
+            .to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_payment_hash(
+            payment_hash,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        // This is the value persisted by versions affected by #1499.
+        amount_sats: principal_sats,
+        fee_sats,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    // Both receive_btc and get_cch_order use this conversion for their immediate RPC response.
+    let response = fiber_json_types::CchOrderResponse::from(order.clone());
+    assert_eq!(response.amount_sats, incoming_amount_sats);
+
+    harness.insert_order_directly(order).await.unwrap();
+
+    let fetched = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(
+        fetched.amount_sats, incoming_amount_sats,
+        "amount_sats must match the amount required by the incoming Lightning invoice"
+    );
+}
+
+/// Orders created before incoming Lightning invoices included the CCH fee must retain the actual
+/// invoice amount. Compatibility handling must not blindly add `fee_sats` to every old record.
+#[tokio::test]
+async fn test_get_receive_btc_pre_fee_invoice_does_not_add_fee() {
+    let harness = setup_test_harness().await;
+    let (_preimage, payment_hash) = create_valid_preimage_pair(65);
+    let incoming_amount_sats = 100_000;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_amount(payment_hash, incoming_amount_sats)
+            .to_string(),
+        incoming_invoice: CchInvoice::Lightning(
+            create_test_lightning_invoice_with_payment_hash_and_amount(
+                payment_hash,
+                incoming_amount_sats as u64,
+            ),
+        ),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: incoming_amount_sats,
+        fee_sats: 2_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    let fetched = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(fetched.amount_sats, incoming_amount_sats);
+    assert_ne!(
+        fetched.amount_sats,
+        incoming_amount_sats + fetched.fee_sats,
+        "historical compatibility must use the invoice amount rather than blindly adding the fee"
     );
 }
 
@@ -1906,6 +2053,14 @@ fn create_test_lightning_invoice_with_cltv(
     payment_hash: Hash256,
     min_final_cltv: u64,
 ) -> lightning_invoice::Bolt11Invoice {
+    create_test_lightning_invoice_with_cltv_and_amount(payment_hash, min_final_cltv, 100_000)
+}
+
+fn create_test_lightning_invoice_with_cltv_and_amount(
+    payment_hash: Hash256,
+    min_final_cltv: u64,
+    amount_sats: u64,
+) -> lightning_invoice::Bolt11Invoice {
     use bitcoin::hashes::Hash as _;
     use lightning_invoice::{Currency as LnCurrency, InvoiceBuilder as LnInvoiceBuilder};
 
@@ -1924,7 +2079,7 @@ fn create_test_lightning_invoice_with_cltv(
         .payment_secret(payment_secret)
         .duration_since_epoch(duration_since_epoch)
         .min_final_cltv_expiry_delta(min_final_cltv)
-        .amount_milli_satoshis(100_000_000)
+        .amount_milli_satoshis(amount_sats * 1_000)
         .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build lightning invoice")
 }

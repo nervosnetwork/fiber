@@ -52,6 +52,17 @@ pub(crate) fn outgoing_max_fee_rate(amount: u128, max_fee_amount: u128) -> u64 {
     u64::try_from(rate).unwrap_or(u64::MAX)
 }
 
+/// Read the outgoing Fiber principal from its invoice.
+///
+/// ReceiveBTC orders historically used `amount_sats` for the outgoing principal, while new orders
+/// use it for the incoming total including the CCH fee. The signed outgoing invoice is therefore
+/// the stable source of truth across both persisted representations.
+pub(crate) fn outgoing_fiber_principal_sats(order: &CchOrder) -> Option<u128> {
+    CkbInvoice::from_str(&order.outgoing_pay_req)
+        .ok()
+        .and_then(|invoice| invoice.amount())
+}
+
 pub struct SendOutgoingPaymentDispatcher;
 
 pub struct SendFiberOutgoingPaymentExecutor {
@@ -366,6 +377,23 @@ impl SendOutgoingPaymentDispatcher {
 
         match dispatch_payment_handler(order) {
             PaymentHandlerType::Fiber => {
+                let outgoing_principal_sats = match outgoing_fiber_principal_sats(order) {
+                    Some(amount) => amount,
+                    None => {
+                        let _ = cch_actor_ref.send_message(CchMessage::TrackingEvent(
+                            CchTrackingEvent::PaymentChanged {
+                                payment_hash: order.payment_hash,
+                                payment_preimage: None,
+                                status: PaymentStatus::Failed,
+                                failure_reason: Some(
+                                    "Outgoing Fiber invoice is invalid or missing an amount"
+                                        .to_string(),
+                                ),
+                            },
+                        ));
+                        return None;
+                    }
+                };
                 let tlc_expiry_limit = max_outgoing_seconds
                     .saturating_mul(1000)
                     .min(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
@@ -378,7 +406,10 @@ impl SendOutgoingPaymentDispatcher {
                     tlc_expiry_limit,
                     fee_limit: OutgoingFeeLimit {
                         max_fee_amount: fee_budget_sats,
-                        max_fee_rate: outgoing_max_fee_rate(order.amount_sats, fee_budget_sats),
+                        max_fee_rate: outgoing_max_fee_rate(
+                            outgoing_principal_sats,
+                            fee_budget_sats,
+                        ),
                     },
                 }))
             }
