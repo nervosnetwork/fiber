@@ -405,6 +405,18 @@ impl From<fiber_types::SessionRoute> for JsonSessionRoute {
     }
 }
 
+impl From<fiber_types::AttemptStatus> for crate::payment::PaymentAttemptStatus {
+    fn from(status: fiber_types::AttemptStatus) -> Self {
+        match status {
+            fiber_types::AttemptStatus::Created => Self::Created,
+            fiber_types::AttemptStatus::Inflight => Self::Inflight,
+            fiber_types::AttemptStatus::Retrying => Self::Retrying,
+            fiber_types::AttemptStatus::Success => Self::Success,
+            fiber_types::AttemptStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 // ─── RouterHop Conversions ──────────────────────────────────────────────────
 
 impl From<fiber_types::RouterHop> for crate::payment::RouterHop {

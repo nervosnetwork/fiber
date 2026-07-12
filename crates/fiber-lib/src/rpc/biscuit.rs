@@ -119,6 +119,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
     b.rule("get_payment", r#"allow if read("payments");"#);
+    b.rule("get_payment_diagnostics", r#"allow if read("payments");"#);
     b.rule("list_payments", r#"allow if read("payments");"#);
     b.rule("build_router", r#"allow if read("payments");"#);
     b.rule("send_payment_with_router", r#"allow if write("payments");"#);
@@ -294,11 +295,37 @@ mod tests {
         assert!(auth.check_permission("send_payment", &token,).is_ok());
         // write permission do not implies read
         assert!(auth.check_permission("get_payment", &token).is_err());
+        assert!(auth
+            .check_permission("get_payment_diagnostics", &token)
+            .is_err());
         assert!(auth.check_permission("list_peers", &token).is_ok());
         assert!(auth.check_permission("connect_peer", &token).is_err());
 
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());
+    }
+
+    #[test]
+    fn test_payment_diagnostics_requires_read_payments() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("payments");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("payments");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        assert!(auth
+            .check_permission("get_payment_diagnostics", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_payment_diagnostics", &write_token)
+            .is_err());
     }
 
     #[test]

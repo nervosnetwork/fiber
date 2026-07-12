@@ -93,6 +93,70 @@ pub struct GetPaymentCommandResult {
     pub routers: Vec<SessionRoute>,
 }
 
+/// The status of one concrete payment attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum PaymentAttemptStatus {
+    Created,
+    Inflight,
+    Retrying,
+    Success,
+    Failed,
+}
+
+/// Redacted, read-only evidence for one payment attempt.
+///
+/// This type intentionally excludes the session key, preimage, invoice, custom records,
+/// route hop payloads, and onion data held by the internal payment attempt.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PaymentAttemptDiagnostic {
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub attempt_id: u64,
+    pub status: PaymentAttemptStatus,
+    #[serde_as(as = "U32Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub retry_count: u32,
+    #[serde_as(as = "U32Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub retry_limit: u32,
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub created_at: u64,
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub last_updated_at: u64,
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub receiver_amount: u128,
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub fee: u128,
+    pub failed_error: Option<String>,
+    pub route: SessionRoute,
+}
+
+/// Release-safe payment diagnostics for operators and observability clients.
+///
+/// Unlike the debug-only route field on `get_payment`, this response is available in release
+/// builds. It exposes only redacted failure and route evidence.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GetPaymentDiagnosticsResult {
+    pub payment_hash: Hash256,
+    pub status: PaymentStatus,
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub created_at: u64,
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub last_updated_at: u64,
+    /// Stable Fiber TLC error code name when the failure supplied one.
+    pub failed_error_code: Option<String>,
+    pub failed_error: Option<String>,
+    pub attempts: Vec<PaymentAttemptDiagnostic>,
+}
+
 /// Parameters for listing payments.
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Default, JsonSchema)]
@@ -397,4 +461,39 @@ pub struct SendPaymentWithRouterParams {
     /// it's useful for the sender to double check the payment before sending it to the network,
     /// default is false
     pub dry_run: Option<bool>,
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::{PaymentAttemptDiagnostic, PaymentAttemptStatus, SessionRoute};
+
+    #[test]
+    fn payment_attempt_diagnostic_serialization_has_no_secret_fields() {
+        let diagnostic = PaymentAttemptDiagnostic {
+            attempt_id: 7,
+            status: PaymentAttemptStatus::Failed,
+            retry_count: 2,
+            retry_limit: 3,
+            created_at: 10,
+            last_updated_at: 20,
+            receiver_amount: 1_000,
+            fee: 5,
+            failed_error: Some("route unavailable".to_owned()),
+            route: SessionRoute::default(),
+        };
+
+        let value = serde_json::to_value(diagnostic).unwrap();
+        for forbidden in [
+            "session_key",
+            "preimage",
+            "invoice",
+            "custom_records",
+            "route_hops",
+            "onion",
+        ] {
+            assert!(value.get(forbidden).is_none(), "leaked {forbidden}");
+        }
+        assert_eq!(value["attempt_id"], "0x7");
+        assert_eq!(value["status"], "Failed");
+    }
 }
