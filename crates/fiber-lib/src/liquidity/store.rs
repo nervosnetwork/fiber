@@ -183,8 +183,11 @@ pub trait LiquidityStore {
 mod tests {
     use super::*;
 
+    use ckb_types::{packed::Byte32, packed::OutPoint, prelude::*};
+
     #[test]
     fn liquidity_swap_record_round_trips_through_bincode() {
+        let outpoint = OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 1);
         let record = LiquiditySwapRecord {
             swap_id: [1u8; 32].into(),
             quote_id: [2u8; 32].into(),
@@ -195,7 +198,7 @@ mod tests {
             payment_hash: [3u8; 32].into(),
             payment_preimage: Some([4u8; 32].into()),
             amount: 1000,
-            onchain_outpoint: None,
+            onchain_outpoint: Some(outpoint),
             payout_deadline: Some(2000),
             refund_after_lock_time: 3000,
             expires_at: 4000,
