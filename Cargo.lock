@@ -6527,9 +6527,9 @@ dependencies = [
 
 [[package]]
 name = "tentacle-multiaddr"
-version = "0.3.6"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d2d1d3511bbe6d6a662ee13616a31268d0558c73d25dfe6b5a5dcb376719c7"
+checksum = "b7b06b419ae75898680ae449d5db5bf9dfedb531c49cdb6f24d42054508a2df3"
 dependencies = [
  "arrayref",
  "bs58",
