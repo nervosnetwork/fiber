@@ -24,6 +24,9 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
+use crate::liquidity::store::{
+    LiquidityStore, LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole,
+};
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::open_store;
@@ -51,7 +54,8 @@ use fiber_types::{
     SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
-    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
+    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, LiquiditySwapState, PaymentHopData,
+    RouterHop, SessionRoute,
 };
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
@@ -137,6 +141,39 @@ fn test_store_invoice() {
     let status = CkbInvoiceStatus::Paid;
     store.update_invoice_status(hash, status).unwrap();
     assert_eq!(store.get_invoice_status(hash), Some(status));
+}
+
+fn mock_liquidity_swap(seed: u8, state: LiquiditySwapState, asset_id: &str) -> LiquiditySwapRecord {
+    LiquiditySwapRecord {
+        swap_id: [seed; 32].into(),
+        quote_id: [seed.wrapping_add(1); 32].into(),
+        role: LiquiditySwapRole::Client,
+        swap_kind: LiquiditySwapKind::LoopOut,
+        asset_id: asset_id.to_string(),
+        state,
+        payment_hash: [seed.wrapping_add(2); 32].into(),
+        payment_preimage: None,
+        amount: u128::from(seed) + 1000,
+        onchain_outpoint: None,
+        payout_deadline: Some(10_000 + u64::from(seed)),
+        refund_after_lock_time: 20_000 + u64::from(seed),
+        expires_at: 30_000 + u64::from(seed),
+        failure_reason: None,
+        created_at: 40_000 + u64::from(seed),
+        updated_at: 50_000 + u64::from(seed),
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_insert_get() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(1, LiquiditySwapState::Created, "ckb");
+
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
+    assert_eq!(store.get_liquidity_swap(&[99u8; 32].into()).unwrap(), None);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
