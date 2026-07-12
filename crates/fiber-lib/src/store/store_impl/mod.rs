@@ -16,6 +16,10 @@ use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 #[cfg(feature = "watchtower")]
 use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::HoldTlc;
+use crate::liquidity::store::{
+    LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
+    LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapUpdate,
+};
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{
@@ -36,8 +40,9 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, Hash256, LiquidityAsset, LiquiditySwapState, PaymentCustomRecords,
+    PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey, TLCId, TimedResult,
+    CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
@@ -416,6 +421,24 @@ fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
     (payment_hash.into(), hold_tlc)
 }
 
+fn liquidity_state_key(state: LiquiditySwapState) -> u8 {
+    match state {
+        LiquiditySwapState::Created => 0,
+        LiquiditySwapState::Quoted => 1,
+        LiquiditySwapState::OnchainLockPending => 2,
+        LiquiditySwapState::OnchainLocked => 3,
+        LiquiditySwapState::PayoutPending => 4,
+        LiquiditySwapState::PayoutLocked => 5,
+        LiquiditySwapState::PaymentInFlight => 6,
+        LiquiditySwapState::PaymentSettled => 7,
+        LiquiditySwapState::ClaimPending => 8,
+        LiquiditySwapState::RefundPending => 9,
+        LiquiditySwapState::Success => 10,
+        LiquiditySwapState::Failed => 11,
+        LiquiditySwapState::Refunded => 12,
+    }
+}
+
 pub enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
@@ -449,6 +472,10 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchSendBtcOrderCreation(Hash256, CchSendBtcOrderCreation),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
+    LiquiditySwap(Hash256, LiquiditySwapRecord),
+    LiquiditySwapStateIndex((LiquiditySwapState, Hash256)),
+    LiquiditySwapAssetIndex((String, Hash256)),
+    LiquidityAsset(String, LiquidityAsset),
 }
 
 /// Recorded store changes.
@@ -588,6 +615,25 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
+            KeyValue::LiquiditySwap(swap_id, _) => {
+                [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat()
+            }
+            KeyValue::LiquiditySwapStateIndex((state, swap_id)) => [
+                &[LIQUIDITY_SWAP_STATE_PREFIX],
+                &[liquidity_state_key(*state)],
+                swap_id.as_ref(),
+            ]
+            .concat(),
+            KeyValue::LiquiditySwapAssetIndex((asset_id, swap_id)) => [
+                &[LIQUIDITY_SWAP_ASSET_PREFIX],
+                asset_id.as_bytes(),
+                &[0],
+                swap_id.as_ref(),
+            ]
+            .concat(),
+            KeyValue::LiquidityAsset(asset_id, _) => {
+                [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat()
+            }
         }
     }
 
@@ -638,6 +684,10 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(creation, "CchSendBtcOrderCreation")
             }
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+            KeyValue::LiquiditySwap(_, swap) => serialize_to_vec(swap, "LiquiditySwapRecord"),
+            KeyValue::LiquiditySwapStateIndex(_) => Vec::new(),
+            KeyValue::LiquiditySwapAssetIndex(_) => Vec::new(),
+            KeyValue::LiquidityAsset(_, asset) => serialize_to_vec(asset, "LiquidityAsset"),
         }
     }
 }
@@ -1209,6 +1259,77 @@ impl ChannelOpenRecordStore for Store {
     fn delete_channel_open_record(&self, channel_id: &Hash256) {
         let key = [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat();
         self.delete(key);
+    }
+}
+
+impl LiquidityStore for Store {
+    fn insert_liquidity_swap(&self, swap: LiquiditySwapRecord) -> Result<(), LiquidityStoreError> {
+        if self.get_liquidity_swap(&swap.swap_id)?.is_some() {
+            return Err(LiquidityStoreError::Backend(format!(
+                "liquidity swap already exists: {:?}",
+                swap.swap_id
+            )));
+        }
+
+        let mut batch = self.batch();
+        let primary = KeyValue::LiquiditySwap(swap.swap_id, swap.clone());
+        let state_index = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id));
+        let asset_index = KeyValue::LiquiditySwapAssetIndex((swap.asset_id.clone(), swap.swap_id));
+        batch.put(primary.key(), primary.value());
+        batch.put(state_index.key(), state_index.value());
+        batch.put(asset_index.key(), asset_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_swap(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<Option<LiquiditySwapRecord>, LiquidityStoreError> {
+        let key = [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat();
+        Ok(self
+            .get(key)
+            .map(|value| deserialize_from(value.as_ref(), "LiquiditySwapRecord")))
+    }
+
+    fn list_liquidity_swaps(
+        &self,
+        _filter: LiquiditySwapFilter,
+    ) -> Result<LiquiditySwapPage, LiquidityStoreError> {
+        Ok(LiquiditySwapPage::default())
+    }
+
+    fn update_liquidity_swap_state(
+        &self,
+        swap_id: &Hash256,
+        _transition: LiquidityStateTransition,
+    ) -> Result<(), LiquidityStoreError> {
+        Err(LiquidityStoreError::SwapNotFound(*swap_id))
+    }
+
+    fn update_liquidity_swap(
+        &self,
+        swap_id: &Hash256,
+        _update: LiquiditySwapUpdate,
+    ) -> Result<(), LiquidityStoreError> {
+        Err(LiquidityStoreError::SwapNotFound(*swap_id))
+    }
+
+    fn upsert_liquidity_asset(&self, _asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
+        Err(LiquidityStoreError::Backend(
+            "liquidity asset persistence unavailable in current task".to_string(),
+        ))
+    }
+
+    fn get_liquidity_asset(
+        &self,
+        _asset_id: &str,
+    ) -> Result<Option<LiquidityAsset>, LiquidityStoreError> {
+        Ok(None)
+    }
+
+    fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
+        Ok(Vec::new())
     }
 }
 

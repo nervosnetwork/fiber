@@ -57,3 +57,7 @@ pub const CCH_ORDER_PREFIX: u8 = 232;
 pub const CCH_RECEIVE_BTC_ORDER_CREATION_PREFIX: u8 = 233;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_SEND_BTC_ORDER_CREATION_PREFIX: u8 = 234;
+pub const LIQUIDITY_SWAP_PREFIX: u8 = 240;
+pub const LIQUIDITY_SWAP_STATE_PREFIX: u8 = 241;
+pub const LIQUIDITY_SWAP_ASSET_PREFIX: u8 = 242;
+pub const LIQUIDITY_ASSET_PREFIX: u8 = 243;
