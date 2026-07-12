@@ -1,10 +1,12 @@
 //! Liquidity persistence traits and records.
 
-use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapState};
+use fiber_types::{EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState};
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use thiserror::Error;
 
 /// Local role for a persisted liquidity swap.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LiquiditySwapRole {
     /// Local node initiated the swap.
     Client,
@@ -13,7 +15,7 @@ pub enum LiquiditySwapRole {
 }
 
 /// Direction of a persisted liquidity swap.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LiquiditySwapKind {
     /// Move Fiber balance out to chain.
     LoopOut,
@@ -30,6 +32,9 @@ pub enum LiquidityStoreError {
     /// The requested asset does not exist.
     #[error("liquidity asset not found: {0}")]
     AssetNotFound(String),
+    /// The requested asset is invalid.
+    #[error("invalid liquidity asset: {0}")]
+    InvalidAsset(#[from] LiquidityAssetError),
     /// The requested transition is not allowed by the liquidity state machine.
     #[error("invalid liquidity state transition from {from:?} to {to:?}")]
     InvalidStateTransition {
@@ -44,7 +49,8 @@ pub enum LiquidityStoreError {
 }
 
 /// Persisted liquidity swap record needed for restart recovery.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquiditySwapRecord {
     /// Local swap identifier.
     pub swap_id: Hash256,
@@ -65,6 +71,7 @@ pub struct LiquiditySwapRecord {
     /// Raw swap amount.
     pub amount: u128,
     /// On-chain lock or payout outpoint once known.
+    #[serde_as(as = "Option<EntityHex>")]
     pub onchain_outpoint: Option<ckb_types::packed::OutPoint>,
     /// Loop Out payout confirmation deadline.
     pub payout_deadline: Option<u64>,
@@ -81,7 +88,7 @@ pub struct LiquiditySwapRecord {
 }
 
 /// Filter for paginated swap history queries.
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquiditySwapFilter {
     /// Optional state filter.
     pub state: Option<LiquiditySwapState>,
@@ -94,7 +101,7 @@ pub struct LiquiditySwapFilter {
 }
 
 /// Page returned by swap history queries.
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquiditySwapPage {
     /// Matching swap records.
     pub swaps: Vec<LiquiditySwapRecord>,
@@ -103,7 +110,7 @@ pub struct LiquiditySwapPage {
 }
 
 /// State transition metadata persisted with each transition.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquidityStateTransition {
     /// Requested next state.
     pub state: LiquiditySwapState,
@@ -114,11 +121,13 @@ pub struct LiquidityStateTransition {
 }
 
 /// Recovery fields that may become known after swap creation.
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[serde_as]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquiditySwapUpdate {
     /// Known 32-byte preimage after payment settlement.
     pub payment_preimage: Option<Hash256>,
     /// On-chain lock or payout outpoint once observed or broadcast.
+    #[serde_as(as = "Option<EntityHex>")]
     pub onchain_outpoint: Option<ckb_types::packed::OutPoint>,
     /// Failure reason for terminal failed swaps.
     pub failure_reason: Option<String>,
@@ -168,4 +177,37 @@ pub trait LiquidityStore {
 
     /// List configured provider assets.
     fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liquidity_swap_record_round_trips_through_bincode() {
+        let record = LiquiditySwapRecord {
+            swap_id: [1u8; 32].into(),
+            quote_id: [2u8; 32].into(),
+            role: LiquiditySwapRole::Client,
+            swap_kind: LiquiditySwapKind::LoopOut,
+            asset_id: "ckb".to_string(),
+            state: LiquiditySwapState::Created,
+            payment_hash: [3u8; 32].into(),
+            payment_preimage: Some([4u8; 32].into()),
+            amount: 1000,
+            onchain_outpoint: None,
+            payout_deadline: Some(2000),
+            refund_after_lock_time: 3000,
+            expires_at: 4000,
+            failure_reason: Some("failed".to_string()),
+            created_at: 5000,
+            updated_at: 6000,
+        };
+
+        let bytes = bincode::serialize(&record).expect("serialize record");
+        let decoded: LiquiditySwapRecord =
+            bincode::deserialize(&bytes).expect("deserialize record");
+
+        assert_eq!(decoded, record);
+    }
 }
