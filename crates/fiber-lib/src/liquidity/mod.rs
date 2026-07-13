@@ -1,6 +1,7 @@
 //! Fiber-side liquidity integration helpers.
 
 pub mod actor;
+pub mod payment;
 pub mod quote;
 pub mod store;
 pub mod tx;
