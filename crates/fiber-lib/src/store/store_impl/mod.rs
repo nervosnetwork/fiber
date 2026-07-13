@@ -49,6 +49,7 @@ use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation}
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
@@ -230,6 +231,15 @@ where
 {
     bincode::deserialize(slice)
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
+}
+
+fn deserialize_liquidity<T: DeserializeOwned>(
+    value: &[u8],
+    field_name: &str,
+) -> Result<T, LiquidityStoreError> {
+    bincode::deserialize(value).map_err(|err| {
+        LiquidityStoreError::Backend(format!("deserialization of {field_name} failed: {err}"))
+    })
 }
 
 /// Open a store at `path`, running auto-migration with auto-confirm.
@@ -1346,9 +1356,9 @@ impl LiquidityStore for Store {
         swap_id: &Hash256,
     ) -> Result<Option<LiquiditySwapRecord>, LiquidityStoreError> {
         let key = Self::liquidity_swap_key(swap_id);
-        Ok(self
-            .get(key)
-            .map(|value| deserialize_from(value.as_ref(), "LiquiditySwapRecord")))
+        self.get(key)
+            .map(|value| deserialize_liquidity(value.as_ref(), "LiquiditySwapRecord"))
+            .transpose()
     }
 
     fn list_liquidity_swaps(
@@ -1367,23 +1377,25 @@ impl LiquidityStore for Store {
                 options = options.start_key(cursor_key).start_key_exclusive();
             }
             let rows = self.collect_by_prefix_with(&prefix, options);
-            let swaps = rows
-                .into_iter()
-                .filter_map(|kv| {
-                    let swap = if prefix[0] == LIQUIDITY_SWAP_PREFIX {
-                        Some(deserialize_from(kv.value.as_ref(), "LiquiditySwapRecord"))
-                    } else {
-                        Self::parse_liquidity_swap_id_from_index(&kv.key)
-                            .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
-                    }?;
-                    match filter.asset_id.as_ref() {
-                        Some(asset_id) if filter.state.is_some() && swap.asset_id != *asset_id => {
-                            None
-                        }
-                        _ => Some(swap),
-                    }
-                })
-                .collect();
+            let mut swaps = Vec::new();
+            for kv in rows {
+                let Some(swap) = (if prefix[0] == LIQUIDITY_SWAP_PREFIX {
+                    Some(deserialize_liquidity(
+                        kv.value.as_ref(),
+                        "LiquiditySwapRecord",
+                    )?)
+                } else if let Some(swap_id) = Self::parse_liquidity_swap_id_from_index(&kv.key) {
+                    self.get_liquidity_swap(&swap_id)?
+                } else {
+                    None
+                }) else {
+                    continue;
+                };
+                match filter.asset_id.as_ref() {
+                    Some(asset_id) if filter.state.is_some() && swap.asset_id != *asset_id => {}
+                    _ => swaps.push(swap),
+                }
+            }
 
             return Ok(LiquiditySwapPage {
                 swaps,
@@ -1426,9 +1438,10 @@ impl LiquidityStore for Store {
                 for kv in rows {
                     let key = kv.key;
                     scan_cursor = Some(key.clone());
-                    let Some(swap) = Self::parse_liquidity_swap_id_from_index(&key)
-                        .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
-                    else {
+                    let Some(swap_id) = Self::parse_liquidity_swap_id_from_index(&key) else {
+                        continue;
+                    };
+                    let Some(swap) = self.get_liquidity_swap(&swap_id)? else {
                         continue;
                     };
 
@@ -1456,10 +1469,14 @@ impl LiquidityStore for Store {
             let rows = self.collect_by_prefix_with(&prefix, options);
             for kv in rows {
                 let Some(swap) = (if prefix[0] == LIQUIDITY_SWAP_PREFIX {
-                    Some(deserialize_from(kv.value.as_ref(), "LiquiditySwapRecord"))
+                    Some(deserialize_liquidity(
+                        kv.value.as_ref(),
+                        "LiquiditySwapRecord",
+                    )?)
+                } else if let Some(swap_id) = Self::parse_liquidity_swap_id_from_index(&kv.key) {
+                    self.get_liquidity_swap(&swap_id)?
                 } else {
-                    Self::parse_liquidity_swap_id_from_index(&kv.key)
-                        .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
+                    None
                 }) else {
                     continue;
                 };
@@ -1552,17 +1569,16 @@ impl LiquidityStore for Store {
         asset_id: &str,
     ) -> Result<Option<LiquidityAsset>, LiquidityStoreError> {
         let key = [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat();
-        Ok(self
-            .get(key)
-            .map(|value| deserialize_from(value.as_ref(), "LiquidityAsset")))
+        self.get(key)
+            .map(|value| deserialize_liquidity(value.as_ref(), "LiquidityAsset"))
+            .transpose()
     }
 
     fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
-        Ok(self
-            .collect_by_prefix(&[LIQUIDITY_ASSET_PREFIX])
+        self.collect_by_prefix(&[LIQUIDITY_ASSET_PREFIX])
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "LiquidityAsset"))
-            .collect())
+            .map(|kv| deserialize_liquidity(kv.value.as_ref(), "LiquidityAsset"))
+            .collect()
     }
 }
 

@@ -25,14 +25,15 @@ use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::liquidity::store::{
-    LiquidityStateTransition, LiquidityStore, LiquiditySwapFilter, LiquiditySwapKind,
-    LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
+    LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
+    LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
 };
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+use crate::store::store_impl::{KeyValue, StoreKeyValue};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::{check_validate, open_store};
 use crate::tests::test_utils::*;
@@ -304,6 +305,60 @@ fn test_store_liquidity_check_validate_rejects_corrupt_records() {
 
     assert!(error.contains("LIQUIDITY_SWAP_PREFIX"));
     assert!(error.contains("LIQUIDITY_ASSET_PREFIX"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swap_get_returns_backend_error_on_corrupt_record() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(21, LiquiditySwapState::Created, "ckb");
+    let key = KeyValue::LiquiditySwap(swap.swap_id, swap.clone()).key();
+
+    store.put(key, [0]);
+
+    assert!(matches!(
+        store.get_liquidity_swap(&swap.swap_id),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_index_scan_returns_backend_error_on_corrupt_record() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(22, LiquiditySwapState::Created, "ckb");
+    let primary_key = KeyValue::LiquiditySwap(swap.swap_id, swap.clone()).key();
+    let state_index_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
+
+    store.put(primary_key, [0]);
+    store.put(state_index_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_asset_reads_return_backend_error_on_corrupt_record() {
+    let (store, _dir) = generate_store();
+    let asset = mock_liquidity_asset("ckb");
+    let key = KeyValue::LiquidityAsset(asset.asset_id.clone(), asset.clone()).key();
+
+    store.put(key, [0]);
+
+    assert!(matches!(
+        store.get_liquidity_asset(&asset.asset_id),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+    assert!(matches!(
+        store.list_liquidity_assets(),
+        Err(LiquidityStoreError::Backend(_))
+    ));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
