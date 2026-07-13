@@ -88,6 +88,43 @@ pub struct QuoteLoopOutParams {
     pub expires_after_seconds: u64,
 }
 
+/// Provider-side parameters for quoting a Loop Out request.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderQuoteLoopOutParams {
+    /// Provider asset registry identifier.
+    pub asset_id: String,
+    /// Raw on-chain destination amount before routing fees.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub amount: u128,
+    /// CKB address or UDT receiver descriptor.
+    pub receiver: String,
+    /// Maximum provider fee accepted by the client.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub max_provider_fee: u128,
+    /// Maximum Fiber routing fee accepted by the client.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub max_routing_fee: u128,
+    /// Relative quote expiry requested by the client.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub expires_after_seconds: u64,
+}
+
+/// Provider-side parameters for accepting a Loop Out quote.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderAcceptLoopOutParams {
+    /// Provider-generated quote identifier.
+    pub quote_id: Hash256,
+    /// Claimant lock script bytes encoded for the payout lock.
+    pub claimant_lock: String,
+    /// Refund lock script bytes encoded for the payout lock.
+    pub refund_lock: String,
+}
+
 /// Quote response shared by Loop In and Loop Out.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -392,5 +429,18 @@ mod tests {
         assert_eq!(value["kind"], "ckb");
         assert_eq!(value["min_amount"], "0x1");
         assert_eq!(value["proportional_fee_ppm"], "0x1e");
+    }
+
+    #[test]
+    fn provider_accept_loop_out_params_serialize_quote_id() {
+        let params = ProviderAcceptLoopOutParams {
+            quote_id: Hash256([1u8; 32]),
+            claimant_lock: "0x0102".to_string(),
+            refund_lock: "0x0304".to_string(),
+        };
+
+        let value = serde_json::to_value(params).expect("json");
+
+        assert_eq!(value["quote_id"].as_str().unwrap().len(), 66);
     }
 }
