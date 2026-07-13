@@ -211,6 +211,8 @@ git commit -m "feat: add loop out domain types"
 
 ### Task 2: Implement Quote Validation And Preimage Generation
 
+> Task 2 correction: this slice implements quote validation only. Preimage/payment-hash generation helpers are deferred until an actor or payment task needs a concrete API.
+
 **Files:**
 - Create: `crates/fiber-lib/src/liquidity/quote.rs`
 - Modify: `crates/fiber-lib/src/liquidity/mod.rs`
