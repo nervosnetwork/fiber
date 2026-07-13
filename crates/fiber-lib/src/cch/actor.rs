@@ -850,22 +850,15 @@ impl<S: CchOrderStore> CchState<S> {
             StoreChange::PutPaymentSession {
                 payment_hash,
                 payment_session,
+                payment_preimage,
             } => {
-                use fiber_types::payment::PaymentStatus;
                 let status = payment_session.status;
-                // For successful payments, we need the preimage. If it's not in the same
-                // store change batch, the PutPreimage event will follow.
-                if status == PaymentStatus::Success {
-                    // Defer to PutPreimage
-                    vec![]
-                } else {
-                    vec![CchTrackingEvent::PaymentChanged {
-                        payment_hash: *payment_hash,
-                        payment_preimage: None,
-                        status,
-                        failure_reason: None,
-                    }]
-                }
+                vec![CchTrackingEvent::PaymentChanged {
+                    payment_hash: *payment_hash,
+                    payment_preimage: *payment_preimage,
+                    status,
+                    failure_reason: None,
+                }]
             }
             StoreChange::PutAttempt {
                 payment_hash,
@@ -880,18 +873,10 @@ impl<S: CchOrderStore> CchState<S> {
                 }]
             }
             StoreChange::PutAttempt { .. } => vec![],
-            StoreChange::PutPreimage {
-                payment_hash,
-                payment_preimage,
-            } => {
-                use fiber_types::payment::PaymentStatus;
-                vec![CchTrackingEvent::PaymentChanged {
-                    payment_hash: *payment_hash,
-                    payment_preimage: Some(*payment_preimage),
-                    status: PaymentStatus::Success,
-                    failure_reason: None,
-                }]
-            }
+            // Preimages are global to a Fiber node and can be learned from unrelated TLCs
+            // that reuse the same payment hash. Only the correlated PaymentSession success
+            // above is authoritative for a CCH outgoing payment.
+            StoreChange::PutPreimage { .. } => vec![],
         }
     }
 }
@@ -1060,10 +1045,14 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
             payment_hash: *payment_hash,
             has_payment_preimage: false,
         },
-        StoreChange::PutPaymentSession { payment_hash, .. } => RedactedStoreChangeSummary {
+        StoreChange::PutPaymentSession {
+            payment_hash,
+            payment_preimage,
+            ..
+        } => RedactedStoreChangeSummary {
             kind: "PutPaymentSession",
             payment_hash: *payment_hash,
-            has_payment_preimage: false,
+            has_payment_preimage: payment_preimage.is_some(),
         },
         StoreChange::PutAttempt { payment_hash, .. } => RedactedStoreChangeSummary {
             kind: "PutAttempt",

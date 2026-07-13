@@ -25,7 +25,9 @@ use crate::fiber::{
     payment::{PaymentSessionExt, SendPaymentCommand, SendPaymentDataBuilder},
     NetworkActorCommand, NetworkActorMessage,
 };
-use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
+use crate::invoice::{
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, PreimageStore,
+};
 use crate::store::{store_impl::StoreChange, Store};
 use crate::tests::test_utils::{generate_store, TempDir};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -930,6 +932,107 @@ async fn test_receive_btc_store_attempt_inflight_updates_payment_and_cch_status(
         .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 1000)
         .await;
     assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+}
+
+#[tokio::test]
+async fn test_receive_btc_unrelated_preimage_does_not_mark_outgoing_payment_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(100);
+    let harness = setup_store_backed_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    // Preimages are stored globally whenever any Fiber TLC with this hash is fulfilled.
+    // A fulfillment unrelated to the outgoing payment owned by this CCH order must not
+    // authorize settlement of the incoming Lightning hold invoice.
+    harness.store.insert_preimage(payment_hash, preimage);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert_eq!(order.payment_preimage, None);
+}
+
+#[tokio::test]
+async fn test_receive_btc_correlated_payment_session_success_marks_outgoing_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(101);
+    let harness = setup_store_backed_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    let payment_data =
+        SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100_000, payment_hash)
+            .final_tlc_expiry_delta(10_000)
+            .tlc_expiry_limit(10_000)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1_000))
+            .build()
+            .expect("valid payment_data");
+    let mut payment_session =
+        fiber_types::PaymentSession::new_session(&harness.store, payment_data, 10);
+    let route_hops = vec![PaymentHopData {
+        amount: 100_000,
+        expiry: 10_000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: crate::gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        crate::gen_rand_fiber_public_key(),
+        route_hops,
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    harness.store.insert_attempt(attempt.clone());
+    payment_session.append_attempt(attempt.clone());
+    payment_session.update_with_attempt(attempt);
+    harness.store.insert_payment_session(payment_session);
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
 }
 
 async fn insert_receive_btc_order_with_expiry(

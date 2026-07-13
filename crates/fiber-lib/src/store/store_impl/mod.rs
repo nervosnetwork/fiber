@@ -422,6 +422,8 @@ pub enum StoreChange {
     PutPaymentSession {
         payment_hash: Hash256,
         payment_session: PaymentSession,
+        #[serde(default)]
+        payment_preimage: Option<Hash256>,
     },
     PutAttempt {
         payment_hash: Hash256,
@@ -1198,6 +1200,9 @@ impl NetworkGraphStateStore for Store {
     fn insert_payment_session(&self, session: PaymentSession) {
         let payment_hash = session.payment_hash();
         let session_clone = session.clone();
+        let payment_preimage = (session.status == PaymentStatus::Success)
+            .then(|| session.attempts().find_map(|attempt| attempt.preimage))
+            .flatten();
         let mut batch = self.batch();
         let kv = KeyValue::PaymentSession(payment_hash, session);
         batch.put(kv.key(), kv.value());
@@ -1205,6 +1210,7 @@ impl NetworkGraphStateStore for Store {
         self.notify(StoreChange::PutPaymentSession {
             payment_hash,
             payment_session: session_clone,
+            payment_preimage,
         });
     }
 
