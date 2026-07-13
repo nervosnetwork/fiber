@@ -336,6 +336,35 @@ fn test_store_liquidity_swaps_filter_by_asset_and_state() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_asset_filter_does_not_overlap_embedded_nul_asset_ids() {
+    let (store, _dir) = generate_store();
+    let ckb = mock_liquidity_swap(16, LiquiditySwapState::Created, "ckb");
+    let ckb_udt = mock_liquidity_swap(17, LiquiditySwapState::Created, "ckb\0udt");
+    let ckb_udt_suffix = mock_liquidity_swap(18, LiquiditySwapState::Created, "ckb\0udt\0suffix");
+
+    for swap in [&ckb, &ckb_udt, &ckb_udt_suffix] {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let ckb_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ckb_swaps.swaps, vec![ckb]);
+
+    let ckb_udt_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb\0udt".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ckb_udt_swaps.swaps, vec![ckb_udt]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_liquidity_swaps_paginate_without_duplicates() {
     let (store, _dir) = generate_store();
     let swaps = vec![
