@@ -1374,9 +1374,28 @@ impl LiquidityStore for Store {
     fn update_liquidity_swap(
         &self,
         swap_id: &Hash256,
-        _update: LiquiditySwapUpdate,
+        update: LiquiditySwapUpdate,
     ) -> Result<(), LiquidityStoreError> {
-        Err(LiquidityStoreError::SwapNotFound(*swap_id))
+        let mut swap = self
+            .get_liquidity_swap(swap_id)?
+            .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+
+        if let Some(payment_preimage) = update.payment_preimage {
+            swap.payment_preimage = Some(payment_preimage);
+        }
+        if let Some(onchain_outpoint) = update.onchain_outpoint {
+            swap.onchain_outpoint = Some(onchain_outpoint);
+        }
+        if let Some(failure_reason) = update.failure_reason {
+            swap.failure_reason = Some(failure_reason);
+        }
+        swap.updated_at = update.updated_at;
+
+        let mut batch = self.batch();
+        let primary = KeyValue::LiquiditySwap(*swap_id, swap);
+        batch.put(primary.key(), primary.value());
+        batch.commit();
+        Ok(())
     }
 
     fn upsert_liquidity_asset(&self, _asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {

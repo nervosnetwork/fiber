@@ -26,7 +26,7 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquiditySwapFilter, LiquiditySwapKind,
-    LiquiditySwapRecord, LiquiditySwapRole,
+    LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
 };
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
@@ -262,6 +262,40 @@ fn test_store_liquidity_swap_invalid_transition_is_rejected() {
         Err(crate::liquidity::store::LiquidityStoreError::InvalidStateTransition { .. })
     ));
     assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_update_preserves_none_fields() {
+    let (store, _dir) = generate_store();
+    let mut swap = mock_liquidity_swap(5, LiquiditySwapState::PaymentInFlight, "ckb");
+    let payment_preimage = [6u8; 32].into();
+    let onchain_outpoint = OutPoint::new_builder()
+        .tx_hash([7u8; 32].pack())
+        .index(1u32)
+        .build();
+    swap.payment_preimage = Some(payment_preimage);
+    swap.onchain_outpoint = Some(onchain_outpoint.clone());
+    swap.failure_reason = Some("existing failure".to_string());
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    store
+        .update_liquidity_swap(
+            &swap.swap_id,
+            LiquiditySwapUpdate {
+                payment_preimage: None,
+                onchain_outpoint: None,
+                failure_reason: None,
+                updated_at: 123,
+            },
+        )
+        .unwrap();
+
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.payment_preimage, Some(payment_preimage));
+    assert_eq!(updated.onchain_outpoint, Some(onchain_outpoint));
+    assert_eq!(updated.failure_reason, Some("existing failure".to_string()));
+    assert_eq!(updated.updated_at, 123);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
