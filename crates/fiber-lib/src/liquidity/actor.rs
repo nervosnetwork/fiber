@@ -138,7 +138,12 @@ where
 }
 
 fn map_store_error(error: LiquidityStoreError) -> LiquidityLoopOutError {
-    LiquidityLoopOutError::Store(error.to_string())
+    match error {
+        LiquidityStoreError::InvalidStateTransition { from, to } => {
+            LiquidityLoopOutError::InvalidStateTransition { from, to }
+        }
+        error => LiquidityLoopOutError::Store(error.to_string()),
+    }
 }
 
 /// Return whether the client may start the Fiber payment from `state`.
@@ -175,11 +180,12 @@ mod tests {
     use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey};
     use secp256k1::{SecretKey, SECP256K1};
 
-    use super::*;
     use crate::liquidity::store::{
         LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
         LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapUpdate,
     };
+
+    use super::*;
 
     #[derive(Default)]
     struct TestLiquidityStore {
@@ -405,5 +411,19 @@ mod tests {
         );
         assert!(store.events.borrow().is_empty());
         assert!(store.swaps.borrow().is_empty());
+    }
+
+    #[test]
+    fn loop_out_store_invalid_transition_maps_to_structured_error() {
+        assert_eq!(
+            map_store_error(LiquidityStoreError::InvalidStateTransition {
+                from: LiquiditySwapState::Quoted,
+                to: LiquiditySwapState::PayoutLocked,
+            }),
+            LiquidityLoopOutError::InvalidStateTransition {
+                from: LiquiditySwapState::Quoted,
+                to: LiquiditySwapState::PayoutLocked,
+            }
+        );
     }
 }
