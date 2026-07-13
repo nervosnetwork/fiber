@@ -132,6 +132,8 @@ struct MockNetworkState {
     preflighted_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Optional error returned by dry-run Fiber payments.
     fiber_preflight_error: Arc<Mutex<Option<String>>>,
+    /// Artificial delay before returning a dry-run Fiber payment response.
+    fiber_preflight_delay: Arc<Mutex<Duration>>,
     /// Tracks the `max_fee_amount` of each outgoing Fiber SendPayment, keyed by payment hash.
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
@@ -177,6 +179,8 @@ impl Actor for MockNetworkActor {
                             .lock()
                             .unwrap()
                             .insert(payment_hash);
+                        let delay = *state.fiber_preflight_delay.lock().unwrap();
+                        tokio::time::sleep(delay).await;
                         if let Some(error) = state.fiber_preflight_error.lock().unwrap().clone() {
                             let _ = reply.send(Err(error));
                             return Ok(());
@@ -348,6 +352,10 @@ impl TestHarness {
 
     fn fail_fiber_payment_preflight(&self, error: impl Into<String>) {
         *self.mock_state.fiber_preflight_error.lock().unwrap() = Some(error.into());
+    }
+
+    fn delay_fiber_payment_preflight(&self, delay: Duration) {
+        *self.mock_state.fiber_preflight_delay.lock().unwrap() = delay;
     }
 
     fn was_fiber_payment_preflighted(&self, payment_hash: Hash256) -> bool {
@@ -530,6 +538,7 @@ async fn setup_test_harness_with_config_and_store(
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fiber_preflight_error: Arc::new(Mutex::new(None)),
+        fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
@@ -577,6 +586,7 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fiber_preflight_error: Arc::new(Mutex::new(None)),
+        fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
@@ -1846,6 +1856,69 @@ async fn test_receive_btc_preflights_fiber_sendability_before_lnd() {
     assert!(
         harness.was_fiber_payment_preflighted(payment_hash),
         "receive_btc must dry-run the outgoing Fiber payment"
+    );
+}
+
+/// A Fiber invoice that becomes too short-lived during preflight must be rejected before CCH
+/// creates an LND hold invoice with a longer relative expiry.
+#[tokio::test]
+async fn test_receive_btc_rechecks_fiber_invoice_expiry_after_preflight() {
+    use crate::ckb::contracts::{get_script_by_contract, Contract};
+    use crate::invoice::CkbScript;
+
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 1,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+    harness.delay_fiber_payment_preflight(Duration::from_millis(2_100));
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(173);
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(100_000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("short-lived invoice".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(2)),
+                Attribute::PayeePublicKey(public_key),
+                Attribute::UdtScript(CkbScript(get_script_by_contract(Contract::SimpleUDT, &[]))),
+                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(
+        harness.was_fiber_payment_preflighted(payment_hash),
+        "receive_btc must complete preflight before rechecking expiry"
+    );
+    assert!(
+        matches!(result, Err(CchError::OutgoingInvoiceExpiryTooShort)),
+        "invoice that expires during preflight must be rejected, got: {:?}",
+        result
     );
 }
 
