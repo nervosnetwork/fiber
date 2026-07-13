@@ -153,6 +153,9 @@ pub const MAX_DESCRIPTION_LENGTH: usize = 639;
 /// addresses and future attributes while bounding compressed-input expansion.
 pub const MAX_INVOICE_DATA_LENGTH: usize = 16 * 1024;
 
+/// Default final-hop TLC expiry delta when an invoice does not specify one.
+pub const DEFAULT_FINAL_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
+
 /// Encodes bytes and returns the compressed form.
 /// This is used for encoding the invoice data, to make the final Invoice encoded address shorter.
 pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
@@ -557,7 +560,10 @@ pub enum Attribute {
     /// This attribute is deprecated since v0.6.0. The final TLC timeout, in milliseconds.
     #[serde(with = "U64Hex")]
     FinalHtlcTimeout(u64),
-    /// The final TLC minimum expiry delta, in milliseconds. Default is 160 minutes.
+    /// The final TLC minimum expiry delta, in milliseconds.
+    ///
+    /// When omitted, the protocol default is 24 hours. Invoices created through
+    /// the node RPC normally contain an explicit value, defaulting to 160 minutes.
     #[serde(with = "U64Hex")]
     FinalHtlcMinimumExpiryDelta(u64),
     /// The expiry time of the invoice, in seconds.
@@ -858,8 +864,8 @@ impl CkbInvoice {
         let required_expiry = now
             + (self
                 .final_tlc_minimum_expiry_delta()
-                .cloned()
-                .unwrap_or_default() as u128);
+                .copied()
+                .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA) as u128);
         (tlc_expiry as u128) < required_expiry
     }
 
@@ -875,6 +881,29 @@ impl CkbInvoice {
         self.signature = Some(InvoiceSignature(signature));
         self.check_signature()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invoice_without_final_expiry_delta_uses_protocol_default() {
+        let now = crate::now_timestamp_as_millis_u64();
+        let invoice = CkbInvoice {
+            currency: Currency::Fibd,
+            amount: Some(1_000),
+            signature: None,
+            data: InvoiceData {
+                timestamp: now.into(),
+                payment_hash: Hash256::default(),
+                attrs: Vec::new(),
+            },
+        };
+
+        assert!(invoice.is_tlc_expire_too_soon(now + 12 * 60 * 60 * 1_000));
+        assert!(!invoice.is_tlc_expire_too_soon(now + 48 * 60 * 60 * 1_000));
     }
 }
 
