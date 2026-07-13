@@ -51,7 +51,9 @@ use fiber_store::backend::StorageBackend;
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
-use fiber_types::schema::{LIQUIDITY_ASSET_PREFIX, LIQUIDITY_SWAP_PREFIX};
+use fiber_types::schema::{
+    LIQUIDITY_ASSET_PREFIX, LIQUIDITY_SWAP_PREFIX, LIQUIDITY_SWAP_STATE_PREFIX,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
@@ -331,6 +333,44 @@ fn test_store_liquidity_swaps_index_scan_returns_backend_error_on_corrupt_record
     let state_index_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
 
     store.put(primary_key, [0]);
+    store.put(state_index_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_malformed_key() {
+    let (store, _dir) = generate_store();
+    let state = LiquiditySwapState::Created;
+    let mut malformed_key = KeyValue::LiquiditySwapStateIndex((state, [23u8; 32].into())).key();
+    assert_eq!(malformed_key[0], LIQUIDITY_SWAP_STATE_PREFIX);
+    malformed_key.truncate(malformed_key.len() - 1);
+
+    store.put(malformed_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(state),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_missing_primary_record() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(24, LiquiditySwapState::Created, "ckb");
+    let state_index_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
+
     store.put(state_index_key, []);
 
     assert!(matches!(
