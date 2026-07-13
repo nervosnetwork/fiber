@@ -59,6 +59,44 @@ pub trait LoopOutChainAdapter {
     /// Broadcast the payout lock transaction for the accepted quote.
     fn broadcast_payout_lock(&mut self, quote: &LoopOutQuoteTerms)
         -> Result<OutPoint, Self::Error>;
+
+    /// Broadcast the claim transaction for a paid Loop Out swap.
+    fn broadcast_claim(&mut self, swap_id: Hash256) -> Result<(), Self::Error>;
+}
+
+/// Payment boundary required by the client Loop Out execution workflow.
+pub trait LoopOutPaymentAdapter {
+    /// Adapter-specific error returned by payment operations.
+    type Error;
+
+    /// Send the Fiber payment for a Loop Out swap and return the settled payment preimage.
+    fn send_loop_out_payment(
+        &mut self,
+        request: crate::liquidity::payment::LoopOutPaymentRequest,
+    ) -> Result<Hash256, Self::Error>;
+}
+
+/// Create the client-side Loop Out record and persist quote acceptance before side effects.
+pub fn create_client_loop_out<S>(
+    store: &S,
+    quote: LoopOutQuoteTerms,
+    now_ms: u64,
+) -> Result<Hash256, LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    if quote.expires_at <= now_ms {
+        return Err(LiquidityLoopOutError::QuoteExpired);
+    }
+
+    let swap_id = quote.quote_id;
+    store
+        .insert_liquidity_swap(loop_out_record(&quote, LiquiditySwapRole::Client, now_ms))
+        .map_err(map_store_error)?;
+    transition_swap(store, &swap_id, LiquiditySwapState::Quoted, now_ms)?;
+    transition_swap(store, &swap_id, LiquiditySwapState::PayoutPending, now_ms)?;
+
+    Ok(swap_id)
 }
 
 /// Accept a provider Loop Out quote and persist restart-safe state before chain broadcast.
@@ -137,6 +175,142 @@ where
     Ok(swap_id)
 }
 
+/// Mark the client-side Loop Out payout lock as observed before starting payment.
+pub fn mark_client_payout_locked<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    transition_swap(store, &swap_id, LiquiditySwapState::PayoutLocked, now_ms)
+}
+
+/// Send the client Fiber payment after payout lock persistence and persist the preimage.
+pub fn send_client_loop_out_payment<S, P>(
+    store: &S,
+    payment: &mut P,
+    quote: LoopOutQuoteTerms,
+    now_ms: u64,
+) -> Result<Hash256, LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+    P: LoopOutPaymentAdapter,
+    P::Error: Display,
+{
+    let swap_id = quote.quote_id;
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    ensure_client_can_start_payment(swap.state)?;
+
+    transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
+    let request = crate::liquidity::payment::LoopOutPaymentRequest::new(
+        quote.payment_hash,
+        quote.amount,
+        quote.provider_fee,
+        quote.routing_fee_limit,
+    )?;
+    let preimage = payment
+        .send_loop_out_payment(request)
+        .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
+    store
+        .update_liquidity_swap(
+            &swap_id,
+            LiquiditySwapUpdate {
+                payment_preimage: Some(preimage),
+                updated_at: now_ms,
+                ..Default::default()
+            },
+        )
+        .map_err(map_store_error)?;
+    transition_swap(store, &swap_id, LiquiditySwapState::PaymentSettled, now_ms)?;
+
+    Ok(preimage)
+}
+
+/// Claim the on-chain Loop Out payout after payment settlement.
+pub fn claim_client_loop_out<S, C>(
+    store: &S,
+    chain: &mut C,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+    C: LoopOutChainAdapter,
+    C::Error: Display,
+{
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if !client_can_claim(swap.state) {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::ClaimPending,
+        });
+    }
+
+    transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    chain
+        .broadcast_claim(swap_id)
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+    transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
+}
+
+fn loop_out_record(
+    quote: &LoopOutQuoteTerms,
+    role: LiquiditySwapRole,
+    now_ms: u64,
+) -> LiquiditySwapRecord {
+    LiquiditySwapRecord {
+        swap_id: quote.quote_id,
+        quote_id: quote.quote_id,
+        role,
+        swap_kind: LiquiditySwapKind::LoopOut,
+        asset_id: quote.asset.asset_id.clone(),
+        state: LiquiditySwapState::Created,
+        payment_hash: quote.payment_hash,
+        payment_preimage: None,
+        amount: quote.amount,
+        onchain_outpoint: None,
+        payout_deadline: Some(quote.payout_deadline),
+        refund_after_lock_time: quote.refund_after_lock_time,
+        expires_at: quote.expires_at,
+        failure_reason: None,
+        created_at: now_ms,
+        updated_at: now_ms,
+    }
+}
+
+fn transition_swap<S>(
+    store: &S,
+    swap_id: &Hash256,
+    state: LiquiditySwapState,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    store
+        .update_liquidity_swap_state(
+            swap_id,
+            LiquidityStateTransition {
+                state,
+                updated_at: now_ms,
+                reason: None,
+            },
+        )
+        .map_err(map_store_error)
+}
+
 fn map_store_error(error: LiquidityStoreError) -> LiquidityLoopOutError {
     match error {
         LiquidityStoreError::InvalidStateTransition { from, to } => {
@@ -191,11 +365,89 @@ mod tests {
     struct TestLiquidityStore {
         swaps: RefCell<HashMap<Hash256, LiquiditySwapRecord>>,
         events: Rc<RefCell<Vec<&'static str>>>,
+        label: Option<&'static str>,
     }
 
     impl TestLiquidityStore {
+        fn new(events: Rc<RefCell<Vec<&'static str>>>, label: &'static str) -> Self {
+            Self {
+                swaps: RefCell::new(HashMap::new()),
+                events,
+                label: Some(label),
+            }
+        }
+
         fn events(&self) -> Rc<RefCell<Vec<&'static str>>> {
             self.events.clone()
+        }
+
+        fn insert_event(&self, role: LiquiditySwapRole) -> &'static str {
+            match (self.label, role) {
+                (Some("client"), LiquiditySwapRole::Client) => "client_insert_created",
+                (Some("provider"), LiquiditySwapRole::Provider) => "provider_insert_created",
+                _ => "insert_swap",
+            }
+        }
+
+        fn transition_event(
+            &self,
+            role: LiquiditySwapRole,
+            state: LiquiditySwapState,
+        ) -> &'static str {
+            match (self.label, role, state) {
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapState::Quoted) => {
+                    "client_transition_quoted"
+                }
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapState::PayoutPending) => {
+                    "client_transition_payout_pending"
+                }
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapState::PayoutLocked) => {
+                    "client_transition_payout_locked"
+                }
+                (
+                    Some("client"),
+                    LiquiditySwapRole::Client,
+                    LiquiditySwapState::PaymentInFlight,
+                ) => "client_transition_payment_in_flight",
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapState::PaymentSettled) => {
+                    "client_transition_payment_settled"
+                }
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapState::ClaimPending) => {
+                    "client_transition_claim_pending"
+                }
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapState::Success) => {
+                    "client_transition_success"
+                }
+                (Some("provider"), LiquiditySwapRole::Provider, LiquiditySwapState::Quoted) => {
+                    "provider_transition_quoted"
+                }
+                (
+                    Some("provider"),
+                    LiquiditySwapRole::Provider,
+                    LiquiditySwapState::PayoutPending,
+                ) => "provider_transition_payout_pending",
+                (_, _, LiquiditySwapState::Quoted) => "transition_quoted",
+                (_, _, LiquiditySwapState::PayoutPending) => "transition_payout_pending",
+                _ => "transition_other",
+            }
+        }
+
+        fn update_event(
+            &self,
+            role: LiquiditySwapRole,
+            update: &LiquiditySwapUpdate,
+        ) -> &'static str {
+            if update.payment_preimage.is_some() {
+                return match (self.label, role) {
+                    (Some("client"), LiquiditySwapRole::Client) => "client_persist_preimage",
+                    _ => "persist_preimage",
+                };
+            }
+
+            match (self.label, role) {
+                (Some("provider"), LiquiditySwapRole::Provider) => "provider_persist_outpoint",
+                _ => "persist_outpoint",
+            }
         }
     }
 
@@ -204,7 +456,7 @@ mod tests {
             &self,
             swap: LiquiditySwapRecord,
         ) -> Result<(), LiquidityStoreError> {
-            self.events.borrow_mut().push("insert_swap");
+            self.events.borrow_mut().push(self.insert_event(swap.role));
             self.swaps.borrow_mut().insert(swap.swap_id, swap);
             Ok(())
         }
@@ -228,19 +480,24 @@ mod tests {
             swap_id: &Hash256,
             transition: LiquidityStateTransition,
         ) -> Result<(), LiquidityStoreError> {
-            let event = match transition.state {
-                LiquiditySwapState::Quoted => "transition_quoted",
-                LiquiditySwapState::PayoutPending => "transition_payout_pending",
-                _ => "transition_other",
-            };
-            self.events.borrow_mut().push(event);
             let mut swaps = self.swaps.borrow_mut();
             let swap = swaps
                 .get_mut(swap_id)
                 .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+            if !swap.state.can_transition_to(transition.state) {
+                return Err(LiquidityStoreError::InvalidStateTransition {
+                    from: swap.state,
+                    to: transition.state,
+                });
+            }
+            self.events
+                .borrow_mut()
+                .push(self.transition_event(swap.role, transition.state));
             swap.state = transition.state;
             swap.updated_at = transition.updated_at;
-            swap.failure_reason = transition.reason;
+            if swap.state == LiquiditySwapState::Failed {
+                swap.failure_reason = transition.reason;
+            }
             Ok(())
         }
 
@@ -249,12 +506,22 @@ mod tests {
             swap_id: &Hash256,
             update: LiquiditySwapUpdate,
         ) -> Result<(), LiquidityStoreError> {
-            self.events.borrow_mut().push("persist_outpoint");
             let mut swaps = self.swaps.borrow_mut();
             let swap = swaps
                 .get_mut(swap_id)
                 .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
-            swap.onchain_outpoint = update.onchain_outpoint;
+            self.events
+                .borrow_mut()
+                .push(self.update_event(swap.role, &update));
+            if update.onchain_outpoint.is_some() {
+                swap.onchain_outpoint = update.onchain_outpoint;
+            }
+            if update.payment_preimage.is_some() {
+                swap.payment_preimage = update.payment_preimage;
+            }
+            if update.failure_reason.is_some() {
+                swap.failure_reason = update.failure_reason;
+            }
             swap.updated_at = update.updated_at;
             Ok(())
         }
@@ -281,6 +548,7 @@ mod tests {
     struct TestLiquidityChain {
         events: Rc<RefCell<Vec<&'static str>>>,
         outpoint: OutPoint,
+        label: Option<&'static str>,
     }
 
     impl TestLiquidityChain {
@@ -288,6 +556,15 @@ mod tests {
             Self {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
+                label: None,
+            }
+        }
+
+        fn new_with_label(events: Rc<RefCell<Vec<&'static str>>>, label: &'static str) -> Self {
+            Self {
+                events,
+                outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
+                label: Some(label),
             }
         }
     }
@@ -299,8 +576,92 @@ mod tests {
             &mut self,
             _quote: &LoopOutQuoteTerms,
         ) -> Result<OutPoint, Self::Error> {
-            self.events.borrow_mut().push("broadcast_payout");
+            let event = match self.label {
+                Some("chain") => "chain_broadcast_payout",
+                _ => "broadcast_payout",
+            };
+            self.events.borrow_mut().push(event);
             Ok(self.outpoint.clone())
+        }
+
+        fn broadcast_claim(&mut self, _swap_id: Hash256) -> Result<(), Self::Error> {
+            let event = match self.label {
+                Some("chain") => "chain_broadcast_claim",
+                _ => "broadcast_claim",
+            };
+            self.events.borrow_mut().push(event);
+            Ok(())
+        }
+    }
+
+    struct TestLoopOutPayment {
+        events: Rc<RefCell<Vec<&'static str>>>,
+        preimage: Hash256,
+    }
+
+    impl TestLoopOutPayment {
+        fn new(events: Rc<RefCell<Vec<&'static str>>>) -> Self {
+            Self {
+                events,
+                preimage: [4u8; 32].into(),
+            }
+        }
+    }
+
+    impl LoopOutPaymentAdapter for TestLoopOutPayment {
+        type Error = String;
+
+        fn send_loop_out_payment(
+            &mut self,
+            _request: crate::liquidity::payment::LoopOutPaymentRequest,
+        ) -> Result<Hash256, Self::Error> {
+            self.events.borrow_mut().push("payment_send");
+            Ok(self.preimage)
+        }
+    }
+
+    struct LoopOutActorTestHarness {
+        events: Rc<RefCell<Vec<&'static str>>>,
+        client_store: TestLiquidityStore,
+        provider_store: TestLiquidityStore,
+        chain: TestLiquidityChain,
+        payment: TestLoopOutPayment,
+    }
+
+    impl LoopOutActorTestHarness {
+        fn new_with_real_orchestrator() -> Self {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            Self {
+                events: events.clone(),
+                client_store: TestLiquidityStore::new(events.clone(), "client"),
+                provider_store: TestLiquidityStore::new(events.clone(), "provider"),
+                chain: TestLiquidityChain::new_with_label(events.clone(), "chain"),
+                payment: TestLoopOutPayment::new(events),
+            }
+        }
+
+        fn run_happy_path(&mut self) {
+            let now_ms = 1_000;
+            let quote = test_loop_out_quote(now_ms + 60_000);
+
+            create_client_loop_out(&self.client_store, quote.clone(), now_ms).unwrap();
+            accept_provider_loop_out(&self.provider_store, &mut self.chain, quote.clone(), now_ms)
+                .unwrap();
+            mark_client_payout_locked(&self.client_store, quote.quote_id, now_ms + 1).unwrap();
+            send_client_loop_out_payment(
+                &self.client_store,
+                &mut self.payment,
+                quote.clone(),
+                now_ms + 2,
+            )
+            .unwrap();
+            claim_client_loop_out(
+                &self.client_store,
+                &mut self.chain,
+                quote.quote_id,
+                now_ms + 3,
+            )
+            .unwrap();
         }
     }
 
@@ -411,6 +772,35 @@ mod tests {
         );
         assert!(store.events.borrow().is_empty());
         assert!(store.swaps.borrow().is_empty());
+    }
+
+    #[test]
+    fn loop_out_happy_path_orders_side_effects_after_persistence() {
+        let mut harness = LoopOutActorTestHarness::new_with_real_orchestrator();
+
+        harness.run_happy_path();
+
+        assert_eq!(
+            harness.events.borrow().as_slice(),
+            vec![
+                "client_insert_created",
+                "client_transition_quoted",
+                "client_transition_payout_pending",
+                "provider_insert_created",
+                "provider_transition_quoted",
+                "provider_transition_payout_pending",
+                "chain_broadcast_payout",
+                "provider_persist_outpoint",
+                "client_transition_payout_locked",
+                "client_transition_payment_in_flight",
+                "payment_send",
+                "client_persist_preimage",
+                "client_transition_payment_settled",
+                "client_transition_claim_pending",
+                "chain_broadcast_claim",
+                "client_transition_success",
+            ]
+        );
     }
 
     #[test]
