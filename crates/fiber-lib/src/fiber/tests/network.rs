@@ -21,7 +21,8 @@ use crate::{
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
-            BroadcastMessagesFilterResult, FiberMessage, GossipMessage, OpenChannel,
+            BroadcastMessagesFilterResult, FiberMessage, GetBroadcastMessagesResult, GossipMessage,
+            OpenChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NodeAnnouncement, Privkey,
@@ -1148,6 +1149,164 @@ async fn test_pending_active_sync_peer_releases_budget_while_connected() {
             .get_latest_node_announcement(&announcement.node_id)
             .is_some(),
         "pending active-sync peer must not keep consuming the active sync budget"
+    );
+}
+
+#[tokio::test]
+async fn test_non_advancing_active_sync_results_do_not_reset_stall_budget() {
+    init_tracing();
+
+    const LARGE_INTERVAL_MS: u64 = 3_600_000;
+    let target_one_active_sync_peer = || {
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.gossip_network_maintenance_interval_ms = Some(LARGE_INTERVAL_MS);
+                config.gossip_network_num_targeted_active_syncing_peers = Some(1);
+            })
+            .build()
+    };
+
+    let mut victim = NetworkNode::new_with_config(target_one_active_sync_peer()).await;
+    let now = now_timestamp_as_millis_u64();
+    let older_announcement = create_node_announcement_message_with_priv_key_and_timestamp(
+        &gen_rand_fiber_private_key(),
+        now.saturating_sub(1_000),
+    );
+    let newer_announcement = create_node_announcement_message_with_priv_key_and_timestamp(
+        &gen_rand_fiber_private_key(),
+        now,
+    );
+    victim
+        .get_store()
+        .save_node_announcement(older_announcement.clone());
+    victim
+        .get_store()
+        .save_node_announcement(newer_announcement.clone());
+
+    let mut stalled_peer = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("stalled-peer".to_string()))
+            .fiber_config_updater(|config| config.auto_announce_node = Some(false))
+            .build(),
+    )
+    .await;
+    stalled_peer
+        .gossip_actor
+        .as_ref()
+        .expect("gossip actor started")
+        .stop(Some("manually drive active-sync responses".to_string()));
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    victim.connect_to(&mut stalled_peer).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let mut honest_peer = NetworkNode::new_with_node_name("honest-peer").await;
+    let (_, honest_announcement) = gen_rand_node_announcement();
+    honest_peer.send_message_to_gossip_actor(GossipActorMessage::TryBroadcastMessages(vec![
+        BroadcastMessageWithTimestamp::NodeAnnouncement(honest_announcement.clone()),
+    ]));
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    victim.connect_to(&mut honest_peer).await;
+
+    let channel_context = ChannelTestContext::gen().await;
+    let orphan_update = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        144,
+        0,
+        0,
+        Some(now_timestamp_as_millis_u64()),
+    );
+
+    let mut request_id = 0;
+    victim.mock_received_gossip_message_from_peer(
+        stalled_peer.pubkey,
+        GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
+            id: request_id,
+            messages: vec![BroadcastMessage::NodeAnnouncement(newer_announcement)],
+        }),
+    );
+    request_id += 1;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    for _ in 0..3 {
+        victim.mock_received_gossip_message_from_peer(
+            stalled_peer.pubkey,
+            GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
+                id: request_id,
+                messages: vec![BroadcastMessage::ChannelUpdate(orphan_update.clone())],
+            }),
+        );
+        request_id += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(550)).await;
+
+        victim.mock_received_gossip_message_from_peer(
+            stalled_peer.pubkey,
+            GossipMessage::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
+                id: request_id,
+                messages: vec![BroadcastMessage::NodeAnnouncement(
+                    older_announcement.clone(),
+                )],
+            }),
+        );
+        request_id += 1;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    assert!(
+        victim
+            .get_store()
+            .get_latest_node_announcement(&honest_announcement.node_id)
+            .is_some(),
+        "non-advancing validated responses must not reset the active-sync stall budget"
+    );
+}
+
+#[tokio::test]
+async fn test_timed_out_active_sync_peer_releases_budget_while_connected() {
+    init_tracing();
+
+    const LARGE_INTERVAL_MS: u64 = 3_600_000;
+    let target_one_active_sync_peer = || {
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.gossip_network_maintenance_interval_ms = Some(LARGE_INTERVAL_MS);
+                config.gossip_network_num_targeted_active_syncing_peers = Some(1);
+            })
+            .build()
+    };
+
+    let mut victim = NetworkNode::new_with_config(target_one_active_sync_peer()).await;
+    let mut stalled_peer = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("stalled-peer".to_string()))
+            .fiber_config_updater(|config| config.auto_announce_node = Some(false))
+            .build(),
+    )
+    .await;
+    stalled_peer
+        .gossip_actor
+        .as_ref()
+        .expect("gossip actor started")
+        .stop(Some("drop active-sync requests".to_string()));
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    victim.connect_to(&mut stalled_peer).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let mut honest_peer = NetworkNode::new_with_node_name("honest-peer").await;
+    let (_, announcement) = gen_rand_node_announcement();
+    honest_peer.send_message_to_gossip_actor(GossipActorMessage::TryBroadcastMessages(vec![
+        BroadcastMessageWithTimestamp::NodeAnnouncement(announcement.clone()),
+    ]));
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    victim.connect_to(&mut honest_peer).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    assert!(
+        victim
+            .get_store()
+            .get_latest_node_announcement(&announcement.node_id)
+            .is_some(),
+        "timed-out active-sync peer must not keep consuming the active sync budget"
     );
 }
 
