@@ -1,3 +1,5 @@
+//! Liquidity actor boundary messages and Loop Out client guard helpers.
+
 use fiber_types::{Hash256, LiquiditySwapState};
 
 use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
@@ -61,8 +63,9 @@ pub fn ensure_client_can_start_payment(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use fiber_types::LiquiditySwapState;
+
+    use super::*;
 
     #[test]
     fn client_payment_requires_payout_locked_state() {
