@@ -284,6 +284,7 @@ fn liquidity_swap_state_to_string(state: LiquiditySwapState) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Mutex;
 
     use fiber_json_types::{GetSwapParams, Hash256 as JsonHash256, ListSwapsParams};
@@ -417,14 +418,11 @@ mod tests {
 
     #[test]
     fn liquidity_rpc_methods_are_registered_by_name() {
-        let methods = liquidity_rpc_method_names();
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default()).into_rpc();
+        let methods: HashSet<_> = rpc.method_names().collect();
+        let expected: HashSet<_> = liquidity_rpc_method_names().into_iter().collect();
 
-        assert!(methods.contains(&"quote_loop_out"));
-        assert!(methods.contains(&"loop_out"));
-        assert!(methods.contains(&"get_swap"));
-        assert!(methods.contains(&"list_swaps"));
-        assert!(methods.contains(&"provider_quote_loop_out"));
-        assert!(methods.contains(&"provider_accept_loop_out"));
+        assert_eq!(methods, expected);
     }
 
     #[tokio::test]
