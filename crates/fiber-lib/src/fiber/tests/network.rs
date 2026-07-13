@@ -1522,7 +1522,6 @@ async fn test_repeated_nonexistent_channel_messages_trigger_disconnect_and_temp_
     let mut peer = NetworkNode::new().await;
 
     peer.connect_to(&mut target).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     for _ in 0..20 {
         peer.network_actor
@@ -1550,8 +1549,7 @@ async fn test_repeated_nonexistent_channel_messages_trigger_disconnect_and_temp_
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(list_connected_peers(&target).await.is_empty());
+    wait_until_async_timeout(|| async { list_connected_peers(&target).await.is_empty() }).await;
 }
 
 #[tokio::test]
