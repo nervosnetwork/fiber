@@ -176,6 +176,8 @@ impl Store {
     fn get_liquidity_swap_from_index(
         &self,
         key: &[u8],
+        expected_state: Option<LiquiditySwapState>,
+        expected_asset_id: Option<&str>,
     ) -> Result<LiquiditySwapRecord, LiquidityStoreError> {
         let swap_id = Self::parse_liquidity_swap_id_from_index(key).ok_or_else(|| {
             LiquidityStoreError::Backend(format!(
@@ -184,12 +186,32 @@ impl Store {
             ))
         })?;
 
-        self.get_liquidity_swap(&swap_id)?.ok_or_else(|| {
+        let swap = self.get_liquidity_swap(&swap_id)?.ok_or_else(|| {
             LiquidityStoreError::Backend(format!(
                 "liquidity swap index points to missing record: {:?}",
                 swap_id
             ))
-        })
+        })?;
+
+        if expected_state.is_some_and(|state| swap.state != state) {
+            return Err(LiquidityStoreError::Backend(format!(
+                "stale liquidity swap state index: key {} points to swap {:?} with state {:?}",
+                hex::encode(key),
+                swap_id,
+                swap.state
+            )));
+        }
+
+        if expected_asset_id.is_some_and(|asset_id| swap.asset_id != asset_id) {
+            return Err(LiquidityStoreError::Backend(format!(
+                "stale liquidity swap asset index: key {} points to swap {:?} with asset_id {}",
+                hex::encode(key),
+                swap_id,
+                swap.asset_id
+            )));
+        }
+
+        Ok(swap)
     }
 }
 
@@ -1400,8 +1422,10 @@ impl LiquidityStore for Store {
             for kv in rows {
                 let swap = if prefix[0] == LIQUIDITY_SWAP_PREFIX {
                     deserialize_liquidity(kv.value.as_ref(), "LiquiditySwapRecord")?
+                } else if let Some(state) = filter.state {
+                    self.get_liquidity_swap_from_index(&kv.key, Some(state), None)?
                 } else {
-                    self.get_liquidity_swap_from_index(&kv.key)?
+                    self.get_liquidity_swap_from_index(&kv.key, None, filter.asset_id.as_deref())?
                 };
                 match filter.asset_id.as_ref() {
                     Some(asset_id) if filter.state.is_some() && swap.asset_id != *asset_id => {}
@@ -1450,7 +1474,7 @@ impl LiquidityStore for Store {
                 for kv in rows {
                     let key = kv.key;
                     scan_cursor = Some(key.clone());
-                    let swap = self.get_liquidity_swap_from_index(&key)?;
+                    let swap = self.get_liquidity_swap_from_index(&key, filter.state, None)?;
 
                     if filter
                         .asset_id
@@ -1477,8 +1501,10 @@ impl LiquidityStore for Store {
             for kv in rows {
                 let swap = if prefix[0] == LIQUIDITY_SWAP_PREFIX {
                     deserialize_liquidity(kv.value.as_ref(), "LiquiditySwapRecord")?
+                } else if let Some(state) = filter.state {
+                    self.get_liquidity_swap_from_index(&kv.key, Some(state), None)?
                 } else {
-                    self.get_liquidity_swap_from_index(&kv.key)?
+                    self.get_liquidity_swap_from_index(&kv.key, None, filter.asset_id.as_deref())?
                 };
 
                 if returned.len() == limit {
