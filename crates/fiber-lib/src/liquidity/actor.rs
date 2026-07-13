@@ -257,6 +257,12 @@ where
             to: LiquiditySwapState::ClaimPending,
         });
     }
+    if swap.payment_preimage.is_none() {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::ClaimPending,
+        });
+    }
 
     transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
     chain
@@ -800,6 +806,51 @@ mod tests {
                 "chain_broadcast_claim",
                 "client_transition_success",
             ]
+        );
+    }
+
+    #[test]
+    fn loop_out_client_claim_requires_persisted_preimage_before_broadcast() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentInFlight,
+            now_ms + 2,
+        )
+        .unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentSettled,
+            now_ms + 3,
+        )
+        .unwrap();
+        events.borrow_mut().clear();
+
+        assert_eq!(
+            claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 4),
+            Err(LiquidityLoopOutError::InvalidStateTransition {
+                from: LiquiditySwapState::PaymentSettled,
+                to: LiquiditySwapState::ClaimPending,
+            })
+        );
+
+        assert!(events.borrow().is_empty());
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::PaymentSettled
         );
     }
 
