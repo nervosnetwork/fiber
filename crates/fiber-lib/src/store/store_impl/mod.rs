@@ -140,6 +140,27 @@ impl Store {
         .concat()
     }
 
+    fn liquidity_swap_asset_index_prefix(asset_id: &str) -> Vec<u8> {
+        [&[LIQUIDITY_SWAP_ASSET_PREFIX], asset_id.as_bytes(), &[0]].concat()
+    }
+
+    fn cursor_to_key(cursor: &Option<String>) -> Result<Option<Vec<u8>>, LiquidityStoreError> {
+        cursor
+            .as_ref()
+            .map(|cursor| {
+                hex::decode(cursor).map_err(|err| {
+                    LiquidityStoreError::Backend(format!(
+                        "invalid liquidity swap cursor {cursor}: {err}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn key_to_cursor(key: &[u8]) -> String {
+        hex::encode(key)
+    }
+
     fn parse_liquidity_swap_id_from_index(key: &[u8]) -> Option<Hash256> {
         let offset = key.len().checked_sub(32)?;
         let bytes: [u8; 32] = key.get(offset..)?.try_into().ok()?;
@@ -1315,28 +1336,89 @@ impl LiquidityStore for Store {
         &self,
         filter: LiquiditySwapFilter,
     ) -> Result<LiquiditySwapPage, LiquidityStoreError> {
-        let prefix = if let Some(state) = filter.state {
-            vec![LIQUIDITY_SWAP_STATE_PREFIX, liquidity_state_key(state)]
-        } else {
-            vec![LIQUIDITY_SWAP_PREFIX]
-        };
-        let rows = self.collect_by_prefix_with(&prefix, PrefixIterOptions::new());
-        let swaps = rows
-            .into_iter()
-            .filter_map(|kv| {
-                if prefix[0] == LIQUIDITY_SWAP_PREFIX {
-                    Some(deserialize_from(kv.value.as_ref(), "LiquiditySwapRecord"))
-                } else {
-                    Self::parse_liquidity_swap_id_from_index(&kv.key)
-                        .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
-                }
-            })
-            .collect();
+        let Some(limit) = filter.limit.map(|limit| limit as usize) else {
+            let cursor_key = Self::cursor_to_key(&filter.cursor)?;
+            let prefix = match (&filter.state, &filter.asset_id) {
+                (Some(state), _) => vec![LIQUIDITY_SWAP_STATE_PREFIX, liquidity_state_key(*state)],
+                (None, Some(asset_id)) => Self::liquidity_swap_asset_index_prefix(asset_id),
+                (None, None) => vec![LIQUIDITY_SWAP_PREFIX],
+            };
+            let mut options = PrefixIterOptions::new();
+            if let Some(cursor_key) = cursor_key.as_ref() {
+                options = options.start_key(cursor_key).start_key_exclusive();
+            }
+            let rows = self.collect_by_prefix_with(&prefix, options);
+            let swaps = rows
+                .into_iter()
+                .filter_map(|kv| {
+                    let swap = if prefix[0] == LIQUIDITY_SWAP_PREFIX {
+                        Some(deserialize_from(kv.value.as_ref(), "LiquiditySwapRecord"))
+                    } else {
+                        Self::parse_liquidity_swap_id_from_index(&kv.key)
+                            .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
+                    }?;
+                    match filter.asset_id.as_ref() {
+                        Some(asset_id) if filter.state.is_some() && swap.asset_id != *asset_id => {
+                            None
+                        }
+                        _ => Some(swap),
+                    }
+                })
+                .collect();
 
-        Ok(LiquiditySwapPage {
-            swaps,
-            next_cursor: None,
-        })
+            return Ok(LiquiditySwapPage {
+                swaps,
+                next_cursor: None,
+            });
+        };
+
+        if limit == 0 {
+            return Ok(LiquiditySwapPage::default());
+        }
+
+        let cursor_key = Self::cursor_to_key(&filter.cursor)?;
+        let prefix = match (&filter.state, &filter.asset_id) {
+            (Some(state), _) => vec![LIQUIDITY_SWAP_STATE_PREFIX, liquidity_state_key(*state)],
+            (None, Some(asset_id)) => Self::liquidity_swap_asset_index_prefix(asset_id),
+            (None, None) => vec![LIQUIDITY_SWAP_PREFIX],
+        };
+        let mut options = PrefixIterOptions::new().limit(limit + 1);
+        if let Some(cursor_key) = cursor_key.as_ref() {
+            options = options.start_key(cursor_key).start_key_exclusive();
+        }
+        let rows = self.collect_by_prefix_with(&prefix, options);
+        let mut returned: Vec<(LiquiditySwapRecord, Vec<u8>)> = Vec::new();
+        let mut next_cursor = None;
+
+        for kv in rows {
+            let Some(swap) = (if prefix[0] == LIQUIDITY_SWAP_PREFIX {
+                Some(deserialize_from(kv.value.as_ref(), "LiquiditySwapRecord"))
+            } else {
+                Self::parse_liquidity_swap_id_from_index(&kv.key)
+                    .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
+            }) else {
+                continue;
+            };
+
+            if filter
+                .asset_id
+                .as_ref()
+                .is_some_and(|asset_id| filter.state.is_some() && swap.asset_id != *asset_id)
+            {
+                continue;
+            }
+
+            if returned.len() == limit {
+                next_cursor = returned.last().map(|(_, key)| Self::key_to_cursor(key));
+                break;
+            }
+
+            returned.push((swap, kv.key));
+        }
+
+        let swaps = returned.into_iter().map(|(swap, _)| swap).collect();
+
+        Ok(LiquiditySwapPage { swaps, next_cursor })
     }
 
     fn update_liquidity_swap_state(
