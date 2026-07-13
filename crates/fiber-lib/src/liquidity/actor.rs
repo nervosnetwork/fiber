@@ -73,6 +73,38 @@ pub struct LoopOutClaimRequest {
     pub payment_preimage: Hash256,
 }
 
+/// Restart recovery action planned for a persisted Loop Out swap state.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RecoveryAction {
+    /// Watch the provider payout lock until it is confirmed or expires.
+    WatchPayout,
+    /// Resume the client payment after the payout lock is confirmed.
+    ResumePayment,
+    /// Reload the in-flight payment and reconcile its latest result.
+    ReloadPayment,
+    /// Broadcast the client claim transaction using the persisted preimage.
+    BroadcastClaim,
+    /// Watch the claim transaction until it is confirmed.
+    WatchClaim,
+    /// Refund the provider payout lock after the refund path is available.
+    RefundProviderPayout,
+}
+
+/// Return the restart recovery action for a persisted Loop Out swap `state`.
+pub fn recovery_action_for_loop_out_state(state: LiquiditySwapState) -> Option<RecoveryAction> {
+    use LiquiditySwapState::*;
+
+    match state {
+        PayoutPending => Some(RecoveryAction::WatchPayout),
+        PayoutLocked => Some(RecoveryAction::ResumePayment),
+        PaymentInFlight => Some(RecoveryAction::ReloadPayment),
+        PaymentSettled => Some(RecoveryAction::BroadcastClaim),
+        ClaimPending => Some(RecoveryAction::WatchClaim),
+        RefundPending => Some(RecoveryAction::RefundProviderPayout),
+        Created | Quoted | OnchainLockPending | OnchainLocked | Success | Failed | Refunded => None,
+    }
+}
+
 /// Payment boundary required by the client Loop Out execution workflow.
 pub trait LoopOutPaymentAdapter {
     /// Adapter-specific error returned by payment operations.
@@ -746,6 +778,33 @@ mod tests {
     fn client_claim_requires_payment_settled_state() {
         assert!(client_can_claim(LiquiditySwapState::PaymentSettled));
         assert!(!client_can_claim(LiquiditySwapState::PaymentInFlight));
+    }
+
+    #[test]
+    fn recovery_maps_non_terminal_loop_out_states_to_actions() {
+        use fiber_types::LiquiditySwapState::*;
+
+        assert_eq!(
+            recovery_action_for_loop_out_state(PayoutPending),
+            Some(RecoveryAction::WatchPayout)
+        );
+        assert_eq!(
+            recovery_action_for_loop_out_state(PayoutLocked),
+            Some(RecoveryAction::ResumePayment)
+        );
+        assert_eq!(
+            recovery_action_for_loop_out_state(PaymentInFlight),
+            Some(RecoveryAction::ReloadPayment)
+        );
+        assert_eq!(
+            recovery_action_for_loop_out_state(PaymentSettled),
+            Some(RecoveryAction::BroadcastClaim)
+        );
+        assert_eq!(
+            recovery_action_for_loop_out_state(ClaimPending),
+            Some(RecoveryAction::WatchClaim)
+        );
+        assert_eq!(recovery_action_for_loop_out_state(Success), None);
     }
 
     #[test]
