@@ -1357,8 +1357,8 @@ impl LiquidityStore for Store {
         let old_state = swap.state;
         swap.state = transition.state;
         swap.updated_at = transition.updated_at;
-        if let Some(reason) = transition.reason {
-            swap.failure_reason = Some(reason);
+        if transition.state == LiquiditySwapState::Failed {
+            swap.failure_reason = transition.reason;
         }
 
         let mut batch = self.batch();

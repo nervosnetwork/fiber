@@ -198,7 +198,7 @@ fn test_store_liquidity_swap_valid_transition_updates_state_index() {
     let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
     assert_eq!(updated.state, LiquiditySwapState::Quoted);
     assert_eq!(updated.updated_at, 99);
-    assert_eq!(updated.failure_reason, Some("quote accepted".to_string()));
+    assert_eq!(updated.failure_reason, None);
 
     let created = store
         .list_liquidity_swaps(LiquiditySwapFilter {
@@ -215,6 +215,30 @@ fn test_store_liquidity_swap_valid_transition_updates_state_index() {
 
     assert!(created.swaps.is_empty());
     assert_eq!(quoted.swaps, vec![updated]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_failed_transition_stores_failure_reason() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(4, LiquiditySwapState::PaymentInFlight, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    store
+        .update_liquidity_swap_state(
+            &swap.swap_id,
+            LiquidityStateTransition {
+                state: LiquiditySwapState::Failed,
+                updated_at: 101,
+                reason: Some("payment failed".to_string()),
+            },
+        )
+        .unwrap();
+
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.state, LiquiditySwapState::Failed);
+    assert_eq!(updated.updated_at, 101);
+    assert_eq!(updated.failure_reason, Some("payment failed".to_string()));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
