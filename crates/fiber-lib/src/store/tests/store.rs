@@ -300,6 +300,80 @@ fn test_store_liquidity_swap_update_preserves_none_fields() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_filter_by_asset_and_state() {
+    let (store, _dir) = generate_store();
+    let ckb_created = mock_liquidity_swap(6, LiquiditySwapState::Created, "ckb");
+    let udt_created = mock_liquidity_swap(7, LiquiditySwapState::Created, "udt1");
+    let ckb_quoted = mock_liquidity_swap(8, LiquiditySwapState::Quoted, "ckb");
+    let udt_quoted = mock_liquidity_swap(9, LiquiditySwapState::Quoted, "udt1");
+
+    for swap in [&ckb_created, &udt_created, &ckb_quoted, &udt_quoted] {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let ckb_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        ckb_swaps.swaps,
+        vec![ckb_created.clone(), ckb_quoted.clone()]
+    );
+    assert_eq!(ckb_swaps.next_cursor, None);
+
+    let udt_created_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            asset_id: Some("udt1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(udt_created_swaps.swaps, vec![udt_created]);
+    assert_eq!(udt_created_swaps.next_cursor, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_paginate_without_duplicates() {
+    let (store, _dir) = generate_store();
+    let swaps = vec![
+        mock_liquidity_swap(10, LiquiditySwapState::Created, "ckb"),
+        mock_liquidity_swap(11, LiquiditySwapState::Created, "ckb"),
+        mock_liquidity_swap(12, LiquiditySwapState::Created, "ckb"),
+    ];
+
+    for swap in &swaps {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let first_page = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            limit: Some(2),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(first_page.swaps, swaps[..2]);
+    let cursor = first_page
+        .next_cursor
+        .expect("first page should have a next cursor");
+
+    let second_page = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            limit: Some(2),
+            cursor: Some(cursor),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(second_page.swaps, swaps[2..]);
+    assert_eq!(second_page.next_cursor, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_get_broadcast_messages_iter() {
     let (store, _dir) = generate_store();
     let timestamp = now_timestamp_as_millis_u64();
