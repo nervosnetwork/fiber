@@ -25,7 +25,8 @@ use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::liquidity::store::{
-    LiquidityStore, LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole,
+    LiquidityStateTransition, LiquidityStore, LiquiditySwapFilter, LiquiditySwapKind,
+    LiquiditySwapRecord, LiquiditySwapRole,
 };
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
@@ -174,6 +175,69 @@ fn test_store_liquidity_swap_insert_get() {
 
     assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
     assert_eq!(store.get_liquidity_swap(&[99u8; 32].into()).unwrap(), None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_valid_transition_updates_state_index() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(2, LiquiditySwapState::Created, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    store
+        .update_liquidity_swap_state(
+            &swap.swap_id,
+            LiquidityStateTransition {
+                state: LiquiditySwapState::Quoted,
+                updated_at: 99,
+                reason: Some("quote accepted".to_string()),
+            },
+        )
+        .unwrap();
+
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.state, LiquiditySwapState::Quoted);
+    assert_eq!(updated.updated_at, 99);
+    assert_eq!(updated.failure_reason, Some("quote accepted".to_string()));
+
+    let created = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        })
+        .unwrap();
+    let quoted = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Quoted),
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert!(created.swaps.is_empty());
+    assert_eq!(quoted.swaps, vec![updated]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_invalid_transition_is_rejected() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(3, LiquiditySwapState::PaymentSettled, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    let result = store.update_liquidity_swap_state(
+        &swap.swap_id,
+        LiquidityStateTransition {
+            state: LiquiditySwapState::Success,
+            updated_at: 99,
+            reason: Some("skip claim".to_string()),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::liquidity::store::LiquidityStoreError::InvalidStateTransition { .. })
+    ));
+    assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
