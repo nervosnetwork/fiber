@@ -26,7 +26,12 @@
 //! 2. Re-queue if failed
 //! 3. Dequeue invoices from the queue and start tracking
 
-use std::{collections::VecDeque, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{anyhow, Result};
 use futures::StreamExt as _;
@@ -134,6 +139,8 @@ pub struct LndTrackerState {
     tracker: TaskTracker,
     /// Queue of payment hashes waiting to be tracked
     invoice_queue: VecDeque<Hash256>,
+    /// Payment hashes that are queued or currently being tracked.
+    tracked_invoices: HashSet<Hash256>,
     /// Number of currently active invoice trackers
     active_invoice_trackers: usize,
 }
@@ -214,6 +221,7 @@ impl Actor for LndTrackerActor {
             token: args.token.clone(),
             tracker: args.tracker.clone(),
             invoice_queue: VecDeque::new(),
+            tracked_invoices: HashSet::new(),
             active_invoice_trackers: 0,
         };
 
@@ -239,12 +247,16 @@ impl Actor for LndTrackerActor {
     ) -> Result<(), ActorProcessingErr> {
         let res = match message {
             LndTrackerMessage::TrackInvoice(payment_hash) => {
-                state.invoice_queue.push_back(payment_hash);
-                state.process_invoice_queue(myself).await?;
+                if state.tracked_invoices.insert(payment_hash) {
+                    state.invoice_queue.push_back(payment_hash);
+                    state.process_invoice_queue(myself).await?;
+                } else {
+                    tracing::debug!("Invoice {:x} is already being tracked", payment_hash);
+                }
                 Ok(())
             }
             LndTrackerMessage::StopTracking(payment_hash) => {
-                // Remove from queue if present
+                state.tracked_invoices.remove(&payment_hash);
                 state.invoice_queue.retain(|&hash| hash != payment_hash);
                 tracing::debug!("Stopped tracking invoice {:x}", payment_hash);
                 Ok(())
@@ -261,8 +273,9 @@ impl Actor for LndTrackerActor {
                     MAX_CONCURRENT_INVOICE_TRACKERS
                 );
                 state.active_invoice_trackers = state.active_invoice_trackers.saturating_sub(1);
-                // Re-queue failed tracker
-                if !completed_successfully {
+                if completed_successfully {
+                    state.tracked_invoices.remove(&payment_hash);
+                } else if state.tracked_invoices.contains(&payment_hash) {
                     state.invoice_queue.push_back(payment_hash);
                 }
 

@@ -180,3 +180,62 @@ async fn test_timeout_requeues_active_invoices() {
     assert_eq!(final_state.invoice_queue_len, 0);
     assert_eq!(final_state.active_invoice_trackers, 1);
 }
+
+#[tokio::test]
+async fn test_duplicate_tracking_requests_are_coalesced() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(2);
+
+    for _ in 0..6 {
+        actor_ref
+            .cast(LndTrackerMessage::TrackInvoice(payment_hash))
+            .expect("Failed to send TrackInvoice");
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state = actor_ref
+        .call(
+            LndTrackerMessage::GetState,
+            Some(RactorDuration::from_millis(1000)),
+        )
+        .await
+        .expect("Failed to get state")
+        .expect("Failed to get state");
+
+    assert_eq!(state.invoice_queue_len, 0);
+    assert_eq!(state.active_invoice_trackers, 1);
+}
+
+#[tokio::test]
+async fn test_stopped_tracker_is_not_requeued_after_failure() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(3);
+
+    actor_ref
+        .cast(LndTrackerMessage::TrackInvoice(payment_hash))
+        .expect("Failed to send TrackInvoice");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    actor_ref
+        .cast(LndTrackerMessage::StopTracking(payment_hash))
+        .expect("Failed to send StopTracking");
+    actor_ref
+        .cast(LndTrackerMessage::InvoiceTrackerCompleted {
+            payment_hash,
+            completed_successfully: false,
+        })
+        .expect("Failed to send completion");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state = actor_ref
+        .call(
+            LndTrackerMessage::GetState,
+            Some(RactorDuration::from_millis(1000)),
+        )
+        .await
+        .expect("Failed to get state")
+        .expect("Failed to get state");
+
+    assert_eq!(state.invoice_queue_len, 0);
+    assert_eq!(state.active_invoice_trackers, 0);
+}
