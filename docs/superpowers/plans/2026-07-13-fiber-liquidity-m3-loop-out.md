@@ -983,6 +983,8 @@ pub struct ProviderAcceptLoopOutParams {
 
 Create `crates/fiber-lib/src/rpc/liquidity.rs` with a jsonrpsee trait containing `quote_loop_out`, `loop_out`, `get_swap`, `list_swaps`, `provider_quote_loop_out`, and `provider_accept_loop_out`. Implement `get_swap` and `list_swaps` by calling `LiquidityStore::get_liquidity_swap` and `LiquidityStore::list_liquidity_swaps`; implement quote/execute/provider methods by sending the corresponding `LiquidityActorMessage` through a required `ActorRef<LiquidityActorMessage>` field and converting actor errors into `ErrorObjectOwned`.
 
+> Task 7 correction: the existing `LiquidityActorMessage` variants do not yet carry typed reply ports or enough response data for RPC methods to delegate without inventing success responses. Task 7 creates the DTOs and RPC trait/module shape, implements store-backed `get_swap`/`list_swaps`, and returns internal errors from actor-backed methods. Task 8/9 must extend the actor request/response boundary before wiring these methods to the server.
+
 The RPC implementation constructor must be:
 
 ```rust

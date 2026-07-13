@@ -11,6 +11,7 @@ pub mod dev;
 pub mod graph;
 pub mod info;
 pub mod invoice;
+pub mod liquidity;
 #[cfg(not(target_arch = "wasm32"))]
 mod middleware;
 pub mod payment;
