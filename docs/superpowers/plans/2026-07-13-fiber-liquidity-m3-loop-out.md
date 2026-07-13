@@ -141,7 +141,8 @@ impl LoopOutRoleState {
                     | (PayoutPending, PayoutLocked)
                     | (PayoutLocked, PaymentInFlight)
                     | (PaymentInFlight, PaymentSettled)
-                    | (PaymentSettled, Success)
+                    | (PaymentSettled, ClaimPending)
+                    | (ClaimPending, Success)
                     | (PayoutLocked, RefundPending)
                     | (RefundPending, Refunded)
             ),
