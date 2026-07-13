@@ -1521,21 +1521,32 @@ impl LiquidityStore for Store {
         Ok(())
     }
 
-    fn upsert_liquidity_asset(&self, _asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
-        Err(LiquidityStoreError::Backend(
-            "liquidity asset persistence unavailable in current task".to_string(),
-        ))
+    fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
+        asset.validate()?;
+
+        let mut batch = self.batch();
+        let asset = KeyValue::LiquidityAsset(asset.asset_id.clone(), asset);
+        batch.put(asset.key(), asset.value());
+        batch.commit();
+        Ok(())
     }
 
     fn get_liquidity_asset(
         &self,
-        _asset_id: &str,
+        asset_id: &str,
     ) -> Result<Option<LiquidityAsset>, LiquidityStoreError> {
-        Ok(None)
+        let key = [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat();
+        Ok(self
+            .get(key)
+            .map(|value| deserialize_from(value.as_ref(), "LiquidityAsset")))
     }
 
     fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
-        Ok(Vec::new())
+        Ok(self
+            .collect_by_prefix(&[LIQUIDITY_ASSET_PREFIX])
+            .into_iter()
+            .map(|kv| deserialize_from(kv.value.as_ref(), "LiquidityAsset"))
+            .collect())
     }
 }
 
