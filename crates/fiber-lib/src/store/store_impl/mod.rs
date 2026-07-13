@@ -126,6 +126,25 @@ impl Store {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone()
     }
+
+    fn liquidity_swap_key(swap_id: &Hash256) -> Vec<u8> {
+        [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat()
+    }
+
+    fn liquidity_swap_state_index_key(state: LiquiditySwapState, swap_id: &Hash256) -> Vec<u8> {
+        [
+            &[LIQUIDITY_SWAP_STATE_PREFIX],
+            &[liquidity_state_key(state)],
+            swap_id.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn parse_liquidity_swap_id_from_index(key: &[u8]) -> Option<Hash256> {
+        let offset = key.len().checked_sub(32)?;
+        let bytes: [u8; 32] = key.get(offset..)?.try_into().ok()?;
+        Some(bytes.into())
+    }
 }
 
 impl StorageBackend for Store {
@@ -1286,7 +1305,7 @@ impl LiquidityStore for Store {
         &self,
         swap_id: &Hash256,
     ) -> Result<Option<LiquiditySwapRecord>, LiquidityStoreError> {
-        let key = [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat();
+        let key = Self::liquidity_swap_key(swap_id);
         Ok(self
             .get(key)
             .map(|value| deserialize_from(value.as_ref(), "LiquiditySwapRecord")))
@@ -1294,17 +1313,62 @@ impl LiquidityStore for Store {
 
     fn list_liquidity_swaps(
         &self,
-        _filter: LiquiditySwapFilter,
+        filter: LiquiditySwapFilter,
     ) -> Result<LiquiditySwapPage, LiquidityStoreError> {
-        Ok(LiquiditySwapPage::default())
+        let prefix = if let Some(state) = filter.state {
+            vec![LIQUIDITY_SWAP_STATE_PREFIX, liquidity_state_key(state)]
+        } else {
+            vec![LIQUIDITY_SWAP_PREFIX]
+        };
+        let rows = self.collect_by_prefix_with(&prefix, PrefixIterOptions::new());
+        let swaps = rows
+            .into_iter()
+            .filter_map(|kv| {
+                if prefix[0] == LIQUIDITY_SWAP_PREFIX {
+                    Some(deserialize_from(kv.value.as_ref(), "LiquiditySwapRecord"))
+                } else {
+                    Self::parse_liquidity_swap_id_from_index(&kv.key)
+                        .and_then(|swap_id| self.get_liquidity_swap(&swap_id).ok().flatten())
+                }
+            })
+            .collect();
+
+        Ok(LiquiditySwapPage {
+            swaps,
+            next_cursor: None,
+        })
     }
 
     fn update_liquidity_swap_state(
         &self,
         swap_id: &Hash256,
-        _transition: LiquidityStateTransition,
+        transition: LiquidityStateTransition,
     ) -> Result<(), LiquidityStoreError> {
-        Err(LiquidityStoreError::SwapNotFound(*swap_id))
+        let mut swap = self
+            .get_liquidity_swap(swap_id)?
+            .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+        if !swap.state.can_transition_to(transition.state) {
+            return Err(LiquidityStoreError::InvalidStateTransition {
+                from: swap.state,
+                to: transition.state,
+            });
+        }
+
+        let old_state = swap.state;
+        swap.state = transition.state;
+        swap.updated_at = transition.updated_at;
+        if let Some(reason) = transition.reason {
+            swap.failure_reason = Some(reason);
+        }
+
+        let mut batch = self.batch();
+        batch.delete(Self::liquidity_swap_state_index_key(old_state, swap_id));
+        let primary = KeyValue::LiquiditySwap(*swap_id, swap.clone());
+        let state_index = KeyValue::LiquiditySwapStateIndex((swap.state, *swap_id));
+        batch.put(primary.key(), primary.value());
+        batch.put(state_index.key(), state_index.value());
+        batch.commit();
+        Ok(())
     }
 
     fn update_liquidity_swap(
