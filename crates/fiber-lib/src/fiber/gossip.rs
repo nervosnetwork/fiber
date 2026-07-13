@@ -114,6 +114,10 @@ const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
 const UPDATE_PEER_FILTER_RETRY_DELAY: Duration = Duration::from_millis(500);
 const DEFERRED_SYNC_CURSOR_RETRY_DELAY: Duration = Duration::from_millis(500);
 #[cfg(test)]
+const MAX_CONSECUTIVE_ACTIVE_SYNC_PENDING_RESULTS: usize = 3;
+#[cfg(not(test))]
+const MAX_CONSECUTIVE_ACTIVE_SYNC_PENDING_RESULTS: usize = 20;
+#[cfg(test)]
 const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
 const ACTIVE_SYNC_FAILURE_RETRY_DELAY: Duration = Duration::from_secs(10);
@@ -870,6 +874,7 @@ pub struct GossipSyncingActorState<S> {
     peer_state: SyncingPeerState,
     request_id: u64,
     inflight_requests: HashMap<u64, InflightGetBroadcastMessagesRequest>,
+    consecutive_pending_results: usize,
 }
 
 struct InflightGetBroadcastMessagesRequest {
@@ -901,6 +906,7 @@ impl<S> GossipSyncingActorState<S> {
             peer_state: Default::default(),
             inflight_requests: Default::default(),
             request_id: 0,
+            consecutive_pending_results: 0,
         }
     }
 
@@ -1046,8 +1052,31 @@ where
                     ) {
                         Ok(ActiveSyncSaveMessagesResult::Validated(cursor)) => {
                             state.cursor = cursor;
+                            state.consecutive_pending_results = 0;
                         }
                         Ok(ActiveSyncSaveMessagesResult::Pending) => {
+                            state.consecutive_pending_results =
+                                state.consecutive_pending_results.saturating_add(1);
+                            if state.consecutive_pending_results
+                                >= MAX_CONSECUTIVE_ACTIVE_SYNC_PENDING_RESULTS
+                            {
+                                warn!(
+                                    "Aborting active sync with peer {:?} after {} consecutive pending results",
+                                    &state.peer_pubkey, state.consecutive_pending_results
+                                );
+                                state
+                                    .gossip_actor
+                                    .send_message(GossipActorMessage::ActiveSyncingAborted {
+                                        peer: state.peer_pubkey,
+                                        session_id: state.session_id,
+                                        sync_id: state.sync_id,
+                                    })
+                                    .expect("gossip actor alive");
+                                myself.stop(Some(
+                                    "Too many consecutive pending active sync results".to_string(),
+                                ));
+                                return Ok(());
+                            }
                             trace!(
                                 "Deferring active sync cursor advancement for peer {:?}",
                                 &state.peer_pubkey
