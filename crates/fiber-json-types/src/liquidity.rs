@@ -441,6 +441,11 @@ mod tests {
 
         let value = serde_json::to_value(params).expect("json");
 
-        assert_eq!(value["quote_id"].as_str().unwrap().len(), 66);
+        assert_eq!(
+            value["quote_id"],
+            "0x0101010101010101010101010101010101010101010101010101010101010101"
+        );
+        assert_eq!(value["claimant_lock"], "0x0102");
+        assert_eq!(value["refund_lock"], "0x0304");
     }
 }

@@ -269,3 +269,213 @@ fn liquidity_swap_state_to_string(state: LiquiditySwapState) -> String {
     }
     .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use fiber_json_types::{GetSwapParams, Hash256 as JsonHash256, ListSwapsParams};
+    use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapState};
+
+    use super::*;
+    use crate::liquidity::store::{
+        LiquidityStateTransition, LiquidityStoreError, LiquiditySwapPage, LiquiditySwapRole,
+        LiquiditySwapUpdate,
+    };
+
+    #[derive(Default)]
+    struct MockLiquidityStore {
+        get_swap_result: Mutex<Option<StoreLiquiditySwapRecord>>,
+        get_swap_id: Mutex<Option<Hash256>>,
+        list_swaps_result: Mutex<LiquiditySwapPage>,
+        list_filter: Mutex<Option<LiquiditySwapFilter>>,
+    }
+
+    impl MockLiquidityStore {
+        fn with_swap(swap: StoreLiquiditySwapRecord) -> Self {
+            Self {
+                get_swap_result: Mutex::new(Some(swap)),
+                ..Default::default()
+            }
+        }
+
+        fn with_page(page: LiquiditySwapPage) -> Self {
+            Self {
+                list_swaps_result: Mutex::new(page),
+                ..Default::default()
+            }
+        }
+
+        fn recorded_get_swap_id(&self) -> Option<Hash256> {
+            *self.get_swap_id.lock().expect("get swap id lock")
+        }
+
+        fn recorded_list_filter(&self) -> Option<LiquiditySwapFilter> {
+            self.list_filter.lock().expect("list filter lock").clone()
+        }
+    }
+
+    impl LiquidityStore for MockLiquidityStore {
+        fn insert_liquidity_swap(
+            &self,
+            _swap: StoreLiquiditySwapRecord,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn get_liquidity_swap(
+            &self,
+            swap_id: &Hash256,
+        ) -> Result<Option<StoreLiquiditySwapRecord>, LiquidityStoreError> {
+            *self.get_swap_id.lock().expect("get swap id lock") = Some(*swap_id);
+            Ok(self
+                .get_swap_result
+                .lock()
+                .expect("get result lock")
+                .clone())
+        }
+
+        fn list_liquidity_swaps(
+            &self,
+            filter: LiquiditySwapFilter,
+        ) -> Result<LiquiditySwapPage, LiquidityStoreError> {
+            *self.list_filter.lock().expect("list filter lock") = Some(filter);
+            Ok(self
+                .list_swaps_result
+                .lock()
+                .expect("list result lock")
+                .clone())
+        }
+
+        fn update_liquidity_swap_state(
+            &self,
+            _swap_id: &Hash256,
+            _transition: LiquidityStateTransition,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn update_liquidity_swap(
+            &self,
+            _swap_id: &Hash256,
+            _update: LiquiditySwapUpdate,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn upsert_liquidity_asset(
+            &self,
+            _asset: LiquidityAsset,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn get_liquidity_asset(
+            &self,
+            _asset_id: &str,
+        ) -> Result<Option<LiquidityAsset>, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+    }
+
+    fn liquidity_rpc_swap() -> StoreLiquiditySwapRecord {
+        StoreLiquiditySwapRecord {
+            swap_id: [1u8; 32].into(),
+            quote_id: [2u8; 32].into(),
+            role: LiquiditySwapRole::Client,
+            swap_kind: LiquiditySwapKind::LoopOut,
+            asset_id: "ckb".to_string(),
+            state: LiquiditySwapState::PaymentSettled,
+            payment_hash: [3u8; 32].into(),
+            payment_preimage: Some([4u8; 32].into()),
+            amount: 123,
+            onchain_outpoint: None,
+            payout_deadline: Some(456),
+            refund_after_lock_time: 789,
+            expires_at: 1000,
+            failure_reason: None,
+            created_at: 11,
+            updated_at: 22,
+        }
+    }
+
+    #[tokio::test]
+    async fn liquidity_rpc_get_swap_converts_store_record_to_json_dto() {
+        let store = MockLiquidityStore::with_swap(liquidity_rpc_swap());
+        let rpc = LiquidityRpcServerImpl::new(store);
+
+        let response = rpc
+            .get_swap(GetSwapParams {
+                swap_id: JsonHash256([1u8; 32]),
+            })
+            .await
+            .expect("get swap")
+            .expect("swap");
+
+        assert_eq!(rpc.store.recorded_get_swap_id(), Some([1u8; 32].into()));
+        assert_eq!(response.swap_id, JsonHash256([1u8; 32]));
+        assert_eq!(
+            response.swap_kind,
+            fiber_json_types::LiquiditySwapKind::LoopOut
+        );
+        assert_eq!(response.state, "payment_settled");
+        assert_eq!(response.asset_id, "ckb");
+        assert_eq!(response.amount, 123);
+        assert_eq!(response.payment_hash, JsonHash256([3u8; 32]));
+        assert_eq!(response.created_at, 11);
+        assert_eq!(response.updated_at, 22);
+    }
+
+    #[tokio::test]
+    async fn liquidity_rpc_list_swaps_forwards_filter_and_returns_next_cursor() {
+        let store = MockLiquidityStore::with_page(LiquiditySwapPage {
+            swaps: vec![liquidity_rpc_swap()],
+            next_cursor: Some("next".to_string()),
+        });
+        let rpc = LiquidityRpcServerImpl::new(store);
+
+        let response = rpc
+            .list_swaps(ListSwapsParams {
+                state: Some("payment_settled".to_string()),
+                asset_id: Some("ckb".to_string()),
+                limit: Some(10),
+                cursor: Some("cursor".to_string()),
+            })
+            .await
+            .expect("list swaps");
+
+        assert_eq!(response.swaps.len(), 1);
+        assert_eq!(response.next_cursor, Some("next".to_string()));
+        assert_eq!(
+            rpc.store.recorded_list_filter(),
+            Some(LiquiditySwapFilter {
+                state: Some(LiquiditySwapState::PaymentSettled),
+                asset_id: Some("ckb".to_string()),
+                limit: Some(10),
+                cursor: Some("cursor".to_string()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn liquidity_rpc_list_swaps_rejects_invalid_state_before_store_call() {
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default());
+
+        let error = rpc
+            .list_swaps(ListSwapsParams {
+                state: Some("not_a_state".to_string()),
+                asset_id: Some("ckb".to_string()),
+                limit: Some(10),
+                cursor: Some("cursor".to_string()),
+            })
+            .await
+            .expect_err("invalid state");
+
+        assert!(error.message().contains("invalid liquidity swap state"));
+        assert_eq!(rpc.store.recorded_list_filter(), None);
+    }
+}
