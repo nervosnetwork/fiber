@@ -366,6 +366,47 @@ fn test_store_liquidity_swaps_state_index_scan_rejects_malformed_key() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_extra_byte_before_swap_id() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(27, LiquiditySwapState::Created, "ckb");
+    let mut malformed_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
+    malformed_key.insert(2, 0xff);
+
+    store.insert_liquidity_swap(swap).unwrap();
+    store.put(malformed_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_asset_index_scan_rejects_extra_byte_before_swap_id() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(28, LiquiditySwapState::Created, "ckb");
+    let mut malformed_key =
+        KeyValue::LiquiditySwapAssetIndex((swap.asset_id.clone(), swap.swap_id)).key();
+    malformed_key.insert(malformed_key.len() - 32, 0xff);
+
+    store.insert_liquidity_swap(swap).unwrap();
+    store.put(malformed_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_store_liquidity_swaps_state_index_scan_rejects_missing_primary_record() {
     let (store, _dir) = generate_store();
     let swap = mock_liquidity_swap(24, LiquiditySwapState::Created, "ckb");
