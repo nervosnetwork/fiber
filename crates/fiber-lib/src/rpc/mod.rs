@@ -37,6 +37,7 @@ pub mod server {
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
+    use crate::rpc::liquidity::{LiquidityRpcServer, LiquidityRpcServerImpl};
     use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
@@ -51,6 +52,7 @@ pub mod server {
             NetworkActorMessage,
         },
         invoice::InvoiceStore,
+        liquidity::store::LiquidityStore,
         FiberConfig,
     };
     #[cfg(debug_assertions)]
@@ -91,6 +93,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + LiquidityStore
         + WatchtowerStore
         + PreimageStore
     {
@@ -102,6 +105,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + LiquidityStore
             + WatchtowerStore
             + PreimageStore
     {
@@ -113,6 +117,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + LiquidityStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -122,6 +127,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + LiquidityStore
     {
     }
 
@@ -319,6 +325,11 @@ pub mod server {
                     .merge(GraphRpcServerImpl::new(network_graph.clone(), store.clone()).into_rpc())
                     .unwrap();
             }
+        }
+        if config.is_module_enabled("liquidity") {
+            modules
+                .merge(LiquidityRpcServerImpl::new(store.clone()).into_rpc())
+                .unwrap();
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
