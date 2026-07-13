@@ -55,8 +55,8 @@ use fiber_types::{
     SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
-    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, LiquiditySwapState, PaymentHopData,
-    RouterHop, SessionRoute,
+    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, LiquidityAsset, LiquidityAssetError,
+    LiquidityAssetKind, LiquiditySwapState, PaymentHopData, RouterHop, SessionRoute,
 };
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
@@ -163,6 +163,66 @@ fn mock_liquidity_swap(seed: u8, state: LiquiditySwapState, asset_id: &str) -> L
         created_at: 40_000 + u64::from(seed),
         updated_at: 50_000 + u64::from(seed),
     }
+}
+
+fn mock_liquidity_asset(asset_id: &str) -> LiquidityAsset {
+    LiquidityAsset {
+        asset_id: asset_id.to_string(),
+        kind: LiquidityAssetKind::Ckb,
+        udt_type_script: None,
+        min_amount: 1_000,
+        max_amount: 1_000_000,
+        available_capacity: 500_000,
+        base_fee: 100,
+        proportional_fee_ppm: 1_000,
+        enabled: true,
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_asset_upsert_get_list() {
+    let (store, _dir) = generate_store();
+    let asset_b = mock_liquidity_asset("ckb-b");
+    let asset_a = mock_liquidity_asset("ckb-a");
+    let mut updated_asset_b = asset_b.clone();
+    updated_asset_b.available_capacity = 750_000;
+    updated_asset_b.enabled = false;
+
+    store.upsert_liquidity_asset(asset_b.clone()).unwrap();
+    store.upsert_liquidity_asset(asset_a.clone()).unwrap();
+    store
+        .upsert_liquidity_asset(updated_asset_b.clone())
+        .unwrap();
+
+    assert_eq!(
+        store.get_liquidity_asset(&asset_b.asset_id).unwrap(),
+        Some(updated_asset_b.clone())
+    );
+    assert_eq!(store.get_liquidity_asset("missing").unwrap(), None);
+    assert_eq!(
+        store.list_liquidity_assets().unwrap(),
+        vec![asset_a, updated_asset_b]
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_asset_validation_rejects_invalid_asset() {
+    let (store, _dir) = generate_store();
+    let mut asset = mock_liquidity_asset("ckb");
+    asset.min_amount = asset.max_amount + 1;
+
+    let result = store.upsert_liquidity_asset(asset.clone());
+
+    assert!(matches!(
+        result,
+        Err(crate::liquidity::store::LiquidityStoreError::InvalidAsset(
+            LiquidityAssetError::InvalidAmountRange
+        ))
+    ));
+    assert_eq!(store.get_liquidity_asset(&asset.asset_id).unwrap(), None);
+    assert!(store.list_liquidity_assets().unwrap().is_empty());
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
