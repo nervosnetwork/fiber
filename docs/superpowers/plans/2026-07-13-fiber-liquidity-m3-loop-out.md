@@ -225,9 +225,10 @@ Create `crates/fiber-lib/src/liquidity/quote.rs` with tests first:
 ```rust
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ckb_jsonrpc_types::Script;
     use fiber_types::{LiquidityAsset, LiquidityAssetKind};
+
+    use super::*;
 
     fn ckb_asset(enabled: bool) -> LiquidityAsset {
         LiquidityAsset {
@@ -318,6 +319,22 @@ mod tests {
             Err(crate::liquidity::types::LiquidityLoopOutError::UdtTypeMismatch)
         ));
     }
+
+    #[test]
+    fn rejects_ckb_request_with_udt_type_script() {
+        assert!(matches!(
+            validate_loop_out_quote_request(
+                &ckb_asset(true),
+                100,
+                10,
+                10,
+                Some(&udt_script("0x01")),
+                1_000,
+                2_000,
+            ),
+            Err(crate::liquidity::types::LiquidityLoopOutError::UdtTypeMismatch)
+        ));
+    }
 }
 ```
 
@@ -378,9 +395,11 @@ pub fn validate_loop_out_quote_request(
             required: amount,
         });
     }
-    if asset.kind == LiquidityAssetKind::Udt
-        && asset.udt_type_script.as_ref() != requested_udt_type_script
-    {
+    let expected_udt_type_script = match asset.kind {
+        LiquidityAssetKind::Ckb => None,
+        LiquidityAssetKind::Udt => asset.udt_type_script.as_ref(),
+    };
+    if expected_udt_type_script != requested_udt_type_script {
         return Err(LiquidityLoopOutError::UdtTypeMismatch);
     }
     if expires_at <= now_ms {
