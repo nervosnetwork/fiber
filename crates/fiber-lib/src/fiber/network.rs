@@ -317,7 +317,7 @@ impl FiberIngressBudget {
 struct PeerMessagePolicy {
     peers: HashMap<Pubkey, PeerMessagePolicyEntry>,
     ordinary_lru: BTreeSet<(u64, Pubkey)>,
-    banned_lru: BTreeSet<(u64, Pubkey)>,
+    banned_expirations: BTreeSet<(u64, Pubkey)>,
     max_entries: usize,
     ingress: FiberIngressBudget,
 }
@@ -327,7 +327,7 @@ impl PeerMessagePolicy {
         Self {
             peers: HashMap::new(),
             ordinary_lru: BTreeSet::new(),
-            banned_lru: BTreeSet::new(),
+            banned_expirations: BTreeSet::new(),
             max_entries: PEER_MESSAGE_MAX_TRACKED_PEERS,
             ingress: FiberIngressBudget::new(
                 FIBER_INGRESS_MAX_IN_FLIGHT_MESSAGES,
@@ -345,42 +345,54 @@ impl PeerMessagePolicy {
         Self {
             peers: HashMap::new(),
             ordinary_lru: BTreeSet::new(),
-            banned_lru: BTreeSet::new(),
+            banned_expirations: BTreeSet::new(),
             max_entries: max_entries.max(1),
             ingress: FiberIngressBudget::new(max_in_flight_messages, max_in_flight_bytes),
         }
     }
 
     fn insert_entry(&mut self, peer: Pubkey, entry: PeerMessagePolicyEntry) {
-        let index = (entry.last_used_ms, peer);
-        if entry.banned_until_ms.is_some() {
-            self.banned_lru.insert(index);
+        if let Some(banned_until_ms) = entry.banned_until_ms {
+            self.banned_expirations.insert((banned_until_ms, peer));
         } else {
-            self.ordinary_lru.insert(index);
+            self.ordinary_lru.insert((entry.last_used_ms, peer));
         }
         self.peers.insert(peer, entry);
     }
 
     fn take_entry(&mut self, peer: &Pubkey) -> Option<PeerMessagePolicyEntry> {
         let entry = self.peers.remove(peer)?;
-        let index = (entry.last_used_ms, *peer);
-        if entry.banned_until_ms.is_some() {
-            self.banned_lru.remove(&index);
+        if let Some(banned_until_ms) = entry.banned_until_ms {
+            self.banned_expirations.remove(&(banned_until_ms, *peer));
         } else {
-            self.ordinary_lru.remove(&index);
+            self.ordinary_lru.remove(&(entry.last_used_ms, *peer));
         }
         Some(entry)
     }
 
-    fn make_room(&mut self, peer: &Pubkey) {
+    fn prune_expired_bans(&mut self, now_ms: u64) {
+        while let Some(&(banned_until_ms, peer)) = self.banned_expirations.first() {
+            if now_ms < banned_until_ms {
+                break;
+            }
+            self.banned_expirations.pop_first();
+            self.peers.remove(&peer);
+        }
+    }
+
+    fn make_room(&mut self, peer: &Pubkey, now_ms: u64) {
         if self.peers.contains_key(peer) || self.peers.len() < self.max_entries {
+            return;
+        }
+        self.prune_expired_bans(now_ms);
+        if self.peers.len() < self.max_entries {
             return;
         }
 
         let evicted_peer = self
             .ordinary_lru
             .pop_first()
-            .or_else(|| self.banned_lru.pop_first())
+            .or_else(|| self.banned_expirations.pop_first())
             .map(|(_, peer)| peer);
         if let Some(evicted_peer) = evicted_peer {
             self.peers.remove(&evicted_peer);
@@ -393,7 +405,7 @@ impl PeerMessagePolicy {
     }
 
     fn entry_for_update(&mut self, peer: &Pubkey, now_ms: u64) -> PeerMessagePolicyEntry {
-        self.make_room(peer);
+        self.make_room(peer, now_ms);
         self.take_entry(peer)
             .unwrap_or_else(|| PeerMessagePolicyEntry::new(now_ms))
     }
@@ -862,6 +874,39 @@ mod tests {
         assert_eq!(policy.tracked_peers(), 2);
         assert!(policy.contains_peer(&banned_peer));
         assert!(!policy.contains_peer(&ordinary_peer));
+        assert!(policy.contains_peer(&new_peer));
+    }
+
+    #[test]
+    fn peer_message_policy_capacity_evicts_expired_bans_before_ordinary_entries() {
+        let expired_banned_peer = Privkey::from_slice(&[16u8; 32]).pubkey();
+        let ordinary_peer = Privkey::from_slice(&[17u8; 32]).pubkey();
+        let new_peer = Privkey::from_slice(&[18u8; 32]).pubkey();
+        let policy = test_peer_message_policy(2, 10, 100);
+
+        for _ in 0..PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
+            policy
+                .lock()
+                .expect("peer message policy lock")
+                .record_invalid(&expired_banned_peer, 0);
+        }
+        drop(expect_admitted(admit_inbound_fiber_message(
+            &policy,
+            &ordinary_peer,
+            1,
+            PEER_MESSAGE_BAN_DURATION_MS + 1,
+        )));
+        drop(expect_admitted(admit_inbound_fiber_message(
+            &policy,
+            &new_peer,
+            1,
+            PEER_MESSAGE_BAN_DURATION_MS + 2,
+        )));
+
+        let policy = policy.lock().expect("peer message policy lock");
+        assert_eq!(policy.tracked_peers(), 2);
+        assert!(!policy.contains_peer(&expired_banned_peer));
+        assert!(policy.contains_peer(&ordinary_peer));
         assert!(policy.contains_peer(&new_peer));
     }
 
