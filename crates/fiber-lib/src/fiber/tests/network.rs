@@ -15,13 +15,14 @@ use crate::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
-            select_connect_peer_address, AcceptChannelCommand, DebugEvent, NetworkActorStateStore,
-            OpenChannelCommand, PeerDisconnectReason,
+            select_connect_peer_address, AcceptChannelCommand, DebugEvent, FiberMessageWithTarget,
+            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason,
         },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
             BroadcastMessagesFilterResult, FiberMessage, GossipMessage, OpenChannel,
+            ReestablishChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NodeAnnouncement, Privkey,
@@ -1504,6 +1505,46 @@ async fn test_invalid_gossip_from_no_channel_peer_triggers_disconnect_and_temp_b
         }),
     );
 
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(list_connected_peers(&target).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_repeated_nonexistent_channel_messages_trigger_disconnect_and_temp_ban() {
+    init_tracing();
+
+    let mut target = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+
+    peer.connect_to(&mut target).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for _ in 0..20 {
+        peer.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    target.pubkey,
+                    FiberMessage::reestablish_channel(ReestablishChannel {
+                        channel_id: gen_rand_sha256_hash(),
+                        local_commitment_number: 0,
+                        remote_commitment_number: 0,
+                    }),
+                )),
+            ))
+            .expect("peer network actor alive");
+    }
+
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    peer.connect_to_nonblocking(&target).await;
     peer.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
     )

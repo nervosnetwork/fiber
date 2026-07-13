@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
@@ -83,6 +83,7 @@ use crate::fiber::channel::{
 use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
+use crate::fiber::gossip_policy::{ByteRateLimitConfig, ByteTokenBucket, DiscreteTokenBucket};
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
     SendPaymentDataBuilder, SendPaymentWithRouterCommand,
@@ -96,7 +97,7 @@ use crate::invoice::{
     CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
-use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use crate::{now_timestamp_as_millis_u64, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
@@ -181,6 +182,202 @@ const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
 /// rapidly reconnects/reestablishes.
 const CHANNEL_READY_RETRY_DEBOUNCE_MS: u64 = 60_000;
 
+// Keep this admission control in the protocol callback, before the NetworkActor's unbounded
+// mailbox. The actor separately scores semantically invalid messages, while these limits bound
+// the amount of parsed work that one peer can enqueue before that score is processed.
+const PEER_MESSAGE_INTERVAL_MS: u64 = 5;
+const PEER_MESSAGE_BURST: u32 = 400;
+const PEER_MESSAGE_RATE_BYTES_PER_SEC: u64 = 1024 * 1024;
+const PEER_MESSAGE_BURST_BYTES: u64 = 4 * 1024 * 1024;
+const PEER_MESSAGE_VIOLATION_BAN_THRESHOLD: u32 = 20;
+const PEER_MESSAGE_BAN_DURATION_MS: u64 = 10 * 60 * 1000;
+const PEER_MESSAGE_MAX_TRACKED_PEERS: usize = 50_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerMessageAdmission {
+    Allow,
+    Drop,
+    Ban,
+}
+
+#[derive(Clone, Debug)]
+struct PeerMessagePolicyEntry {
+    messages: DiscreteTokenBucket,
+    bytes: ByteTokenBucket,
+    rate_limit_violations: u32,
+    invalid_messages: u32,
+    last_invalid_ms: u64,
+    banned_until_ms: Option<u64>,
+    last_used_ms: u64,
+}
+
+impl PeerMessagePolicyEntry {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            messages: DiscreteTokenBucket::new(PEER_MESSAGE_INTERVAL_MS, PEER_MESSAGE_BURST),
+            bytes: ByteTokenBucket::new(ByteRateLimitConfig {
+                rate_bytes_per_sec: PEER_MESSAGE_RATE_BYTES_PER_SEC,
+                burst_bytes: PEER_MESSAGE_BURST_BYTES,
+            }),
+            rate_limit_violations: 0,
+            invalid_messages: 0,
+            last_invalid_ms: now_ms,
+            banned_until_ms: None,
+            last_used_ms: now_ms,
+        }
+    }
+
+    fn is_banned(&self, now_ms: u64) -> bool {
+        self.banned_until_ms
+            .is_some_and(|banned_until_ms| now_ms < banned_until_ms)
+    }
+
+    fn ban(&mut self, now_ms: u64) {
+        self.banned_until_ms = Some(now_ms.saturating_add(PEER_MESSAGE_BAN_DURATION_MS));
+        self.last_used_ms = now_ms;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PeerMessagePolicy {
+    peers: HashMap<Pubkey, PeerMessagePolicyEntry>,
+    max_entries: usize,
+}
+
+impl PeerMessagePolicy {
+    fn new() -> Self {
+        Self {
+            peers: HashMap::new(),
+            max_entries: PEER_MESSAGE_MAX_TRACKED_PEERS,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            peers: HashMap::new(),
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    fn prune_expired(&mut self, now_ms: u64) {
+        self.peers.retain(|_, entry| {
+            entry.is_banned(now_ms)
+                || now_ms.saturating_sub(entry.last_used_ms) < PEER_MESSAGE_BAN_DURATION_MS
+        });
+    }
+
+    fn make_room(&mut self, peer: &Pubkey, now_ms: u64) {
+        if self.peers.contains_key(peer) || self.peers.len() < self.max_entries {
+            return;
+        }
+        self.prune_expired(now_ms);
+        if self.peers.len() < self.max_entries {
+            return;
+        }
+
+        if let Some(evicted_peer) = self
+            .peers
+            .iter()
+            .min_by_key(|(_, entry)| (entry.is_banned(now_ms), entry.last_used_ms))
+            .map(|(peer, _)| *peer)
+        {
+            self.peers.remove(&evicted_peer);
+            debug!(
+                evicted_peer = format!("{evicted_peer:?}"),
+                max_entries = self.max_entries,
+                "Evicting peer message policy entry due to capacity limit"
+            );
+        }
+    }
+
+    fn entry(&mut self, peer: &Pubkey, now_ms: u64) -> &mut PeerMessagePolicyEntry {
+        self.make_room(peer, now_ms);
+        self.peers
+            .entry(*peer)
+            .or_insert_with(|| PeerMessagePolicyEntry::new(now_ms))
+    }
+
+    fn admit(&mut self, peer: &Pubkey, bytes: u64, now_ms: u64) -> PeerMessageAdmission {
+        if self.is_banned(peer, now_ms) {
+            return PeerMessageAdmission::Ban;
+        }
+
+        let entry = self.entry(peer, now_ms);
+        entry.last_used_ms = now_ms;
+        let mut message_bucket = entry.messages.clone();
+        let mut byte_bucket = entry.bytes.clone();
+        if message_bucket.try_consume(now_ms) && byte_bucket.try_consume(bytes, now_ms) {
+            entry.messages = message_bucket;
+            entry.bytes = byte_bucket;
+            entry.rate_limit_violations = 0;
+            return PeerMessageAdmission::Allow;
+        }
+
+        entry.rate_limit_violations = entry.rate_limit_violations.saturating_add(1);
+        if entry.rate_limit_violations >= PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
+            entry.ban(now_ms);
+            PeerMessageAdmission::Ban
+        } else {
+            PeerMessageAdmission::Drop
+        }
+    }
+
+    fn record_invalid(&mut self, peer: &Pubkey, now_ms: u64) -> bool {
+        if self.is_banned(peer, now_ms) {
+            return true;
+        }
+
+        let entry = self.entry(peer, now_ms);
+        if now_ms.saturating_sub(entry.last_invalid_ms) >= PEER_MESSAGE_BAN_DURATION_MS {
+            entry.invalid_messages = 0;
+        }
+        entry.invalid_messages = entry.invalid_messages.saturating_add(1);
+        entry.last_invalid_ms = now_ms;
+        entry.last_used_ms = now_ms;
+        if entry.invalid_messages >= PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
+            entry.ban(now_ms);
+            return true;
+        }
+        false
+    }
+
+    fn is_banned(&mut self, peer: &Pubkey, now_ms: u64) -> bool {
+        let ban_expired = self
+            .peers
+            .get(peer)
+            .is_some_and(|entry| entry.banned_until_ms.is_some() && !entry.is_banned(now_ms));
+        if ban_expired {
+            self.peers.remove(peer);
+            return false;
+        }
+        self.peers
+            .get(peer)
+            .is_some_and(|entry| entry.is_banned(now_ms))
+    }
+
+    fn on_disconnected(&mut self, peer: &Pubkey, now_ms: u64) {
+        let can_forget = !self.is_banned(peer, now_ms)
+            && self.peers.get(peer).is_some_and(|entry| {
+                entry.invalid_messages == 0 && entry.rate_limit_violations == 0
+            });
+        if can_forget {
+            self.peers.remove(peer);
+        }
+    }
+
+    #[cfg(test)]
+    fn tracked_peers(&self) -> usize {
+        self.peers.len()
+    }
+}
+
+impl Default for PeerMessagePolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelReadyRetryScanDecision {
     ScanNow,
@@ -227,6 +424,55 @@ fn funding_retry_delay(retry_count: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_message_policy_bounds_pre_actor_burst_and_bans_repeated_overflow() {
+        let peer = Privkey::from_slice(&[1u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new();
+
+        for _ in 0..PEER_MESSAGE_BURST {
+            assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Allow);
+        }
+        for _ in 1..PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
+            assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Drop);
+        }
+        assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Ban);
+        assert!(policy.is_banned(&peer, 0));
+
+        assert_eq!(
+            policy.admit(&peer, 1, PEER_MESSAGE_BAN_DURATION_MS),
+            PeerMessageAdmission::Allow
+        );
+    }
+
+    #[test]
+    fn peer_message_policy_temp_bans_repeated_invalid_messages_across_disconnect() {
+        let peer = Privkey::from_slice(&[2u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new();
+
+        for _ in 1..PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
+            assert!(!policy.record_invalid(&peer, 1_000));
+        }
+        policy.on_disconnected(&peer, 1_001);
+        assert!(policy.record_invalid(&peer, 1_002));
+        assert!(policy.is_banned(&peer, 1_002));
+
+        assert!(!policy.is_banned(
+            &peer,
+            1_002_u64.saturating_add(PEER_MESSAGE_BAN_DURATION_MS)
+        ));
+    }
+
+    #[test]
+    fn peer_message_policy_caps_tracked_peer_state() {
+        let peer1 = Privkey::from_slice(&[3u8; 32]).pubkey();
+        let peer2 = Privkey::from_slice(&[4u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::with_max_entries(1);
+
+        assert_eq!(policy.admit(&peer1, 1, 0), PeerMessageAdmission::Allow);
+        assert_eq!(policy.admit(&peer2, 1, 1), PeerMessageAdmission::Allow);
+        assert_eq!(policy.tracked_peers(), 1);
+    }
 
     #[test]
     fn channel_ready_retry_debounce_coalesces_pending_trailing_scan() {
@@ -1430,11 +1676,17 @@ where
                 }
 
                 if !found {
-                    error!(
-                        "Received a channel message for a channel that is not created with peer: {:?}",
-                        channel_id
+                    let banned = state.record_invalid_peer_message(peer_pubkey);
+                    debug!(
+                        peer = format!("{peer_pubkey:?}"),
+                        channel = format!("{channel_id:?}"),
+                        banned,
+                        "Dropping peer message for a channel not associated with the peer"
                     );
-                    return Err(Error::ChannelNotFound(channel_id));
+                    if banned {
+                        state.disconnect_peer_for_message_policy(peer_pubkey).await;
+                    }
+                    return Ok(());
                 }
                 state
                     .send_message_to_channel_actor(
@@ -4033,6 +4285,7 @@ pub struct NetworkActorState<S, C> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
     // Cancellation token for the onion service background task.
     #[cfg(not(target_arch = "wasm32"))]
     onion_service_token: Option<tokio_util::sync::CancellationToken>,
@@ -5475,6 +5728,10 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
+        self.peer_message_policy
+            .lock()
+            .expect("peer message policy lock")
+            .on_disconnected(&pubkey, now_timestamp_as_millis_u64());
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
@@ -5509,6 +5766,37 @@ where
             return;
         }
         self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
+    }
+
+    fn record_invalid_peer_message(&self, pubkey: Pubkey) -> bool {
+        self.peer_message_policy
+            .lock()
+            .expect("peer message policy lock")
+            .record_invalid(&pubkey, now_timestamp_as_millis_u64())
+    }
+
+    async fn disconnect_peer_for_message_policy(&mut self, pubkey: Pubkey) {
+        let Some(session_id) = self
+            .peer_session_map
+            .get(&pubkey)
+            .map(|peer| peer.session_id)
+        else {
+            return;
+        };
+
+        warn!(
+            peer = format!("{pubkey:?}"),
+            session = format!("{session_id:?}"),
+            "Temporarily banning peer after repeated invalid Fiber messages"
+        );
+        if let Err(err) = self.control.disconnect(session_id).await {
+            error!(
+                peer = format!("{pubkey:?}"),
+                session = format!("{session_id:?}"),
+                %err,
+                "Failed to disconnect peer banned by Fiber message policy"
+            );
+        }
     }
 
     pub(crate) fn get_peer_addresses_by_pubkey(&self, pubkey: &Pubkey) -> HashSet<Multiaddr> {
@@ -5998,7 +6286,6 @@ where
     ) {
         match self.channels.get(&channel_id) {
             None => match (message, peer_pubkey) {
-                // TODO: ban the adversary who constantly send messages related to non-existing channels.
                 (
                     ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannel(r)),
                     Some(remote_pubkey),
@@ -6024,7 +6311,7 @@ where
                     }
                 }
                 (message, _) => {
-                    error!(
+                    debug!(
                         "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
                         &channel_id, &message,
                     );
@@ -6115,7 +6402,8 @@ where
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let handle = NetworkServiceHandle::new(myself.clone());
+        let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new()));
+        let handle = NetworkServiceHandle::new(myself.clone(), peer_message_policy.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let peer_channel_index = PeerChannelIndex::build(&self.store);
 
@@ -6371,6 +6659,7 @@ where
             default_shutdown_script,
             network: myself.clone(),
             control,
+            peer_message_policy,
             #[cfg(not(target_arch = "wasm32"))]
             onion_service_token,
             peer_session_map: Default::default(),
@@ -6567,6 +6856,7 @@ where
 #[derive(Clone, Debug)]
 struct FiberProtocolHandle {
     actor: ActorRef<NetworkActorMessage>,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
 }
 
 impl FiberProtocolHandle {
@@ -6595,10 +6885,31 @@ impl ServiceProtocol for FiberProtocolHandle {
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, _version: &str) {
         let _session = context.session;
         if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
+            let pubkey = super::types::pubkey_from_tentacle(remote_pubkey);
+            let banned = self
+                .peer_message_policy
+                .lock()
+                .expect("peer message policy lock")
+                .is_banned(&pubkey, now_timestamp_as_millis_u64());
+            if banned {
+                debug!(
+                    peer = format!("{pubkey:?}"),
+                    session = format!("{:?}", context.session.id),
+                    "Disconnecting peer while its Fiber message ban is active"
+                );
+                if let Err(err) = context.disconnect(context.session.id).await {
+                    error!(
+                        peer = format!("{pubkey:?}"),
+                        %err,
+                        "Failed to disconnect peer with active Fiber message ban"
+                    );
+                }
+                return;
+            }
             try_send_actor_message(
                 &self.actor,
                 NetworkActorMessage::new_event(NetworkActorEvent::PeerConnected(
-                    super::types::pubkey_from_tentacle(remote_pubkey),
+                    pubkey,
                     context.session.clone(),
                 )),
             );
@@ -6628,24 +6939,75 @@ impl ServiceProtocol for FiberProtocolHandle {
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        let msg = unwrap_or_return!(FiberMessage::from_molecule_slice(&data), "parse message");
-        match context.session.remote_pubkey.as_ref() {
-            Some(pubkey) => {
-                try_send_actor_message(
-                    &self.actor,
-                    NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
-                        super::types::pubkey_from_tentacle(pubkey.clone()),
-                        msg,
-                    )),
+        let Some(remote_pubkey) = context.session.remote_pubkey.clone() else {
+            debug!(
+                "Received message without remote pubkey {:?}",
+                context.session
+            );
+            return;
+        };
+        let pubkey = super::types::pubkey_from_tentacle(remote_pubkey);
+        let now_ms = now_timestamp_as_millis_u64();
+        let admission = self
+            .peer_message_policy
+            .lock()
+            .expect("peer message policy lock")
+            .admit(&pubkey, data.len() as u64, now_ms);
+        match admission {
+            PeerMessageAdmission::Allow => {}
+            PeerMessageAdmission::Drop => {
+                trace!(
+                    peer = format!("{pubkey:?}"),
+                    "Dropping rate-limited Fiber message before actor enqueue"
                 );
+                return;
             }
-            None => {
+            PeerMessageAdmission::Ban => {
                 debug!(
-                    "Received message without remote pubkey {:?}",
-                    context.session
+                    peer = format!("{pubkey:?}"),
+                    "Disconnecting peer after repeated Fiber message rate-limit violations"
                 );
+                if let Err(err) = context.disconnect(context.session.id).await {
+                    error!(
+                        peer = format!("{pubkey:?}"),
+                        %err,
+                        "Failed to disconnect rate-limited Fiber peer"
+                    );
+                }
+                return;
             }
         }
+
+        let msg = match FiberMessage::from_molecule_slice(&data) {
+            Ok(msg) => msg,
+            Err(err) => {
+                let banned = self
+                    .peer_message_policy
+                    .lock()
+                    .expect("peer message policy lock")
+                    .record_invalid(&pubkey, now_ms);
+                debug!(
+                    peer = format!("{pubkey:?}"),
+                    %err,
+                    banned,
+                    "Dropping malformed Fiber message"
+                );
+                if banned {
+                    if let Err(disconnect_err) = context.disconnect(context.session.id).await {
+                        error!(
+                            peer = format!("{pubkey:?}"),
+                            %disconnect_err,
+                            "Failed to disconnect peer sending malformed Fiber messages"
+                        );
+                    }
+                }
+                return;
+            }
+        };
+        try_send_actor_message(
+            &self.actor,
+            NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(pubkey, msg)),
+        );
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
@@ -6654,11 +7016,18 @@ impl ServiceProtocol for FiberProtocolHandle {
 #[derive(Clone, Debug)]
 struct NetworkServiceHandle {
     actor: ActorRef<NetworkActorMessage>,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
 }
 
 impl NetworkServiceHandle {
-    fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
-        NetworkServiceHandle { actor }
+    fn new(
+        actor: ActorRef<NetworkActorMessage>,
+        peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
+    ) -> Self {
+        NetworkServiceHandle {
+            actor,
+            peer_message_policy,
+        }
     }
 }
 
@@ -6666,6 +7035,7 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
     fn from(handle: &NetworkServiceHandle) -> Self {
         FiberProtocolHandle {
             actor: handle.actor.clone(),
+            peer_message_policy: handle.peer_message_policy.clone(),
         }
     }
 }
