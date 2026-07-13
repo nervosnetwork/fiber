@@ -68,6 +68,18 @@ pub struct LiquidityRpcServerImpl<S> {
     store: S,
 }
 
+/// Return the JSON-RPC method names exposed by the liquidity module.
+pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
+    vec![
+        "quote_loop_out",
+        "loop_out",
+        "get_swap",
+        "list_swaps",
+        "provider_quote_loop_out",
+        "provider_accept_loop_out",
+    ]
+}
+
 impl<S> LiquidityRpcServerImpl<S> {
     /// Construct a liquidity RPC server backed by `store`.
     pub fn new(store: S) -> Self {
@@ -401,6 +413,18 @@ mod tests {
             created_at: 11,
             updated_at: 22,
         }
+    }
+
+    #[test]
+    fn liquidity_rpc_methods_are_registered_by_name() {
+        let methods = liquidity_rpc_method_names();
+
+        assert!(methods.contains(&"quote_loop_out"));
+        assert!(methods.contains(&"loop_out"));
+        assert!(methods.contains(&"get_swap"));
+        assert!(methods.contains(&"list_swaps"));
+        assert!(methods.contains(&"provider_quote_loop_out"));
+        assert!(methods.contains(&"provider_accept_loop_out"));
     }
 
     #[tokio::test]

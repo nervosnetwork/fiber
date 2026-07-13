@@ -1031,12 +1031,12 @@ git commit -m "feat: add loop out RPC surface"
 
 ---
 
-### Task 8: Wire LiquidityActor Into RPC Server
+### Task 8: Register Liquidity RPC Module
 
 **Files:**
 - Modify: `crates/fiber-lib/src/rpc/mod.rs`
 - Modify: `crates/fiber-lib/src/rpc/liquidity.rs`
-- Modify: `crates/fiber-lib/src/liquidity/actor.rs`
+- Modify: `docs/superpowers/plans/2026-07-13-fiber-liquidity-m3-loop-out.md`
 - Test: `crates/fiber-lib/src/rpc/liquidity.rs`
 
 - [ ] **Step 1: Write failing RPC thin-adapter test**
@@ -1063,7 +1063,7 @@ Run: `cargo test -p fnn --features rocksdb liquidity_rpc_methods_are_registered_
 
 Expected: FAIL because helper does not exist.
 
-- [ ] **Step 3: Spawn actor and register RPC methods**
+- [ ] **Step 3: Register RPC methods**
 
 Add helper and register module in `rpc/liquidity.rs`:
 
@@ -1080,7 +1080,7 @@ pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
 }
 ```
 
-Update `rpc/mod.rs` server method aggregation to spawn `LiquidityActor` before module registration and merge `LiquidityRpcServerImpl::new(store.clone(), liquidity_actor).into_rpc()` into `Methods`, matching the pattern used for payment/channel modules. Add `LiquidityStore` to `RpcServerStore` bounds. The actor arguments must include `store.clone()`, `network_actor.clone()`, and CKB adapter configuration so RPC handlers do not mutate liquidity state directly.
+Update `rpc/mod.rs` server method aggregation to merge `LiquidityRpcServerImpl::new(store.clone()).into_rpc()` into `Methods` when the `liquidity` module is enabled. Add `LiquidityStore` to `RpcServerStore` bounds. Do not spawn or fake a `LiquidityActor` in this task: the current liquidity actor file only defines the message enum boundary and not a Ractor `Actor` implementation, so actor spawning and delegation are deferred to Task 9, which extends the actor request/response boundary and adds real orchestration.
 
 - [ ] **Step 4: Run tests/check**
 
@@ -1098,7 +1098,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git add crates/fiber-lib/src/rpc/mod.rs crates/fiber-lib/src/rpc/liquidity.rs crates/fiber-lib/src/liquidity/actor.rs
+git add crates/fiber-lib/src/rpc/mod.rs crates/fiber-lib/src/rpc/liquidity.rs docs/superpowers/plans/2026-07-13-fiber-liquidity-m3-loop-out.md
 git commit -m "feat: wire liquidity RPC module"
 ```
 
