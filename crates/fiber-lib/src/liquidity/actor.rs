@@ -804,6 +804,10 @@ mod tests {
             recovery_action_for_loop_out_state(ClaimPending),
             Some(RecoveryAction::WatchClaim)
         );
+        assert_eq!(
+            recovery_action_for_loop_out_state(RefundPending),
+            Some(RecoveryAction::RefundProviderPayout)
+        );
         assert_eq!(recovery_action_for_loop_out_state(Success), None);
     }
 
