@@ -44,6 +44,13 @@ pub enum CchFiberAgentMessage {
         Option<u64>,
         RpcReplyPort<Result<PaymentStatus>>,
     ),
+    PreflightPayment(
+        String,
+        Option<u64>,
+        Option<u128>,
+        Option<u64>,
+        RpcReplyPort<Result<PaymentStatus>>,
+    ),
     SettleInvoice(Hash256, Hash256, RpcReplyPort<Result<()>>),
 }
 
@@ -96,6 +103,24 @@ impl Actor for CchFiberAgentActor {
                     .await;
                 let _ = port.send(result);
             }
+            CchFiberAgentMessage::PreflightPayment(
+                pay_req,
+                tlc_expiry_limit,
+                max_fee_amount,
+                max_fee_rate,
+                port,
+            ) => {
+                let result = state
+                    .send_payment_with_dry_run(
+                        pay_req,
+                        tlc_expiry_limit,
+                        max_fee_amount,
+                        max_fee_rate,
+                        true,
+                    )
+                    .await;
+                let _ = port.send(result);
+            }
             CchFiberAgentMessage::SettleInvoice(payment_hash, payment_preimage, port) => {
                 let result = state.settle_invoice(payment_hash, payment_preimage).await;
                 let _ = port.send(result);
@@ -145,6 +170,24 @@ impl CchFiberAgentHttpBackend {
         max_fee_amount: Option<u128>,
         max_fee_rate: Option<u64>,
     ) -> Result<PaymentStatus> {
+        self.send_payment_with_dry_run(
+            pay_req,
+            tlc_expiry_limit,
+            max_fee_amount,
+            max_fee_rate,
+            false,
+        )
+        .await
+    }
+
+    async fn send_payment_with_dry_run(
+        &self,
+        pay_req: String,
+        tlc_expiry_limit: Option<u64>,
+        max_fee_amount: Option<u128>,
+        max_fee_rate: Option<u64>,
+        dry_run: bool,
+    ) -> Result<PaymentStatus> {
         let payment_params = SendPaymentCommandParams {
             target_pubkey: None,
             amount: None,
@@ -162,7 +205,7 @@ impl CchFiberAgentHttpBackend {
             allow_self_payment: None,
             custom_records: None,
             hop_hints: None,
-            dry_run: None,
+            dry_run: Some(dry_run),
         };
         let response = self
             .client
@@ -304,6 +347,52 @@ impl CchFiberAgentRef {
                 CchFiberAgentMessage::AddInvoice(invoice.clone(), port)
             })
             .map_err(to_fiber_err)?
+            .map_err(CchError::FiberNodeError),
+        }
+    }
+
+    /// Verify that Fiber can currently build a route for an outgoing payment without creating a
+    /// payment session or sending a TLC.
+    pub async fn call_payment_preflight(
+        &self,
+        outgoing_pay_req: String,
+        tlc_expiry_limit: u64,
+        fee_limit: OutgoingFeeLimit,
+    ) -> Result<(), CchError> {
+        let tlc_limit = Some(tlc_expiry_limit);
+        let max_fee = Some(fee_limit.max_fee_amount);
+        let max_fee_rate = Some(fee_limit.max_fee_rate);
+        match self {
+            Self::InProcess(network_actor) => {
+                let msg = move |tx| {
+                    NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                        SendPaymentCommand {
+                            invoice: Some(outgoing_pay_req.clone()),
+                            tlc_expiry_limit: tlc_limit,
+                            max_fee_amount: max_fee,
+                            max_fee_rate,
+                            dry_run: true,
+                            ..Default::default()
+                        },
+                        tx,
+                    ))
+                };
+                call!(network_actor, msg)
+                    .map_err(to_fiber_err)?
+                    .map_err(to_fiber_err)?;
+                Ok(())
+            }
+            Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
+                CchFiberAgentMessage::PreflightPayment(
+                    outgoing_pay_req,
+                    tlc_limit,
+                    max_fee,
+                    max_fee_rate,
+                    port,
+                )
+            })
+            .map_err(to_fiber_err)?
+            .map(|_| ())
             .map_err(CchError::FiberNodeError),
         }
     }

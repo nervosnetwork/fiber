@@ -128,6 +128,10 @@ struct MockNetworkState {
     event_port: Arc<OutputPort<CchTrackingEvent>>,
     /// Tracks payment hashes for which SendPayment was called (outgoing Fiber payments)
     sent_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
+    /// Tracks payment hashes for which a dry-run Fiber payment was requested.
+    preflighted_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
+    /// Optional error returned by dry-run Fiber payments.
+    fiber_preflight_error: Arc<Mutex<Option<String>>>,
     /// Tracks the `max_fee_amount` of each outgoing Fiber SendPayment, keyed by payment hash.
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
@@ -167,20 +171,38 @@ impl Actor for MockNetworkActor {
                     // Extract payment hash from invoice
                     let payment_hash = extract_payment_hash_from_command(&cmd);
 
-                    // Track that this payment was sent
-                    state
-                        .sent_fiber_payments
-                        .lock()
-                        .unwrap()
-                        .insert(payment_hash);
-                    state
-                        .sent_fiber_payment_fees
-                        .lock()
-                        .unwrap()
-                        .insert(payment_hash, cmd.max_fee_amount);
+                    if cmd.dry_run {
+                        state
+                            .preflighted_fiber_payments
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash);
+                        if let Some(error) = state.fiber_preflight_error.lock().unwrap().clone() {
+                            let _ = reply.send(Err(error));
+                            return Ok(());
+                        }
+                    }
+
+                    if !cmd.dry_run {
+                        // Track that this payment was sent
+                        state
+                            .sent_fiber_payments
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash);
+                        state
+                            .sent_fiber_payment_fees
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash, cmd.max_fee_amount);
+                    }
 
                     // Return success response - the executor will create CchTrackingEvent
-                    let status = *state.send_payment_status.lock().unwrap();
+                    let status = if cmd.dry_run {
+                        PaymentStatus::Created
+                    } else {
+                        *state.send_payment_status.lock().unwrap()
+                    };
                     let response = SendPaymentResponse {
                         payment_hash,
                         status,
@@ -322,6 +344,18 @@ impl TestHarness {
 
     fn set_send_payment_status(&self, status: PaymentStatus) {
         *self.mock_state.send_payment_status.lock().unwrap() = status;
+    }
+
+    fn fail_fiber_payment_preflight(&self, error: impl Into<String>) {
+        *self.mock_state.fiber_preflight_error.lock().unwrap() = Some(error.into());
+    }
+
+    fn was_fiber_payment_preflighted(&self, payment_hash: Hash256) -> bool {
+        self.mock_state
+            .preflighted_fiber_payments
+            .lock()
+            .unwrap()
+            .contains(&payment_hash)
     }
 
     fn simulate_fiber_attempt_status(&self, payment_hash: Hash256, attempt_status: AttemptStatus) {
@@ -494,6 +528,8 @@ async fn setup_test_harness_with_config_and_store(
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        fiber_preflight_error: Arc::new(Mutex::new(None)),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
@@ -539,6 +575,8 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        fiber_preflight_error: Arc::new(Mutex::new(None)),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
     };
@@ -1751,6 +1789,63 @@ async fn test_receive_btc_amount_overflow_u128() {
         matches!(err, CchError::ReceiveBTCOrderAmountTooLarge),
         "expected ReceiveBTCOrderAmountTooLarge, got: {:?}",
         err
+    );
+}
+
+/// An unroutable Fiber invoice must be rejected before CCH creates an LND hold invoice.
+#[tokio::test]
+async fn test_receive_btc_preflights_fiber_sendability_before_lnd() {
+    use crate::ckb::contracts::{get_script_by_contract, Contract};
+    use crate::invoice::CkbScript;
+
+    let harness = setup_test_harness().await;
+    harness.fail_fiber_payment_preflight("Failed to build route, no path found");
+
+    let (_preimage, payment_hash) = create_valid_preimage_pair(172);
+    let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+    let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+    let mut invoice = CkbInvoice {
+        currency: Currency::Fibb,
+        amount: Some(100_000),
+        signature: None,
+        data: InvoiceData {
+            payment_hash,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            attrs: vec![
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
+                Attribute::Description("unroutable invoice".to_string()),
+                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::PayeePublicKey(public_key),
+                Attribute::UdtScript(CkbScript(get_script_by_contract(Contract::SimpleUDT, &[]))),
+                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+            ],
+        },
+    };
+    invoice
+        .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    let error = result.expect_err("unroutable Fiber invoice must be rejected");
+    assert!(
+        matches!(error, CchError::FiberNodeError(_)),
+        "sendability failure must be returned before contacting LND, got: {:?}",
+        error
+    );
+    assert!(
+        harness.was_fiber_payment_preflighted(payment_hash),
+        "receive_btc must dry-run the outgoing Fiber payment"
     );
 }
 

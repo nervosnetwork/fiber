@@ -14,6 +14,9 @@ use tentacle::secio::SecioKeyPair;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::cch::actions::send_outgoing_payment::{
+    outgoing_fee_budget_from_fee_sats, outgoing_max_fee_rate,
+};
 use crate::cch::actions::{ActionDispatcher, CchOrderAction};
 use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentRef};
 use crate::cch::order::CchOrderStateMachine;
@@ -22,8 +25,9 @@ use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
     RedactedCchTrackingEvent,
 };
-use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
+use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::now_timestamp_as_millis_u64;
@@ -765,6 +769,22 @@ impl<S: CchOrderStore> CchState<S> {
         if hash_algorithm != HashAlgorithm::Sha256 {
             return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
         }
+
+        // Do not create externally payable BTC-side state for an invoice Fiber cannot currently
+        // route. The actual payment is still attempted only after the hold invoice is accepted;
+        // this dry run is a side-effect-free snapshot that rejects already-invalid orders early.
+        let fee_budget_sats =
+            outgoing_fee_budget_from_fee_sats(fee_sats, self.config.max_outgoing_fee_percentage);
+        self.fiber_agent_ref
+            .call_payment_preflight(
+                receive_btc.fiber_pay_req.clone(),
+                (btc_final_cltv_millis / 2).min(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+                OutgoingFeeLimit {
+                    max_fee_amount: fee_budget_sats,
+                    max_fee_rate: outgoing_max_fee_rate(amount_sats, fee_budget_sats),
+                },
+            )
+            .await?;
 
         let mut client = self.lnd_connection.create_invoices_client().await?;
         let req = invoicesrpc::AddHoldInvoiceRequest {

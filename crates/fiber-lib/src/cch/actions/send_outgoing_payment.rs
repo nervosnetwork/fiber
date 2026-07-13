@@ -28,11 +28,15 @@ const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 /// charged on the incoming/order leg. This enforces the invariant that the total outgoing route
 /// fee never exceeds the fee the operator collected. `max_outgoing_fee_percentage` is validated
 /// to be within `1..=100` at startup, so the multiplication only ever shrinks `fee_sats`.
+pub(crate) fn outgoing_fee_budget_from_fee_sats(
+    fee_sats: u128,
+    max_outgoing_fee_percentage: u64,
+) -> u128 {
+    fee_sats.saturating_mul(max_outgoing_fee_percentage as u128) / 100
+}
+
 pub(crate) fn outgoing_fee_budget_sats(order: &CchOrder, max_outgoing_fee_percentage: u64) -> u128 {
-    order
-        .fee_sats
-        .saturating_mul(max_outgoing_fee_percentage as u128)
-        / 100
+    outgoing_fee_budget_from_fee_sats(order.fee_sats, max_outgoing_fee_percentage)
 }
 
 /// Compute the `max_fee_rate` (proportional, over `MAX_FEE_RATE_DENOMINATOR`) that corresponds to
