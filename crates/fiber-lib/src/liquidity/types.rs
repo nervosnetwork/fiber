@@ -52,7 +52,6 @@ impl LoopOutRoleState {
                     | (PayoutPending, PayoutLocked)
                     | (PayoutLocked, PaymentInFlight)
                     | (PaymentInFlight, PaymentSettled)
-                    | (PaymentInFlight, Failed)
                     | (PaymentSettled, ClaimPending)
                     | (ClaimPending, Success)
             ),
@@ -120,6 +119,10 @@ mod tests {
         assert!(!LoopOutRoleState::Client.next_allowed(
             LiquiditySwapState::Quoted,
             LiquiditySwapState::PaymentInFlight,
+        ));
+        assert!(!LoopOutRoleState::Client.next_allowed(
+            LiquiditySwapState::PaymentInFlight,
+            LiquiditySwapState::Failed,
         ));
     }
 
