@@ -362,6 +362,22 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            LIQUIDITY_SWAP_PREFIX => {
+                check_deserialization::<LiquiditySwapRecord>(
+                    &value,
+                    "LIQUIDITY_SWAP_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_SWAP_STATE_PREFIX => {}
+            LIQUIDITY_SWAP_ASSET_PREFIX => {}
+            LIQUIDITY_ASSET_PREFIX => {
+                check_deserialization::<LiquidityAsset>(
+                    &value,
+                    "LIQUIDITY_ASSET_PREFIX",
+                    &mut errors,
+                );
+            }
             #[cfg(not(target_arch = "wasm32"))]
             CCH_ORDER_PREFIX => {
                 check_deserialization::<CchOrder>(&value, "CCH_ORDER_PREFIX", &mut errors);

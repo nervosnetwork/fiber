@@ -30,11 +30,11 @@ use crate::liquidity::store::{
 };
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::store::open_store;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::{check_validate, open_store};
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,6 +49,8 @@ use core::cmp::Ordering;
 use fiber_store::backend::StorageBackend;
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::schema::{LIQUIDITY_ASSET_PREFIX, LIQUIDITY_SWAP_PREFIX};
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
@@ -235,6 +237,73 @@ fn test_store_liquidity_swap_insert_get() {
 
     assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
     assert_eq!(store.get_liquidity_swap(&[99u8; 32].into()).unwrap(), None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_duplicate_insert_is_rejected() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(19, LiquiditySwapState::Created, "ckb");
+
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    let result = store.insert_liquidity_swap(swap.clone());
+
+    assert!(matches!(
+        result,
+        Err(crate::liquidity::store::LiquidityStoreError::Backend(_))
+    ));
+    assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_records_survive_reopen() {
+    let dir = TempDir::new("test-liquidity-store-reopen");
+    let asset = mock_liquidity_asset("ckb");
+    let swap = mock_liquidity_swap(20, LiquiditySwapState::Created, &asset.asset_id);
+
+    {
+        let store = open_store(dir.as_ref()).expect("create store failed");
+        store.upsert_liquidity_asset(asset.clone()).unwrap();
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let reopened = open_store(dir.as_ref()).expect("reopen store failed");
+    assert_eq!(
+        reopened.get_liquidity_asset(&asset.asset_id).unwrap(),
+        Some(asset)
+    );
+    assert_eq!(
+        reopened.get_liquidity_swap(&swap.swap_id).unwrap(),
+        Some(swap.clone())
+    );
+    assert_eq!(
+        reopened
+            .list_liquidity_swaps(LiquiditySwapFilter {
+                state: Some(LiquiditySwapState::Created),
+                asset_id: Some("ckb".to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+            .swaps,
+        vec![swap]
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_check_validate_rejects_corrupt_records() {
+    let dir = TempDir::new("test-liquidity-store-check-validate");
+    let store = open_store(dir.as_ref()).expect("create store failed");
+
+    store.put([LIQUIDITY_SWAP_PREFIX], [0]);
+    store.put([LIQUIDITY_ASSET_PREFIX], [0]);
+    drop(store);
+
+    let error = check_validate(dir.as_ref()).expect_err("corrupt liquidity records must fail");
+
+    assert!(error.contains("LIQUIDITY_SWAP_PREFIX"));
+    assert!(error.contains("LIQUIDITY_ASSET_PREFIX"));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
