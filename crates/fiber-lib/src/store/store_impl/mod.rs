@@ -167,8 +167,28 @@ impl Store {
         hex::encode(key)
     }
 
-    fn parse_liquidity_swap_id_from_index(key: &[u8]) -> Option<Hash256> {
-        let offset = key.len().checked_sub(32)?;
+    fn parse_liquidity_swap_id_from_index(
+        key: &[u8],
+        expected_state: Option<LiquiditySwapState>,
+        expected_asset_id: Option<&str>,
+    ) -> Option<Hash256> {
+        let offset = if let Some(state) = expected_state {
+            if key.len() != 34
+                || key.first() != Some(&LIQUIDITY_SWAP_STATE_PREFIX)
+                || key.get(1) != Some(&liquidity_state_key(state))
+            {
+                return None;
+            }
+            2
+        } else if let Some(asset_id) = expected_asset_id {
+            let prefix = Self::liquidity_swap_asset_index_prefix(asset_id);
+            if key.len() != prefix.len() + 32 || !key.starts_with(&prefix) {
+                return None;
+            }
+            prefix.len()
+        } else {
+            key.len().checked_sub(32)?
+        };
         let bytes: [u8; 32] = key.get(offset..)?.try_into().ok()?;
         Some(bytes.into())
     }
@@ -179,12 +199,14 @@ impl Store {
         expected_state: Option<LiquiditySwapState>,
         expected_asset_id: Option<&str>,
     ) -> Result<LiquiditySwapRecord, LiquidityStoreError> {
-        let swap_id = Self::parse_liquidity_swap_id_from_index(key).ok_or_else(|| {
-            LiquidityStoreError::Backend(format!(
-                "invalid liquidity swap index key: {}",
-                hex::encode(key)
-            ))
-        })?;
+        let swap_id =
+            Self::parse_liquidity_swap_id_from_index(key, expected_state, expected_asset_id)
+                .ok_or_else(|| {
+                    LiquidityStoreError::Backend(format!(
+                        "invalid liquidity swap index key: {}",
+                        hex::encode(key)
+                    ))
+                })?;
 
         let swap = self.get_liquidity_swap(&swap_id)?.ok_or_else(|| {
             LiquidityStoreError::Backend(format!(
