@@ -2,6 +2,7 @@
 
 pub mod store;
 pub mod tx;
+pub mod types;
 
 use ckb_hash::blake2b_256;
 use ckb_types::{packed::Script, prelude::*};
