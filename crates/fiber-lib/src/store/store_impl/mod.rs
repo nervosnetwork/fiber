@@ -1382,7 +1382,11 @@ impl LiquidityStore for Store {
             (None, Some(asset_id)) => Self::liquidity_swap_asset_index_prefix(asset_id),
             (None, None) => vec![LIQUIDITY_SWAP_PREFIX],
         };
-        let mut options = PrefixIterOptions::new().limit(limit + 1);
+        let mut options = if filter.state.is_some() && filter.asset_id.is_some() {
+            PrefixIterOptions::new()
+        } else {
+            PrefixIterOptions::new().limit(limit + 1)
+        };
         if let Some(cursor_key) = cursor_key.as_ref() {
             options = options.start_key(cursor_key).start_key_exclusive();
         }
