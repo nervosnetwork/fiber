@@ -61,7 +61,16 @@ pub trait LoopOutChainAdapter {
         -> Result<OutPoint, Self::Error>;
 
     /// Broadcast the claim transaction for a paid Loop Out swap.
-    fn broadcast_claim(&mut self, swap_id: Hash256) -> Result<(), Self::Error>;
+    fn broadcast_claim(&mut self, request: LoopOutClaimRequest) -> Result<(), Self::Error>;
+}
+
+/// Chain claim request for a client Loop Out payout.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct LoopOutClaimRequest {
+    /// Local swap identifier being claimed.
+    pub swap_id: Hash256,
+    /// Persisted payment preimage required to unlock the claim path.
+    pub payment_preimage: Hash256,
 }
 
 /// Payment boundary required by the client Loop Out execution workflow.
@@ -207,14 +216,14 @@ where
             LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
         })?;
     ensure_client_can_start_payment(swap.state)?;
-
-    transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
     let request = crate::liquidity::payment::LoopOutPaymentRequest::new(
         quote.payment_hash,
         quote.amount,
         quote.provider_fee,
         quote.routing_fee_limit,
     )?;
+
+    transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
     let preimage = payment
         .send_loop_out_payment(request)
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
@@ -257,16 +266,24 @@ where
             to: LiquiditySwapState::ClaimPending,
         });
     }
-    if swap.payment_preimage.is_none() {
-        return Err(LiquidityLoopOutError::InvalidStateTransition {
-            from: swap.state,
-            to: LiquiditySwapState::ClaimPending,
-        });
-    }
+    let payment_preimage = match swap.payment_preimage {
+        Some(payment_preimage) => payment_preimage,
+        None => {
+            return Err(LiquidityLoopOutError::InvalidStateTransition {
+                from: swap.state,
+                to: LiquiditySwapState::ClaimPending,
+            })
+        }
+    };
 
-    transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    if swap.state == LiquiditySwapState::PaymentSettled {
+        transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    }
     chain
-        .broadcast_claim(swap_id)
+        .broadcast_claim(LoopOutClaimRequest {
+            swap_id,
+            payment_preimage,
+        })
         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
     transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
 }
@@ -331,9 +348,12 @@ pub fn client_can_start_payment(state: LiquiditySwapState) -> bool {
     state == LiquiditySwapState::PayoutLocked
 }
 
-/// Return whether the client may claim the payout lock from `state`.
+/// Return whether the client may claim or retry claiming the payout lock from `state`.
 pub fn client_can_claim(state: LiquiditySwapState) -> bool {
-    state == LiquiditySwapState::PaymentSettled
+    matches!(
+        state,
+        LiquiditySwapState::PaymentSettled | LiquiditySwapState::ClaimPending
+    )
 }
 
 /// Ensure the client may start the Fiber payment from `state`.
@@ -555,6 +575,8 @@ mod tests {
         events: Rc<RefCell<Vec<&'static str>>>,
         outpoint: OutPoint,
         label: Option<&'static str>,
+        fail_next_claim: bool,
+        claim_preimages: Vec<Hash256>,
     }
 
     impl TestLiquidityChain {
@@ -563,6 +585,8 @@ mod tests {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
                 label: None,
+                fail_next_claim: false,
+                claim_preimages: Vec::new(),
             }
         }
 
@@ -571,7 +595,13 @@ mod tests {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
                 label: Some(label),
+                fail_next_claim: false,
+                claim_preimages: Vec::new(),
             }
+        }
+
+        fn fail_next_claim(&mut self) {
+            self.fail_next_claim = true;
         }
     }
 
@@ -590,12 +620,17 @@ mod tests {
             Ok(self.outpoint.clone())
         }
 
-        fn broadcast_claim(&mut self, _swap_id: Hash256) -> Result<(), Self::Error> {
+        fn broadcast_claim(&mut self, request: LoopOutClaimRequest) -> Result<(), Self::Error> {
             let event = match self.label {
                 Some("chain") => "chain_broadcast_claim",
                 _ => "broadcast_claim",
             };
             self.events.borrow_mut().push(event);
+            self.claim_preimages.push(request.payment_preimage);
+            if self.fail_next_claim {
+                self.fail_next_claim = false;
+                return Err("claim failed".to_string());
+            }
             Ok(())
         }
     }
@@ -807,6 +842,7 @@ mod tests {
                 "client_transition_success",
             ]
         );
+        assert_eq!(harness.chain.claim_preimages, [[4u8; 32].into()]);
     }
 
     #[test]
@@ -851,6 +887,105 @@ mod tests {
                 .unwrap()
                 .state,
             LiquiditySwapState::PaymentSettled
+        );
+    }
+
+    #[test]
+    fn loop_out_client_claim_retries_after_transient_chain_failure() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentInFlight,
+            now_ms + 2,
+        )
+        .unwrap();
+        store
+            .update_liquidity_swap(
+                &quote.quote_id,
+                LiquiditySwapUpdate {
+                    payment_preimage: Some([4u8; 32].into()),
+                    updated_at: now_ms + 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentSettled,
+            now_ms + 3,
+        )
+        .unwrap();
+        events.borrow_mut().clear();
+        chain.fail_next_claim();
+
+        assert_eq!(
+            claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 4),
+            Err(LiquidityLoopOutError::Chain("claim failed".to_string()))
+        );
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::ClaimPending
+        );
+
+        claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 5).unwrap();
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                "client_transition_claim_pending",
+                "chain_broadcast_claim",
+                "chain_broadcast_claim",
+                "client_transition_success",
+            ]
+        );
+        assert_eq!(
+            chain.claim_preimages,
+            vec![[4u8; 32].into(), [4u8; 32].into()]
+        );
+    }
+
+    #[test]
+    fn loop_out_payment_request_overflow_does_not_mark_payment_in_flight() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut payment = TestLoopOutPayment::new(events.clone());
+        let now_ms = 1_000;
+        let quote = LoopOutQuoteTerms {
+            amount: u128::MAX,
+            provider_fee: 1,
+            ..test_loop_out_quote(now_ms + 60_000)
+        };
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        events.borrow_mut().clear();
+
+        assert_eq!(
+            send_client_loop_out_payment(&store, &mut payment, quote.clone(), now_ms + 2),
+            Err(LiquidityLoopOutError::GrossAmountOverflow)
+        );
+
+        assert!(events.borrow().is_empty());
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::PayoutLocked
         );
     }
 
