@@ -47,6 +47,13 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
         * [Method `settle_invoice`](#invoice-settle_invoice)
+    * [Module Liquidity](#module-liquidity)
+        * [Method `quote_loop_out`](#liquidity-quote_loop_out)
+        * [Method `loop_out`](#liquidity-loop_out)
+        * [Method `get_swap`](#liquidity-get_swap)
+        * [Method `list_swaps`](#liquidity-list_swaps)
+        * [Method `provider_quote_loop_out`](#liquidity-provider_quote_loop_out)
+        * [Method `provider_accept_loop_out`](#liquidity-provider_accept_loop_out)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -87,6 +94,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Htlc`](#type-htlc)
     * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
+    * [Type `LiquiditySwapKind`](#type-liquidityswapkind)
+    * [Type `LiquiditySwapRecord`](#type-liquidityswaprecord)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
@@ -773,6 +782,160 @@ Settles an invoice by saving the preimage to this invoice.
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="liquidity"></a>
+### Module `Liquidity`
+RPC module for liquidity management.
+
+
+<a id="liquidity-quote_loop_out"></a>
+#### Method `quote_loop_out`
+
+Request a Loop Out quote from a provider.
+
+##### Params
+
+* `provider` - <em>`String`</em>, Provider node identifier or endpoint.
+* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
+* `amount` - <em>`u128`</em>, Raw on-chain destination amount before routing fees.
+* `receiver` - <em>`String`</em>, CKB address or UDT receiver descriptor.
+* `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
+* `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
+* `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
+
+##### Returns
+
+* `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
+* `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
+* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
+* `amount` - <em>`u128`</em>, Raw destination amount before routing fees.
+* `provider_fee` - <em>`u128`</em>, Fee charged in the swapped asset.
+* `routing_fee_limit` - <em>`u128`</em>, Maximum Fiber routing fee in the swapped asset.
+* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee.
+* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
+* `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
+* `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
+
+---
+
+
+
+<a id="liquidity-loop_out"></a>
+#### Method `loop_out`
+
+Execute a Loop Out swap after quote acceptance.
+
+##### Params
+
+* `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
+* `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted at execution time.
+* `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted at execution time.
+
+##### Returns
+
+* `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
+* `state` - <em>`String`</em>, Initial persisted state name.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
+
+---
+
+
+
+<a id="liquidity-get_swap"></a>
+#### Method `get_swap`
+
+Return one persisted liquidity swap.
+
+##### Params
+
+* `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
+
+##### Returns
+
+* `Option` - <em>Option</em>, 
+
+---
+
+
+
+<a id="liquidity-list_swaps"></a>
+#### Method `list_swaps`
+
+Return persisted liquidity swaps.
+
+##### Params
+
+* `state` - <em>`Option<String>`</em>, Optional state filter.
+* `asset_id` - <em>`Option<String>`</em>, Optional asset filter.
+* `limit` - <em>`Option<u64>`</em>, Maximum number of rows to return.
+* `cursor` - <em>`Option<String>`</em>, Pagination cursor returned by the previous call.
+
+##### Returns
+
+* `swaps` - <em>Vec<[LiquiditySwapRecord](#type-liquidityswaprecord)></em>, Swap records in cursor order.
+* `next_cursor` - <em>`Option<String>`</em>, Cursor for the next page, if more records are available.
+
+---
+
+
+
+<a id="liquidity-provider_quote_loop_out"></a>
+#### Method `provider_quote_loop_out`
+
+Provider-side quote endpoint for a Loop Out request.
+
+##### Params
+
+* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
+* `amount` - <em>`u128`</em>, Raw on-chain destination amount before routing fees.
+* `receiver` - <em>`String`</em>, CKB address or UDT receiver descriptor.
+* `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
+* `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
+* `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
+
+##### Returns
+
+* `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
+* `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
+* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
+* `amount` - <em>`u128`</em>, Raw destination amount before routing fees.
+* `provider_fee` - <em>`u128`</em>, Fee charged in the swapped asset.
+* `routing_fee_limit` - <em>`u128`</em>, Maximum Fiber routing fee in the swapped asset.
+* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee.
+* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
+* `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
+* `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
+
+---
+
+
+
+<a id="liquidity-provider_accept_loop_out"></a>
+#### Method `provider_accept_loop_out`
+
+Provider-side accept endpoint for a Loop Out quote.
+
+##### Params
+
+* `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
+* `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
+
+##### Returns
+
+* `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
+* `state` - <em>`String`</em>, Initial persisted state name.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
 
 ---
 
@@ -1558,6 +1721,36 @@ The metadata of the invoice.
 * `timestamp` - <em>`u128`</em>, The timestamp of the invoice
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
+---
+
+<a id="#type-liquidityswapkind"></a>
+### Type `LiquiditySwapKind`
+
+Direction of a liquidity swap.
+
+
+#### Enum with values of
+
+* `loop_out` - Move Fiber channel balance to an on-chain receiver.
+* `loop_in` - Move on-chain funds into Fiber channel balance.
+---
+
+<a id="#type-liquidityswaprecord"></a>
+### Type `LiquiditySwapRecord`
+
+Persisted swap record returned by `get_swap` and `list_swaps`.
+
+
+#### Fields
+
+* `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
+* `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
+* `state` - <em>`String`</em>, Current persisted state name.
+* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
+* `amount` - <em>`u128`</em>, Raw swap amount.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
+* `updated_at` - <em>`u64`</em>, Last update timestamp in milliseconds.
 ---
 
 <a id="#type-nodeinfo"></a>
