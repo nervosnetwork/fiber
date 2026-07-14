@@ -320,8 +320,8 @@ where
     transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
 }
 
-/// Mark the provider-side Loop Out swap complete after the client claim is observed.
-pub fn complete_provider_loop_out_after_claim<S>(
+/// Mark the provider-side Loop Out payout lock as observed on-chain.
+pub fn mark_provider_payout_locked<S>(
     store: &S,
     swap_id: Hash256,
     now_ms: u64,
@@ -329,10 +329,50 @@ pub fn complete_provider_loop_out_after_claim<S>(
 where
     S: LiquidityStore,
 {
-    transition_swap(store, &swap_id, LiquiditySwapState::PayoutLocked, now_ms)?;
+    transition_swap(store, &swap_id, LiquiditySwapState::PayoutLocked, now_ms)
+}
+
+/// Mark the provider-side Loop Out Fiber payment as settled.
+pub fn mark_provider_payment_settled<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
     transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
-    transition_swap(store, &swap_id, LiquiditySwapState::PaymentSettled, now_ms)?;
-    transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    transition_swap(store, &swap_id, LiquiditySwapState::PaymentSettled, now_ms)
+}
+
+/// Mark the provider-side Loop Out client claim as observed on-chain.
+pub fn mark_provider_claim_observed<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if !matches!(
+        swap.state,
+        LiquiditySwapState::PaymentSettled | LiquiditySwapState::ClaimPending
+    ) {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::ClaimPending,
+        });
+    }
+
+    if swap.state == LiquiditySwapState::PaymentSettled {
+        transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    }
     transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
 }
 
@@ -759,6 +799,7 @@ mod tests {
             create_client_loop_out(&self.client_store, quote.clone(), now_ms).unwrap();
             accept_provider_loop_out(&self.provider_store, &mut self.chain, quote.clone(), now_ms)
                 .unwrap();
+            mark_provider_payout_locked(&self.provider_store, quote.quote_id, now_ms + 1).unwrap();
             mark_client_payout_locked(&self.client_store, quote.quote_id, now_ms + 1).unwrap();
             send_client_loop_out_payment(
                 &self.client_store,
@@ -767,6 +808,8 @@ mod tests {
                 now_ms + 2,
             )
             .unwrap();
+            mark_provider_payment_settled(&self.provider_store, quote.quote_id, now_ms + 2)
+                .unwrap();
             claim_client_loop_out(
                 &self.client_store,
                 &mut self.chain,
@@ -774,12 +817,7 @@ mod tests {
                 now_ms + 3,
             )
             .unwrap();
-            complete_provider_loop_out_after_claim(
-                &self.provider_store,
-                quote.quote_id,
-                now_ms + 4,
-            )
-            .unwrap();
+            mark_provider_claim_observed(&self.provider_store, quote.quote_id, now_ms + 4).unwrap();
         }
 
         fn client_swap(&self) -> LiquiditySwapRecord {
@@ -801,6 +839,7 @@ mod tests {
         client_final_state: LiquiditySwapState,
         provider_final_state: LiquiditySwapState,
         payment_preimage_persisted: bool,
+        preimage_persisted_before_claim: bool,
         claim_broadcast: bool,
     }
 
@@ -815,6 +854,9 @@ mod tests {
         let claim_broadcast_at = events
             .iter()
             .position(|event| *event == "chain_broadcast_claim");
+        let preimage_persisted_at = events
+            .iter()
+            .position(|event| *event == "client_persist_preimage");
         let client_success_at = events
             .iter()
             .position(|event| *event == "client_transition_success");
@@ -827,11 +869,18 @@ mod tests {
             }
             _ => false,
         };
+        let preimage_persisted_before_claim = match (preimage_persisted_at, claim_broadcast_at) {
+            (Some(preimage_persisted_at), Some(claim_broadcast_at)) => {
+                preimage_persisted_at < claim_broadcast_at
+            }
+            _ => false,
+        };
 
         LoopOutEndToEndResult {
             client_final_state: client_swap.state,
             provider_final_state: provider_swap.state,
             payment_preimage_persisted: client_swap.payment_preimage.is_some(),
+            preimage_persisted_before_claim,
             claim_broadcast,
         }
     }
@@ -997,22 +1046,48 @@ mod tests {
                 "provider_transition_payout_pending",
                 "chain_broadcast_payout",
                 "provider_persist_outpoint",
+                "provider_transition_payout_locked",
                 "client_transition_payout_locked",
                 "client_transition_payment_in_flight",
                 "payment_send",
                 "client_persist_preimage",
                 "client_transition_payment_settled",
+                "provider_transition_payment_in_flight",
+                "provider_transition_payment_settled",
                 "client_transition_claim_pending",
                 "chain_broadcast_claim",
                 "client_transition_success",
-                "provider_transition_payout_locked",
-                "provider_transition_payment_in_flight",
-                "provider_transition_payment_settled",
                 "provider_transition_claim_pending",
                 "provider_transition_success",
             ]
         );
         assert_eq!(harness.chain.claim_preimages, [[4u8; 32].into()]);
+    }
+
+    #[test]
+    fn loop_out_provider_claim_observed_requires_payment_settled_state() {
+        let store = TestLiquidityStore::default();
+        let mut chain = TestLiquidityChain::new(store.events());
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        accept_provider_loop_out(&store, &mut chain, quote.clone(), now_ms).unwrap();
+
+        assert_eq!(
+            mark_provider_claim_observed(&store, quote.quote_id, now_ms + 1),
+            Err(LiquidityLoopOutError::InvalidStateTransition {
+                from: LiquiditySwapState::PayoutPending,
+                to: LiquiditySwapState::ClaimPending,
+            })
+        );
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::PayoutPending
+        );
     }
 
     #[test]
@@ -1028,6 +1103,7 @@ mod tests {
             fiber_types::LiquiditySwapState::Success
         );
         assert!(result.payment_preimage_persisted);
+        assert!(result.preimage_persisted_before_claim);
         assert!(result.claim_broadcast);
     }
 
