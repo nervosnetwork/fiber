@@ -56,9 +56,18 @@ pub trait LoopOutChainAdapter {
     /// Adapter-specific error returned by chain operations.
     type Error;
 
-    /// Broadcast the payout lock transaction for the accepted quote.
-    fn broadcast_payout_lock(&mut self, quote: &LoopOutQuoteTerms)
-        -> Result<OutPoint, Self::Error>;
+    /// Reserve the payout lock outpoint for the accepted quote before broadcast.
+    fn reserve_payout_lock_outpoint(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+    ) -> Result<OutPoint, Self::Error>;
+
+    /// Broadcast the payout lock transaction for the accepted quote and outpoint.
+    fn broadcast_payout_lock(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+        outpoint: &OutPoint,
+    ) -> Result<(), Self::Error>;
 
     /// Broadcast the claim transaction for a paid Loop Out swap.
     fn broadcast_claim(&mut self, request: LoopOutClaimRequest) -> Result<(), Self::Error>;
@@ -200,18 +209,21 @@ where
         .map_err(map_store_error)?;
 
     let onchain_outpoint = chain
-        .broadcast_payout_lock(&quote)
+        .reserve_payout_lock_outpoint(&quote)
         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
     store
         .update_liquidity_swap(
             &swap_id,
             LiquiditySwapUpdate {
-                onchain_outpoint: Some(onchain_outpoint),
+                onchain_outpoint: Some(onchain_outpoint.clone()),
                 updated_at: now_ms,
                 ..Default::default()
             },
         )
         .map_err(map_store_error)?;
+    chain
+        .broadcast_payout_lock(&quote, &onchain_outpoint)
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
 
     Ok(swap_id)
 }
@@ -292,6 +304,9 @@ where
         .ok_or_else(|| {
             LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
         })?;
+    if swap.state == LiquiditySwapState::ClaimPending {
+        return Ok(());
+    }
     if !client_can_claim(swap.state) {
         return Err(LiquidityLoopOutError::InvalidStateTransition {
             from: swap.state,
@@ -317,6 +332,18 @@ where
             payment_preimage,
         })
         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+    Ok(())
+}
+
+/// Mark the client-side Loop Out claim as confirmed on-chain.
+pub fn mark_client_claim_confirmed<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
     transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
 }
 
@@ -719,16 +746,24 @@ mod tests {
     impl LoopOutChainAdapter for TestLiquidityChain {
         type Error = String;
 
-        fn broadcast_payout_lock(
+        fn reserve_payout_lock_outpoint(
             &mut self,
             _quote: &LoopOutQuoteTerms,
         ) -> Result<OutPoint, Self::Error> {
+            Ok(self.outpoint.clone())
+        }
+
+        fn broadcast_payout_lock(
+            &mut self,
+            _quote: &LoopOutQuoteTerms,
+            _outpoint: &OutPoint,
+        ) -> Result<(), Self::Error> {
             let event = match self.label {
                 Some("chain") => "chain_broadcast_payout",
                 _ => "broadcast_payout",
             };
             self.events.borrow_mut().push(event);
-            Ok(self.outpoint.clone())
+            Ok(())
         }
 
         fn broadcast_claim(&mut self, request: LoopOutClaimRequest) -> Result<(), Self::Error> {
@@ -817,6 +852,7 @@ mod tests {
                 now_ms + 3,
             )
             .unwrap();
+            mark_client_claim_confirmed(&self.client_store, quote.quote_id, now_ms + 4).unwrap();
             mark_provider_claim_observed(&self.provider_store, quote.quote_id, now_ms + 4).unwrap();
         }
 
@@ -1008,8 +1044,8 @@ mod tests {
                 "insert_swap",
                 "transition_quoted",
                 "transition_payout_pending",
-                "broadcast_payout",
                 "persist_outpoint",
+                "broadcast_payout",
             ]
         );
     }
@@ -1044,8 +1080,8 @@ mod tests {
                 "provider_insert_created",
                 "provider_transition_quoted",
                 "provider_transition_payout_pending",
-                "chain_broadcast_payout",
                 "provider_persist_outpoint",
+                "chain_broadcast_payout",
                 "provider_transition_payout_locked",
                 "client_transition_payout_locked",
                 "client_transition_payment_in_flight",
@@ -1062,6 +1098,77 @@ mod tests {
             ]
         );
         assert_eq!(harness.chain.claim_preimages, [[4u8; 32].into()]);
+    }
+
+    #[test]
+    fn loop_out_client_claim_broadcast_waits_for_confirmation_before_success() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentInFlight,
+            now_ms + 2,
+        )
+        .unwrap();
+        store
+            .update_liquidity_swap(
+                &quote.quote_id,
+                LiquiditySwapUpdate {
+                    payment_preimage: Some([4u8; 32].into()),
+                    updated_at: now_ms + 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentSettled,
+            now_ms + 3,
+        )
+        .unwrap();
+        events.borrow_mut().clear();
+
+        claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 4).unwrap();
+
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::ClaimPending
+        );
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["client_transition_claim_pending", "chain_broadcast_claim"]
+        );
+
+        mark_client_claim_confirmed(&store, quote.quote_id, now_ms + 5).unwrap();
+
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::Success
+        );
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                "client_transition_claim_pending",
+                "chain_broadcast_claim",
+                "client_transition_success",
+            ]
+        );
     }
 
     #[test]
@@ -1202,20 +1309,23 @@ mod tests {
             LiquiditySwapState::ClaimPending
         );
 
-        claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 5).unwrap();
+        assert_eq!(
+            claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 5),
+            Ok(())
+        );
 
         assert_eq!(
             events.borrow().as_slice(),
-            [
-                "client_transition_claim_pending",
-                "chain_broadcast_claim",
-                "chain_broadcast_claim",
-                "client_transition_success",
-            ]
+            ["client_transition_claim_pending", "chain_broadcast_claim"]
         );
+        assert_eq!(chain.claim_preimages, vec![[4u8; 32].into()]);
         assert_eq!(
-            chain.claim_preimages,
-            vec![[4u8; 32].into(), [4u8; 32].into()]
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::ClaimPending
         );
     }
 
