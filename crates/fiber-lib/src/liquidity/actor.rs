@@ -304,10 +304,7 @@ where
         .ok_or_else(|| {
             LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
         })?;
-    if swap.state == LiquiditySwapState::ClaimPending {
-        return Ok(());
-    }
-    if !client_can_claim(swap.state) {
+    if !client_can_claim(swap.state) && swap.state != LiquiditySwapState::ClaimPending {
         return Err(LiquidityLoopOutError::InvalidStateTransition {
             from: swap.state,
             to: LiquiditySwapState::ClaimPending,
@@ -1316,9 +1313,16 @@ mod tests {
 
         assert_eq!(
             events.borrow().as_slice(),
-            ["client_transition_claim_pending", "chain_broadcast_claim"]
+            [
+                "client_transition_claim_pending",
+                "chain_broadcast_claim",
+                "chain_broadcast_claim",
+            ]
         );
-        assert_eq!(chain.claim_preimages, vec![[4u8; 32].into()]);
+        assert_eq!(
+            chain.claim_preimages,
+            vec![[4u8; 32].into(), [4u8; 32].into()]
+        );
         assert_eq!(
             store
                 .get_liquidity_swap(&quote.quote_id)
@@ -1326,6 +1330,17 @@ mod tests {
                 .unwrap()
                 .state,
             LiquiditySwapState::ClaimPending
+        );
+
+        mark_client_claim_confirmed(&store, quote.quote_id, now_ms + 6).unwrap();
+
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::Success
         );
     }
 
