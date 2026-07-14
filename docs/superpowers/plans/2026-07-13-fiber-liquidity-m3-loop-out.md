@@ -1129,6 +1129,7 @@ fn loop_out_happy_path_orders_side_effects_after_persistence() {
             "provider_insert_created",
             "provider_transition_quoted",
             "provider_transition_payout_pending",
+            "provider_persist_outpoint",
             "chain_broadcast_payout",
             "client_transition_payout_locked",
             "client_transition_payment_in_flight",
@@ -1137,6 +1138,8 @@ fn loop_out_happy_path_orders_side_effects_after_persistence() {
             "client_transition_claim_pending",
             "chain_broadcast_claim",
             "client_transition_success",
+            "provider_transition_claim_pending",
+            "provider_transition_success",
         ]
     );
 }
@@ -1190,11 +1193,13 @@ impl LoopOutActorTestHarness {
         mark_client_payout_locked(&self.store, quote.quote_id, now_ms + 1).unwrap();
         send_client_loop_out_payment(&self.store, &mut self.payment, quote.clone(), now_ms + 2).unwrap();
         claim_client_loop_out(&self.store, &mut self.chain, quote.quote_id, now_ms + 3).unwrap();
+        mark_client_claim_confirmed(&self.store, quote.quote_id, now_ms + 4).unwrap();
+        mark_provider_claim_observed(&self.store, quote.quote_id, now_ms + 4).unwrap();
     }
 }
 ```
 
-Implement the production functions named in the harness in `actor.rs`. Each function must call M2 `LiquidityStore` APIs before external adapter methods and must reject invalid state transitions through the store. The deterministic adapters must push their events into the shared `Rc<RefCell<Vec<&'static str>>>` at the exact moment each store, payment, or chain method is called.
+Implement the production functions named in the harness in `actor.rs`. Each function must call M2 `LiquidityStore` APIs before external adapter methods and must reject invalid state transitions through the store. `claim_client_loop_out` must stop at `ClaimPending`; `mark_client_claim_confirmed` is the explicit client confirmation boundary for `ClaimPending -> Success`; `mark_provider_claim_observed` is the explicit provider claim-observed boundary. The deterministic adapters must push their events into the shared `Rc<RefCell<Vec<&'static str>>>` at the exact moment each store, payment, or chain method is called.
 
 - [ ] **Step 4: Run test**
 
@@ -1347,7 +1352,7 @@ fn run_loop_out_end_to_end_test() -> LoopOutEndToEndResult {
 }
 ```
 
-The helper must fail if the production methods skip store persistence, skip preimage persistence, or mark success before the claim adapter records `"broadcast_claim"`.
+The helper must fail if the production methods skip store persistence, skip preimage persistence, persist the payout outpoint after `"chain_broadcast_payout"`, or mark client/provider success before the explicit claim confirmation/observation methods run after `"chain_broadcast_claim"`.
 
 - [ ] **Step 4: Run test**
 
