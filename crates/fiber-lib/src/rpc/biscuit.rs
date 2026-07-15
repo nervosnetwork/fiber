@@ -1,15 +1,19 @@
-use anyhow::{anyhow, Context, Result};
-use biscuit_auth::{
-    builder::{Fact, Term},
-    AuthorizerBuilder, Biscuit, PublicKey,
-};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
+    time::Duration,
+};
+
+use anyhow::{anyhow, Context, Result};
+use biscuit_auth::{
+    builder::{Fact, Term},
+    AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
 };
 
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
+
+const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
 
 pub struct AuthRule {
     pub(crate) code: &'static str,
@@ -32,6 +36,10 @@ impl AuthRule {
     /// build rule
     fn build_rule(&self) -> Result<AuthorizerBuilder> {
         let authorizer = AuthorizerBuilder::new()
+            .set_limits(AuthorizerLimits {
+                max_time: DEFAULT_BISCUIT_AUTH_MAX_TIME,
+                ..Default::default()
+            })
             .code(self.code)
             .context("build authorizer code")?;
         Ok(authorizer)
@@ -237,10 +245,7 @@ impl BiscuitAuth {
         }
         // check permission
         let rule = self.get_rule(method)?;
-        if let Err(err) = rule.authorize(&b, time_in_ms) {
-            tracing::debug!("authorize failed: {err}");
-            return Err(err);
-        }
+        rule.authorize(&b, time_in_ms)?;
         Ok((b, rule))
     }
 
@@ -270,7 +275,19 @@ mod tests {
 
     use crate::rpc::biscuit::extract_node_id;
 
-    use super::BiscuitAuth;
+    use super::{AuthRule, BiscuitAuth, DEFAULT_BISCUIT_AUTH_MAX_TIME};
+
+    #[test]
+    fn test_biscuit_auth_uses_ten_millisecond_authorizer_limit() {
+        let rule = AuthRule::new(r#"allow if read("payments");"#);
+        let authorizer = rule.build_rule().unwrap();
+        let limits = authorizer.limits();
+        let default_limits = biscuit_auth::AuthorizerLimits::default();
+
+        assert_eq!(limits.max_time, DEFAULT_BISCUIT_AUTH_MAX_TIME);
+        assert_eq!(limits.max_facts, default_limits.max_facts);
+        assert_eq!(limits.max_iterations, default_limits.max_iterations);
+    }
 
     #[test]
     fn test_biscuit_auth() {
