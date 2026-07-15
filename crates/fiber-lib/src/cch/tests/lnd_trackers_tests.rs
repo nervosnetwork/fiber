@@ -60,6 +60,7 @@ struct TestStateSnapshot {
     invoice_queue_len: usize,
     active_invoice_trackers: usize,
     reserved_invoice_trackers: usize,
+    stopping_invoice_trackers: usize,
     tracked_invoices: usize,
 }
 
@@ -76,6 +77,7 @@ async fn get_state(actor_ref: &ActorRef<LndTrackerMessage>) -> TestStateSnapshot
         invoice_queue_len: state.invoice_queue_len,
         active_invoice_trackers: state.active_invoice_trackers,
         reserved_invoice_trackers: state.reserved_invoice_trackers,
+        stopping_invoice_trackers: state.stopping_invoice_trackers,
         tracked_invoices: state.tracked_invoices,
     }
 }
@@ -167,6 +169,40 @@ async fn test_tracking_commits_invoice_tracking_reservation() {
 }
 
 #[tokio::test]
+async fn test_stopping_active_tracker_remains_capacity_accounted() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let active_payment_hash = test_payment_hash(0);
+
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, active_payment_hash).await,
+        InvoiceTrackingReservationResult::Reserved
+    );
+    actor_ref
+        .cast(LndTrackerMessage::TrackInvoice(active_payment_hash))
+        .expect("Failed to send TrackInvoice");
+    for value in 1..MAX_TRACKED_INVOICES {
+        assert_eq!(
+            reserve_invoice_tracking(&actor_ref, test_payment_hash(value as u8)).await,
+            InvoiceTrackingReservationResult::Reserved
+        );
+    }
+
+    actor_ref
+        .cast(LndTrackerMessage::StopTracking(active_payment_hash))
+        .expect("Failed to send StopTracking");
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, test_payment_hash(MAX_TRACKED_INVOICES as u8)).await,
+        InvoiceTrackingReservationResult::CapacityExceeded
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.active_invoice_trackers, 1);
+    assert_eq!(state.stopping_invoice_trackers, 1);
+    assert_eq!(state.reserved_invoice_trackers, MAX_TRACKED_INVOICES - 1);
+    assert_eq!(state.tracked_invoices, MAX_TRACKED_INVOICES);
+}
+
+#[tokio::test]
 async fn test_retracking_before_stopped_tracker_completes_does_not_duplicate_tracker() {
     let (actor_ref, _handle) = create_test_actor().await;
     let payment_hash = test_payment_hash(1);
@@ -178,9 +214,21 @@ async fn test_retracking_before_stopped_tracker_completes_does_not_duplicate_tra
     actor_ref
         .cast(LndTrackerMessage::StopTracking(payment_hash))
         .expect("Failed to send StopTracking");
+
+    let stopping_state = get_state(&actor_ref).await;
+    assert_eq!(stopping_state.active_invoice_trackers, 1);
+    assert_eq!(stopping_state.stopping_invoice_trackers, 1);
+    assert_eq!(stopping_state.tracked_invoices, 1);
+
     actor_ref
         .cast(LndTrackerMessage::TrackInvoice(payment_hash))
         .expect("Failed to send TrackInvoice");
+
+    let resumed_state = get_state(&actor_ref).await;
+    assert_eq!(resumed_state.active_invoice_trackers, 1);
+    assert_eq!(resumed_state.stopping_invoice_trackers, 0);
+    assert_eq!(resumed_state.tracked_invoices, 1);
+
     actor_ref
         .cast(LndTrackerMessage::InvoiceTrackerCompleted {
             payment_hash,
