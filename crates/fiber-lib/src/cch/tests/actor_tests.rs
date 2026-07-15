@@ -1929,13 +1929,24 @@ fn create_test_lightning_invoice_with_cltv(
         .expect("build lightning invoice")
 }
 
-/// Create a test Fiber invoice with a custom final_tlc_minimum_expiry_delta (in milliseconds).
-fn create_test_fiber_invoice_with_expiry(
+/// Create a test Fiber invoice with an optional final TLC minimum expiry delta.
+fn create_test_fiber_invoice_with_optional_expiry(
     payment_hash: Hash256,
-    final_tlc_expiry_delta_ms: u64,
+    final_tlc_expiry_delta_ms: Option<u64>,
 ) -> CkbInvoice {
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+
+    let mut attrs = vec![
+        Attribute::Description("test".to_string()),
+        Attribute::ExpiryTime(Duration::from_secs(3600)),
+        Attribute::PayeePublicKey(public_key),
+    ];
+    if let Some(final_tlc_expiry_delta_ms) = final_tlc_expiry_delta_ms {
+        attrs.push(Attribute::FinalHtlcMinimumExpiryDelta(
+            final_tlc_expiry_delta_ms,
+        ));
+    }
 
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
@@ -1947,18 +1958,58 @@ fn create_test_fiber_invoice_with_expiry(
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis(),
-            attrs: vec![
-                Attribute::FinalHtlcMinimumExpiryDelta(final_tlc_expiry_delta_ms),
-                Attribute::Description("test".to_string()),
-                Attribute::ExpiryTime(Duration::from_secs(3600)),
-                Attribute::PayeePublicKey(public_key),
-            ],
+            attrs,
         },
     };
     invoice
         .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
     invoice
+}
+
+/// Create a test Fiber invoice with a custom final TLC minimum expiry delta.
+fn create_test_fiber_invoice_with_expiry(
+    payment_hash: Hash256,
+    final_tlc_expiry_delta_ms: u64,
+) -> CkbInvoice {
+    create_test_fiber_invoice_with_optional_expiry(payment_hash, Some(final_tlc_expiry_delta_ms))
+}
+
+/// Create a test Fiber invoice without a final TLC minimum expiry delta attribute.
+fn create_test_fiber_invoice_without_expiry(payment_hash: Hash256) -> CkbInvoice {
+    create_test_fiber_invoice_with_optional_expiry(payment_hash, None)
+}
+
+/// An omitted final TLC expiry delta still represents the protocol default of 24 hours.
+/// The ReceiveBTC static safety check must reject it when the configured incoming BTC
+/// CLTV only leaves a 12-hour outgoing budget.
+#[tokio::test]
+async fn test_receive_btc_applies_protocol_default_to_missing_fiber_expiry_delta() {
+    let (_, payment_hash) = create_valid_preimage_pair(253);
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // 144 blocks is 24 hours; only half (12 hours) is available outgoing.
+        btc_final_tlc_expiry_delta_blocks: 144,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+    let invoice = create_test_fiber_invoice_without_expiry(payment_hash);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(matches!(
+        result,
+        Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge)
+    ));
 }
 
 /// Tests that a SendBTC order fails when the incoming CKB TLC does not have enough
@@ -2107,6 +2158,107 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
         reason.contains("Insufficient HTLC expiry delta"),
         "Expected expiry delta failure message, got: {}",
         reason,
+    );
+}
+
+/// A missing outgoing Fiber expiry attribute means 24 hours, not zero. With a
+/// 36-hour incoming Lightning budget, only 18 hours are safe for the outgoing route.
+#[tokio::test]
+async fn test_receive_btc_order_fails_when_omitted_outgoing_expiry_exceeds_budget() {
+    let (_, payment_hash) = create_valid_preimage_pair(254);
+    let store = MockCchOrderStore::new();
+    let incoming_lightning_invoice =
+        create_test_lightning_invoice_with_cltv(payment_hash, 36 * 60 * 60 / BTC_BLOCK_TIME_SECS);
+    let outgoing_fiber_invoice = create_test_fiber_invoice_without_expiry(payment_hash);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: outgoing_fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(incoming_lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert!(
+        order
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Insufficient HTLC expiry delta")),
+        "expected expiry delta failure, got {:?}",
+        order.failure_reason
+    );
+}
+
+/// Persisted incoming Fiber invoices without an expiry attribute guarantee 24 hours,
+/// even when the current CCH config has a longer default. Only 12 hours are therefore
+/// available for the outgoing route, which cannot fit an 18-hour Lightning CLTV.
+#[tokio::test]
+async fn test_send_btc_order_uses_protocol_default_for_omitted_incoming_expiry() {
+    let (_, payment_hash) = create_valid_preimage_pair(255);
+    let store = MockCchOrderStore::new();
+    let incoming_fiber_invoice = create_test_fiber_invoice_without_expiry(payment_hash);
+    let outgoing_lightning_invoice =
+        create_test_lightning_invoice_with_cltv(payment_hash, 18 * 60 * 60 / BTC_BLOCK_TIME_SECS);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: outgoing_lightning_invoice.to_string(),
+        incoming_invoice: CchInvoice::Fiber(incoming_fiber_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // The old fallback used this 60-hour value and incorrectly allowed the order.
+        ckb_final_tlc_expiry_delta_seconds: 60 * 60 * 60,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert!(
+        order
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Insufficient HTLC expiry delta")),
+        "expected expiry delta failure, got {:?}",
+        order.failure_reason
     );
 }
 

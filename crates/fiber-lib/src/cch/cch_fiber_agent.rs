@@ -120,7 +120,7 @@ impl CchFiberAgentHttpBackend {
             payment_hash: Some((*invoice.payment_hash()).into()),
             hash_algorithm: invoice.hash_algorithm().copied().map(Into::into),
             expiry: invoice.expiry_time().map(|duration| duration.as_secs()),
-            final_expiry_delta: invoice.final_tlc_minimum_expiry_delta().copied(),
+            final_expiry_delta: Some(invoice.final_tlc_minimum_expiry_delta_or_default()),
             udt_type_script: invoice
                 .udt_type_script()
                 .map(|script| script.clone().into()),

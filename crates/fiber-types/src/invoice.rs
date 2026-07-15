@@ -787,6 +787,16 @@ impl CkbInvoice {
             .next()
     }
 
+    /// Returns the effective final TLC minimum expiry delta.
+    ///
+    /// Uses [`DEFAULT_FINAL_TLC_EXPIRY_DELTA`] when the invoice omits the
+    /// corresponding attribute.
+    pub fn final_tlc_minimum_expiry_delta_or_default(&self) -> u64 {
+        self.final_tlc_minimum_expiry_delta()
+            .copied()
+            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA)
+    }
+
     /// Returns the fallback address if set in the invoice attributes.
     pub fn fallback_address(&self) -> Option<&String> {
         self.data
@@ -861,11 +871,7 @@ impl CkbInvoice {
             .elapsed()
             .expect("Duration since unix epoch")
             .as_millis();
-        let required_expiry = now
-            + (self
-                .final_tlc_minimum_expiry_delta()
-                .copied()
-                .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA) as u128);
+        let required_expiry = now + u128::from(self.final_tlc_minimum_expiry_delta_or_default());
         (tlc_expiry as u128) < required_expiry
     }
 
@@ -902,8 +908,23 @@ mod tests {
             },
         };
 
+        assert_eq!(
+            invoice.final_tlc_minimum_expiry_delta_or_default(),
+            DEFAULT_FINAL_TLC_EXPIRY_DELTA
+        );
         assert!(invoice.is_tlc_expire_too_soon(now + 12 * 60 * 60 * 1_000));
         assert!(!invoice.is_tlc_expire_too_soon(now + 48 * 60 * 60 * 1_000));
+
+        let explicit_delta = 36 * 60 * 60 * 1_000;
+        let mut invoice_with_explicit_delta = invoice;
+        invoice_with_explicit_delta
+            .data
+            .attrs
+            .push(Attribute::FinalHtlcMinimumExpiryDelta(explicit_delta));
+        assert_eq!(
+            invoice_with_explicit_delta.final_tlc_minimum_expiry_delta_or_default(),
+            explicit_delta
+        );
     }
 }
 

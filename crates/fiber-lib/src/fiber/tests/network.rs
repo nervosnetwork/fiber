@@ -1864,18 +1864,30 @@ fn test_send_payment_validate_invoice() {
     let result = SendPaymentData::new(send_command);
     assert!(result.is_ok());
 
-    // invoice with invalid final_tlc_expiry_delta
+    // An invoice without an explicit final TLC delta still requires the 24-hour
+    // protocol default, so a shorter command value cannot reduce it.
     let send_command = SendPaymentCommand {
-        final_tlc_expiry_delta: Some(11),
+        final_tlc_expiry_delta: Some(12 * 60 * 60 * 1000),
         invoice: Some(invoice_encoded.clone()),
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .contains("invalid final_tlc_expiry_delta"));
+    let payment_data = SendPaymentData::new(send_command).unwrap();
+    assert_eq!(
+        payment_data.final_tlc_expiry_delta,
+        crate::fiber::config::DEFAULT_FINAL_TLC_EXPIRY_DELTA
+    );
+
+    // Callers may still request a longer final-hop delta.
+    let longer_delta = 48 * 60 * 60 * 1000;
+    let send_command = SendPaymentCommand {
+        final_tlc_expiry_delta: Some(longer_delta),
+        invoice: Some(invoice_encoded.clone()),
+        ..Default::default()
+    };
+
+    let payment_data = SendPaymentData::new(send_command).unwrap();
+    assert_eq!(payment_data.final_tlc_expiry_delta, longer_delta);
 
     // invoice with invalid final_tlc_expiry_delta
     let invoice = InvoiceBuilder::new(Currency::Fibb)

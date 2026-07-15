@@ -692,10 +692,7 @@ impl<S: CchOrderStore> CchState<S> {
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // CKB uses milliseconds, BTC uses blocks (~10 min each).
-        let ckb_final_tlc_millis = invoice
-            .final_tlc_minimum_expiry_delta()
-            .copied()
-            .unwrap_or(0);
+        let ckb_final_tlc_millis = invoice.final_tlc_minimum_expiry_delta_or_default();
         let btc_final_cltv_millis = self
             .config
             .btc_final_tlc_expiry_delta_blocks
