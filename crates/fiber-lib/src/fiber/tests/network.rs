@@ -2494,6 +2494,7 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
         .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
             peer.pubkey,
             FiberMessage::ChannelInitialization(open_channel),
+            None,
         )))
         .expect("network actor alive");
 

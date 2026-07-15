@@ -10750,6 +10750,7 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
                 channel_id,
                 witnesses: vec![vec![0u8; 65]],
             }),
+            None,
         )))
         .expect("network actor alive");
 

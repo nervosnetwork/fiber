@@ -182,23 +182,24 @@ const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
 /// rapidly reconnects/reestablishes.
 const CHANNEL_READY_RETRY_DEBOUNCE_MS: u64 = 60_000;
 
-/// Keeps one globally admitted inbound Fiber frame reserved until it has left the
-/// NetworkActor's queue and completed actor-side handling.
-#[doc(hidden)]
-pub struct FiberIngressReservation {
+/// An owned permit for one inbound Fiber frame admitted into the NetworkActor.
+///
+/// The permit keeps the frame's message and byte capacity occupied while it is queued or being
+/// processed. Dropping it returns that capacity to the global Fiber ingress budget.
+pub struct FiberIngressPermit {
     peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
     bytes: u64,
 }
 
-impl fmt::Debug for FiberIngressReservation {
+impl fmt::Debug for FiberIngressPermit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FiberIngressReservation")
+        f.debug_struct("FiberIngressPermit")
             .field("bytes", &self.bytes)
             .finish_non_exhaustive()
     }
 }
 
-impl Drop for FiberIngressReservation {
+impl Drop for FiberIngressPermit {
     fn drop(&mut self) {
         match self.peer_message_policy.lock() {
             Ok(mut policy) => policy.release_ingress(self.bytes),
@@ -209,7 +210,7 @@ impl Drop for FiberIngressReservation {
 
 #[derive(Debug)]
 enum InboundFiberAdmission {
-    Admitted(FiberIngressReservation),
+    Admitted(FiberIngressPermit),
     Disconnect,
     Ban,
 }
@@ -225,7 +226,7 @@ fn admit_inbound_fiber_message(
         .expect("peer message policy lock")
         .admit(peer, bytes, now_ms);
     match decision {
-        PeerMessageAdmission::Allow => InboundFiberAdmission::Admitted(FiberIngressReservation {
+        PeerMessageAdmission::Allow => InboundFiberAdmission::Admitted(FiberIngressPermit {
             peer_message_policy: peer_message_policy.clone(),
             bytes,
         }),
@@ -281,9 +282,9 @@ fn funding_retry_delay(retry_count: u32) -> Duration {
 mod tests {
     use super::*;
 
-    fn expect_admitted(admission: InboundFiberAdmission) -> FiberIngressReservation {
+    fn expect_admitted(admission: InboundFiberAdmission) -> FiberIngressPermit {
         match admission {
-            InboundFiberAdmission::Admitted(reservation) => reservation,
+            InboundFiberAdmission::Admitted(permit) => permit,
             other => panic!("expected admitted Fiber message, got {other:?}"),
         }
     }
@@ -301,13 +302,13 @@ mod tests {
     }
 
     #[test]
-    fn fiber_ingress_reservation_releases_after_malformed_message() {
+    fn fiber_ingress_permit_releases_after_malformed_message() {
         let peer = Privkey::from_slice(&[11u8; 32]).pubkey();
         let policy = test_peer_message_policy(8, 1, 100);
 
-        let reservation = expect_admitted(admit_inbound_fiber_message(&policy, &peer, 1, 0));
+        let permit = expect_admitted(admit_inbound_fiber_message(&policy, &peer, 1, 0));
         assert!(FiberMessage::from_molecule_slice(&[0xff]).is_err());
-        drop(reservation);
+        drop(permit);
         assert_eq!(
             policy.lock().expect("peer message policy lock").in_flight(),
             (0, 0)
@@ -315,17 +316,17 @@ mod tests {
     }
 
     #[test]
-    fn fiber_ingress_reservation_releases_when_actor_send_drops_message() {
+    fn fiber_ingress_permit_releases_when_actor_send_drops_message() {
         let peer = Privkey::from_slice(&[15u8; 32]).pubkey();
         let policy = test_peer_message_policy(8, 1, 100);
-        let reservation = expect_admitted(admit_inbound_fiber_message(&policy, &peer, 1, 0));
-        let message = NetworkActorMessage::new_event(NetworkActorEvent::ReservedFiberMessage(
+        let permit = expect_admitted(admit_inbound_fiber_message(&policy, &peer, 1, 0));
+        let message = NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
             peer,
             FiberMessage::init(Init {
                 features: FeatureVector::default(),
                 chain_hash: get_chain_hash(),
             }),
-            reservation,
+            Some(permit),
         ));
 
         drop(message);
@@ -1087,9 +1088,10 @@ pub enum NetworkActorEvent {
     /// Network events to be processed by this actor.
     PeerConnected(Pubkey, SessionContext),
     PeerDisconnected(Pubkey, SessionContext),
-    FiberMessage(Pubkey, FiberMessage),
-    #[doc(hidden)]
-    ReservedFiberMessage(Pubkey, FiberMessage, FiberIngressReservation),
+    /// A Fiber protocol message from a peer. Network ingress messages carry a permit that keeps
+    /// their global queue capacity occupied until handling completes; internally injected
+    /// messages do not need one.
+    FiberMessage(Pubkey, FiberMessage, Option<FiberIngressPermit>),
 
     // Some gossip messages have been updated in the gossip message store.
     // Normally we need to propagate these messages to the network graph.
@@ -1702,15 +1704,11 @@ where
                     )
                 );
             }
-            NetworkActorEvent::FiberMessage(pubkey, message) => {
-                self.handle_peer_message(myself, state, pubkey, message)
-                    .await?
-            }
-            NetworkActorEvent::ReservedFiberMessage(pubkey, message, reservation) => {
+            NetworkActorEvent::FiberMessage(pubkey, message, ingress_permit) => {
                 let result = self
                     .handle_peer_message(myself, state, pubkey, message)
                     .await;
-                drop(reservation);
+                drop(ingress_permit);
                 result?;
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
@@ -6824,8 +6822,8 @@ impl ServiceProtocol for FiberProtocolHandle {
             data.len() as u64,
             now_ms,
         );
-        let reservation = match admission {
-            InboundFiberAdmission::Admitted(reservation) => reservation,
+        let permit = match admission {
+            InboundFiberAdmission::Admitted(permit) => permit,
             InboundFiberAdmission::Disconnect => {
                 debug!(
                     peer = format!("{pubkey:?}"),
@@ -6884,10 +6882,10 @@ impl ServiceProtocol for FiberProtocolHandle {
         };
         try_send_actor_message(
             &self.actor,
-            NetworkActorMessage::new_event(NetworkActorEvent::ReservedFiberMessage(
+            NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
                 pubkey,
                 msg,
-                reservation,
+                Some(permit),
             )),
         );
     }
