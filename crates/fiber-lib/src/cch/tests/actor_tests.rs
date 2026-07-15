@@ -1858,13 +1858,15 @@ async fn test_receive_btc_fee_calculation() {
         .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
 
+    let fiber_pay_req = invoice.to_string();
+
     // receive_btc will fail at the LND call, but all prior validations
     // (amount, fee, UDT script, hash algorithm) should pass.
     let result = call!(
         harness.actor,
         CchMessage::ReceiveBTC,
         crate::cch::ReceiveBTC {
-            fiber_pay_req: invoice.to_string(),
+            fiber_pay_req: fiber_pay_req.clone(),
         }
     )
     .expect("actor call failed");
@@ -1895,6 +1897,24 @@ async fn test_receive_btc_fee_calculation() {
             other
         ),
     }
+
+    // A failed LND invoice creation must release its reservation. Retrying the
+    // same request should reach LND again instead of being rejected as tracked.
+    let retry_err = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(
+        matches!(
+            &retry_err,
+            CchError::LndRpcError(_) | CchError::LndChannelError(_)
+        ),
+        "failed LND invoice creation should release its tracker reservation, got: {:?}",
+        retry_err
+    );
 }
 
 // =============================================================================

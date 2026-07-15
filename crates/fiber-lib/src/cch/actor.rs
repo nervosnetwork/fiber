@@ -19,8 +19,8 @@ use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, 
 use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
-    CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
-    RedactedCchTrackingEvent,
+    CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
+    LndTrackerArgs, LndTrackerMessage, RedactedCchTrackingEvent, MAX_TRACKED_INVOICES,
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
@@ -766,37 +766,69 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
         }
 
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        let req = invoicesrpc::AddHoldInvoiceRequest {
-            hash: payment_hash.as_ref().to_vec(),
-            value_msat: total_msat,
-            expiry: outgoing_invoice_expiry_delta_seconds as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
-            ..Default::default()
-        };
-        let add_invoice_resp = client
-            .add_hold_invoice(req.clone())
-            .await
-            .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
-            .into_inner();
-        let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
+        let reservation = ractor::call!(self.lnd_tracker, |reply| {
+            LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply)
+        })
+        .map_err(|err| CchError::LndInvoiceTrackerError(err.to_string()))?;
+        match reservation {
+            InvoiceTrackingReservationResult::Reserved => {}
+            InvoiceTrackingReservationResult::AlreadyTracked => {
+                return Err(CchError::LndInvoiceAlreadyTracked(payment_hash));
+            }
+            InvoiceTrackingReservationResult::CapacityExceeded => {
+                return Err(CchError::LndInvoiceTrackerCapacityExceeded(
+                    MAX_TRACKED_INVOICES,
+                ));
+            }
+        }
 
-        let order = CchOrder {
-            created_at: order_created_at,
-            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
-            failure_reason: None,
-            incoming_invoice: CchInvoice::Lightning(incoming_invoice),
-            outgoing_pay_req: receive_btc.fiber_pay_req,
-            payment_preimage: None,
-            status: CchOrderStatus::Pending,
-            amount_sats,
-            fee_sats,
-            payment_hash,
-            wrapped_btc_type_script,
-        };
+        let result = async {
+            let mut client = self.lnd_connection.create_invoices_client().await?;
+            let req = invoicesrpc::AddHoldInvoiceRequest {
+                hash: payment_hash.as_ref().to_vec(),
+                value_msat: total_msat,
+                expiry: outgoing_invoice_expiry_delta_seconds as i64,
+                cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
+                ..Default::default()
+            };
+            let add_invoice_resp = client
+                .add_hold_invoice(req.clone())
+                .await
+                .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
+                .into_inner();
+            let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
 
-        self.store.insert_cch_order(order.clone())?;
-        Ok(order)
+            let order = CchOrder {
+                created_at: order_created_at,
+                expiry_delta_seconds: self.config.order_expiry_delta_seconds,
+                failure_reason: None,
+                incoming_invoice: CchInvoice::Lightning(incoming_invoice),
+                outgoing_pay_req: receive_btc.fiber_pay_req,
+                payment_preimage: None,
+                status: CchOrderStatus::Pending,
+                amount_sats,
+                fee_sats,
+                payment_hash,
+                wrapped_btc_type_script,
+            };
+
+            self.store.insert_cch_order(order.clone())?;
+            Ok(order)
+        };
+        let result = result.await;
+        if result.is_err() {
+            if let Err(err) = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTracking(payment_hash))
+            {
+                tracing::warn!(
+                    "Failed to release invoice tracker reservation for {:x}: {}",
+                    payment_hash,
+                    err
+                );
+            }
+        }
+        result
     }
 
     async fn handle_tracking_event(&self, event: CchTrackingEvent) -> Result<Vec<CchOrderAction>> {

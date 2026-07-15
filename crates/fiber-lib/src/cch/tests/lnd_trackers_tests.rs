@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::cch::trackers::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage};
+use crate::cch::trackers::{
+    InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor, LndTrackerArgs,
+    LndTrackerMessage, MAX_TRACKED_INVOICES,
+};
 use fiber_types::Hash256;
 use ractor::{concurrency::Duration as RactorDuration, Actor, ActorRef, OutputPort};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -41,6 +44,156 @@ async fn create_test_actor() -> (ActorRef<LndTrackerMessage>, tokio::task::JoinH
         .expect("Failed to spawn test actor");
 
     (actor_ref, actor_handle)
+}
+
+async fn reserve_invoice_tracking(
+    actor_ref: &ActorRef<LndTrackerMessage>,
+    payment_hash: Hash256,
+) -> InvoiceTrackingReservationResult {
+    ractor::call!(actor_ref, |reply| {
+        LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply)
+    })
+    .expect("Failed to reserve invoice tracking")
+}
+
+struct TestStateSnapshot {
+    invoice_queue_len: usize,
+    active_invoice_trackers: usize,
+    reserved_invoice_trackers: usize,
+    tracked_invoices: usize,
+}
+
+async fn get_state(actor_ref: &ActorRef<LndTrackerMessage>) -> TestStateSnapshot {
+    let state = actor_ref
+        .call(
+            LndTrackerMessage::GetState,
+            Some(RactorDuration::from_millis(1000)),
+        )
+        .await
+        .expect("Failed to get state")
+        .expect("Failed to get state");
+    TestStateSnapshot {
+        invoice_queue_len: state.invoice_queue_len,
+        active_invoice_trackers: state.active_invoice_trackers,
+        reserved_invoice_trackers: state.reserved_invoice_trackers,
+        tracked_invoices: state.tracked_invoices,
+    }
+}
+
+#[tokio::test]
+async fn test_invoice_tracking_reservation_enforces_global_limit() {
+    let (actor_ref, _handle) = create_test_actor().await;
+
+    for value in 0..MAX_TRACKED_INVOICES {
+        assert_eq!(
+            reserve_invoice_tracking(&actor_ref, test_payment_hash(value as u8)).await,
+            InvoiceTrackingReservationResult::Reserved
+        );
+    }
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, test_payment_hash(MAX_TRACKED_INVOICES as u8)).await,
+        InvoiceTrackingReservationResult::CapacityExceeded
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_invoice_trackers, MAX_TRACKED_INVOICES);
+    assert_eq!(state.tracked_invoices, MAX_TRACKED_INVOICES);
+    assert_eq!(state.invoice_queue_len, 0);
+    assert_eq!(state.active_invoice_trackers, 0);
+}
+
+#[tokio::test]
+async fn test_duplicate_invoice_tracking_reservation_is_coalesced() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(1);
+
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, payment_hash).await,
+        InvoiceTrackingReservationResult::Reserved
+    );
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, payment_hash).await,
+        InvoiceTrackingReservationResult::AlreadyTracked
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_invoice_trackers, 1);
+    assert_eq!(state.tracked_invoices, 1);
+}
+
+#[tokio::test]
+async fn test_stopping_reservation_releases_global_capacity() {
+    let (actor_ref, _handle) = create_test_actor().await;
+
+    for value in 0..MAX_TRACKED_INVOICES {
+        assert_eq!(
+            reserve_invoice_tracking(&actor_ref, test_payment_hash(value as u8)).await,
+            InvoiceTrackingReservationResult::Reserved
+        );
+    }
+
+    actor_ref
+        .cast(LndTrackerMessage::StopTracking(test_payment_hash(0)))
+        .expect("Failed to send StopTracking");
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, test_payment_hash(MAX_TRACKED_INVOICES as u8)).await,
+        InvoiceTrackingReservationResult::Reserved
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_invoice_trackers, MAX_TRACKED_INVOICES);
+    assert_eq!(state.tracked_invoices, MAX_TRACKED_INVOICES);
+}
+
+#[tokio::test]
+async fn test_tracking_commits_invoice_tracking_reservation() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(1);
+
+    assert_eq!(
+        reserve_invoice_tracking(&actor_ref, payment_hash).await,
+        InvoiceTrackingReservationResult::Reserved
+    );
+    actor_ref
+        .cast(LndTrackerMessage::TrackInvoice(payment_hash))
+        .expect("Failed to send TrackInvoice");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_invoice_trackers, 0);
+    assert_eq!(state.tracked_invoices, 1);
+    assert_eq!(state.invoice_queue_len, 0);
+    assert_eq!(state.active_invoice_trackers, 1);
+}
+
+#[tokio::test]
+async fn test_retracking_before_stopped_tracker_completes_does_not_duplicate_tracker() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(1);
+
+    actor_ref
+        .cast(LndTrackerMessage::TrackInvoice(payment_hash))
+        .expect("Failed to send TrackInvoice");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    actor_ref
+        .cast(LndTrackerMessage::StopTracking(payment_hash))
+        .expect("Failed to send StopTracking");
+    actor_ref
+        .cast(LndTrackerMessage::TrackInvoice(payment_hash))
+        .expect("Failed to send TrackInvoice");
+    actor_ref
+        .cast(LndTrackerMessage::InvoiceTrackerCompleted {
+            payment_hash,
+            completed_successfully: false,
+        })
+        .expect("Failed to send completion");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_invoice_trackers, 0);
+    assert_eq!(state.tracked_invoices, 1);
+    assert_eq!(state.invoice_queue_len, 0);
+    assert_eq!(state.active_invoice_trackers, 1);
 }
 
 // Test completion decrements active_invoice_trackers counter

@@ -39,7 +39,7 @@ use lnd_grpc_tonic_client::{
     create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
     RouterClient, Uri,
 };
-use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, OutputPort};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -48,6 +48,7 @@ use fiber_types::payment::PaymentStatus as FiberPaymentStatus;
 use fiber_types::Hash256;
 
 const MAX_CONCURRENT_INVOICE_TRACKERS: usize = 5;
+pub(crate) const MAX_TRACKED_INVOICES: usize = 100;
 const INVOICE_TRACKING_TIMEOUT: Duration = Duration::from_secs(5 * 60); // 5 minutes
 
 /// LND connection information
@@ -95,6 +96,9 @@ impl LndConnectionInfo {
 /// Message types for the LndTrackerActor
 #[derive(Debug)]
 pub enum LndTrackerMessage {
+    /// Reserve global capacity before creating an externally payable LND invoice.
+    ReserveInvoiceTracking(Hash256, RpcReplyPort<InvoiceTrackingReservationResult>),
+
     /// Track a new invoice
     TrackInvoice(Hash256),
 
@@ -115,12 +119,21 @@ pub enum LndTrackerMessage {
     GetState(ractor::RpcReplyPort<StateSnapshot>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceTrackingReservationResult {
+    Reserved,
+    AlreadyTracked,
+    CapacityExceeded,
+}
+
 /// Snapshot of actor state (for testing)
 #[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct StateSnapshot {
     pub invoice_queue_len: usize,
     pub active_invoice_trackers: usize,
+    pub reserved_invoice_trackers: usize,
+    pub tracked_invoices: usize,
 }
 
 /// Arguments for starting the LndTrackerActor
@@ -139,10 +152,14 @@ pub struct LndTrackerState {
     tracker: TaskTracker,
     /// Queue of payment hashes waiting to be tracked
     invoice_queue: VecDeque<Hash256>,
-    /// Payment hashes that are queued or currently being tracked.
+    /// Payment hashes that are reserved, queued, active, or stopping.
     tracked_invoices: HashSet<Hash256>,
-    /// Number of currently active invoice trackers
-    active_invoice_trackers: usize,
+    /// Reservations made before the corresponding LND invoice and CCH order are created.
+    reserved_invoices: HashSet<Hash256>,
+    /// Payment hashes with a currently running tracker task.
+    active_invoices: HashSet<Hash256>,
+    /// Active trackers asked to stop; they remain capacity-accounted until completion.
+    stopped_invoices: HashSet<Hash256>,
 }
 
 /// Ractor Actor to track LND payments and invoices
@@ -222,7 +239,9 @@ impl Actor for LndTrackerActor {
             tracker: args.tracker.clone(),
             invoice_queue: VecDeque::new(),
             tracked_invoices: HashSet::new(),
-            active_invoice_trackers: 0,
+            reserved_invoices: HashSet::new(),
+            active_invoices: HashSet::new(),
+            stopped_invoices: HashSet::new(),
         };
 
         // Start payment tracker in background
@@ -246,8 +265,41 @@ impl Actor for LndTrackerActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         let res = match message {
+            LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply_port) => {
+                let result = if state.tracked_invoices.contains(&payment_hash) {
+                    InvoiceTrackingReservationResult::AlreadyTracked
+                } else if state.tracked_invoices.len() >= MAX_TRACKED_INVOICES {
+                    InvoiceTrackingReservationResult::CapacityExceeded
+                } else {
+                    state.tracked_invoices.insert(payment_hash);
+                    state.reserved_invoices.insert(payment_hash);
+                    InvoiceTrackingReservationResult::Reserved
+                };
+                let _ = reply_port.send(result);
+                Ok(())
+            }
             LndTrackerMessage::TrackInvoice(payment_hash) => {
-                if state.tracked_invoices.insert(payment_hash) {
+                if state.reserved_invoices.remove(&payment_hash) {
+                    state.invoice_queue.push_back(payment_hash);
+                    state.process_invoice_queue(myself).await?;
+                } else if state.stopped_invoices.remove(&payment_hash)
+                    && state.active_invoices.contains(&payment_hash)
+                {
+                    tracing::debug!(
+                        "Resumed tracking invoice {:x} before its active tracker stopped",
+                        payment_hash
+                    );
+                } else if state.tracked_invoices.insert(payment_hash) {
+                    if state.tracked_invoices.len() > MAX_TRACKED_INVOICES {
+                        // Existing persisted orders must still be restored after an upgrade even
+                        // if they predate the admission limit. New orders reserve capacity before
+                        // creating their LND invoice and cannot take this path.
+                        tracing::warn!(
+                            "Restoring invoice tracker {:x} above the global limit of {}",
+                            payment_hash,
+                            MAX_TRACKED_INVOICES
+                        );
+                    }
                     state.invoice_queue.push_back(payment_hash);
                     state.process_invoice_queue(myself).await?;
                 } else {
@@ -256,8 +308,14 @@ impl Actor for LndTrackerActor {
                 Ok(())
             }
             LndTrackerMessage::StopTracking(payment_hash) => {
-                state.tracked_invoices.remove(&payment_hash);
+                state.reserved_invoices.remove(&payment_hash);
                 state.invoice_queue.retain(|&hash| hash != payment_hash);
+                if state.active_invoices.contains(&payment_hash) {
+                    state.stopped_invoices.insert(payment_hash);
+                } else {
+                    state.stopped_invoices.remove(&payment_hash);
+                    state.tracked_invoices.remove(&payment_hash);
+                }
                 tracing::debug!("Stopped tracking invoice {:x}", payment_hash);
                 Ok(())
             }
@@ -269,11 +327,18 @@ impl Actor for LndTrackerActor {
                     "Processing completion for payment_hash={}, success={}, active={}/{}",
                     payment_hash,
                     completed_successfully,
-                    state.active_invoice_trackers,
+                    state.active_invoices.len(),
                     MAX_CONCURRENT_INVOICE_TRACKERS
                 );
-                state.active_invoice_trackers = state.active_invoice_trackers.saturating_sub(1);
-                if completed_successfully {
+                if !state.active_invoices.remove(&payment_hash) {
+                    tracing::warn!(
+                        "Ignoring stale completion for inactive invoice tracker {:x}",
+                        payment_hash
+                    );
+                    return Ok(());
+                }
+
+                if state.stopped_invoices.remove(&payment_hash) || completed_successfully {
                     state.tracked_invoices.remove(&payment_hash);
                 } else if state.tracked_invoices.contains(&payment_hash) {
                     state.invoice_queue.push_back(payment_hash);
@@ -289,7 +354,9 @@ impl Actor for LndTrackerActor {
             LndTrackerMessage::GetState(reply_port) => {
                 let snapshot = StateSnapshot {
                     invoice_queue_len: state.invoice_queue.len(),
-                    active_invoice_trackers: state.active_invoice_trackers,
+                    active_invoice_trackers: state.active_invoices.len(),
+                    reserved_invoice_trackers: state.reserved_invoices.len(),
+                    tracked_invoices: state.tracked_invoices.len(),
                 };
                 let _ = reply_port.send(snapshot);
                 Ok(())
@@ -302,7 +369,7 @@ impl Actor for LndTrackerActor {
             metrics::gauge!(crate::metrics::CCH_LND_TRACKER_INVOICE_QUEUE_LEN)
                 .set(state.invoice_queue.len() as f64);
             metrics::gauge!(crate::metrics::CCH_LND_TRACKER_ACTIVE_INVOICE_TRACKERS)
-                .set(state.active_invoice_trackers as f64);
+                .set(state.active_invoices.len() as f64);
         }
 
         res
@@ -315,11 +382,17 @@ impl LndTrackerState {
         myself: ActorRef<LndTrackerMessage>,
     ) -> Result<(), ActorProcessingErr> {
         // Process invoices from queue
-        while self.active_invoice_trackers < MAX_CONCURRENT_INVOICE_TRACKERS {
+        while self.active_invoices.len() < MAX_CONCURRENT_INVOICE_TRACKERS {
             let Some(payment_hash) = self.invoice_queue.pop_front() else {
                 break;
             };
-            self.active_invoice_trackers += 1;
+            if !self.active_invoices.insert(payment_hash) {
+                tracing::warn!(
+                    "Skipping duplicate queued invoice tracker {:x}",
+                    payment_hash
+                );
+                continue;
+            }
 
             let tracker = InvoiceTracker {
                 port: self.port.clone(),
@@ -353,7 +426,7 @@ impl LndTrackerState {
             tracing::debug!(
                 "Started invoice tracker for payment_hash={}, active={}/{}",
                 payment_hash,
-                self.active_invoice_trackers,
+                self.active_invoices.len(),
                 MAX_CONCURRENT_INVOICE_TRACKERS
             );
         }
