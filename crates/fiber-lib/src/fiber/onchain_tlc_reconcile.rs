@@ -7,7 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
-use fiber_types::{Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, TLCId, TlcInfo};
+use fiber_types::{
+    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, RemoveTlcReason, TLCId, TlcInfo,
+};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -35,6 +37,19 @@ pub(crate) struct OnChainFulfilledTlc {
     pub forwarding_tlc: Option<(Hash256, u64)>,
     pub payment_hash: Hash256,
     pub attempt_id: Option<u64>,
+    pub preimage: Hash256,
+}
+
+/// An origin-payer TLC whose fulfill was learned off-chain before the channel closed, and whose
+/// preimage is now independently confirmed by this channel's on-chain settlement record.
+///
+/// Such a TLC may already be `RemoteRemoved`, while the corresponding payment attempt is still
+/// inflight because the remove commitment handshake never reached `apply_remove_tlc_operation`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OnChainConfirmedPayerTlc {
+    pub tlc_id: TLCId,
+    pub payment_hash: Hash256,
+    pub attempt_id: u64,
     pub preimage: Hash256,
 }
 
@@ -136,6 +151,43 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
                 forwarding_tlc: tlc.forwarding_tlc,
                 payment_hash: tlc.payment_hash,
                 attempt_id: tlc.attempt_id,
+                preimage,
+            })
+        })
+        .collect()
+}
+
+/// Collect already-fulfilled first-hop TLCs that still need their payer-side attempt outcome
+/// reconciled. The `attempt_id` is local metadata persisted on the offered TLC; forwarded TLCs do
+/// not carry one and are deliberately excluded.
+pub(crate) fn collect_onchain_confirmed_payer_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<OnChainConfirmedPayerTlc> {
+    let channel_id = state.get_id();
+    state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .filter(|tlc| tlc.forwarding_tlc.is_none())
+        .filter_map(|tlc| {
+            let attempt_id = tlc.attempt_id?;
+            let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                return None;
+            };
+            let preimage = onchain_fulfilled_preimage(&channel_id, store, tlc)?;
+            if preimage != fulfill.payment_preimage {
+                warn!(
+                    "Skipping payer TLC {:?} in channel {:?}: local fulfill preimage does not match on-chain preimage",
+                    tlc.tlc_id, channel_id
+                );
+                return None;
+            }
+            Some(OnChainConfirmedPayerTlc {
+                tlc_id: tlc.tlc_id,
+                payment_hash: tlc.payment_hash,
+                attempt_id,
                 preimage,
             })
         })

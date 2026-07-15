@@ -84,9 +84,9 @@ use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
-    OnChainTimeoutTlcRole,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
+    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
+    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
@@ -733,6 +733,15 @@ pub enum NetworkActorCommand {
     SettleReceivedHoldTlcSet(Hash256),
     // Settle an invoice from received TLCs already reconciled as fulfilled on-chain.
     SettleOnChainFulfilledInvoice(Hash256),
+    /// Reconcile one origin-payer attempt from a channel-scoped on-chain fulfill proof.
+    ReconcileOnChainPayerTlc {
+        channel_id: Hash256,
+        tlc_id: TLCId,
+        payment_hash: Hash256,
+        attempt_id: u64,
+        payment_preimage: Hash256,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
     /// Relay a RemoveTlc for an on-chain-resolved downstream TLC to its upstream channel.
     /// The downstream TLC is finalized only after this is delivered or durably queued.
     RelayOnChainTlcRemove {
@@ -763,6 +772,8 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
+    #[cfg(any(test, feature = "bench"))]
+    GetChannelActor(Hash256, RpcReplyPort<Option<ActorRef<ChannelActorMessage>>>),
     // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
     // the hop data for the current node.
     SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<(), TlcErr>>),
@@ -2405,6 +2416,25 @@ where
             NetworkActorCommand::SettleOnChainFulfilledInvoice(payment_hash) => {
                 self.settle_onchain_fulfilled_invoice(payment_hash);
             }
+            NetworkActorCommand::ReconcileOnChainPayerTlc {
+                channel_id,
+                tlc_id,
+                payment_hash,
+                attempt_id,
+                payment_preimage,
+                reply,
+            } => {
+                let result = self
+                    .reconcile_onchain_payer_tlc(state, payment_hash, attempt_id, payment_preimage)
+                    .await;
+                if let Err(err) = &result {
+                    warn!(
+                        "Failed to reconcile on-chain payer TLC {:?} in channel {:?}: {}",
+                        tlc_id, channel_id, err
+                    );
+                }
+                let _ = reply.send(result);
+            }
             NetworkActorCommand::RelayOnChainTlcRemove {
                 downstream_channel_id,
                 downstream_tlc_id,
@@ -2509,6 +2539,10 @@ where
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
+            }
+            #[cfg(any(test, feature = "bench"))]
+            NetworkActorCommand::GetChannelActor(channel_id, reply) => {
+                let _ = reply.send(state.channels.get(&channel_id).cloned());
             }
             NetworkActorCommand::SendPaymentOnionPacket(command, reply) => {
                 match self
@@ -3054,6 +3088,10 @@ where
     ) {
         let channel_id = actor_state.get_id();
         let mut settlement_state_changed = false;
+        // Snapshot before newly discovered TLCs are marked removed below, so each payer effect is
+        // applied at most once per reconciliation pass.
+        let confirmed_payer_tlcs = collect_onchain_confirmed_payer_tlcs(actor_state, &self.store);
+        let mut payer_effects_applied = true;
 
         // Settlement-completed events are the durable chain signal that the channel close
         // transaction has finished. Record that signal first, then let the normal reconciliation
@@ -3155,16 +3193,23 @@ where
                             .tlc_state
                             .set_offered_tlc_removed(id, fulfill.clone());
                         actor_state_changed = true;
-                        state
-                            .network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::TlcRemoveReceived(
+                        if let Some(attempt_id) = tlc.attempt_id {
+                            if let Err(err) = self
+                                .reconcile_onchain_payer_tlc(
+                                    state,
                                     tlc.payment_hash,
-                                    tlc.attempt_id,
-                                    fulfill,
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                    attempt_id,
+                                    tlc.preimage,
+                                )
+                                .await
+                            {
+                                warn!(
+                                    "Will retry payer reconciliation for TLC {:?} in channel {:?}: {}",
+                                    tlc.tlc_id, channel_id, err
+                                );
+                                payer_effects_applied = false;
+                            }
+                        }
                     }
                 }
                 TLCId::Received(id) => {
@@ -3178,6 +3223,18 @@ where
                     invoice_hashes.push(tlc.payment_hash);
                     actor_state_changed = true;
                 }
+            }
+        }
+        for tlc in confirmed_payer_tlcs {
+            if let Err(err) = self
+                .reconcile_onchain_payer_tlc(state, tlc.payment_hash, tlc.attempt_id, tlc.preimage)
+                .await
+            {
+                warn!(
+                    "Will retry payer reconciliation for TLC {:?} in channel {:?}: {}",
+                    tlc.tlc_id, channel_id, err
+                );
+                payer_effects_applied = false;
             }
         }
         invoice_hashes.extend(self.already_fulfilled_onchain_invoice_hashes(actor_state));
@@ -3217,7 +3274,7 @@ where
 
         // Keep waiting while any TLC outcome is still unknown. Once the settlement was confirmed
         // and every TLC is terminal, clear the close flags and drop the funding-script cache entry.
-        if has_unresolved_onchain_tlcs(actor_state) {
+        if !payer_effects_applied || has_unresolved_onchain_tlcs(actor_state) {
             if mark_settlement_confirmed {
                 info!(
                     "Channel {channel_id:?} on-chain reconciliation incomplete; CheckChannels will retry"
@@ -3969,6 +4026,48 @@ where
             PaymentActorMessage::OnRemoveTlcEvent { attempt_id, reason },
         )
         .await;
+    }
+
+    /// Serialize an on-chain payer outcome through the PaymentActor and wait until the exact
+    /// attempt and aggregate session have been persisted. This acknowledgement lets channel
+    /// reconciliation safely finalize without losing the higher-level payment update on restart.
+    async fn reconcile_onchain_payer_tlc(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        payment_hash: Hash256,
+        attempt_id: u64,
+        payment_preimage: Hash256,
+    ) -> Result<(), String> {
+        let (send, recv) = oneshot::channel();
+        let message = PaymentActorMessage::ReconcileOnChainFulfill {
+            attempt_id,
+            payment_preimage,
+            reply: RpcReplyPort::from(send),
+        };
+
+        if let Some(actor) = state.inflight_payments.get(&payment_hash) {
+            actor.send_message(message).map_err(|err| {
+                format!(
+                    "failed to send on-chain fulfill to payment actor for {payment_hash:?}: {err}"
+                )
+            })?;
+        } else {
+            self.start_payment_actor(state.network.clone(), state, payment_hash, message)
+                .await?;
+        }
+
+        tokio::time::timeout(Duration::from_millis(DEFAULT_CHAIN_ACTOR_TIMEOUT), recv)
+            .await
+            .map_err(|_| {
+                format!(
+                    "timed out reconciling on-chain fulfill for {payment_hash:?} attempt {attempt_id}"
+                )
+            })?
+            .map_err(|err| {
+                format!(
+                    "payment actor stopped while reconciling {payment_hash:?} attempt {attempt_id}: {err}"
+                )
+            })?
     }
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {

@@ -15,8 +15,9 @@ use crate::fiber::fee::{
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
+    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
+    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
     OnChainTimeoutTlcRole, OnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
@@ -212,6 +213,8 @@ pub enum ChannelCommand {
     #[cfg(any(test, feature = "bench"))]
     SetDeferPeerTlcUpdates(bool),
     #[cfg(any(test, feature = "bench"))]
+    TestBarrier(RpcReplyPort<()>),
+    #[cfg(any(test, feature = "bench"))]
     ReloadState(ReloadParams),
 }
 
@@ -233,6 +236,8 @@ impl Display for ChannelCommand {
             ChannelCommand::SetDeferPeerTlcUpdates(enabled) => {
                 write!(f, "SetDeferPeerTlcUpdates [{enabled}]")
             }
+            #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::TestBarrier(_) => write!(f, "TestBarrier"),
             #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(_) => write!(f, "ReloadState"),
         }
@@ -2839,6 +2844,11 @@ where
                 Ok(())
             }
             #[cfg(any(test, feature = "bench"))]
+            ChannelCommand::TestBarrier(reply) => {
+                let _ = reply.send(());
+                Ok(())
+            }
+            #[cfg(any(test, feature = "bench"))]
             ChannelCommand::ReloadState(reload_params) => {
                 let private_key = state.private_key.clone();
                 *state = self
@@ -3075,8 +3085,39 @@ where
     /// the original payer's payment session is notified, and a now fully-fulfilled invoice is
     /// marked paid. On-chain preimage discovery is mutually exclusive with the on-chain fail
     /// marker, so this never overlaps the fail path handled above.
-    fn settle_onchain_fulfilled_tlcs(&self, state: &mut ChannelActorState) {
+    async fn reconcile_onchain_payer_tlc(
+        &self,
+        channel_id: Hash256,
+        tlc: OnChainConfirmedPayerTlc,
+    ) -> bool {
+        match call!(self.network, |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::ReconcileOnChainPayerTlc {
+                channel_id,
+                tlc_id: tlc.tlc_id,
+                payment_hash: tlc.payment_hash,
+                attempt_id: tlc.attempt_id,
+                payment_preimage: tlc.preimage,
+                reply,
+            })
+        })
+        .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+        {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(
+                    "Will retry payer reconciliation for TLC {:?} in channel {:?}: {}",
+                    tlc.tlc_id, channel_id, err
+                );
+                false
+            }
+        }
+    }
+
+    async fn settle_onchain_fulfilled_tlcs(&self, state: &mut ChannelActorState) -> bool {
         let channel_id = state.get_id();
+        // Snapshot already-fulfilled payer TLCs before mutating newly discovered TLCs below. This
+        // avoids applying the same payer outcome twice in one reconciliation pass.
+        let confirmed_payer_tlcs = collect_onchain_confirmed_payer_tlcs(state, &self.store);
         // Collect first so we don't borrow `tlc_state` across the state mutations and message sends.
         let fulfilled = collect_onchain_fulfilled_tlcs(state, &self.store);
 
@@ -3095,6 +3136,7 @@ where
         }
 
         let mut onchain_fulfilled_invoice_hashes = HashSet::new();
+        let mut payer_effects_applied = true;
 
         for tlc in fulfilled {
             let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
@@ -3118,16 +3160,20 @@ where
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     } else {
                         self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
-                        self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::TlcRemoveReceived(
-                                    tlc.payment_hash,
-                                    tlc.attempt_id,
-                                    fulfill.clone(),
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        state.tlc_state.set_offered_tlc_removed(id, fulfill);
+                        state.tlc_state.set_offered_tlc_removed(id, fulfill.clone());
+                        if let Some(attempt_id) = tlc.attempt_id {
+                            payer_effects_applied &= self
+                                .reconcile_onchain_payer_tlc(
+                                    channel_id,
+                                    OnChainConfirmedPayerTlc {
+                                        tlc_id: tlc.tlc_id,
+                                        payment_hash: tlc.payment_hash,
+                                        attempt_id,
+                                        preimage: tlc.preimage,
+                                    },
+                                )
+                                .await;
+                        }
                     }
                 }
                 TLCId::Received(id) => {
@@ -3138,6 +3184,10 @@ where
                     onchain_fulfilled_invoice_hashes.insert(tlc.payment_hash);
                 }
             }
+        }
+
+        for tlc in confirmed_payer_tlcs {
+            payer_effects_applied &= self.reconcile_onchain_payer_tlc(channel_id, tlc).await;
         }
 
         if !onchain_fulfilled_invoice_hashes.is_empty() {
@@ -3154,6 +3204,7 @@ where
         // Synchronize TLC status and invoice state for any previously-fulfilled TLCs whose
         // fulfillment is now confirmed by a channel-scoped on-chain settlement record.
         self.sync_already_fulfilled_onchain_tlcs(state);
+        payer_effects_applied
     }
 
     fn onchain_confirmed_fulfill_reason(
@@ -3260,11 +3311,11 @@ where
     }
 
     /// Returns true when no reconcilable TLC remains unresolved on this channel.
-    fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState, now: u64) -> bool {
+    async fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState, now: u64) -> bool {
         self.maintain_waiting_onchain_settlement_tlcs(state, now);
-        self.settle_onchain_fulfilled_tlcs(state);
+        let payer_effects_applied = self.settle_onchain_fulfilled_tlcs(state).await;
         self.finalize_onchain_timed_out_received_tlcs(state);
-        !has_unresolved_onchain_tlcs(state)
+        payer_effects_applied && !has_unresolved_onchain_tlcs(state)
     }
 
     async fn finalize_onchain_settlement(
@@ -3287,7 +3338,7 @@ where
 
         flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
         let now = now_timestamp_as_millis_u64();
-        if self.reconcile_onchain_tlcs(state, now) {
+        if self.reconcile_onchain_tlcs(state, now).await {
             flags.remove(
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
@@ -3649,7 +3700,7 @@ where
                 // healthy ready channel degrades payment throughput (see the benchmark
                 // regression in PR #1254).
                 if state.is_closed() || matches!(state.state, ChannelState::ShuttingDown(_)) {
-                    self.settle_onchain_fulfilled_tlcs(state);
+                    self.settle_onchain_fulfilled_tlcs(state).await;
                     self.finalize_onchain_timed_out_received_tlcs(state);
                 }
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()

@@ -49,10 +49,12 @@ use fiber_sphinx::OnionSharedSecretIter;
 use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
+use fiber_types::OutboundTlcStatus;
 use fiber_types::RemoveTlcFulfill;
 use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
 use fiber_types::TlcErrPacket;
+use fiber_types::TlcInfo;
 use fiber_types::SIGNATURE_U5_SIZE;
 use fiber_types::{Attempt, AttemptStatus, PrevTlcInfo, TrampolineContext};
 use ractor::call;
@@ -5306,6 +5308,453 @@ async fn test_payer_payment_success_from_onchain_preimage() {
             &preimage_record
         )),
         "on-chain payment success must persist a normal preimage record so CCH observes the same success signal as off-chain fulfillment"
+    );
+}
+
+#[cfg(feature = "watchtower")]
+struct MppRemoteRemovedPayerFixture {
+    payer: NetworkNode,
+    _payee: NetworkNode,
+    stuck_channel_actor: ractor::ActorRef<ChannelActorMessage>,
+    stuck_channel_id: Hash256,
+    payment_hash: Hash256,
+    payment_preimage: Hash256,
+    completed_attempt_id: Option<u64>,
+    stuck_attempt_id: Option<u64>,
+    stuck_tlc_id: u64,
+}
+
+#[cfg(feature = "watchtower")]
+impl MppRemoteRemovedPayerFixture {
+    fn attempt_status(&self, attempt_id: Option<u64>) -> Option<AttemptStatus> {
+        self.payer
+            .get_payment_session(self.payment_hash)
+            .and_then(|session| {
+                session
+                    .attempts()
+                    .find(|attempt| Some(attempt.id) == attempt_id)
+                    .map(|attempt| attempt.status)
+            })
+    }
+
+    fn attempt_statuses(&self) -> Vec<(u64, AttemptStatus)> {
+        self.payer
+            .get_payment_session(self.payment_hash)
+            .expect("payer payment session exists")
+            .attempts()
+            .map(|attempt| (attempt.id, attempt.status))
+            .collect()
+    }
+
+    fn stuck_tlc(&self) -> TlcInfo {
+        self.payer
+            .get_tlc(self.stuck_channel_id, TLCId::Offered(self.stuck_tlc_id))
+            .expect("remote-removed payer TLC exists")
+    }
+
+    fn notify_maintain_channel_tlcs(&self) {
+        self.payer
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: self.stuck_channel_id,
+                    command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+                }),
+            ))
+            .expect("network actor alive");
+    }
+
+    fn insert_onchain_settlement(&self) {
+        insert_onchain_preimage(
+            &self.payer.store,
+            &self.stuck_channel_id,
+            self.payment_hash,
+            self.payment_preimage,
+        );
+    }
+
+    async fn channel_barrier(&self) {
+        ractor::call_t!(
+            self.stuck_channel_actor.clone(),
+            |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+            5_000
+        )
+        .expect("stuck channel actor must process the barrier");
+    }
+
+    fn assert_channel_running(&self) {
+        assert_eq!(
+            self.stuck_channel_actor.get_status(),
+            ractor::ActorStatus::Running,
+            "reconciliation must not crash the stuck channel actor"
+        );
+    }
+
+    async fn reaches_success(&self) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if self.payer.get_payment_status(self.payment_hash).await == PaymentStatus::Success
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    fn assert_pre_reconcile_state(&self) {
+        assert_eq!(
+            self.attempt_status(self.completed_attempt_id),
+            Some(AttemptStatus::Success)
+        );
+        assert_eq!(
+            self.attempt_status(self.stuck_attempt_id),
+            Some(AttemptStatus::Inflight)
+        );
+        let tlc = self.stuck_tlc();
+        assert_eq!(tlc.outbound_status(), OutboundTlcStatus::RemoteRemoved);
+        assert!(matches!(
+            tlc.removed_reason,
+            Some(RemoveTlcReason::RemoveTlcFulfill(..))
+        ));
+        assert_eq!(tlc.removed_confirmed_at, None);
+    }
+}
+
+#[cfg(feature = "watchtower")]
+async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixture {
+    let part_amount = 10_000_000_000;
+    let total_amount = part_amount * 2;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + part_amount, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + part_amount, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(total_amount))
+        .payment_preimage(payment_preimage)
+        .payee_pub_key(node_1.pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build MPP hold invoice");
+    node_1.insert_invoice(invoice.clone(), None);
+
+    let payment_hash = *invoice.payment_hash();
+    node_0
+        .send_payment(SendPaymentCommand {
+            max_parts: Some(2),
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send MPP payment");
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until_timeout(30_000, || {
+        channels.iter().all(|channel_id| {
+            node_0
+                .get_channel_actor_state(*channel_id)
+                .tlc_state
+                .offered_tlcs
+                .tlcs
+                .iter()
+                .any(|tlc| {
+                    tlc.payment_hash == payment_hash
+                        && tlc.outbound_status() == OutboundTlcStatus::Committed
+                })
+        })
+    })
+    .await;
+
+    let offered_tlc = |channel_id| {
+        node_0
+            .get_channel_actor_state(channel_id)
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == payment_hash)
+            .cloned()
+            .expect("payer offered MPP TLC exists")
+    };
+    let completed_tlc = offered_tlc(channels[0]);
+    let stuck_tlc = offered_tlc(channels[1]);
+    assert_ne!(completed_tlc.attempt_id, stuck_tlc.attempt_id);
+
+    // Model the online split that completed normally. This leaves the aggregate MPP session
+    // Inflight because the force-closed split has not delivered its payer completion event.
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::TlcRemoveReceived(
+                payment_hash,
+                completed_tlc.attempt_id,
+                RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+            ),
+        ))
+        .expect("network actor alive");
+    wait_until_timeout(10_000, || {
+        node_0
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status == PaymentStatus::Inflight
+                    && session
+                        .attempts()
+                        .any(|attempt| attempt.status == AttemptStatus::Success)
+            })
+    })
+    .await;
+    let TLCId::Offered(stuck_tlc_id) = stuck_tlc.tlc_id else {
+        panic!("payer TLC must be offered");
+    };
+    // Deliver the fulfill through the real peer-message handler. The test-only lookup only
+    // exposes the live actor selected by channel id; all state transitions remain production code.
+    let stuck_channel_actor = node_0
+        .get_channel_actor(channels[1])
+        .await
+        .expect("stuck payer channel actor is live");
+    stuck_channel_actor
+        .send_message(ChannelActorMessage::PeerMessage(
+            FiberChannelMessage::RemoveTlc(RemoveTlc {
+                channel_id: channels[1],
+                tlc_id: stuck_tlc_id,
+                reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+            }),
+        ))
+        .expect("stuck payer channel actor alive");
+    wait_until_timeout(10_000, || {
+        node_0
+            .get_tlc(channels[1], TLCId::Offered(stuck_tlc_id))
+            .is_some_and(|tlc| {
+                tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved
+                    && matches!(
+                        tlc.removed_reason,
+                        Some(RemoveTlcReason::RemoveTlcFulfill(..))
+                    )
+            })
+    })
+    .await;
+    assert_eq!(
+        node_0.store.get_preimage(&payment_hash),
+        Some(payment_preimage),
+        "the peer-message handler must persist the learned preimage"
+    );
+
+    // Model A observing B's already-broadcast force-close before the remove commitment handshake
+    // reaches `apply_remove_tlc_operation`. This is a legitimate transition from ChannelReady and
+    // leaves the peer-message-produced RemoteRemoved state durable on the closed channel.
+    let tx_hash = TransactionBuilder::default().build().hash();
+    node_0
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                node_1.pubkey,
+                channels[1],
+                tx_hash,
+                true,
+                false,
+            ),
+        ))
+        .expect("payer network actor alive");
+    wait_until_timeout(10_000, || {
+        matches!(
+            node_0.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    // The synthetic payee is no longer part of the scenario after delivering the fulfill. Stop it
+    // so its hold-invoice timeout cannot inject unrelated late completion events into idempotency
+    // assertions. The payer's closed watch-chain actor remains live.
+    node_1.stop().await;
+
+    let fixture = MppRemoteRemovedPayerFixture {
+        payer: node_0,
+        _payee: node_1,
+        stuck_channel_actor,
+        stuck_channel_id: channels[1],
+        payment_hash,
+        payment_preimage,
+        completed_attempt_id: completed_tlc.attempt_id,
+        stuck_attempt_id: stuck_tlc.attempt_id,
+        stuck_tlc_id,
+    };
+    fixture.assert_pre_reconcile_state();
+    fixture
+}
+
+// Reproduces the payer-side state reported by the PR #1512 integration test: one MPP part has
+// completed off-chain, while the other part learned the fulfill from its peer but force-closed
+// before the removal was commitment-confirmed. The latter TLC is therefore already
+// `RemoteRemoved` with a fulfill reason, but its payment attempt is still `Inflight`. Once the
+// same preimage is verified on-chain, reconciliation must deliver the missing payer completion
+// event without trying to mark the TLC removed a second time.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_mpp_payer_remote_removed_attempt_succeeds_from_onchain_preimage() {
+    init_tracing();
+
+    let fixture = setup_mpp_remote_removed_payer_fixture().await;
+    fixture.insert_onchain_settlement();
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+
+    let reached_success = fixture.reaches_success().await;
+    fixture.assert_channel_running();
+    assert!(
+        reached_success,
+        "on-chain confirmation of the RemoteRemoved MPP split must complete the payer payment; status={:?}, attempts={:?}",
+        fixture.payer.get_payment_status(fixture.payment_hash).await,
+        fixture.attempt_statuses()
+    );
+}
+
+// The fulfill and attempt state are durable. If the payer restarts before reconciliation, the
+// no-live-channel fallback must recover the same missing completion event from persisted state.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_mpp_payer_remote_removed_attempt_succeeds_after_restart() {
+    init_tracing();
+
+    let mut fixture = setup_mpp_remote_removed_payer_fixture().await;
+    fixture.payer.restart().await;
+    fixture.stuck_channel_actor = fixture
+        .payer
+        .get_channel_actor(fixture.stuck_channel_id)
+        .await
+        .expect("restart restores the closed watch-chain actor");
+    fixture.assert_pre_reconcile_state();
+
+    // Stop the restored watch-chain actor so CheckChannels must use the persisted-state fallback,
+    // matching a restart window where the channel actor is unavailable.
+    fixture
+        .payer
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: fixture.stuck_channel_id,
+                command: ChannelCommand::NotifyEvent(ChannelEvent::Stop(StopReason::Closed)),
+            }),
+        ))
+        .expect("network actor alive");
+    wait_until_timeout(10_000, || {
+        fixture.stuck_channel_actor.get_status() == ractor::ActorStatus::Stopped
+    })
+    .await;
+    // The stopped actor enqueues ChannelActorStopped from post_stop. This NetworkActor RPC is a
+    // barrier proving that event was consumed and the channel was removed from the live map.
+    fixture.payer.node_info().await;
+    assert!(
+        fixture
+            .payer
+            .get_channel_actor(fixture.stuck_channel_id)
+            .await
+            .is_none(),
+        "CheckChannels must exercise the no-live-channel fallback"
+    );
+    fixture.assert_pre_reconcile_state();
+
+    fixture.insert_onchain_settlement();
+    fixture
+        .payer
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .expect("network actor alive");
+    fixture.payer.node_info().await;
+
+    let reached_success = fixture.reaches_success().await;
+    assert!(
+        reached_success,
+        "restart/no-live reconciliation must complete the RemoteRemoved MPP split; status={:?}, attempts={:?}",
+        fixture.payer.get_payment_status(fixture.payment_hash).await,
+        fixture.attempt_statuses()
+    );
+}
+
+// Watchtower and startup scans can report the same settlement repeatedly. After the first
+// successful reconciliation, subsequent scans must not emit another payer completion event or
+// mutate the already-reconciled TLC/payment state.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_mpp_payer_remote_removed_onchain_reconciliation_is_idempotent() {
+    init_tracing();
+
+    let mut fixture = setup_mpp_remote_removed_payer_fixture().await;
+    fixture
+        .payer
+        .add_unexpected_events(vec!["panic".to_string(), "panicked".to_string()])
+        .await;
+    fixture.insert_onchain_settlement();
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    assert!(
+        fixture.reaches_success().await,
+        "first reconciliation must complete the payer before idempotency can be checked; status={:?}, attempts={:?}",
+        fixture.payer.get_payment_status(fixture.payment_hash).await,
+        fixture.attempt_statuses()
+    );
+    fixture.assert_channel_running();
+
+    let tlc_after_first_scan = fixture.stuck_tlc();
+    let attempts_after_first_scan = fixture.attempt_statuses();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while fixture.payer.event_emitter.try_recv().is_ok() {}
+
+    for _ in 0..3 {
+        fixture.notify_maintain_channel_tlcs();
+    }
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    fixture.assert_channel_running();
+    // Any duplicate TlcRemoveReceived emitted by the ChannelActor is queued back to the
+    // NetworkActor. Cross that mailbox as well, then give the event-forwarding task a bounded
+    // window to publish the corresponding debug notification before asserting its absence.
+    fixture.payer.node_info().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut duplicate_completion_events = 0;
+    while let Ok(event) = fixture.payer.event_emitter.try_recv() {
+        if matches!(
+            event,
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                if message.starts_with("after on_remove_tlc_event session_status:")
+        ) {
+            duplicate_completion_events += 1;
+        }
+    }
+    assert_eq!(
+        duplicate_completion_events, 0,
+        "repeated settlement scans must not emit duplicate TlcRemoveReceived events"
+    );
+    assert_eq!(fixture.stuck_tlc(), tlc_after_first_scan);
+    assert_eq!(fixture.attempt_statuses(), attempts_after_first_scan);
+    assert_eq!(
+        fixture.payer.get_payment_status(fixture.payment_hash).await,
+        PaymentStatus::Success
+    );
+    assert!(
+        fixture
+            .payer
+            .get_triggered_unexpected_events()
+            .await
+            .is_empty(),
+        "repeated reconciliation must not panic"
     );
 }
 
