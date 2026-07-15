@@ -7,13 +7,24 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use biscuit_auth::{
     builder::{Fact, Term},
-    AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
+    Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
 };
 
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
 
 const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
+
+fn authorizer_builder() -> AuthorizerBuilder {
+    AuthorizerBuilder::new().set_limits(AuthorizerLimits {
+        max_time: DEFAULT_BISCUIT_AUTH_MAX_TIME,
+        ..Default::default()
+    })
+}
+
+fn build_authorizer(token: &Biscuit) -> Result<Authorizer> {
+    Ok(authorizer_builder().build(token)?)
+}
 
 pub struct AuthRule {
     pub(crate) code: &'static str,
@@ -35,11 +46,7 @@ impl AuthRule {
 
     /// build rule
     fn build_rule(&self) -> Result<AuthorizerBuilder> {
-        let authorizer = AuthorizerBuilder::new()
-            .set_limits(AuthorizerLimits {
-                max_time: DEFAULT_BISCUIT_AUTH_MAX_TIME,
-                ..Default::default()
-            })
+        let authorizer = authorizer_builder()
             .code(self.code)
             .context("build authorizer code")?;
         Ok(authorizer)
@@ -261,7 +268,8 @@ impl BiscuitAuth {
 /// Extract node id from token
 pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     const QUERY: &str = "data($id) <- node($id)";
-    let (id,): (String,) = token.authorizer()?.query_exactly_one(QUERY)?;
+    let mut authorizer = build_authorizer(token)?;
+    let (id,): (String,) = authorizer.query_exactly_one(QUERY)?;
     let node_id = NodeId::from_str(id.as_str())?;
     tracing::warn!("fetch {id:?} {node_id:?}");
     Ok(node_id)
@@ -275,7 +283,7 @@ mod tests {
 
     use crate::rpc::biscuit::extract_node_id;
 
-    use super::{AuthRule, BiscuitAuth, DEFAULT_BISCUIT_AUTH_MAX_TIME};
+    use super::{build_authorizer, AuthRule, BiscuitAuth};
 
     #[test]
     fn test_biscuit_auth_uses_ten_millisecond_authorizer_limit() {
@@ -284,9 +292,19 @@ mod tests {
         let limits = authorizer.limits();
         let default_limits = biscuit_auth::AuthorizerLimits::default();
 
-        assert_eq!(limits.max_time, DEFAULT_BISCUIT_AUTH_MAX_TIME);
+        assert_eq!(limits.max_time, Duration::from_millis(10));
         assert_eq!(limits.max_facts, default_limits.max_facts);
         assert_eq!(limits.max_iterations, default_limits.max_iterations);
+    }
+
+    #[test]
+    fn test_node_id_query_uses_ten_millisecond_authorizer_limit() {
+        let root = KeyPair::new();
+        let token = biscuit!(r#"node("test-node-id");"#).build(&root).unwrap();
+        let authorizer = build_authorizer(&token).unwrap();
+        let limits = authorizer.limits();
+
+        assert_eq!(limits.max_time, Duration::from_millis(10));
     }
 
     #[test]
