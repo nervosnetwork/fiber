@@ -53,7 +53,7 @@ pub fn build_liquidity_lock_script(
 ) -> packed::Script {
     packed::Script::new_builder()
         .code_hash(artifact.code_hash.clone())
-        .hash_type(artifact.hash_type.clone())
+        .hash_type(artifact.hash_type)
         .args(
             Bytes::from(build_liquidity_lock_args(
                 params.payment_hash,
