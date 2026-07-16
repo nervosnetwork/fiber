@@ -71,35 +71,6 @@ impl LiquidityActorMessage {
     }
 }
 
-/// Command payload for requesting a Loop Out quote.
-#[derive(Debug, Clone)]
-pub struct QuoteLoopOutCommand {
-    /// Asset identifier to quote.
-    pub asset_id: String,
-    /// Net amount the client wants to receive on-chain.
-    pub amount: u128,
-    /// Maximum provider fee the client accepts.
-    pub max_provider_fee: u128,
-    /// Maximum Fiber routing fee the client accepts.
-    pub max_routing_fee: u128,
-    /// Relative quote expiration requested by the client.
-    pub expires_after_seconds: u64,
-}
-
-impl QuoteLoopOutCommand {
-    /// Return the absolute requested quote expiration timestamp in milliseconds.
-    pub fn requested_expiry_ms(&self, now_ms: u64) -> Option<u64> {
-        now_ms.checked_add(self.expires_after_seconds.checked_mul(1000)?)
-    }
-}
-
-/// Command payload for accepting a Loop Out quote.
-#[derive(Debug, Clone)]
-pub struct AcceptLoopOutCommand {
-    /// Provider quote terms being accepted.
-    pub quote: LoopOutQuoteTerms,
-}
-
 /// Chain boundary required by the provider Loop Out accept workflow.
 pub trait LoopOutChainAdapter {
     /// Adapter-specific error returned by chain operations.
@@ -1080,25 +1051,6 @@ mod tests {
                 to: LiquiditySwapState::PaymentInFlight,
             })
         );
-    }
-
-    #[test]
-    fn quote_loop_out_command_requested_expiry_ms_checks_overflow() {
-        let command = QuoteLoopOutCommand {
-            asset_id: "ckb".to_string(),
-            amount: 100,
-            max_provider_fee: 1,
-            max_routing_fee: 1,
-            expires_after_seconds: 60,
-        };
-
-        assert_eq!(command.requested_expiry_ms(1_000), Some(61_000));
-
-        let overflowing_command = QuoteLoopOutCommand {
-            expires_after_seconds: u64::MAX,
-            ..command
-        };
-        assert_eq!(overflowing_command.requested_expiry_ms(1_000), None);
     }
 
     #[test]
