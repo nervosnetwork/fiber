@@ -273,6 +273,16 @@ where
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
         let quote_id: Hash256 = params.quote_id.into();
+        if self
+            .store
+            .get_liquidity_swap(&quote_id)
+            .map_err(map_store_error)?
+            .is_some()
+        {
+            return Err(LiquidityLoopOutError::Store(format!(
+                "loop out quote already accepted: {quote_id:?}"
+            )));
+        }
         let mut quote = self.quote_terms(&quote_id)?;
         quote.claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
         quote.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
@@ -1709,6 +1719,50 @@ mod tests {
         assert!(error.to_string().contains("claimant_lock"));
         assert!(harness.events().is_empty());
         assert!(harness.chain.payout_locks.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_accept_loop_out_rejects_duplicate_without_changing_locks() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        let first_claimant_lock = script("claimant-first");
+        let first_refund_lock = script("refund-first");
+        let second_claimant_lock = script("claimant-second");
+        let second_refund_lock = script("refund-second");
+        harness.store_quote(quote.clone());
+
+        harness
+            .call_provider_accept_with_locks(
+                quote.quote_id,
+                script_hex(&first_claimant_lock),
+                script_hex(&first_refund_lock),
+            )
+            .await
+            .unwrap();
+        let events_after_first_accept = harness.events();
+
+        let error = harness
+            .call_provider_accept_with_locks(
+                quote.quote_id,
+                script_hex(&second_claimant_lock),
+                script_hex(&second_refund_lock),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("already") || error.to_string().contains("exists"));
+        assert_eq!(harness.events(), events_after_first_accept);
+        assert_eq!(
+            harness.chain.payout_locks.borrow().as_slice(),
+            [(first_claimant_lock.clone(), first_refund_lock.clone())]
+        );
+        let persisted_quote = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_quote.claimant_lock, first_claimant_lock);
+        assert_eq!(persisted_quote.refund_lock, first_refund_lock);
     }
 
     #[tokio::test]
