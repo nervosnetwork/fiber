@@ -1,31 +1,13 @@
 //! Liquidity persistence traits and records.
 
-use fiber_types::{
-    EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState, Pubkey,
-};
+use fiber_types::{EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use thiserror::Error;
 
 use crate::liquidity::types::LoopOutQuoteTerms;
 
-/// Local role for a persisted liquidity swap.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum LiquiditySwapRole {
-    /// Local node initiated the swap.
-    Client,
-    /// Local node provided liquidity for the swap.
-    Provider,
-}
-
-/// Direction of a persisted liquidity swap.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum LiquiditySwapKind {
-    /// Move Fiber balance out to chain.
-    LoopOut,
-    /// Move chain funds into Fiber balance.
-    LoopIn,
-}
+pub use fiber_types::{LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole};
 
 /// Persistence error returned by liquidity storage implementations.
 #[derive(Debug, Error)]
@@ -52,45 +34,6 @@ pub enum LiquidityStoreError {
     Backend(String),
 }
 
-/// Persisted liquidity swap record needed for restart recovery.
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LiquiditySwapRecord {
-    /// Local swap identifier.
-    pub swap_id: Hash256,
-    /// Provider quote identifier.
-    pub quote_id: Hash256,
-    /// Local role in this swap.
-    pub role: LiquiditySwapRole,
-    /// Swap direction.
-    pub swap_kind: LiquiditySwapKind,
-    /// Provider asset registry identifier.
-    pub asset_id: String,
-    /// Current recovery state.
-    pub state: LiquiditySwapState,
-    /// CKB-hash of the 32-byte payment preimage.
-    pub payment_hash: Hash256,
-    /// Known 32-byte preimage after payment settlement.
-    pub payment_preimage: Option<Hash256>,
-    /// Raw swap amount.
-    pub amount: u128,
-    /// On-chain lock or payout outpoint once known.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub onchain_outpoint: Option<ckb_types::packed::OutPoint>,
-    /// Loop Out payout confirmation deadline.
-    pub payout_deadline: Option<u64>,
-    /// Refund lock time encoded in the liquidity-lock args.
-    pub refund_after_lock_time: u64,
-    /// Quote expiry timestamp in milliseconds.
-    pub expires_at: u64,
-    /// Failure reason for terminal failed swaps.
-    pub failure_reason: Option<String>,
-    /// Creation timestamp in milliseconds.
-    pub created_at: u64,
-    /// Last update timestamp in milliseconds.
-    pub updated_at: u64,
-}
-
 /// Filter for paginated swap history queries.
 #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquiditySwapFilter {
@@ -113,84 +56,47 @@ pub struct LiquiditySwapPage {
     pub next_cursor: Option<String>,
 }
 
-/// Persisted provider Loop Out quote fields required to reconstruct accepted terms.
-#[serde_as]
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LoopOutQuoteRecord {
-    /// Unique provider quote identifier.
-    pub quote_id: Hash256,
-    /// Provider node public key.
-    pub provider: Pubkey,
-    /// Asset being swapped out.
-    pub asset: LiquidityAsset,
-    /// Net amount the client wants to receive on-chain.
-    pub amount: u128,
-    /// Provider fee charged in the quoted asset unit.
-    pub provider_fee: u128,
-    /// Maximum Fiber routing fee the client accepts.
-    pub routing_fee_limit: u128,
-    /// Estimated CKB transaction fee for the on-chain operation.
-    pub onchain_fee_estimate_ckb: u64,
-    /// CKB capacity required for the payout lock output.
-    pub capacity_requirement_ckb: u64,
-    /// Payment hash used for the Fiber payment and on-chain lock.
-    pub payment_hash: Hash256,
-    /// Quote expiration timestamp in milliseconds.
-    pub expires_at: u64,
-    /// Deadline timestamp by which the payout lock must be confirmed.
-    pub payout_deadline: u64,
-    /// Lock time after which the provider may refund the payout lock.
-    pub refund_after_lock_time: u64,
-    /// Client claimant lock used for the claim transaction.
-    #[serde_as(as = "EntityHex")]
-    pub claimant_lock: ckb_types::packed::Script,
-    /// Provider refund lock used if the swap is not paid and claimed.
-    #[serde_as(as = "EntityHex")]
-    pub refund_lock: ckb_types::packed::Script,
-    /// Creation timestamp in milliseconds.
-    pub created_at: u64,
+pub(crate) fn loop_out_quote_record_from_terms(
+    quote: LoopOutQuoteTerms,
+    created_at: u64,
+) -> fiber_types::LoopOutQuoteRecord {
+    fiber_types::LoopOutQuoteRecord {
+        quote_id: quote.quote_id,
+        provider: quote.provider,
+        asset: quote.asset,
+        amount: quote.amount,
+        provider_fee: quote.provider_fee,
+        routing_fee_limit: quote.routing_fee_limit,
+        onchain_fee_estimate_ckb: quote.onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: quote.capacity_requirement_ckb,
+        payment_hash: quote.payment_hash,
+        expires_at: quote.expires_at,
+        payout_deadline: quote.payout_deadline,
+        refund_after_lock_time: quote.refund_after_lock_time,
+        claimant_lock: quote.claimant_lock,
+        refund_lock: quote.refund_lock,
+        created_at,
+    }
 }
 
-impl LoopOutQuoteRecord {
-    /// Build a persisted record from quote terms and creation timestamp.
-    pub fn from_terms(quote: LoopOutQuoteTerms, created_at: u64) -> Self {
-        Self {
-            quote_id: quote.quote_id,
-            provider: quote.provider,
-            asset: quote.asset,
-            amount: quote.amount,
-            provider_fee: quote.provider_fee,
-            routing_fee_limit: quote.routing_fee_limit,
-            onchain_fee_estimate_ckb: quote.onchain_fee_estimate_ckb,
-            capacity_requirement_ckb: quote.capacity_requirement_ckb,
-            payment_hash: quote.payment_hash,
-            expires_at: quote.expires_at,
-            payout_deadline: quote.payout_deadline,
-            refund_after_lock_time: quote.refund_after_lock_time,
-            claimant_lock: quote.claimant_lock,
-            refund_lock: quote.refund_lock,
-            created_at,
-        }
-    }
-
-    /// Reconstruct executable quote terms from this persisted record.
-    pub fn into_terms(self) -> LoopOutQuoteTerms {
-        LoopOutQuoteTerms {
-            quote_id: self.quote_id,
-            provider: self.provider,
-            asset: self.asset,
-            amount: self.amount,
-            provider_fee: self.provider_fee,
-            routing_fee_limit: self.routing_fee_limit,
-            onchain_fee_estimate_ckb: self.onchain_fee_estimate_ckb,
-            capacity_requirement_ckb: self.capacity_requirement_ckb,
-            payment_hash: self.payment_hash,
-            expires_at: self.expires_at,
-            payout_deadline: self.payout_deadline,
-            refund_after_lock_time: self.refund_after_lock_time,
-            claimant_lock: self.claimant_lock,
-            refund_lock: self.refund_lock,
-        }
+pub(crate) fn loop_out_quote_terms_from_record(
+    record: fiber_types::LoopOutQuoteRecord,
+) -> LoopOutQuoteTerms {
+    LoopOutQuoteTerms {
+        quote_id: record.quote_id,
+        provider: record.provider,
+        asset: record.asset,
+        amount: record.amount,
+        provider_fee: record.provider_fee,
+        routing_fee_limit: record.routing_fee_limit,
+        onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: record.capacity_requirement_ckb,
+        payment_hash: record.payment_hash,
+        expires_at: record.expires_at,
+        payout_deadline: record.payout_deadline,
+        refund_after_lock_time: record.refund_after_lock_time,
+        claimant_lock: record.claimant_lock,
+        refund_lock: record.refund_lock,
     }
 }
 

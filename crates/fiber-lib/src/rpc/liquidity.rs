@@ -167,7 +167,7 @@ where
     ) -> Result<Option<JsonLiquiditySwapRecord>, ErrorObjectOwned> {
         self.store
             .get_liquidity_swap(&params.swap_id.into())
-            .map(|swap| swap.map(JsonLiquiditySwapRecord::from))
+            .map(|swap| swap.map(json_liquidity_swap_record_from_store))
             .rpc_err()
     }
 
@@ -193,7 +193,7 @@ where
             swaps: page
                 .swaps
                 .into_iter()
-                .map(JsonLiquiditySwapRecord::from)
+                .map(json_liquidity_swap_record_from_store)
                 .collect(),
             next_cursor: page.next_cursor,
         })
@@ -220,27 +220,25 @@ where
     }
 }
 
-impl From<StoreLiquiditySwapRecord> for JsonLiquiditySwapRecord {
-    fn from(record: StoreLiquiditySwapRecord) -> Self {
-        Self {
-            swap_id: record.swap_id.into(),
-            swap_kind: record.swap_kind.into(),
-            state: liquidity_swap_state_to_string(record.state),
-            asset_id: record.asset_id,
-            amount: record.amount,
-            payment_hash: record.payment_hash.into(),
-            created_at: record.created_at,
-            updated_at: record.updated_at,
-        }
+fn json_liquidity_swap_record_from_store(
+    record: StoreLiquiditySwapRecord,
+) -> JsonLiquiditySwapRecord {
+    JsonLiquiditySwapRecord {
+        swap_id: record.swap_id.into(),
+        swap_kind: json_liquidity_swap_kind(record.swap_kind),
+        state: liquidity_swap_state_to_string(record.state),
+        asset_id: record.asset_id,
+        amount: record.amount,
+        payment_hash: record.payment_hash.into(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
     }
 }
 
-impl From<LiquiditySwapKind> for fiber_json_types::LiquiditySwapKind {
-    fn from(kind: LiquiditySwapKind) -> Self {
-        match kind {
-            LiquiditySwapKind::LoopOut => Self::LoopOut,
-            LiquiditySwapKind::LoopIn => Self::LoopIn,
-        }
+fn json_liquidity_swap_kind(kind: LiquiditySwapKind) -> fiber_json_types::LiquiditySwapKind {
+    match kind {
+        LiquiditySwapKind::LoopOut => fiber_json_types::LiquiditySwapKind::LoopOut,
+        LiquiditySwapKind::LoopIn => fiber_json_types::LiquiditySwapKind::LoopIn,
     }
 }
 

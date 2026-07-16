@@ -1,6 +1,10 @@
 //! Liquidity management domain types.
 
+use crate::serde_utils::EntityHex;
+use crate::{Hash256, Pubkey};
+
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use thiserror::Error;
 
 /// Asset family supported by the liquidity protocol.
@@ -27,6 +31,24 @@ pub enum LiquidityAssetError {
     InvalidAmountRange,
 }
 
+/// Local role for a persisted liquidity swap.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LiquiditySwapRole {
+    /// Local node initiated the swap.
+    Client,
+    /// Local node provided liquidity for the swap.
+    Provider,
+}
+
+/// Direction of a persisted liquidity swap.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LiquiditySwapKind {
+    /// Move Fiber balance out to chain.
+    LoopOut,
+    /// Move chain funds into Fiber balance.
+    LoopIn,
+}
+
 /// Provider asset registry entry.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct LiquidityAsset {
@@ -48,6 +70,83 @@ pub struct LiquidityAsset {
     pub proportional_fee_ppm: u64,
     /// Whether the provider currently quotes this asset.
     pub enabled: bool,
+}
+
+/// Persisted provider Loop Out quote fields required to reconstruct accepted terms.
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LoopOutQuoteRecord {
+    /// Unique provider quote identifier.
+    pub quote_id: Hash256,
+    /// Provider node public key.
+    pub provider: Pubkey,
+    /// Asset being swapped out.
+    pub asset: LiquidityAsset,
+    /// Net amount the client wants to receive on-chain.
+    pub amount: u128,
+    /// Provider fee charged in the quoted asset unit.
+    pub provider_fee: u128,
+    /// Maximum Fiber routing fee the client accepts.
+    pub routing_fee_limit: u128,
+    /// Estimated CKB transaction fee for the on-chain operation.
+    pub onchain_fee_estimate_ckb: u64,
+    /// CKB capacity required for the payout lock output.
+    pub capacity_requirement_ckb: u64,
+    /// Payment hash used for the Fiber payment and on-chain lock.
+    pub payment_hash: Hash256,
+    /// Quote expiration timestamp in milliseconds.
+    pub expires_at: u64,
+    /// Deadline timestamp by which the payout lock must be confirmed.
+    pub payout_deadline: u64,
+    /// Lock time after which the provider may refund the payout lock.
+    pub refund_after_lock_time: u64,
+    /// Client claimant lock used for the claim transaction.
+    #[serde_as(as = "EntityHex")]
+    pub claimant_lock: ckb_types::packed::Script,
+    /// Provider refund lock used if the swap is not paid and claimed.
+    #[serde_as(as = "EntityHex")]
+    pub refund_lock: ckb_types::packed::Script,
+    /// Creation timestamp in milliseconds.
+    pub created_at: u64,
+}
+
+/// Persisted liquidity swap record needed for restart recovery.
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LiquiditySwapRecord {
+    /// Local swap identifier.
+    pub swap_id: Hash256,
+    /// Provider quote identifier.
+    pub quote_id: Hash256,
+    /// Local role in this swap.
+    pub role: LiquiditySwapRole,
+    /// Swap direction.
+    pub swap_kind: LiquiditySwapKind,
+    /// Provider asset registry identifier.
+    pub asset_id: String,
+    /// Current recovery state.
+    pub state: LiquiditySwapState,
+    /// CKB-hash of the 32-byte payment preimage.
+    pub payment_hash: Hash256,
+    /// Known 32-byte preimage after payment settlement.
+    pub payment_preimage: Option<Hash256>,
+    /// Raw swap amount.
+    pub amount: u128,
+    /// On-chain lock or payout outpoint once known.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub onchain_outpoint: Option<ckb_types::packed::OutPoint>,
+    /// Loop Out payout confirmation deadline.
+    pub payout_deadline: Option<u64>,
+    /// Refund lock time encoded in the liquidity-lock args.
+    pub refund_after_lock_time: u64,
+    /// Quote expiry timestamp in milliseconds.
+    pub expires_at: u64,
+    /// Failure reason for terminal failed swaps.
+    pub failure_reason: Option<String>,
+    /// Creation timestamp in milliseconds.
+    pub created_at: u64,
+    /// Last update timestamp in milliseconds.
+    pub updated_at: u64,
 }
 
 impl LiquidityAsset {
