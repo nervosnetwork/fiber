@@ -1669,6 +1669,17 @@ mod tests {
         assert_eq!(quote.amount, 1000);
         assert!(quote.provider_fee <= 100);
         assert!(quote.routing_fee_limit <= 50);
+
+        let persisted_quote = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_quote.quote_id, quote.quote_id.into());
+        assert_eq!(persisted_quote.asset.asset_id, quote.asset_id);
+        assert_eq!(persisted_quote.amount, quote.amount);
+        assert_eq!(persisted_quote.provider_fee, quote.provider_fee);
+        assert_eq!(persisted_quote.routing_fee_limit, quote.routing_fee_limit);
     }
 
     #[tokio::test]
@@ -1717,6 +1728,25 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("claimant_lock"));
+        assert!(harness.events().is_empty());
+        assert!(harness.chain.payout_locks.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_accept_loop_out_rejects_missing_quote_before_side_effects() {
+        let harness = RuntimeActorHarness::new_provider();
+        let error = harness
+            .call_provider_accept_with_locks(
+                [9u8; 32].into(),
+                script_hex(&Default::default()),
+                script_hex(&Default::default()),
+            )
+            .await
+            .unwrap_err();
+
+        let error_text = error.to_string();
+        assert!(error_text.contains("quote"));
+        assert!(error_text.contains("not found") || error_text.contains("missing"));
         assert!(harness.events().is_empty());
         assert!(harness.chain.payout_locks.borrow().is_empty());
     }
