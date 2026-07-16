@@ -276,7 +276,11 @@ where
         let mut quote = self.quote_terms(&quote_id)?;
         quote.claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
         quote.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
-        let swap_id = accept_provider_loop_out(&self.store, &mut self.chain, quote, now_ms())?;
+        let now_ms = now_ms();
+        self.store
+            .insert_loop_out_quote(quote.clone(), now_ms)
+            .map_err(map_store_error)?;
+        let swap_id = accept_provider_loop_out(&self.store, &mut self.chain, quote, now_ms)?;
         self.chain
             .watch_payout_lock(swap_id, myself)
             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
@@ -1676,8 +1680,15 @@ mod tests {
 
         assert_eq!(
             harness.chain.payout_locks.borrow().as_slice(),
-            [(claimant_lock, refund_lock)]
+            [(claimant_lock.clone(), refund_lock.clone())]
         );
+        let persisted_quote = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_quote.claimant_lock, claimant_lock);
+        assert_eq!(persisted_quote.refund_lock, refund_lock);
     }
 
     #[tokio::test]
