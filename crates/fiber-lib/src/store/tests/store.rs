@@ -188,6 +188,12 @@ fn mock_liquidity_asset(asset_id: &str) -> LiquidityAsset {
     }
 }
 
+fn mock_script(args: &'static str) -> Script {
+    Script::new_builder()
+        .args(ckb_types::bytes::Bytes::from(args).pack())
+        .build()
+}
+
 fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     LoopOutQuoteTerms {
@@ -203,8 +209,8 @@ fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
         expires_at: 20_000,
         payout_deadline: 30_000,
         refund_after_lock_time: 40_000,
-        claimant_lock: Default::default(),
-        refund_lock: Default::default(),
+        claimant_lock: mock_script("claimant-store-round-trip"),
+        refund_lock: mock_script("refund-store-round-trip"),
     }
 }
 

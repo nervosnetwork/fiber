@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 
-use ckb_types::packed::OutPoint;
+use ckb_types::packed::{OutPoint, Script};
+use ckb_types::prelude::Entity;
 use fiber_json_types::{
     LiquidityQuoteResponse, LiquiditySwapResponse, LoopOutParams, ProviderAcceptLoopOutParams,
     ProviderQuoteLoopOutParams, QuoteLoopOutParams,
@@ -272,7 +273,9 @@ where
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
         let quote_id: Hash256 = params.quote_id.into();
-        let quote = self.quote_terms(&quote_id)?;
+        let mut quote = self.quote_terms(&quote_id)?;
+        quote.claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
+        quote.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
         let swap_id = accept_provider_loop_out(&self.store, &mut self.chain, quote, now_ms())?;
         self.chain
             .watch_payout_lock(swap_id, myself)
@@ -349,6 +352,22 @@ fn quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuoteResponse
         payout_deadline: Some(terms.payout_deadline),
         refund_after_lock_time: terms.refund_after_lock_time,
     }
+}
+
+fn parse_script_hex(value: &str, field: &str) -> Result<Script, LiquidityLoopOutError> {
+    let Some(hex_value) = value.strip_prefix("0x") else {
+        return Err(LiquidityLoopOutError::Store(format!(
+            "invalid {field}: script hex must start with 0x"
+        )));
+    };
+    let bytes = hex::decode(hex_value).map_err(|error| {
+        LiquidityLoopOutError::Store(format!(
+            "invalid {field}: script hex decode failed: {error}"
+        ))
+    })?;
+    Script::from_slice(&bytes).map_err(|error| {
+        LiquidityLoopOutError::Store(format!("invalid {field}: script decode failed: {error}"))
+    })
 }
 
 /// Chain boundary required by the provider Loop Out accept workflow.
@@ -1098,6 +1117,7 @@ mod tests {
         label: Option<&'static str>,
         fail_next_claim: bool,
         claim_preimages: Vec<Hash256>,
+        payout_locks: Shared<Vec<(ckb_types::packed::Script, ckb_types::packed::Script)>>,
     }
 
     impl TestLiquidityChain {
@@ -1108,6 +1128,7 @@ mod tests {
                 label: None,
                 fail_next_claim: false,
                 claim_preimages: Vec::new(),
+                payout_locks: Shared::new(Vec::new()),
             }
         }
 
@@ -1118,6 +1139,7 @@ mod tests {
                 label: Some(label),
                 fail_next_claim: false,
                 claim_preimages: Vec::new(),
+                payout_locks: Shared::new(Vec::new()),
             }
         }
 
@@ -1141,13 +1163,16 @@ mod tests {
 
         fn broadcast_payout_lock(
             &mut self,
-            _quote: &LoopOutQuoteTerms,
+            quote: &LoopOutQuoteTerms,
             _outpoint: &OutPoint,
         ) -> Result<(), Self::Error> {
             let event = match self.label {
                 Some("chain") => "chain_broadcast_payout",
                 _ => "broadcast_payout",
             };
+            self.payout_locks
+                .borrow_mut()
+                .push((quote.claimant_lock.clone(), quote.refund_lock.clone()));
             self.events.borrow_mut().push(event);
             Ok(())
         }
@@ -1325,13 +1350,27 @@ mod tests {
             &self,
             quote_id: Hash256,
         ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+            self.call_provider_accept_with_locks(
+                quote_id,
+                script_hex(&Default::default()),
+                script_hex(&Default::default()),
+            )
+            .await
+        }
+
+        async fn call_provider_accept_with_locks(
+            &self,
+            quote_id: Hash256,
+            claimant_lock: String,
+            refund_lock: String,
+        ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
             ractor::call!(actor, |reply| {
                 LiquidityActorMessage::ProviderAcceptLoopOut(
                     ProviderAcceptLoopOutParams {
                         quote_id: quote_id.into(),
-                        claimant_lock: "0x".to_string(),
-                        refund_lock: "0x".to_string(),
+                        claimant_lock,
+                        refund_lock,
                     },
                     reply,
                 )
@@ -1487,6 +1526,16 @@ mod tests {
         [1u8; 32].into()
     }
 
+    fn script(args: &'static str) -> ckb_types::packed::Script {
+        ckb_types::packed::Script::new_builder()
+            .args(ckb_types::bytes::Bytes::from(args).pack())
+            .build()
+    }
+
+    fn script_hex(script: &ckb_types::packed::Script) -> String {
+        format!("0x{}", hex::encode(script.as_slice()))
+    }
+
     fn test_loop_out_quote(expires_at: u64) -> LoopOutQuoteTerms {
         let sk = SecretKey::from_slice(&[42; 32]).unwrap();
         LoopOutQuoteTerms {
@@ -1606,6 +1655,49 @@ mod tests {
         assert_eq!(quote.amount, 1000);
         assert!(quote.provider_fee <= 100);
         assert!(quote.routing_fee_limit <= 50);
+    }
+
+    #[tokio::test]
+    async fn provider_accept_loop_out_uses_submitted_lock_scripts() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        let claimant_lock = script("claimant-submitted");
+        let refund_lock = script("refund-submitted");
+        harness.store_quote(quote.clone());
+
+        harness
+            .call_provider_accept_with_locks(
+                quote.quote_id,
+                script_hex(&claimant_lock),
+                script_hex(&refund_lock),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            harness.chain.payout_locks.borrow().as_slice(),
+            [(claimant_lock, refund_lock)]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_accept_loop_out_rejects_invalid_lock_before_side_effects() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        let error = harness
+            .call_provider_accept_with_locks(
+                quote.quote_id,
+                "not-hex".to_string(),
+                script_hex(&Default::default()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("claimant_lock"));
+        assert!(harness.events().is_empty());
+        assert!(harness.chain.payout_locks.borrow().is_empty());
     }
 
     #[tokio::test]

@@ -17,8 +17,9 @@ use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::HoldTlc;
 use crate::liquidity::store::{
-    LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
-    LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapUpdate, LoopOutQuoteRecord,
+    loop_out_quote_record_from_terms, loop_out_quote_terms_from_record, LiquidityStateTransition,
+    LiquidityStore, LiquidityStoreError, LiquiditySwapFilter, LiquiditySwapPage,
+    LiquiditySwapRecord, LiquiditySwapUpdate,
 };
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
@@ -40,9 +41,9 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, LiquidityAsset, LiquiditySwapState, PaymentCustomRecords,
-    PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey, TLCId, TimedResult,
-    CURSOR_SIZE,
+    Cursor, Direction, Hash256, LiquidityAsset, LiquiditySwapState, LoopOutQuoteRecord,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey,
+    TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
@@ -1414,7 +1415,7 @@ impl LiquidityStore for Store {
         quote: crate::liquidity::types::LoopOutQuoteTerms,
         created_at: u64,
     ) -> Result<(), LiquidityStoreError> {
-        let record = LoopOutQuoteRecord::from_terms(quote, created_at);
+        let record = loop_out_quote_record_from_terms(quote, created_at);
         let mut batch = self.batch();
         let quote = KeyValue::LoopOutQuote(record.quote_id, record);
         batch.put(quote.key(), quote.value());
@@ -1432,7 +1433,7 @@ impl LiquidityStore for Store {
                 deserialize_liquidity::<LoopOutQuoteRecord>(value.as_ref(), "LoopOutQuoteRecord")
             })
             .transpose()
-            .map(|record| record.map(LoopOutQuoteRecord::into_terms))
+            .map(|record| record.map(loop_out_quote_terms_from_record))
     }
 
     fn insert_liquidity_swap(&self, swap: LiquiditySwapRecord) -> Result<(), LiquidityStoreError> {
