@@ -144,7 +144,7 @@ where
                 let _ = reply.send(Ok(0));
             }
             LiquidityActorMessage::PayoutConfirmed(swap_id) => {
-                if let Err(error) = mark_client_payout_locked(&state.store, swap_id, now_ms()) {
+                if let Err(error) = state.handle_payout_confirmed(swap_id, myself.clone()) {
                     tracing::warn!(?swap_id, %error, "ignoring loop out payout continuation");
                 }
             }
@@ -195,13 +195,39 @@ where
         self.chain
             .watch_payout_lock(swap_id, myself.clone())
             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
-        mark_client_payout_locked(&self.store, swap_id, now_ms)?;
-        send_client_loop_out_payment(&self.store, &mut self.payment, quote.clone(), now_ms)?;
-        claim_client_loop_out(&self.store, &mut self.chain, swap_id, now_ms)?;
-        self.chain
-            .watch_claim(swap_id, myself)
-            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
         self.swap_response(&swap_id)
+    }
+
+    fn handle_payout_confirmed(
+        &mut self,
+        swap_id: Hash256,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let swap = self
+            .store
+            .get_liquidity_swap(&swap_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        let now_ms = now_ms();
+
+        match swap.role {
+            LiquiditySwapRole::Client => {
+                mark_client_payout_locked(&self.store, swap_id, now_ms)?;
+                let quote = self.quote_terms(&swap_id)?;
+                send_client_loop_out_payment(&self.store, &mut self.payment, quote, now_ms)?;
+                claim_client_loop_out(&self.store, &mut self.chain, swap_id, now_ms)?;
+                self.chain
+                    .watch_claim(swap_id, myself)
+                    .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+            }
+            LiquiditySwapRole::Provider => {
+                mark_provider_payout_locked(&self.store, swap_id, now_ms)?;
+            }
+        }
+
+        Ok(())
     }
 
     fn handle_provider_accept_loop_out(
@@ -1049,13 +1075,10 @@ mod tests {
 
         fn watch_payout_lock(
             &mut self,
-            swap_id: Hash256,
-            myself: ActorRef<LiquidityActorMessage>,
+            _swap_id: Hash256,
+            _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
             self.events.borrow_mut().push("watch_payout");
-            if self.label == Some("runtime_client") {
-                let _ = myself.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id));
-            }
             Ok(())
         }
 
@@ -1173,6 +1196,20 @@ mod tests {
             .unwrap()
         }
 
+        async fn confirm_payout(
+            &self,
+            swap_id: Hash256,
+        ) -> Result<Result<usize, LiquidityLoopOutError>, ractor::RactorErr<LiquidityActorMessage>>
+        {
+            let actor = self.spawn_actor().await;
+            self.events.borrow_mut().push("payout_confirmed");
+            actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
+            tokio::task::yield_now().await;
+            ractor::call!(actor, |reply| LiquidityActorMessage::ResumeNonTerminal(
+                reply
+            ))
+        }
+
         async fn call_provider_accept(
             &self,
             quote_id: Hash256,
@@ -1197,6 +1234,7 @@ mod tests {
         ) -> Result<Result<usize, LiquidityLoopOutError>, ractor::RactorErr<LiquidityActorMessage>>
         {
             let actor = self.spawn_actor().await;
+            actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
             actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
             tokio::task::yield_now().await;
             ractor::call!(actor, |reply| LiquidityActorMessage::ResumeNonTerminal(
@@ -1378,6 +1416,7 @@ mod tests {
         let response = harness.call_loop_out(quote.quote_id).await.unwrap();
 
         assert_eq!(response.swap_id, quote.quote_id.into());
+        assert_eq!(response.state, "PayoutPending");
         assert_eq!(
             harness.events(),
             vec![
@@ -1385,6 +1424,23 @@ mod tests {
                 "client_transition_quoted",
                 "client_transition_payout_pending",
                 "watch_payout",
+            ]
+        );
+
+        harness
+            .confirm_payout(quote.quote_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            harness.events(),
+            vec![
+                "client_insert_created",
+                "client_transition_quoted",
+                "client_transition_payout_pending",
+                "watch_payout",
+                "payout_confirmed",
                 "client_transition_payout_locked",
                 "client_transition_payment_in_flight",
                 "send_payment",
