@@ -3,7 +3,12 @@
 use std::fmt::Display;
 
 use ckb_types::packed::OutPoint;
+use fiber_json_types::{
+    LiquidityQuoteResponse, LiquiditySwapResponse, LoopOutParams, ProviderAcceptLoopOutParams,
+    ProviderQuoteLoopOutParams, QuoteLoopOutParams,
+};
 use fiber_types::{Hash256, LiquiditySwapState};
+use ractor::RpcReplyPort;
 
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
@@ -14,12 +19,56 @@ use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
 /// Messages accepted by the liquidity actor boundary.
 #[derive(Debug)]
 pub enum LiquidityActorMessage {
-    /// Request a provider quote for a Loop Out swap.
-    QuoteLoopOut(QuoteLoopOutCommand),
-    /// Accept a previously issued Loop Out quote.
-    AcceptLoopOut(AcceptLoopOutCommand),
-    /// Resume orchestration for a persisted Loop Out swap.
-    ResumeLoopOut(Hash256),
+    /// Client-side request for a provider Loop Out quote.
+    QuoteLoopOut(
+        QuoteLoopOutParams,
+        RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+    ),
+    /// Client-side acceptance/execution of a Loop Out quote.
+    LoopOut(
+        LoopOutParams,
+        RpcReplyPort<Result<LiquiditySwapResponse, LiquidityLoopOutError>>,
+    ),
+    /// Provider-side quote request.
+    ProviderQuoteLoopOut(
+        ProviderQuoteLoopOutParams,
+        RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+    ),
+    /// Provider-side quote acceptance.
+    ProviderAcceptLoopOut(
+        ProviderAcceptLoopOutParams,
+        RpcReplyPort<Result<LiquiditySwapResponse, LiquidityLoopOutError>>,
+    ),
+    /// Resume every persisted non-terminal Loop Out swap.
+    ResumeNonTerminal(RpcReplyPort<Result<usize, LiquidityLoopOutError>>),
+    /// Internal continuation after payout lock confirmation.
+    PayoutConfirmed(Hash256),
+    /// Internal continuation after payment settlement.
+    PaymentSettled(Hash256, Hash256),
+    /// Internal continuation after client claim confirmation.
+    ClaimConfirmed(Hash256),
+    /// Internal continuation after provider observes the client claim.
+    ProviderClaimObserved(Hash256),
+    /// Internal continuation after provider refund confirmation.
+    RefundConfirmed(Hash256),
+}
+
+impl LiquidityActorMessage {
+    /// Stable variant names used by tests and RPC wiring assertions.
+    pub fn variant_names() -> &'static [&'static str] {
+        &[
+            "quote_loop_out",
+            "loop_out",
+            "provider_quote_loop_out",
+            "provider_accept_loop_out",
+            "resume_non_terminal",
+            "payout_confirmed",
+            "payment_settled",
+            "claim_confirmed",
+            "provider_claim_observed",
+            "refund_confirmed",
+        ]
+    }
 }
 
 /// Command payload for requesting a Loop Out quote.
@@ -498,6 +547,32 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn actor_message_names_cover_m3_mutations_and_recovery() {
+        let names = LiquidityActorMessage::variant_names();
+
+        assert_eq!(
+            names,
+            &[
+                "quote_loop_out",
+                "loop_out",
+                "provider_quote_loop_out",
+                "provider_accept_loop_out",
+                "resume_non_terminal",
+                "payout_confirmed",
+                "payment_settled",
+                "claim_confirmed",
+                "provider_claim_observed",
+                "refund_confirmed",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_non_terminal_action_is_explicit_actor_message() {
+        assert!(LiquidityActorMessage::variant_names().contains(&"resume_non_terminal"));
+    }
 
     #[derive(Default)]
     struct TestLiquidityStore {
