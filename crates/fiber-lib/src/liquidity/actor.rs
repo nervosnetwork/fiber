@@ -60,6 +60,7 @@ pub enum LiquidityActorMessage {
 }
 
 impl LiquidityActorMessage {
+    #[cfg(test)]
     fn variant_names() -> &'static [&'static str] {
         &[
             "quote_loop_out",
@@ -1355,9 +1356,7 @@ mod tests {
             self.events.borrow_mut().push("payout_confirmed");
             actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
             tokio::task::yield_now().await;
-            ractor::call!(actor, |reply| LiquidityActorMessage::ResumeNonTerminal(
-                reply
-            ))
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
         }
 
         async fn call_provider_accept(
@@ -1401,9 +1400,7 @@ mod tests {
             actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
             actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
             tokio::task::yield_now().await;
-            ractor::call!(actor, |reply| LiquidityActorMessage::ResumeNonTerminal(
-                reply
-            ))
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
         }
 
         async fn spawn_actor(&self) -> ractor::ActorRef<LiquidityActorMessage> {
