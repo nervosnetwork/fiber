@@ -1,6 +1,9 @@
 //! Liquidity actor boundary messages and Loop Out client guard helpers.
 
 use std::fmt::Display;
+use std::marker::PhantomData;
+
+use async_trait::async_trait;
 
 use ckb_types::packed::OutPoint;
 use fiber_json_types::{
@@ -8,7 +11,7 @@ use fiber_json_types::{
     ProviderQuoteLoopOutParams, QuoteLoopOutParams,
 };
 use fiber_types::{Hash256, LiquiditySwapState};
-use ractor::RpcReplyPort;
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
@@ -70,6 +73,180 @@ impl LiquidityActorMessage {
     }
 }
 
+/// Runtime dependencies for `LiquidityActor`.
+pub struct LiquidityActorArguments<S, P, C> {
+    /// Durable liquidity swap store.
+    pub store: S,
+    /// Fiber payment adapter used by client Loop Out execution.
+    pub payment: P,
+    /// Chain adapter used by payout and claim workflows.
+    pub chain: C,
+    /// Test-only accepted quote lookup until Task 3 adds durable quote storage.
+    #[cfg(test)]
+    pub quotes: std::collections::HashMap<Hash256, LoopOutQuoteTerms>,
+}
+
+/// Durable mutation actor for liquidity workflows.
+pub struct LiquidityActor<S, P, C>(pub PhantomData<(S, P, C)>);
+
+/// Mutable runtime state held by `LiquidityActor`.
+pub struct LiquidityActorState<S, P, C> {
+    store: S,
+    payment: P,
+    chain: C,
+    #[cfg(test)]
+    quotes: std::collections::HashMap<Hash256, LoopOutQuoteTerms>,
+}
+
+#[async_trait]
+impl<S, P, C> Actor for LiquidityActor<S, P, C>
+where
+    S: LiquidityStore + Send + Sync + 'static,
+    P: LoopOutPaymentAdapter + Send + Sync + 'static,
+    P::Error: Display + Send,
+    C: LoopOutChainAdapter + Send + Sync + 'static,
+    C::Error: Display + Send,
+{
+    type Msg = LiquidityActorMessage;
+    type State = LiquidityActorState<S, P, C>;
+    type Arguments = LiquidityActorArguments<S, P, C>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(LiquidityActorState {
+            store: args.store,
+            payment: args.payment,
+            chain: args.chain,
+            #[cfg(test)]
+            quotes: args.quotes,
+        })
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            LiquidityActorMessage::LoopOut(params, reply) => {
+                let result = state.handle_loop_out(params);
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::ProviderAcceptLoopOut(params, reply) => {
+                let result = state.handle_provider_accept_loop_out(params);
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::ResumeNonTerminal(reply) => {
+                let _ = reply.send(Ok(0));
+            }
+            LiquidityActorMessage::PayoutConfirmed(swap_id) => {
+                mark_client_payout_locked(&state.store, swap_id, now_ms())
+                    .map_err(|error| ActorProcessingErr::from(error.to_string()))?;
+            }
+            LiquidityActorMessage::PaymentSettled(_swap_id, _preimage) => {}
+            LiquidityActorMessage::ClaimConfirmed(swap_id) => {
+                mark_client_claim_confirmed(&state.store, swap_id, now_ms())
+                    .map_err(|error| ActorProcessingErr::from(error.to_string()))?;
+            }
+            LiquidityActorMessage::ProviderClaimObserved(swap_id) => {
+                mark_provider_claim_observed(&state.store, swap_id, now_ms())
+                    .map_err(|error| ActorProcessingErr::from(error.to_string()))?;
+            }
+            LiquidityActorMessage::RefundConfirmed(_swap_id) => {}
+            LiquidityActorMessage::QuoteLoopOut(_params, reply) => {
+                let _ = reply.send(Err(LiquidityLoopOutError::Store(
+                    "client quote delegation is wired in a later task".to_string(),
+                )));
+            }
+            LiquidityActorMessage::ProviderQuoteLoopOut(_params, reply) => {
+                let _ = reply.send(Err(LiquidityLoopOutError::Store(
+                    "provider quote delegation is wired in a later task".to_string(),
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<S, P, C> LiquidityActorState<S, P, C>
+where
+    S: LiquidityStore,
+    P: LoopOutPaymentAdapter,
+    P::Error: Display,
+    C: LoopOutChainAdapter,
+    C::Error: Display,
+{
+    fn handle_loop_out(
+        &mut self,
+        params: LoopOutParams,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        let quote_id: Hash256 = params.quote_id.into();
+        let quote = self.quote_terms(&quote_id)?;
+        let now_ms = now_ms();
+        let swap_id = create_client_loop_out(&self.store, quote.clone(), now_ms)?;
+        self.chain
+            .watch_payout_lock(&swap_id)
+            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+        mark_client_payout_locked(&self.store, swap_id, now_ms)?;
+        send_client_loop_out_payment(&self.store, &mut self.payment, quote.clone(), now_ms)?;
+        claim_client_loop_out(&self.store, &mut self.chain, swap_id, now_ms)?;
+        self.chain
+            .watch_claim(&swap_id)
+            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+        self.swap_response(&swap_id)
+    }
+
+    fn handle_provider_accept_loop_out(
+        &mut self,
+        params: ProviderAcceptLoopOutParams,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        let quote_id: Hash256 = params.quote_id.into();
+        let quote = self.quote_terms(&quote_id)?;
+        let swap_id = accept_provider_loop_out(&self.store, &mut self.chain, quote, now_ms())?;
+        self.chain
+            .watch_payout_lock(&swap_id)
+            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+        self.swap_response(&swap_id)
+    }
+
+    #[cfg(test)]
+    fn quote_terms(&self, quote_id: &Hash256) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
+        self.quotes.get(quote_id).cloned().ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("loop out quote not found: {quote_id:?}"))
+        })
+    }
+
+    #[cfg(not(test))]
+    fn quote_terms(&self, quote_id: &Hash256) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
+        Err(LiquidityLoopOutError::Store(format!(
+            "loop out quote terms are not durably persisted yet: {quote_id:?}"
+        )))
+    }
+
+    fn swap_response(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        let swap = self
+            .store
+            .get_liquidity_swap(swap_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        Ok(LiquiditySwapResponse {
+            swap_id: swap.swap_id.into(),
+            state: format!("{:?}", swap.state),
+            payment_hash: swap.payment_hash.into(),
+            created_at: swap.created_at,
+        })
+    }
+}
+
 /// Chain boundary required by the provider Loop Out accept workflow.
 pub trait LoopOutChainAdapter {
     /// Adapter-specific error returned by chain operations.
@@ -90,6 +267,16 @@ pub trait LoopOutChainAdapter {
 
     /// Broadcast the claim transaction for a paid Loop Out swap.
     fn broadcast_claim(&mut self, request: LoopOutClaimRequest) -> Result<(), Self::Error>;
+
+    /// Watch the payout lock until confirmation or expiry.
+    fn watch_payout_lock(&mut self, _swap_id: &Hash256) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Watch the client claim until confirmation.
+    fn watch_claim(&mut self, _swap_id: &Hash256) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// Chain claim request for a client Loop Out payout.
@@ -474,6 +661,15 @@ fn map_store_error(error: LiquidityStoreError) -> LiquidityLoopOutError {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 /// Return whether the client may start the Fiber payment from `state`.
 pub fn client_can_start_payment(state: LiquiditySwapState) -> bool {
     state == LiquiditySwapState::PayoutLocked
@@ -503,9 +699,8 @@ pub fn ensure_client_can_start_payment(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use ckb_types::{packed::Byte32, packed::OutPoint, prelude::*};
     use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey};
@@ -544,23 +739,40 @@ mod tests {
         assert!(LiquidityActorMessage::variant_names().contains(&"resume_non_terminal"));
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
+    struct Shared<T>(Arc<Mutex<T>>);
+
+    impl<T> Shared<T> {
+        fn new(value: T) -> Self {
+            Self(Arc::new(Mutex::new(value)))
+        }
+
+        fn borrow(&self) -> MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+
+        fn borrow_mut(&self) -> MutexGuard<'_, T> {
+            self.0.lock().unwrap()
+        }
+    }
+
+    #[derive(Clone, Default)]
     struct TestLiquidityStore {
-        swaps: RefCell<HashMap<Hash256, LiquiditySwapRecord>>,
-        events: Rc<RefCell<Vec<&'static str>>>,
+        swaps: Shared<HashMap<Hash256, LiquiditySwapRecord>>,
+        events: Shared<Vec<&'static str>>,
         label: Option<&'static str>,
     }
 
     impl TestLiquidityStore {
-        fn new(events: Rc<RefCell<Vec<&'static str>>>, label: &'static str) -> Self {
+        fn new(events: Shared<Vec<&'static str>>, label: &'static str) -> Self {
             Self {
-                swaps: RefCell::new(HashMap::new()),
+                swaps: Shared::new(HashMap::new()),
                 events,
                 label: Some(label),
             }
         }
 
-        fn events(&self) -> Rc<RefCell<Vec<&'static str>>> {
+        fn events(&self) -> Shared<Vec<&'static str>> {
             self.events.clone()
         }
 
@@ -751,8 +963,9 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct TestLiquidityChain {
-        events: Rc<RefCell<Vec<&'static str>>>,
+        events: Shared<Vec<&'static str>>,
         outpoint: OutPoint,
         label: Option<&'static str>,
         fail_next_claim: bool,
@@ -760,7 +973,7 @@ mod tests {
     }
 
     impl TestLiquidityChain {
-        fn new(events: Rc<RefCell<Vec<&'static str>>>) -> Self {
+        fn new(events: Shared<Vec<&'static str>>) -> Self {
             Self {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
@@ -770,7 +983,7 @@ mod tests {
             }
         }
 
-        fn new_with_label(events: Rc<RefCell<Vec<&'static str>>>, label: &'static str) -> Self {
+        fn new_with_label(events: Shared<Vec<&'static str>>, label: &'static str) -> Self {
             Self {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
@@ -792,6 +1005,9 @@ mod tests {
             &mut self,
             _quote: &LoopOutQuoteTerms,
         ) -> Result<OutPoint, Self::Error> {
+            if self.label == Some("runtime") {
+                self.events.borrow_mut().push("reserve_payout");
+            }
             Ok(self.outpoint.clone())
         }
 
@@ -821,18 +1037,39 @@ mod tests {
             }
             Ok(())
         }
+
+        fn watch_payout_lock(&mut self, _swap_id: &Hash256) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("watch_payout");
+            Ok(())
+        }
+
+        fn watch_claim(&mut self, _swap_id: &Hash256) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("watch_claim");
+            Ok(())
+        }
     }
 
+    #[derive(Clone)]
     struct TestLoopOutPayment {
-        events: Rc<RefCell<Vec<&'static str>>>,
+        events: Shared<Vec<&'static str>>,
         preimage: Hash256,
+        label: Option<&'static str>,
     }
 
     impl TestLoopOutPayment {
-        fn new(events: Rc<RefCell<Vec<&'static str>>>) -> Self {
+        fn new(events: Shared<Vec<&'static str>>) -> Self {
             Self {
                 events,
                 preimage: [4u8; 32].into(),
+                label: None,
+            }
+        }
+
+        fn new_with_label(events: Shared<Vec<&'static str>>, label: &'static str) -> Self {
+            Self {
+                events,
+                preimage: [4u8; 32].into(),
+                label: Some(label),
             }
         }
     }
@@ -844,13 +1081,108 @@ mod tests {
             &mut self,
             _request: crate::liquidity::payment::LoopOutPaymentRequest,
         ) -> Result<Hash256, Self::Error> {
-            self.events.borrow_mut().push("payment_send");
+            let event = match self.label {
+                Some("runtime") => "send_payment",
+                _ => "payment_send",
+            };
+            self.events.borrow_mut().push(event);
             Ok(self.preimage)
         }
     }
 
+    struct RuntimeActorHarness {
+        events: Shared<Vec<&'static str>>,
+        store: TestLiquidityStore,
+        chain: TestLiquidityChain,
+        payment: TestLoopOutPayment,
+        quotes: Shared<HashMap<Hash256, LoopOutQuoteTerms>>,
+    }
+
+    impl RuntimeActorHarness {
+        fn new_client() -> Self {
+            Self::new("client")
+        }
+
+        fn new_provider() -> Self {
+            Self::new("provider")
+        }
+
+        fn new(label: &'static str) -> Self {
+            let events = Shared::new(Vec::new());
+            Self {
+                events: events.clone(),
+                store: TestLiquidityStore::new(events.clone(), label),
+                chain: TestLiquidityChain::new_with_label(events.clone(), "runtime"),
+                payment: TestLoopOutPayment::new_with_label(events, "runtime"),
+                quotes: Shared::new(HashMap::new()),
+            }
+        }
+
+        fn loop_out_quote_terms(&self) -> LoopOutQuoteTerms {
+            test_loop_out_quote(now_ms() + 60_000)
+        }
+
+        fn store_quote(&self, quote: LoopOutQuoteTerms) {
+            self.quotes.borrow_mut().insert(quote.quote_id, quote);
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.events.borrow().clone()
+        }
+
+        async fn call_loop_out(
+            &self,
+            quote_id: Hash256,
+        ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+            let actor = self.spawn_actor().await;
+            ractor::call!(actor, |reply| LiquidityActorMessage::LoopOut(
+                LoopOutParams {
+                    quote_id: quote_id.into(),
+                    max_provider_fee: 1,
+                    max_routing_fee: 1,
+                },
+                reply
+            ))
+            .unwrap()
+        }
+
+        async fn call_provider_accept(
+            &self,
+            quote_id: Hash256,
+        ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+            let actor = self.spawn_actor().await;
+            ractor::call!(actor, |reply| {
+                LiquidityActorMessage::ProviderAcceptLoopOut(
+                    ProviderAcceptLoopOutParams {
+                        quote_id: quote_id.into(),
+                        claimant_lock: "0x".to_string(),
+                        refund_lock: "0x".to_string(),
+                    },
+                    reply,
+                )
+            })
+            .unwrap()
+        }
+
+        async fn spawn_actor(&self) -> ractor::ActorRef<LiquidityActorMessage> {
+            let (actor, _handle) = ractor::Actor::spawn(
+                None,
+                LiquidityActor::<_, _, _>(std::marker::PhantomData),
+                LiquidityActorArguments {
+                    store: self.store.clone(),
+                    payment: self.payment.clone(),
+                    chain: self.chain.clone(),
+                    quotes: self.quotes.borrow().clone(),
+                },
+            )
+            .await
+            .unwrap();
+            actor
+        }
+    }
+
     struct LoopOutActorTestHarness {
-        events: Rc<RefCell<Vec<&'static str>>>,
+        events: Shared<Vec<&'static str>>,
         client_store: TestLiquidityStore,
         provider_store: TestLiquidityStore,
         chain: TestLiquidityChain,
@@ -859,7 +1191,7 @@ mod tests {
 
     impl LoopOutActorTestHarness {
         fn new_with_real_orchestrator() -> Self {
-            let events = Rc::new(RefCell::new(Vec::new()));
+            let events = Shared::new(Vec::new());
             Self {
                 events: events.clone(),
                 client_store: TestLiquidityStore::new(events.clone(), "client"),
@@ -997,6 +1329,57 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn liquidity_actor_loop_out_persists_before_payment_and_claim() {
+        let harness = RuntimeActorHarness::new_client();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        let response = harness.call_loop_out(quote.quote_id).await.unwrap();
+
+        assert_eq!(response.swap_id, quote.quote_id.into());
+        assert_eq!(
+            harness.events(),
+            vec![
+                "client_insert_created",
+                "client_transition_quoted",
+                "client_transition_payout_pending",
+                "watch_payout",
+                "client_transition_payout_locked",
+                "client_transition_payment_in_flight",
+                "send_payment",
+                "client_persist_preimage",
+                "client_transition_payment_settled",
+                "client_transition_claim_pending",
+                "broadcast_claim",
+                "watch_claim",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn liquidity_actor_provider_accept_persists_outpoint_before_broadcast() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        let response = harness.call_provider_accept(quote.quote_id).await.unwrap();
+
+        assert_eq!(response.swap_id, quote.quote_id.into());
+        assert_eq!(
+            harness.events(),
+            vec![
+                "provider_insert_created",
+                "provider_transition_quoted",
+                "provider_transition_payout_pending",
+                "reserve_payout",
+                "provider_persist_outpoint",
+                "broadcast_payout",
+                "watch_payout",
+            ]
+        );
+    }
+
     #[test]
     fn client_payment_requires_payout_locked_state() {
         assert!(client_can_start_payment(LiquiditySwapState::PayoutLocked));
@@ -1125,7 +1508,7 @@ mod tests {
 
     #[test]
     fn loop_out_client_claim_broadcast_waits_for_confirmation_before_success() {
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
         let now_ms = 1_000;
@@ -1239,7 +1622,7 @@ mod tests {
 
     #[test]
     fn loop_out_client_claim_requires_persisted_preimage_before_broadcast() {
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
         let now_ms = 1_000;
@@ -1284,7 +1667,7 @@ mod tests {
 
     #[test]
     fn loop_out_client_claim_retries_after_transient_chain_failure() {
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
         let now_ms = 1_000;
@@ -1372,7 +1755,7 @@ mod tests {
 
     #[test]
     fn loop_out_payment_request_overflow_does_not_mark_payment_in_flight() {
-        let events = Rc::new(RefCell::new(Vec::new()));
+        let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut payment = TestLoopOutPayment::new(events.clone());
         let now_ms = 1_000;
