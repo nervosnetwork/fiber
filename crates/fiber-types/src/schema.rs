@@ -20,6 +20,11 @@
 //! | 232          | Payment_hash         | CchOrder                    |
 //! | 233          | Payment_hash         | CchReceiveBtcOrderCreation  |
 //! | 234          | Payment_hash         | CchSendBtcOrderCreation    |
+//! | 240          | Hash256              | LiquiditySwap               |
+//! | 241          | LiquiditySwapState   | LiquiditySwapStateIndex     |
+//! | 242          | String               | LiquiditySwapAssetIndex     |
+//! | 243          | String               | LiquidityAsset              |
+//! | 244          | Hash256              | LiquidityLoopOutQuote       |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -61,3 +66,4 @@ pub const LIQUIDITY_SWAP_PREFIX: u8 = 240;
 pub const LIQUIDITY_SWAP_STATE_PREFIX: u8 = 241;
 pub const LIQUIDITY_SWAP_ASSET_PREFIX: u8 = 242;
 pub const LIQUIDITY_ASSET_PREFIX: u8 = 243;
+pub const LIQUIDITY_LOOP_OUT_QUOTE_PREFIX: u8 = 244;

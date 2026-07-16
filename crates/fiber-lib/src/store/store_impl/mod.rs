@@ -18,7 +18,7 @@ use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlc
 use crate::fiber::types::HoldTlc;
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
-    LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapUpdate,
+    LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapUpdate, LoopOutQuoteRecord,
 };
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
@@ -130,6 +130,10 @@ impl Store {
 
     fn liquidity_swap_key(swap_id: &Hash256) -> Vec<u8> {
         [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat()
+    }
+
+    fn loop_out_quote_key(quote_id: &Hash256) -> Vec<u8> {
+        [&[LIQUIDITY_LOOP_OUT_QUOTE_PREFIX], quote_id.as_ref()].concat()
     }
 
     fn liquidity_swap_state_index_key(state: LiquiditySwapState, swap_id: &Hash256) -> Vec<u8> {
@@ -451,6 +455,13 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            LIQUIDITY_LOOP_OUT_QUOTE_PREFIX => {
+                check_deserialization::<LoopOutQuoteRecord>(
+                    &value,
+                    "LIQUIDITY_LOOP_OUT_QUOTE_PREFIX",
+                    &mut errors,
+                );
+            }
             #[cfg(not(target_arch = "wasm32"))]
             CCH_ORDER_PREFIX => {
                 check_deserialization::<CchOrder>(&value, "CCH_ORDER_PREFIX", &mut errors);
@@ -610,6 +621,7 @@ pub enum KeyValue {
     LiquiditySwapStateIndex((LiquiditySwapState, Hash256)),
     LiquiditySwapAssetIndex((String, Hash256)),
     LiquidityAsset(String, LiquidityAsset),
+    LoopOutQuote(Hash256, LoopOutQuoteRecord),
 }
 
 /// Recorded store changes.
@@ -766,6 +778,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::LiquidityAsset(asset_id, _) => {
                 [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat()
             }
+            KeyValue::LoopOutQuote(quote_id, _) => Store::loop_out_quote_key(quote_id),
         }
     }
 
@@ -820,6 +833,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::LiquiditySwapStateIndex(_) => Vec::new(),
             KeyValue::LiquiditySwapAssetIndex(_) => Vec::new(),
             KeyValue::LiquidityAsset(_, asset) => serialize_to_vec(asset, "LiquidityAsset"),
+            KeyValue::LoopOutQuote(_, quote) => serialize_to_vec(quote, "LoopOutQuoteRecord"),
         }
     }
 }
@@ -1395,6 +1409,32 @@ impl ChannelOpenRecordStore for Store {
 }
 
 impl LiquidityStore for Store {
+    fn insert_loop_out_quote(
+        &self,
+        quote: crate::liquidity::types::LoopOutQuoteTerms,
+        created_at: u64,
+    ) -> Result<(), LiquidityStoreError> {
+        let record = LoopOutQuoteRecord::from_terms(quote, created_at);
+        let mut batch = self.batch();
+        let quote = KeyValue::LoopOutQuote(record.quote_id, record);
+        batch.put(quote.key(), quote.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_loop_out_quote(
+        &self,
+        quote_id: &Hash256,
+    ) -> Result<Option<crate::liquidity::types::LoopOutQuoteTerms>, LiquidityStoreError> {
+        let key = Self::loop_out_quote_key(quote_id);
+        self.get(key)
+            .map(|value| {
+                deserialize_liquidity::<LoopOutQuoteRecord>(value.as_ref(), "LoopOutQuoteRecord")
+            })
+            .transpose()
+            .map(|record| record.map(LoopOutQuoteRecord::into_terms))
+    }
+
     fn insert_liquidity_swap(&self, swap: LiquiditySwapRecord) -> Result<(), LiquidityStoreError> {
         if self.get_liquidity_swap(&swap.swap_id)?.is_some() {
             return Err(LiquidityStoreError::Backend(format!(

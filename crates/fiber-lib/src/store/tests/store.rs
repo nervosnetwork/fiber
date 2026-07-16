@@ -28,6 +28,7 @@ use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
     LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
 };
+use crate::liquidity::types::LoopOutQuoteTerms;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
@@ -52,7 +53,8 @@ use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::schema::{
-    LIQUIDITY_ASSET_PREFIX, LIQUIDITY_SWAP_PREFIX, LIQUIDITY_SWAP_STATE_PREFIX,
+    LIQUIDITY_ASSET_PREFIX, LIQUIDITY_LOOP_OUT_QUOTE_PREFIX, LIQUIDITY_SWAP_PREFIX,
+    LIQUIDITY_SWAP_STATE_PREFIX,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
@@ -67,6 +69,8 @@ use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
+use secp256k1::SecretKey;
+use secp256k1::{Keypair, SECP256K1};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;
@@ -182,6 +186,41 @@ fn mock_liquidity_asset(asset_id: &str) -> LiquidityAsset {
         proportional_fee_ppm: 1_000,
         enabled: true,
     }
+}
+
+fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    LoopOutQuoteTerms {
+        quote_id: [seed; 32].into(),
+        provider: Pubkey::from(sk.public_key(SECP256K1)),
+        asset: mock_liquidity_asset("ckb"),
+        amount: 10_000,
+        provider_fee: 100,
+        routing_fee_limit: 50,
+        onchain_fee_estimate_ckb: 1_000,
+        capacity_requirement_ckb: 10_000,
+        payment_hash: [seed.wrapping_add(1); 32].into(),
+        expires_at: 20_000,
+        payout_deadline: 30_000,
+        refund_after_lock_time: 40_000,
+        claimant_lock: Default::default(),
+        refund_lock: Default::default(),
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_loop_out_quote_insert_get_and_missing() {
+    let (store, _dir) = generate_store();
+    let quote = mock_loop_out_quote(77);
+
+    store.insert_loop_out_quote(quote.clone(), 1_000).unwrap();
+
+    assert_eq!(
+        store.get_loop_out_quote(&quote.quote_id).unwrap(),
+        Some(quote)
+    );
+    assert_eq!(store.get_loop_out_quote(&[99u8; 32].into()).unwrap(), None);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -301,12 +340,14 @@ fn test_store_liquidity_check_validate_rejects_corrupt_records() {
 
     store.put([LIQUIDITY_SWAP_PREFIX], [0]);
     store.put([LIQUIDITY_ASSET_PREFIX], [0]);
+    store.put([LIQUIDITY_LOOP_OUT_QUOTE_PREFIX], [0]);
     drop(store);
 
     let error = check_validate(dir.as_ref()).expect_err("corrupt liquidity records must fail");
 
     assert!(error.contains("LIQUIDITY_SWAP_PREFIX"));
     assert!(error.contains("LIQUIDITY_ASSET_PREFIX"));
+    assert!(error.contains("LIQUIDITY_LOOP_OUT_QUOTE_PREFIX"));
 }
 
 #[cfg(not(target_arch = "wasm32"))]

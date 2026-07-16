@@ -1,9 +1,13 @@
 //! Liquidity persistence traits and records.
 
-use fiber_types::{EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState};
+use fiber_types::{
+    EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState, Pubkey,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use thiserror::Error;
+
+use crate::liquidity::types::LoopOutQuoteTerms;
 
 /// Local role for a persisted liquidity swap.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -109,6 +113,87 @@ pub struct LiquiditySwapPage {
     pub next_cursor: Option<String>,
 }
 
+/// Persisted provider Loop Out quote fields required to reconstruct accepted terms.
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LoopOutQuoteRecord {
+    /// Unique provider quote identifier.
+    pub quote_id: Hash256,
+    /// Provider node public key.
+    pub provider: Pubkey,
+    /// Asset being swapped out.
+    pub asset: LiquidityAsset,
+    /// Net amount the client wants to receive on-chain.
+    pub amount: u128,
+    /// Provider fee charged in the quoted asset unit.
+    pub provider_fee: u128,
+    /// Maximum Fiber routing fee the client accepts.
+    pub routing_fee_limit: u128,
+    /// Estimated CKB transaction fee for the on-chain operation.
+    pub onchain_fee_estimate_ckb: u64,
+    /// CKB capacity required for the payout lock output.
+    pub capacity_requirement_ckb: u64,
+    /// Payment hash used for the Fiber payment and on-chain lock.
+    pub payment_hash: Hash256,
+    /// Quote expiration timestamp in milliseconds.
+    pub expires_at: u64,
+    /// Deadline timestamp by which the payout lock must be confirmed.
+    pub payout_deadline: u64,
+    /// Lock time after which the provider may refund the payout lock.
+    pub refund_after_lock_time: u64,
+    /// Client claimant lock used for the claim transaction.
+    #[serde_as(as = "EntityHex")]
+    pub claimant_lock: ckb_types::packed::Script,
+    /// Provider refund lock used if the swap is not paid and claimed.
+    #[serde_as(as = "EntityHex")]
+    pub refund_lock: ckb_types::packed::Script,
+    /// Creation timestamp in milliseconds.
+    pub created_at: u64,
+}
+
+impl LoopOutQuoteRecord {
+    /// Build a persisted record from quote terms and creation timestamp.
+    pub fn from_terms(quote: LoopOutQuoteTerms, created_at: u64) -> Self {
+        Self {
+            quote_id: quote.quote_id,
+            provider: quote.provider,
+            asset: quote.asset,
+            amount: quote.amount,
+            provider_fee: quote.provider_fee,
+            routing_fee_limit: quote.routing_fee_limit,
+            onchain_fee_estimate_ckb: quote.onchain_fee_estimate_ckb,
+            capacity_requirement_ckb: quote.capacity_requirement_ckb,
+            payment_hash: quote.payment_hash,
+            expires_at: quote.expires_at,
+            payout_deadline: quote.payout_deadline,
+            refund_after_lock_time: quote.refund_after_lock_time,
+            claimant_lock: quote.claimant_lock,
+            refund_lock: quote.refund_lock,
+            created_at,
+        }
+    }
+
+    /// Reconstruct executable quote terms from this persisted record.
+    pub fn into_terms(self) -> LoopOutQuoteTerms {
+        LoopOutQuoteTerms {
+            quote_id: self.quote_id,
+            provider: self.provider,
+            asset: self.asset,
+            amount: self.amount,
+            provider_fee: self.provider_fee,
+            routing_fee_limit: self.routing_fee_limit,
+            onchain_fee_estimate_ckb: self.onchain_fee_estimate_ckb,
+            capacity_requirement_ckb: self.capacity_requirement_ckb,
+            payment_hash: self.payment_hash,
+            expires_at: self.expires_at,
+            payout_deadline: self.payout_deadline,
+            refund_after_lock_time: self.refund_after_lock_time,
+            claimant_lock: self.claimant_lock,
+            refund_lock: self.refund_lock,
+        }
+    }
+}
+
 /// State transition metadata persisted with each transition.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LiquidityStateTransition {
@@ -137,6 +222,19 @@ pub struct LiquiditySwapUpdate {
 
 /// Store interface required by liquidity swap execution and recovery.
 pub trait LiquidityStore {
+    /// Persist provider-generated Loop Out quote terms.
+    fn insert_loop_out_quote(
+        &self,
+        quote: LoopOutQuoteTerms,
+        created_at: u64,
+    ) -> Result<(), LiquidityStoreError>;
+
+    /// Get provider-generated Loop Out quote terms by quote id.
+    fn get_loop_out_quote(
+        &self,
+        quote_id: &Hash256,
+    ) -> Result<Option<LoopOutQuoteTerms>, LiquidityStoreError>;
+
     /// Insert a new swap record.
     fn insert_liquidity_swap(&self, swap: LiquiditySwapRecord) -> Result<(), LiquidityStoreError>;
 

@@ -12,7 +12,9 @@ use fiber_json_types::{
 };
 use fiber_types::{Hash256, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use secp256k1::{SecretKey, SECP256K1};
 
+use crate::liquidity::quote::validate_loop_out_quote_request;
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
     LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
@@ -81,9 +83,6 @@ pub struct LiquidityActorArguments<S, P, C> {
     pub payment: P,
     /// Chain adapter used by payout and claim workflows.
     pub chain: C,
-    /// Test-only accepted quote lookup until Task 3 adds durable quote storage.
-    #[cfg(test)]
-    pub quotes: std::collections::HashMap<Hash256, LoopOutQuoteTerms>,
 }
 
 /// Durable mutation actor for liquidity workflows.
@@ -94,8 +93,6 @@ pub struct LiquidityActorState<S, P, C> {
     store: S,
     payment: P,
     chain: C,
-    #[cfg(test)]
-    quotes: std::collections::HashMap<Hash256, LoopOutQuoteTerms>,
 }
 
 #[async_trait]
@@ -120,8 +117,6 @@ where
             store: args.store,
             payment: args.payment,
             chain: args.chain,
-            #[cfg(test)]
-            quotes: args.quotes,
         })
     }
 
@@ -165,10 +160,9 @@ where
                     "client quote delegation is wired in a later task".to_string(),
                 )));
             }
-            LiquidityActorMessage::ProviderQuoteLoopOut(_params, reply) => {
-                let _ = reply.send(Err(LiquidityLoopOutError::Store(
-                    "provider quote delegation is wired in a later task".to_string(),
-                )));
+            LiquidityActorMessage::ProviderQuoteLoopOut(params, reply) => {
+                let result = state.handle_provider_quote_loop_out(params);
+                let _ = reply.send(result);
             }
         }
         Ok(())
@@ -196,6 +190,48 @@ where
             .watch_payout_lock(swap_id, myself.clone())
             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
         self.swap_response(&swap_id)
+    }
+
+    fn handle_provider_quote_loop_out(
+        &mut self,
+        params: ProviderQuoteLoopOutParams,
+    ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        let asset = self
+            .store
+            .get_liquidity_asset(&params.asset_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| LiquidityLoopOutError::AssetNotFound(params.asset_id.clone()))?;
+        let now_ms = now_ms();
+        let expires_at = quote_expires_at(now_ms, params.expires_after_seconds)?;
+        let validated = validate_loop_out_quote_request(
+            &asset,
+            params.amount,
+            params.max_provider_fee,
+            params.max_routing_fee,
+            asset.udt_type_script.as_ref(),
+            now_ms,
+            expires_at,
+        )?;
+        let terms = LoopOutQuoteTerms {
+            quote_id: loop_out_quote_hash(&params, now_ms, b"quote"),
+            provider: deterministic_provider_pubkey(),
+            asset,
+            amount: params.amount,
+            provider_fee: validated.provider_fee,
+            routing_fee_limit: validated.routing_fee_limit,
+            onchain_fee_estimate_ckb: 1_000,
+            capacity_requirement_ckb: 10_000,
+            payment_hash: loop_out_quote_hash(&params, now_ms, b"payment"),
+            expires_at: validated.expires_at,
+            payout_deadline: validated.expires_at.saturating_add(10_000),
+            refund_after_lock_time: validated.expires_at.saturating_add(20_000),
+            claimant_lock: Default::default(),
+            refund_lock: Default::default(),
+        };
+        self.store
+            .insert_loop_out_quote(terms.clone(), now_ms)
+            .map_err(map_store_error)?;
+        Ok(quote_response_from_terms(terms))
     }
 
     fn handle_payout_confirmed(
@@ -244,18 +280,13 @@ where
         self.swap_response(&swap_id)
     }
 
-    #[cfg(test)]
     fn quote_terms(&self, quote_id: &Hash256) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
-        self.quotes.get(quote_id).cloned().ok_or_else(|| {
-            LiquidityLoopOutError::Store(format!("loop out quote not found: {quote_id:?}"))
-        })
-    }
-
-    #[cfg(not(test))]
-    fn quote_terms(&self, quote_id: &Hash256) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
-        Err(LiquidityLoopOutError::Store(format!(
-            "loop out quote terms are not durably persisted yet: {quote_id:?}"
-        )))
+        self.store
+            .get_loop_out_quote(quote_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("loop out quote not found: {quote_id:?}"))
+            })
     }
 
     fn swap_response(
@@ -275,6 +306,48 @@ where
             payment_hash: swap.payment_hash.into(),
             created_at: swap.created_at,
         })
+    }
+}
+
+fn quote_expires_at(now_ms: u64, expires_after_seconds: u64) -> Result<u64, LiquidityLoopOutError> {
+    expires_after_seconds
+        .checked_mul(1_000)
+        .and_then(|ttl_ms| now_ms.checked_add(ttl_ms))
+        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
+}
+
+fn loop_out_quote_hash(params: &ProviderQuoteLoopOutParams, now_ms: u64, domain: &[u8]) -> Hash256 {
+    let mut seed = Vec::new();
+    seed.extend_from_slice(domain);
+    seed.extend_from_slice(params.asset_id.as_bytes());
+    seed.extend_from_slice(&params.amount.to_le_bytes());
+    seed.extend_from_slice(params.receiver.as_bytes());
+    seed.extend_from_slice(&params.max_provider_fee.to_le_bytes());
+    seed.extend_from_slice(&params.max_routing_fee.to_le_bytes());
+    seed.extend_from_slice(&params.expires_after_seconds.to_le_bytes());
+    seed.extend_from_slice(&now_ms.to_le_bytes());
+    ckb_hash::blake2b_256(seed).into()
+}
+
+fn deterministic_provider_pubkey() -> fiber_types::Pubkey {
+    let sk = SecretKey::from_slice(&[42; 32]).expect("valid deterministic provider secret key");
+    fiber_types::Pubkey::from(sk.public_key(SECP256K1))
+}
+
+fn quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuoteResponse {
+    LiquidityQuoteResponse {
+        quote_id: terms.quote_id.into(),
+        swap_kind: fiber_json_types::LiquiditySwapKind::LoopOut,
+        asset_id: terms.asset.asset_id,
+        amount: terms.amount,
+        provider_fee: terms.provider_fee,
+        routing_fee_limit: terms.routing_fee_limit,
+        onchain_fee_estimate_ckb: terms.onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: terms.capacity_requirement_ckb,
+        payment_hash: terms.payment_hash.into(),
+        expires_at: terms.expires_at,
+        payout_deadline: Some(terms.payout_deadline),
+        refund_after_lock_time: terms.refund_after_lock_time,
     }
 }
 
@@ -794,6 +867,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestLiquidityStore {
         swaps: Shared<HashMap<Hash256, LiquiditySwapRecord>>,
+        quotes: Shared<HashMap<Hash256, LoopOutQuoteTerms>>,
+        assets: Shared<HashMap<String, LiquidityAsset>>,
         events: Shared<Vec<&'static str>>,
         label: Option<&'static str>,
     }
@@ -802,6 +877,8 @@ mod tests {
         fn new(events: Shared<Vec<&'static str>>, label: &'static str) -> Self {
             Self {
                 swaps: Shared::new(HashMap::new()),
+                quotes: Shared::new(HashMap::new()),
+                assets: Shared::new(HashMap::new()),
                 events,
                 label: Some(label),
             }
@@ -905,6 +982,22 @@ mod tests {
     }
 
     impl LiquidityStore for TestLiquidityStore {
+        fn insert_loop_out_quote(
+            &self,
+            quote: LoopOutQuoteTerms,
+            _created_at: u64,
+        ) -> Result<(), LiquidityStoreError> {
+            self.quotes.borrow_mut().insert(quote.quote_id, quote);
+            Ok(())
+        }
+
+        fn get_loop_out_quote(
+            &self,
+            quote_id: &Hash256,
+        ) -> Result<Option<LoopOutQuoteTerms>, LiquidityStoreError> {
+            Ok(self.quotes.borrow().get(quote_id).cloned())
+        }
+
         fn insert_liquidity_swap(
             &self,
             swap: LiquiditySwapRecord,
@@ -979,22 +1072,22 @@ mod tests {
             Ok(())
         }
 
-        fn upsert_liquidity_asset(
-            &self,
-            _asset: LiquidityAsset,
-        ) -> Result<(), LiquidityStoreError> {
+        fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
+            self.assets
+                .borrow_mut()
+                .insert(asset.asset_id.clone(), asset);
             Ok(())
         }
 
         fn get_liquidity_asset(
             &self,
-            _asset_id: &str,
+            asset_id: &str,
         ) -> Result<Option<LiquidityAsset>, LiquidityStoreError> {
-            Ok(None)
+            Ok(self.assets.borrow().get(asset_id).cloned())
         }
 
         fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
-            Ok(Vec::new())
+            Ok(self.assets.borrow().values().cloned().collect())
         }
     }
 
@@ -1138,7 +1231,6 @@ mod tests {
         store: TestLiquidityStore,
         chain: TestLiquidityChain,
         payment: TestLoopOutPayment,
-        quotes: Shared<HashMap<Hash256, LoopOutQuoteTerms>>,
     }
 
     impl RuntimeActorHarness {
@@ -1148,6 +1240,15 @@ mod tests {
 
         fn new_provider() -> Self {
             Self::new("provider")
+        }
+
+        fn new_provider_with_asset() -> Self {
+            let harness = Self::new_provider();
+            harness
+                .store
+                .upsert_liquidity_asset(test_loop_out_quote(now_ms() + 60_000).asset)
+                .unwrap();
+            harness
         }
 
         fn new(label: &'static str) -> Self {
@@ -1164,7 +1265,6 @@ mod tests {
                     },
                 ),
                 payment: TestLoopOutPayment::new_with_label(events, "runtime"),
-                quotes: Shared::new(HashMap::new()),
             }
         }
 
@@ -1173,7 +1273,7 @@ mod tests {
         }
 
         fn store_quote(&self, quote: LoopOutQuoteTerms) {
-            self.quotes.borrow_mut().insert(quote.quote_id, quote);
+            self.store.insert_loop_out_quote(quote, now_ms()).unwrap();
         }
 
         fn events(&self) -> Vec<&'static str> {
@@ -1193,6 +1293,17 @@ mod tests {
                 },
                 reply
             ))
+            .unwrap()
+        }
+
+        async fn call_provider_quote(
+            &self,
+            params: ProviderQuoteLoopOutParams,
+        ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+            let actor = self.spawn_actor().await;
+            ractor::call!(actor, |reply| {
+                LiquidityActorMessage::ProviderQuoteLoopOut(params, reply)
+            })
             .unwrap()
         }
 
@@ -1250,7 +1361,6 @@ mod tests {
                     store: self.store.clone(),
                     payment: self.payment.clone(),
                     chain: self.chain.clone(),
-                    quotes: self.quotes.borrow().clone(),
                 },
             )
             .await
@@ -1474,6 +1584,38 @@ mod tests {
                 "watch_payout",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_quote_loop_out_validates_asset_and_returns_terms() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+
+        let quote = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                receiver: "ckt1receiver".to_string(),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(quote.asset_id, "ckb");
+        assert_eq!(quote.amount, 1000);
+        assert!(quote.provider_fee <= 100);
+        assert!(quote.routing_fee_limit <= 50);
+    }
+
+    #[tokio::test]
+    async fn loop_out_rejects_unknown_quote_id_before_side_effects() {
+        let harness = RuntimeActorHarness::new_client();
+
+        let error = harness.call_loop_out([9u8; 32].into()).await.unwrap_err();
+
+        assert!(error.to_string().contains("quote"));
+        assert!(harness.events().is_empty());
     }
 
     #[tokio::test]

@@ -329,6 +329,22 @@ mod tests {
     }
 
     impl LiquidityStore for MockLiquidityStore {
+        fn insert_loop_out_quote(
+            &self,
+            _quote: crate::liquidity::types::LoopOutQuoteTerms,
+            _created_at: u64,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn get_loop_out_quote(
+            &self,
+            _quote_id: &Hash256,
+        ) -> Result<Option<crate::liquidity::types::LoopOutQuoteTerms>, LiquidityStoreError>
+        {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
         fn insert_liquidity_swap(
             &self,
             _swap: StoreLiquiditySwapRecord,
