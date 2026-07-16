@@ -54,8 +54,7 @@ pub enum LiquidityActorMessage {
 }
 
 impl LiquidityActorMessage {
-    /// Stable variant names used by tests and RPC wiring assertions.
-    pub fn variant_names() -> &'static [&'static str] {
+    fn variant_names() -> &'static [&'static str] {
         &[
             "quote_loop_out",
             "loop_out",
