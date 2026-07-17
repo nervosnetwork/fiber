@@ -328,7 +328,7 @@ pub mod server {
         }
         if config.is_module_enabled("liquidity") {
             modules
-                .merge(LiquidityRpcServerImpl::new(store.clone()).into_rpc())
+                .merge(LiquidityRpcServerImpl::new(store.clone(), None).into_rpc())
                 .unwrap();
         }
         if let Some(network_actor) = network_actor {

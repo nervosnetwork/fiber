@@ -9,12 +9,15 @@ use fiber_types::LiquiditySwapState;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+use ractor::{call, ActorRef};
 
+use crate::liquidity::actor::LiquidityActorMessage;
 use crate::liquidity::store::{
     LiquidityStore, LiquiditySwapFilter, LiquiditySwapKind,
     LiquiditySwapRecord as StoreLiquiditySwapRecord,
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};
+use crate::{handle_actor_call, log_and_error};
 
 /// RPC module for liquidity management.
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,6 +69,7 @@ trait LiquidityRpc {
 /// Server implementation for the liquidity RPC module.
 pub struct LiquidityRpcServerImpl<S> {
     store: S,
+    actor: Option<ActorRef<LiquidityActorMessage>>,
 }
 
 /// Return the JSON-RPC method names exposed by the liquidity module.
@@ -82,8 +86,8 @@ pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
 
 impl<S> LiquidityRpcServerImpl<S> {
     /// Construct a liquidity RPC server backed by `store`.
-    pub fn new(store: S) -> Self {
-        Self { store }
+    pub fn new(store: S, actor: Option<ActorRef<LiquidityActorMessage>>) -> Self {
+        Self { store, actor }
     }
 }
 
@@ -143,21 +147,29 @@ where
     /// Request a Loop Out quote from a provider.
     pub async fn quote_loop_out(
         &self,
-        _params: QuoteLoopOutParams,
+        params: QuoteLoopOutParams,
     ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
-        Err(rpc_error(
-            "liquidity quote execution is unavailable until the liquidity actor RPC boundary is wired",
-        ))
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let message = |reply| LiquidityActorMessage::QuoteLoopOut(params.clone(), reply);
+
+        handle_actor_call!(actor.clone(), message, params)
     }
 
     /// Execute a Loop Out swap after quote acceptance.
     pub async fn loop_out(
         &self,
-        _params: LoopOutParams,
+        params: LoopOutParams,
     ) -> Result<LiquiditySwapResponse, ErrorObjectOwned> {
-        Err(rpc_error(
-            "liquidity swap execution is unavailable until the liquidity actor RPC boundary is wired",
-        ))
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let message = |reply| LiquidityActorMessage::LoopOut(params.clone(), reply);
+
+        handle_actor_call!(actor.clone(), message, params)
     }
 
     /// Return one persisted liquidity swap.
@@ -202,21 +214,29 @@ where
     /// Provider-side quote endpoint for a Loop Out request.
     pub async fn provider_quote_loop_out(
         &self,
-        _params: ProviderQuoteLoopOutParams,
+        params: ProviderQuoteLoopOutParams,
     ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
-        Err(rpc_error(
-            "provider loop-out quoting is unavailable until the liquidity actor RPC boundary is wired",
-        ))
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let message = |reply| LiquidityActorMessage::ProviderQuoteLoopOut(params.clone(), reply);
+
+        handle_actor_call!(actor.clone(), message, params)
     }
 
     /// Provider-side accept endpoint for a Loop Out quote.
     pub async fn provider_accept_loop_out(
         &self,
-        _params: ProviderAcceptLoopOutParams,
+        params: ProviderAcceptLoopOutParams,
     ) -> Result<LiquiditySwapResponse, ErrorObjectOwned> {
-        Err(rpc_error(
-            "provider loop-out acceptance is unavailable until the liquidity actor RPC boundary is wired",
-        ))
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let message = |reply| LiquidityActorMessage::ProviderAcceptLoopOut(params.clone(), reply);
+
+        handle_actor_call!(actor.clone(), message, params)
     }
 }
 
@@ -283,12 +303,14 @@ fn liquidity_swap_state_to_string(state: LiquiditySwapState) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use fiber_json_types::{GetSwapParams, Hash256 as JsonHash256, ListSwapsParams};
     use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapState};
+    use ractor::{Actor, ActorProcessingErr, ActorRef};
 
     use super::*;
+    use crate::liquidity::actor::LiquidityActorMessage;
     use crate::liquidity::store::{
         LiquidityStateTransition, LiquidityStoreError, LiquiditySwapPage, LiquiditySwapRole,
         LiquiditySwapUpdate,
@@ -430,9 +452,153 @@ mod tests {
         }
     }
 
+    struct LiquidityRpcMock;
+
+    #[async_trait::async_trait]
+    impl Actor for LiquidityRpcMock {
+        type Msg = LiquidityActorMessage;
+        type State = Arc<Mutex<Vec<&'static str>>>;
+        type Arguments = Arc<Mutex<Vec<&'static str>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            events: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(events)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            events: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                LiquidityActorMessage::QuoteLoopOut(_params, reply) => {
+                    events.lock().expect("events lock").push("quote_loop_out");
+                    let _ = reply.send(Ok(liquidity_quote_response()));
+                }
+                LiquidityActorMessage::LoopOut(_params, reply) => {
+                    events.lock().expect("events lock").push("loop_out");
+                    let _ = reply.send(Ok(liquidity_swap_response()));
+                }
+                LiquidityActorMessage::ProviderQuoteLoopOut(_params, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("provider_quote_loop_out");
+                    let _ = reply.send(Ok(liquidity_quote_response()));
+                }
+                LiquidityActorMessage::ProviderAcceptLoopOut(_params, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("provider_accept_loop_out");
+                    let _ = reply.send(Ok(liquidity_swap_response()));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct SpawnedLiquidityRpcMock {
+        ref_: ActorRef<LiquidityActorMessage>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl SpawnedLiquidityRpcMock {
+        fn take_events(&self) -> Vec<&'static str> {
+            std::mem::take(&mut *self.events.lock().expect("events lock"))
+        }
+    }
+
+    async fn spawn_liquidity_rpc_mock() -> SpawnedLiquidityRpcMock {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ref_, _handle) = ractor::Actor::spawn(None, LiquidityRpcMock, events.clone())
+            .await
+            .expect("spawn liquidity rpc mock");
+
+        SpawnedLiquidityRpcMock { ref_, events }
+    }
+
+    fn quote_loop_out_params() -> QuoteLoopOutParams {
+        QuoteLoopOutParams {
+            provider: "provider".to_string(),
+            asset_id: "ckb".to_string(),
+            amount: 100,
+            receiver: "ckt1receiver".to_string(),
+            max_provider_fee: 10,
+            max_routing_fee: 5,
+            expires_after_seconds: 60,
+        }
+    }
+
+    fn loop_out_params() -> LoopOutParams {
+        LoopOutParams {
+            quote_id: JsonHash256([1u8; 32]),
+            max_provider_fee: 10,
+            max_routing_fee: 5,
+        }
+    }
+
+    fn provider_quote_loop_out_params() -> ProviderQuoteLoopOutParams {
+        ProviderQuoteLoopOutParams {
+            asset_id: "ckb".to_string(),
+            amount: 100,
+            receiver: "ckt1receiver".to_string(),
+            max_provider_fee: 10,
+            max_routing_fee: 5,
+            expires_after_seconds: 60,
+        }
+    }
+
+    fn provider_accept_loop_out_params() -> ProviderAcceptLoopOutParams {
+        ProviderAcceptLoopOutParams {
+            quote_id: JsonHash256([1u8; 32]),
+            claimant_lock: "0x".to_string(),
+            refund_lock: "0x".to_string(),
+        }
+    }
+
+    fn liquidity_quote_response() -> LiquidityQuoteResponse {
+        LiquidityQuoteResponse {
+            quote_id: JsonHash256([1u8; 32]),
+            swap_kind: fiber_json_types::LiquiditySwapKind::LoopOut,
+            asset_id: "ckb".to_string(),
+            amount: 100,
+            provider_fee: 10,
+            routing_fee_limit: 5,
+            onchain_fee_estimate_ckb: 1,
+            capacity_requirement_ckb: 61,
+            payment_hash: JsonHash256([3u8; 32]),
+            expires_at: 1000,
+            payout_deadline: Some(2000),
+            refund_after_lock_time: 3000,
+        }
+    }
+
+    fn liquidity_swap_response() -> LiquiditySwapResponse {
+        LiquiditySwapResponse {
+            swap_id: JsonHash256([1u8; 32]),
+            state: "payment_settled".to_string(),
+            payment_hash: JsonHash256([3u8; 32]),
+            created_at: 11,
+        }
+    }
+
+    fn assert_not_placeholder_unavailable(error: Option<ErrorObjectOwned>) {
+        if let Some(error) = error {
+            assert!(!error
+                .to_string()
+                .contains("unavailable until the liquidity actor RPC boundary is wired"));
+        }
+    }
+
     #[test]
     fn liquidity_rpc_methods_are_registered_by_name() {
-        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default()).into_rpc();
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None).into_rpc();
         let methods: HashSet<_> = rpc.method_names().collect();
         let expected: HashSet<_> = liquidity_rpc_method_names().into_iter().collect();
 
@@ -442,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn liquidity_rpc_get_swap_converts_store_record_to_json_dto() {
         let store = MockLiquidityStore::with_swap(liquidity_rpc_swap());
-        let rpc = LiquidityRpcServerImpl::new(store);
+        let rpc = LiquidityRpcServerImpl::new(store, None);
 
         let response = rpc
             .get_swap(GetSwapParams {
@@ -472,7 +638,7 @@ mod tests {
             swaps: vec![liquidity_rpc_swap()],
             next_cursor: Some("next".to_string()),
         });
-        let rpc = LiquidityRpcServerImpl::new(store);
+        let rpc = LiquidityRpcServerImpl::new(store, None);
 
         let response = rpc
             .list_swaps(ListSwapsParams {
@@ -499,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn liquidity_rpc_list_swaps_rejects_invalid_state_before_store_call() {
-        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default());
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None);
 
         let error = rpc
             .list_swaps(ListSwapsParams {
@@ -513,5 +679,87 @@ mod tests {
 
         assert!(error.message().contains("invalid liquidity swap state"));
         assert_eq!(rpc.store.recorded_list_filter(), None);
+    }
+
+    #[tokio::test]
+    async fn loop_out_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc.loop_out(loop_out_params()).await.expect("loop out");
+
+        assert_eq!(response.swap_id, JsonHash256([1u8; 32]));
+        assert_eq!(actor.take_events(), vec!["loop_out"]);
+    }
+
+    #[tokio::test]
+    async fn liquidity_mutation_rpcs_no_longer_return_placeholder_unavailable_errors() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        assert_not_placeholder_unavailable(rpc.quote_loop_out(quote_loop_out_params()).await.err());
+        assert_not_placeholder_unavailable(rpc.loop_out(loop_out_params()).await.err());
+        assert_not_placeholder_unavailable(
+            rpc.provider_quote_loop_out(provider_quote_loop_out_params())
+                .await
+                .err(),
+        );
+        assert_not_placeholder_unavailable(
+            rpc.provider_accept_loop_out(provider_accept_loop_out_params())
+                .await
+                .err(),
+        );
+
+        assert_eq!(
+            actor.take_events(),
+            vec![
+                "quote_loop_out",
+                "loop_out",
+                "provider_quote_loop_out",
+                "provider_accept_loop_out",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn liquidity_mutation_rpcs_report_actor_unavailable_when_missing() {
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None);
+
+        let error = rpc
+            .loop_out(loop_out_params())
+            .await
+            .expect_err("missing actor");
+
+        assert!(error.message().contains("liquidity actor is not available"));
+    }
+
+    #[tokio::test]
+    async fn liquidity_read_rpcs_use_store_without_actor() {
+        let store = MockLiquidityStore::with_page(LiquiditySwapPage {
+            swaps: vec![liquidity_rpc_swap()],
+            next_cursor: None,
+        });
+        let rpc = LiquidityRpcServerImpl::new(store, None);
+
+        let swap = rpc
+            .get_swap(GetSwapParams {
+                swap_id: JsonHash256([1u8; 32]),
+            })
+            .await
+            .expect("get swap");
+        let swaps = rpc
+            .list_swaps(ListSwapsParams {
+                state: None,
+                asset_id: None,
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("list swaps");
+
+        assert!(swap.is_none());
+        assert_eq!(swaps.swaps.len(), 1);
     }
 }
