@@ -156,6 +156,13 @@ pub trait LiquidityStore {
         filter: LiquiditySwapFilter,
     ) -> Result<LiquiditySwapPage, LiquidityStoreError>;
 
+    /// List swaps matching any of the supplied states and swap kind for restart recovery.
+    fn list_liquidity_swaps_by_states(
+        &self,
+        states: &[LiquiditySwapState],
+        swap_kind: LiquiditySwapKind,
+    ) -> Result<Vec<LiquiditySwapRecord>, LiquidityStoreError>;
+
     /// Transition a swap if allowed by the state machine.
     fn update_liquidity_swap_state(
         &self,

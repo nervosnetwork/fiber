@@ -338,6 +338,35 @@ fn test_store_liquidity_records_survive_reopen() {
     );
 }
 
+#[test]
+fn test_store_lists_liquidity_swaps_by_states_and_kind() {
+    let (store, _dir) = generate_store();
+    let payout_pending = mock_liquidity_swap(200, LiquiditySwapState::PayoutPending, "ckb");
+    let payment_settled = mock_liquidity_swap(201, LiquiditySwapState::PaymentSettled, "ckb");
+    let success = mock_liquidity_swap(202, LiquiditySwapState::Success, "ckb");
+    let mut loop_in = mock_liquidity_swap(203, LiquiditySwapState::PayoutPending, "ckb");
+    loop_in.swap_kind = LiquiditySwapKind::LoopIn;
+    store.insert_liquidity_swap(payout_pending.clone()).unwrap();
+    store
+        .insert_liquidity_swap(payment_settled.clone())
+        .unwrap();
+    store.insert_liquidity_swap(success).unwrap();
+    store.insert_liquidity_swap(loop_in).unwrap();
+
+    let mut swaps = store
+        .list_liquidity_swaps_by_states(
+            &[
+                LiquiditySwapState::PayoutPending,
+                LiquiditySwapState::PaymentSettled,
+            ],
+            LiquiditySwapKind::LoopOut,
+        )
+        .unwrap();
+    swaps.sort_by_key(|swap| swap.created_at);
+
+    assert_eq!(swaps, vec![payout_pending, payment_settled]);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_liquidity_check_validate_rejects_corrupt_records() {

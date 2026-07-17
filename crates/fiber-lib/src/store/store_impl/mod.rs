@@ -41,9 +41,9 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, LiquidityAsset, LiquiditySwapState, LoopOutQuoteRecord,
-    PaymentCustomRecords, PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey,
-    TLCId, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, Hash256, LiquidityAsset, LiquiditySwapKind, LiquiditySwapState,
+    LoopOutQuoteRecord, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
@@ -1582,6 +1582,26 @@ impl LiquidityStore for Store {
         let swaps = returned.into_iter().map(|(swap, _)| swap).collect();
 
         Ok(LiquiditySwapPage { swaps, next_cursor })
+    }
+
+    fn list_liquidity_swaps_by_states(
+        &self,
+        states: &[LiquiditySwapState],
+        swap_kind: LiquiditySwapKind,
+    ) -> Result<Vec<LiquiditySwapRecord>, LiquidityStoreError> {
+        let mut swaps = Vec::new();
+        for state in states {
+            swaps.extend(
+                self.list_liquidity_swaps(LiquiditySwapFilter {
+                    state: Some(*state),
+                    ..Default::default()
+                })?
+                .swaps
+                .into_iter()
+                .filter(|swap| swap.swap_kind == swap_kind),
+            );
+        }
+        Ok(swaps)
     }
 
     fn update_liquidity_swap_state(
