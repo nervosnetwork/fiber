@@ -2,6 +2,7 @@
 
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -21,6 +22,8 @@ use crate::liquidity::store::{
     LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
 };
 use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
+
+const LOOP_OUT_PAYMENT_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Messages accepted by the liquidity actor boundary.
 #[derive(Debug)]
@@ -180,7 +183,7 @@ impl<S, P, C> LiquidityActorState<S, P, C>
 where
     S: LiquidityStore,
     P: LoopOutPaymentAdapter + Clone + Send + 'static,
-    P::Error: Display,
+    P::Error: Display + Send + 'static,
     C: LoopOutChainAdapter,
     C::Error: Display,
 {
@@ -260,18 +263,23 @@ where
                 mark_client_payout_locked(&self.store, swap_id, now_ms)?;
                 let quote = self.quote_terms(&swap_id)?;
                 let request = start_client_loop_out_payment(&self.store, quote, now_ms)?;
+                let payment_hash = request.payment_hash;
                 let mut payment = self.payment.clone();
                 tokio::spawn(async move {
                     match payment.send_loop_out_payment(request).await {
                         Ok(preimage) => {
-                            if let Err(error) = myself.send_message(
-                                LiquidityActorMessage::PaymentSettled(swap_id, preimage),
-                            ) {
-                                tracing::warn!(?swap_id, %error, "failed to schedule loop out payment settlement");
-                            }
+                            send_payment_settled(&myself, swap_id, preimage);
                         }
                         Err(error) => {
                             tracing::warn!(?swap_id, %error, "loop out payment remains in flight after send failure");
+                            reconcile_loop_out_payment(
+                                payment,
+                                myself,
+                                swap_id,
+                                payment_hash,
+                                LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
+                            )
+                            .await;
                         }
                     }
                 });
@@ -354,6 +362,49 @@ where
             payment_hash: swap.payment_hash.into(),
             created_at: swap.created_at,
         })
+    }
+}
+
+async fn reconcile_loop_out_payment<P>(
+    mut payment: P,
+    myself: ActorRef<LiquidityActorMessage>,
+    swap_id: Hash256,
+    payment_hash: Hash256,
+    retry_interval: Duration,
+) where
+    P: LoopOutPaymentAdapter + Send + 'static,
+    P::Error: Display,
+{
+    loop {
+        tokio::time::sleep(retry_interval).await;
+        match payment.reload_loop_out_payment(payment_hash).await {
+            Ok(LoopOutPaymentStatus::Settled(preimage)) => {
+                send_payment_settled(&myself, swap_id, preimage);
+                return;
+            }
+            Ok(LoopOutPaymentStatus::InFlight) => {
+                tracing::debug!(?swap_id, ?payment_hash, "loop out payment still in flight");
+            }
+            Ok(LoopOutPaymentStatus::Failed(reason)) => {
+                tracing::warn!(?swap_id, ?payment_hash, %reason, "loop out payment failed while reconciling");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(?swap_id, ?payment_hash, %error, "failed to reload loop out payment; retrying");
+            }
+        }
+    }
+}
+
+fn send_payment_settled(
+    myself: &ActorRef<LiquidityActorMessage>,
+    swap_id: Hash256,
+    preimage: Hash256,
+) {
+    if let Err(error) =
+        myself.send_message(LiquidityActorMessage::PaymentSettled(swap_id, preimage))
+    {
+        tracing::warn!(?swap_id, %error, "failed to schedule loop out payment settlement");
     }
 }
 
@@ -503,6 +554,23 @@ pub trait LoopOutPaymentAdapter {
         &mut self,
         request: crate::liquidity::payment::LoopOutPaymentRequest,
     ) -> Result<Hash256, Self::Error>;
+
+    /// Reload a previously sent Loop Out payment and classify its current state.
+    async fn reload_loop_out_payment(
+        &mut self,
+        payment_hash: Hash256,
+    ) -> Result<LoopOutPaymentStatus, Self::Error>;
+}
+
+/// Reloaded Loop Out payment state used by actor reconciliation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum LoopOutPaymentStatus {
+    /// Payment has settled and revealed the preimage.
+    Settled(Hash256),
+    /// Payment is not terminal yet and should be retried later.
+    InFlight,
+    /// Payment reached a terminal failed state.
+    Failed(String),
 }
 
 /// Create the client-side Loop Out record and persist quote acceptance before side effects.
@@ -1301,6 +1369,7 @@ mod tests {
         label: Option<&'static str>,
         requests: Shared<Vec<crate::liquidity::payment::LoopOutPaymentRequest>>,
         pending_result: Shared<Option<oneshot::Receiver<Result<Hash256, String>>>>,
+        reload_statuses: Shared<Vec<LoopOutPaymentStatus>>,
     }
 
     impl TestLoopOutPayment {
@@ -1311,6 +1380,7 @@ mod tests {
                 label: None,
                 requests: Shared::new(Vec::new()),
                 pending_result: Shared::new(None),
+                reload_statuses: Shared::new(Vec::new()),
             }
         }
 
@@ -1321,11 +1391,13 @@ mod tests {
                 label: Some(label),
                 requests: Shared::new(Vec::new()),
                 pending_result: Shared::new(None),
+                reload_statuses: Shared::new(Vec::new()),
             }
         }
 
-        fn with_pending_result(
+        fn with_pending_result_and_reload_statuses(
             events: Shared<Vec<&'static str>>,
+            reload_statuses: Vec<LoopOutPaymentStatus>,
         ) -> (Self, oneshot::Sender<Result<Hash256, String>>) {
             let (send, recv) = oneshot::channel();
             let payment = Self {
@@ -1334,6 +1406,7 @@ mod tests {
                 label: Some("runtime"),
                 requests: Shared::new(Vec::new()),
                 pending_result: Shared::new(Some(recv)),
+                reload_statuses: Shared::new(reload_statuses),
             };
             (payment, send)
         }
@@ -1364,6 +1437,19 @@ mod tests {
                     .map_err(|_| "payment dropped".to_string())?;
             }
             Ok(self.preimage)
+        }
+
+        async fn reload_loop_out_payment(
+            &mut self,
+            _payment_hash: Hash256,
+        ) -> Result<LoopOutPaymentStatus, Self::Error> {
+            self.events.borrow_mut().push("reload_payment");
+            let mut statuses = self.reload_statuses.borrow_mut();
+            if statuses.is_empty() {
+                Ok(LoopOutPaymentStatus::InFlight)
+            } else {
+                Ok(statuses.remove(0))
+            }
         }
     }
 
@@ -1540,7 +1626,7 @@ mod tests {
     }
 
     async fn wait_for_event(events: &Shared<Vec<&'static str>>, expected: &'static str) {
-        for _ in 0..50 {
+        for _ in 0..250 {
             if events.borrow().contains(&expected) {
                 return;
             }
@@ -1954,7 +2040,11 @@ mod tests {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client");
-        let (payment, release_payment) = TestLoopOutPayment::with_pending_result(events.clone());
+        let (payment, release_payment) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(
+                events.clone(),
+                vec![LoopOutPaymentStatus::Settled([4u8; 32].into())],
+            );
         let quote = test_loop_out_quote(now_ms() + 60_000);
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
@@ -2015,6 +2105,16 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+        wait_for_event(&events, "watch_claim").await;
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::ClaimPending
+        );
+        assert!(events.borrow().contains(&"reload_payment"));
     }
 
     #[tokio::test]
