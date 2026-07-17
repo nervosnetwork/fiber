@@ -336,7 +336,7 @@ pub mod server {
             {
                 match (network_actor.clone(), ckb_chain_actor.clone()) {
                     (Some(network_actor), Some(ckb_chain_actor)) => {
-                        let (actor, _handle) = Actor::spawn(
+                        let (actor, _handle) = Actor::spawn_linked(
                             None,
                             LiquidityActor::<_, _, _>(std::marker::PhantomData),
                             LiquidityActorArguments {
@@ -344,6 +344,7 @@ pub mod server {
                                 payment: NetworkLoopOutPaymentAdapter::new(network_actor),
                                 chain: CkbLiquidityChainWatcher::new(ckb_chain_actor),
                             },
+                            supervisor.clone(),
                         )
                         .await?;
                         match ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal) {

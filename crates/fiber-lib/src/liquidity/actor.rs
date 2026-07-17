@@ -387,6 +387,14 @@ where
         for swap in swaps {
             match recovery_action_for_loop_out_state(swap.state) {
                 Some(RecoveryAction::WatchPayout) => {
+                    if swap.onchain_outpoint.is_none() {
+                        persist_loop_out_payment_failure_context(
+                            &self.store,
+                            swap.swap_id,
+                            "payout recovery missing persisted outpoint".to_string(),
+                        );
+                        continue;
+                    }
                     self.chain
                         .watch_payout_lock(swap.swap_id, myself.clone())
                         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
@@ -1954,6 +1962,36 @@ mod tests {
         assert_eq!(resumed, 1);
         assert_eq!(event_count(&events, "watch_claim"), 1);
         assert_eq!(event_count(&events, "broadcast_claim"), 0);
+    }
+
+    #[tokio::test]
+    async fn payout_pending_recovery_without_outpoint_fails_closed_without_watch() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut swap = recovery_swap(9, LiquiditySwapState::PayoutPending);
+        swap.onchain_outpoint = None;
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 0);
+        assert_eq!(event_count(&events, "watch_payout"), 0);
+        assert_eq!(event_count(&events, "broadcast_payout"), 0);
+        assert_eq!(event_count(&events, "reserve_payout"), 0);
+        assert_eq!(
+            store
+                .get_liquidity_swap(&swap.swap_id)
+                .unwrap()
+                .unwrap()
+                .failure_reason,
+            Some("payout recovery missing persisted outpoint".to_string())
+        );
     }
 
     #[tokio::test]
