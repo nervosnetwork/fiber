@@ -256,9 +256,10 @@ where
     let mut cell_collector = new_default_cell_collector(&rpc_url);
 
     for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
-        let ckb_client =
-            CkbRpcClient::with_builder(&rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
-                .expect("create ckb rpc client should not fail");
+        let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
+            builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
+        })
+        .expect("create ckb rpc client should not fail");
         let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
             &ckb_client,
             &channel_data_funding_tx_lock(&channel_data),

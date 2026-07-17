@@ -1,7 +1,10 @@
 use super::super::FundingError;
 use super::limits::validate_peer_funding_tx_complexity;
 use crate::ckb::{
-    config::{new_ckb_rpc_async_client, new_default_cell_collector},
+    config::{
+        new_ckb_rpc_async_client, new_default_cell_collector, new_default_header_dep_resolver,
+        new_default_transaction_dependency_provider,
+    },
     contracts::get_udt_cell_deps,
 };
 
@@ -11,8 +14,7 @@ use ckb_sdk::{
     rpc::ckb_indexer::SearchMode,
     traits::{
         CellCollector, CellDepResolver, CellQueryOptions, DefaultCellDepResolver,
-        DefaultHeaderDepResolver, DefaultTransactionDependencyProvider, HeaderDepResolver,
-        SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
+        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
     tx_builder::{unlock_tx_async, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
@@ -603,9 +605,10 @@ impl FundingTxBuilder {
                 .cloned(),
         };
 
-        let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
+        let header_dep_resolver = new_default_header_dep_resolver(&self.context.rpc_url);
         let mut cell_collector = new_default_cell_collector(&self.context.rpc_url);
-        let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
+        let tx_dep_provider =
+            new_default_transaction_dependency_provider(&self.context.rpc_url, 10).await;
 
         let tip_block_number: u64 = ckb_client.get_tip_block_number().await?.into();
         trace!(
@@ -779,7 +782,7 @@ impl FundingTx {
         let tx = self.take().ok_or(FundingError::AbsentTx)?;
         let tx_hash_before = tx.hash();
         debug!("Signing funding tx: tx_hash={}", tx_hash_before);
-        let tx_dep_provider = DefaultTransactionDependencyProvider::new(&rpc_url, 10);
+        let tx_dep_provider = new_default_transaction_dependency_provider(&rpc_url, 10).await;
 
         let (tx, _) = unlock_tx_async(tx, &tx_dep_provider, &unlockers)
             .await

@@ -1,0 +1,54 @@
+meta {
+  name: Node3 captures Node2 channel
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {"pubkey": "{{NODE2_PUBKEY}}"}
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+vars:post-response {
+  CAPTURE_CHANNEL_MAX_ITERATIONS: 30
+}
+
+script:post-response {
+  const channels = res.body.result.channels;
+  const iteration = Number(bru.getVar("CAPTURE_BC_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("CAPTURE_CHANNEL_MAX_ITERATIONS"));
+
+  if (channels.length === 1) {
+    bru.setVar("CAPTURE_BC_ITERATION", 0);
+    bru.setVar("BC_CHANNEL", channels[0].channel_id);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("CAPTURE_BC_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("Node3 captures Node2 channel");
+    return;
+  }
+  throw new Error(`expected one Node2-Node3 channel, got ${channels.length}`);
+}

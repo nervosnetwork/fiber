@@ -1896,6 +1896,7 @@ where
         payment_preimage: Hash256,
     ) -> Result<(), Error> {
         let payment_hash = state.payment_hash;
+        let persisted_session_status = self.store.get_persisted_payment_status(payment_hash);
         let (Some(mut session), Some(mut attempt)) =
             self.get_payment_session_with_attempt(payment_hash, Some(attempt_id))
         else {
@@ -1938,7 +1939,12 @@ where
             session.set_success_status();
         }
 
-        if !session.is_dry_run() && (attempt_changed || session.status != previous_session_status) {
+        let session_record_changed = persisted_session_status != Some(session.status);
+        if !session.is_dry_run()
+            && (attempt_changed
+                || session.status != previous_session_status
+                || session_record_changed)
+        {
             self.store.insert_payment_session(session.clone());
             if session.status.is_final() {
                 self.store

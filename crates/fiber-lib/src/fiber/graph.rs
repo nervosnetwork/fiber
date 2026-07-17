@@ -3022,6 +3022,9 @@ where
 
 pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    /// Returns the payment status stored in the session record without recomputing it from
+    /// separately persisted attempts.
+    fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus>;
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession>;
     fn get_payment_sessions_with_status(&self, status: PaymentStatus) -> Vec<PaymentSession>;
     /// Get payment sessions with pagination support.

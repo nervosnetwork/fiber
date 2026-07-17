@@ -259,6 +259,17 @@ fn funding_retry_delay(retry_count: u32) -> Duration {
     Duration::from_millis(delay.min(FUNDING_RETRY_MAX_MILLIS))
 }
 
+fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelState) -> bool {
+    matches!(
+        channel_state,
+        ChannelState::Closed(flags)
+            if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                && flags.intersects(
+                    CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE
+                )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +305,19 @@ mod tests {
             ChannelReadyRetryScanDecision::AlreadyScheduled
         );
         assert_eq!(last_scans.get(&OutPoint::default()), Some(&1_000));
+    }
+
+    #[test]
+    fn completed_force_closed_channel_does_not_need_offline_reconciliation() {
+        let waiting = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        );
+        assert!(should_reconcile_closed_channel_without_live_actor(waiting));
+
+        let completed = ChannelState::Closed(CloseFlags::UNCOOPERATIVE_REMOTE);
+        assert!(!should_reconcile_closed_channel_without_live_actor(
+            completed
+        ));
     }
 }
 
@@ -2381,13 +2405,7 @@ where
                 let now = now_timestamp_as_millis_u64();
 
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if matches!(
-                        channel_state,
-                        ChannelState::Closed(flags)
-                            if flags.intersects(
-                                CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE
-                            )
-                    ) {
+                    if should_reconcile_closed_channel_without_live_actor(channel_state) {
                         if state.channels.contains_key(&channel_id) {
                             continue;
                         }
@@ -4038,6 +4056,31 @@ where
         attempt_id: u64,
         payment_preimage: Hash256,
     ) -> Result<(), String> {
+        if let Some(attempt) = self.store.get_attempt(payment_hash, attempt_id) {
+            if let Some(existing_preimage) = attempt.preimage {
+                if existing_preimage != payment_preimage {
+                    return Err(format!(
+                        "on-chain fulfill preimage conflicts with payment attempt: payment_hash={payment_hash:?}, attempt_id={attempt_id}"
+                    ));
+                }
+            }
+
+            // `get_payment_session` refreshes its status from separately persisted attempts. It
+            // can therefore report Success during the crash window after the attempt write but
+            // before the aggregate session write. Only the raw persisted Success proves that the
+            // acknowledgement from a previous reconciliation was durably completed.
+            if attempt.is_success()
+                && attempt.preimage == Some(payment_preimage)
+                && self.store.get_persisted_payment_status(payment_hash)
+                    == Some(PaymentStatus::Success)
+            {
+                // This also closes the crash window between persisting the final session and
+                // removing the retry index. Clearing an already-empty index is harmless.
+                self.store.clear_attempts_channel_index(payment_hash);
+                return Ok(());
+            }
+        }
+
         let (send, recv) = oneshot::channel();
         let message = PaymentActorMessage::ReconcileOnChainFulfill {
             attempt_id,
@@ -4194,6 +4237,11 @@ where
         {
             Ok((actor, _handle)) => {
                 debug!("Payment actor start {payment_hash}");
+                #[cfg(debug_assertions)]
+                debug_event!(
+                    state.network,
+                    format!("payment actor start: {payment_hash:?}")
+                );
                 state.inflight_payments.insert(payment_hash, actor);
                 Ok(())
             }

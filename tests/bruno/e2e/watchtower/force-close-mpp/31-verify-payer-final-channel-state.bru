@@ -1,0 +1,59 @@
+meta {
+  name: verify payer final channel state
+  type: http
+  seq: 32
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE2_PUBKEY}}",
+        "include_closed": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const paymentHash = bru.getVar("PAYMENT_HASH");
+  const closedChannelId = bru.getVar("FORCE_CLOSED_CHANNEL");
+  const offchainChannelId = bru.getVar("OFFCHAIN_CHANNEL");
+  const closedChannel = res.body.result.channels.find(
+    channel => channel.channel_id === closedChannelId
+  );
+  const offchainChannel = res.body.result.channels.find(
+    channel => channel.channel_id === offchainChannelId
+  );
+  const closedTlc = closedChannel?.pending_tlcs.find(
+    tlc => tlc.payment_hash === paymentHash
+  );
+  const offchainTlc = offchainChannel?.pending_tlcs.find(
+    tlc => tlc.payment_hash === paymentHash
+  );
+
+  if (closedTlc?.status?.Outbound !== "RemoteRemoved") {
+    throw new Error(`closed payer part status=${JSON.stringify(closedTlc?.status)}`);
+  }
+  if (offchainTlc) {
+    throw new Error(`off-chain payer part still pending: ${JSON.stringify(offchainTlc)}`);
+  }
+}

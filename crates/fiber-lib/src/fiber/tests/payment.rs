@@ -5729,18 +5729,23 @@ async fn test_mpp_payer_remote_removed_onchain_reconciliation_is_idempotent() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut duplicate_completion_events = 0;
+    let mut duplicate_payment_actor_starts = 0;
     while let Ok(event) = fixture.payer.event_emitter.try_recv() {
-        if matches!(
-            event,
-            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
-                if message.starts_with("after on_remove_tlc_event session_status:")
-        ) {
-            duplicate_completion_events += 1;
+        if let NetworkServiceEvent::DebugEvent(DebugEvent::Common(message)) = event {
+            if message.starts_with("after on_remove_tlc_event session_status:") {
+                duplicate_completion_events += 1;
+            } else if message.starts_with("payment actor start:") {
+                duplicate_payment_actor_starts += 1;
+            }
         }
     }
     assert_eq!(
         duplicate_completion_events, 0,
         "repeated settlement scans must not emit duplicate TlcRemoveReceived events"
+    );
+    assert_eq!(
+        duplicate_payment_actor_starts, 0,
+        "repeated settlement scans must not restart an already-completed payment actor"
     );
     assert_eq!(fixture.stuck_tlc(), tlc_after_first_scan);
     assert_eq!(fixture.attempt_statuses(), attempts_after_first_scan);
@@ -5755,6 +5760,86 @@ async fn test_mpp_payer_remote_removed_onchain_reconciliation_is_idempotent() {
             .await
             .is_empty(),
         "repeated reconciliation must not panic"
+    );
+}
+
+// Attempt and aggregate session records are separate writes. If the node crashes after writing
+// the successful attempt but before writing the successful session, loading the session will
+// optimistically recompute Success from its attempts even though the durable session record is
+// still Inflight. Reconciliation must not mistake that computed value for a completed previous
+// run: after restart it must resume the PaymentActor and finish the session write.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_mpp_payer_onchain_reconciliation_repairs_partial_session_commit_after_restart() {
+    init_tracing();
+
+    let mut fixture = setup_mpp_remote_removed_payer_fixture().await;
+    let attempt_id = fixture
+        .stuck_attempt_id
+        .expect("remote-removed payer TLC has an attempt id");
+    let mut attempt = fixture
+        .payer
+        .store
+        .get_attempt(fixture.payment_hash, attempt_id)
+        .expect("remote-removed payer attempt exists");
+    attempt.set_success_status();
+    attempt.preimage = Some(fixture.payment_preimage);
+    fixture.payer.store.insert_attempt(attempt);
+
+    assert_eq!(
+        fixture
+            .payer
+            .store
+            .get_persisted_payment_status(fixture.payment_hash),
+        Some(PaymentStatus::Inflight),
+        "the fixture must model a crash before the aggregate session write"
+    );
+    assert_eq!(
+        fixture
+            .payer
+            .get_payment_session(fixture.payment_hash)
+            .expect("payer payment session exists")
+            .status,
+        PaymentStatus::Success,
+        "normal session loading must expose why the persisted status needs a separate check"
+    );
+
+    fixture.payer.restart().await;
+    fixture.stuck_channel_actor = fixture
+        .payer
+        .get_channel_actor(fixture.stuck_channel_id)
+        .await
+        .expect("restart restores the closed watch-chain actor");
+    while fixture.payer.event_emitter.try_recv().is_ok() {}
+
+    fixture.insert_onchain_settlement();
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    wait_until_timeout(10_000, || {
+        fixture
+            .payer
+            .store
+            .get_persisted_payment_status(fixture.payment_hash)
+            == Some(PaymentStatus::Success)
+    })
+    .await;
+
+    fixture.payer.node_info().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut payment_actor_starts = 0;
+    while let Ok(event) = fixture.payer.event_emitter.try_recv() {
+        if matches!(
+            event,
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                if message.starts_with("payment actor start:")
+        ) {
+            payment_actor_starts += 1;
+        }
+    }
+    assert_eq!(
+        payment_actor_starts, 1,
+        "the incomplete session commit must pass through the PaymentActor exactly once"
     );
 }
 

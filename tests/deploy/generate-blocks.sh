@@ -4,6 +4,7 @@ CKB_RPC_URL="${CKB_RPC_URL:-http://127.0.0.1:8114}"
 
 function generate_one() {
     curl --request POST \
+        --noproxy localhost,127.0.0.1 \
         -H "Content-Type: application/json" \
         --url "$CKB_RPC_URL" \
         --data '{

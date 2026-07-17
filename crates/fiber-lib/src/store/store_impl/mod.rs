@@ -1147,6 +1147,12 @@ impl NetworkGraphStateStore for Store {
             .map(|session: PaymentSession| session.init_attempts(self))
     }
 
+    fn get_persisted_payment_status(&self, payment_hash: Hash256) -> Option<PaymentStatus> {
+        let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|v| deserialize_from::<PaymentSession>(v.as_ref(), "PaymentSession").status)
+    }
+
     fn get_all_payment_sessions(&self) -> Vec<PaymentSession> {
         let prefix = [PAYMENT_SESSION_PREFIX];
         self.collect_by_prefix(&prefix)

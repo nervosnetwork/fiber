@@ -46,6 +46,9 @@ case "$testcase_name" in
   "e2e/watchtower/force-close-preimage-multiple")
     export FIBER_ENABLE_PEER_RECONNECT_BACKOFF=false
     ;;
+  "e2e/watchtower/force-close-mpp")
+    export FIBER_WATCHTOWER_CHECK_INTERVAL_SECONDS=3
+    ;;
   "unit")
     start_node_ids=(3)
     ;;

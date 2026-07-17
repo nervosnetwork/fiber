@@ -2,7 +2,12 @@ use super::contracts::{get_script_by_contract, Contract};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 use crate::Result;
-use ckb_sdk::{traits::DefaultCellCollector, CkbRpcAsyncClient};
+use ckb_sdk::{
+    traits::{
+        DefaultCellCollector, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
+    },
+    CkbRpcAsyncClient, IndexerRpcAsyncClient,
+};
 use ckb_types::packed::Script;
 use ckb_types::prelude::Pack;
 use clap_serde_derive::clap::{self};
@@ -204,16 +209,43 @@ pub const CKB_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 pub fn new_ckb_rpc_async_client(rpc_url: &str) -> CkbRpcAsyncClient {
     #[cfg(not(target_arch = "wasm32"))]
-    return CkbRpcAsyncClient::with_builder(rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
-        .expect("create ckb rpc client should not fail");
+    return CkbRpcAsyncClient::with_builder(rpc_url, |builder| {
+        builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
+    })
+    .expect("create ckb rpc client should not fail");
     #[cfg(target_arch = "wasm32")]
     return CkbRpcAsyncClient::new(rpc_url);
 }
 
 pub fn new_default_cell_collector(rpc_url: &str) -> DefaultCellCollector {
     #[cfg(not(target_arch = "wasm32"))]
-    return DefaultCellCollector::new_with_timeout(rpc_url, CKB_RPC_TIMEOUT)
-        .expect("create default cell collector should not fail");
+    return DefaultCellCollector {
+        indexer_client: IndexerRpcAsyncClient::with_builder(rpc_url, |builder| {
+            builder.timeout(CKB_RPC_TIMEOUT).no_proxy()
+        })
+        .expect("create ckb indexer rpc client should not fail"),
+        ckb_client: new_ckb_rpc_async_client(rpc_url),
+        offchain: Default::default(),
+        acceptable_indexer_leftbehind: 1,
+    };
     #[cfg(target_arch = "wasm32")]
     return DefaultCellCollector::new(rpc_url);
+}
+
+pub fn new_default_header_dep_resolver(rpc_url: &str) -> DefaultHeaderDepResolver {
+    DefaultHeaderDepResolver {
+        ckb_client: new_ckb_rpc_async_client(rpc_url),
+    }
+}
+
+pub async fn new_default_transaction_dependency_provider(
+    rpc_url: &str,
+    cache_capacity: usize,
+) -> DefaultTransactionDependencyProvider {
+    let provider = DefaultTransactionDependencyProvider::new(rpc_url, cache_capacity);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        provider.inner.lock().await.rpc_client = new_ckb_rpc_async_client(rpc_url);
+    }
+    provider
 }
