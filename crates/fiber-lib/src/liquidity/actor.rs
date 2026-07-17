@@ -17,7 +17,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use secp256k1::{SecretKey, SECP256K1};
 
 pub use crate::liquidity::chain::{
-    LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimRequest,
+    LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimPlan, LoopOutClaimRequest,
 };
 use crate::liquidity::quote::validate_loop_out_quote_request;
 use crate::liquidity::store::{
@@ -780,24 +780,22 @@ where
             to: LiquiditySwapState::ClaimPending,
         });
     }
-    let payment_preimage = match swap.payment_preimage {
-        Some(payment_preimage) => payment_preimage,
-        None => {
-            return Err(LiquidityLoopOutError::InvalidStateTransition {
+    let claim_plan = LoopOutClaimPlan::from_record(&swap).map_err(|error| {
+        if swap.payment_preimage.is_none() {
+            LiquidityLoopOutError::InvalidStateTransition {
                 from: swap.state,
                 to: LiquiditySwapState::ClaimPending,
-            })
+            }
+        } else {
+            error
         }
-    };
+    })?;
 
     if swap.state == LiquiditySwapState::PaymentSettled {
         transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
     }
     chain
-        .broadcast_claim(LoopOutClaimRequest {
-            swap_id,
-            payment_preimage,
-        })
+        .broadcast_claim(claim_plan.into())
         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
     Ok(())
 }
@@ -2566,6 +2564,58 @@ mod tests {
         );
 
         assert!(events.borrow().is_empty());
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::PaymentSettled
+        );
+    }
+
+    #[test]
+    fn loop_out_client_claim_rejects_default_preimage_before_broadcast() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentInFlight,
+            now_ms + 2,
+        )
+        .unwrap();
+        store
+            .update_liquidity_swap(
+                &quote.quote_id,
+                LiquiditySwapUpdate {
+                    payment_preimage: Some(Hash256::default()),
+                    updated_at: now_ms + 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentSettled,
+            now_ms + 3,
+        )
+        .unwrap();
+        events.borrow_mut().clear();
+
+        let error = claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 4)
+            .expect_err("default preimage must not be claimable");
+
+        assert!(error.to_string().contains("preimage"));
+        assert!(events.borrow().is_empty());
+        assert_eq!(chain.claim_preimages, Vec::<Hash256>::new());
         assert_eq!(
             store
                 .get_liquidity_swap(&quote.quote_id)
