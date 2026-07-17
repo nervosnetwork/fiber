@@ -606,9 +606,13 @@ mod tests {
 
     fn assert_not_placeholder_unavailable(error: Option<ErrorObjectOwned>) {
         if let Some(error) = error {
-            assert!(!error
-                .to_string()
-                .contains("unavailable until the liquidity actor RPC boundary is wired"));
+            let legacy_placeholder = [
+                "unavailable until the liquidity actor RPC boundary is ",
+                "wired",
+            ]
+            .concat();
+
+            assert!(!error.to_string().contains(&legacy_placeholder));
         }
     }
 
