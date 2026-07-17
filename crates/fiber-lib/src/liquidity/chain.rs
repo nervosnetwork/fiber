@@ -58,6 +58,27 @@ pub struct LoopOutClaimPlan {
 }
 
 impl LoopOutClaimPlan {
+    /// Validate that a payment preimage is non-default and matches the expected payment hash.
+    pub fn validate_payment_preimage(
+        payment_hash: Hash256,
+        payment_preimage: Hash256,
+    ) -> Result<(), LiquidityLoopOutError> {
+        if payment_preimage == Hash256::default() {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot claim loop out payout with default payment preimage".to_string(),
+            ));
+        }
+        let expected_payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(payment_preimage).into();
+        if expected_payment_hash != payment_hash {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot claim loop out payout: payment preimage does not match payment hash"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Build a claim plan from a persisted swap record.
     pub fn from_record(record: &LiquiditySwapRecord) -> Result<Self, LiquidityLoopOutError> {
         let Some(payment_preimage) = record.payment_preimage else {
@@ -65,18 +86,7 @@ impl LoopOutClaimPlan {
                 "cannot claim loop out payout without payment preimage".to_string(),
             ));
         };
-        if payment_preimage == Hash256::default() {
-            return Err(LiquidityLoopOutError::Chain(
-                "cannot claim loop out payout with default payment preimage".to_string(),
-            ));
-        }
-        let expected_payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(payment_preimage).into();
-        if expected_payment_hash != record.payment_hash {
-            return Err(LiquidityLoopOutError::Chain(
-                "cannot claim loop out payout: payment preimage does not match payment hash"
-                    .to_string(),
-            ));
-        }
+        Self::validate_payment_preimage(record.payment_hash, payment_preimage)?;
 
         Ok(Self {
             swap_id: record.swap_id,
