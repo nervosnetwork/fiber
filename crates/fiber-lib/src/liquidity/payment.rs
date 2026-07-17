@@ -1,6 +1,8 @@
 //! Payment request models for client-side Loop Out execution.
 
-use fiber_types::Hash256;
+use std::time::Duration;
+
+use fiber_types::{Hash256, PaymentStatus};
 use ractor::{call, ActorRef};
 
 use crate::fiber::network::SendPaymentResponse;
@@ -40,12 +42,42 @@ impl LoopOutPaymentRequest {
 #[derive(Clone)]
 pub struct NetworkLoopOutPaymentAdapter {
     network_actor: ActorRef<NetworkActorMessage>,
+    polling_policy: NetworkLoopOutPaymentPollingPolicy,
+}
+
+/// Bounded polling policy for waiting on a sent Loop Out payment to settle.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct NetworkLoopOutPaymentPollingPolicy {
+    /// Maximum number of `GetPayment` reloads after `SendPayment` returns in-flight.
+    pub max_reload_attempts: u32,
+    /// Delay between non-terminal reload responses.
+    pub reload_interval: Duration,
+}
+
+impl Default for NetworkLoopOutPaymentPollingPolicy {
+    fn default() -> Self {
+        Self {
+            max_reload_attempts: 60,
+            reload_interval: Duration::from_secs(1),
+        }
+    }
 }
 
 impl NetworkLoopOutPaymentAdapter {
     /// Create a network-backed Loop Out payment adapter.
     pub fn new(network_actor: ActorRef<NetworkActorMessage>) -> Self {
-        Self { network_actor }
+        Self::with_polling_policy(network_actor, NetworkLoopOutPaymentPollingPolicy::default())
+    }
+
+    /// Create a network-backed Loop Out payment adapter with a custom polling policy.
+    pub fn with_polling_policy(
+        network_actor: ActorRef<NetworkActorMessage>,
+        polling_policy: NetworkLoopOutPaymentPollingPolicy,
+    ) -> Self {
+        Self {
+            network_actor,
+            polling_policy,
+        }
     }
 
     /// Reload the preimage for a settled payment, if the payment has settled.
@@ -53,13 +85,45 @@ impl NetworkLoopOutPaymentAdapter {
         &self,
         payment_hash: Hash256,
     ) -> Result<Option<Hash256>, LiquidityLoopOutError> {
-        let response = call!(self.network_actor, |reply| {
+        let response = self.get_payment(payment_hash).await?;
+
+        settled_preimage_from_response(response)
+    }
+
+    async fn get_payment(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<SendPaymentResponse, LiquidityLoopOutError> {
+        call!(self.network_actor, |reply| {
             NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, reply))
         })
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?
-        .map_err(LiquidityLoopOutError::PaymentFailed)?;
+        .map_err(LiquidityLoopOutError::PaymentFailed)
+    }
 
-        settled_preimage_from_response(response)
+    async fn wait_for_settled_preimage(
+        &self,
+        payment_hash: Hash256,
+        initial_response: SendPaymentResponse,
+    ) -> Result<Hash256, LiquidityLoopOutError> {
+        if let Some(preimage) = preimage_or_terminal_error(initial_response, payment_hash)? {
+            return Ok(preimage);
+        }
+
+        for attempt in 0..self.polling_policy.max_reload_attempts {
+            let response = self.get_payment(payment_hash).await?;
+            if let Some(preimage) = preimage_or_terminal_error(response, payment_hash)? {
+                return Ok(preimage);
+            }
+
+            if attempt + 1 < self.polling_policy.max_reload_attempts {
+                tokio::time::sleep(self.polling_policy.reload_interval).await;
+            }
+        }
+
+        Err(LiquidityLoopOutError::PaymentFailed(format!(
+            "loop out payment did not settle before polling limit: {payment_hash:?}"
+        )))
     }
 }
 
@@ -99,19 +163,36 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?
         .map_err(LiquidityLoopOutError::PaymentFailed)?;
 
-        match settled_preimage_from_response(response)? {
-            Some(preimage) => Ok(preimage),
-            None => Err(LiquidityLoopOutError::PaymentFailed(format!(
-                "loop out payment did not settle: {payment_hash:?}"
-            ))),
-        }
+        self.wait_for_settled_preimage(payment_hash, response).await
+    }
+}
+
+fn preimage_or_terminal_error(
+    response: SendPaymentResponse,
+    payment_hash: Hash256,
+) -> Result<Option<Hash256>, LiquidityLoopOutError> {
+    match response.status {
+        PaymentStatus::Success => response
+            .preimage
+            .ok_or_else(|| {
+                LiquidityLoopOutError::PaymentFailed(
+                    "settled payment is missing preimage".to_string(),
+                )
+            })
+            .map(Some),
+        PaymentStatus::Failed => Err(LiquidityLoopOutError::PaymentFailed(
+            response.failed_error.unwrap_or_else(|| {
+                format!("loop out payment failed without error detail: {payment_hash:?}")
+            }),
+        )),
+        PaymentStatus::Created | PaymentStatus::Inflight => Ok(None),
     }
 }
 
 fn settled_preimage_from_response(
     response: SendPaymentResponse,
 ) -> Result<Option<Hash256>, LiquidityLoopOutError> {
-    if response.status == fiber_types::PaymentStatus::Success {
+    if response.status == PaymentStatus::Success {
         return response
             .preimage
             .ok_or_else(|| {
@@ -174,6 +255,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_loop_out_payment_adapter_polls_until_sent_payment_settles() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::SendInflightThenReloadSettled(
+            [7u8; 32].into(),
+        ))
+        .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let preimage = adapter
+            .send_loop_out_payment(LoopOutPaymentRequest::new([3u8; 32].into(), 100, 2, 5).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(preimage, [7u8; 32].into());
+        assert_eq!(network.take_events(), vec!["send_payment", "get_payment"]);
+    }
+
+    #[tokio::test]
     async fn network_loop_out_payment_adapter_reloads_settled_payment() {
         let network =
             spawn_payment_mock(NetworkPaymentMockMode::ReloadSettled([8u8; 32].into())).await;
@@ -233,6 +331,7 @@ mod tests {
 
     enum NetworkPaymentMockMode {
         Settle(Hash256),
+        SendInflightThenReloadSettled(Hash256),
         ReloadSettled(Hash256),
         ReloadInflight,
         SettleWithoutPreimage,
@@ -285,6 +384,14 @@ mod tests {
                         let preimage = match state.mode {
                             NetworkPaymentMockMode::Settle(preimage) => Some(preimage),
                             NetworkPaymentMockMode::SettleWithoutPreimage => None,
+                            NetworkPaymentMockMode::SendInflightThenReloadSettled(_) => {
+                                let _ = reply.send(Ok(payment_response(
+                                    payment_hash,
+                                    PaymentStatus::Inflight,
+                                    None,
+                                )));
+                                return Ok(());
+                            }
                             _ => unreachable!("send payment mode must settle"),
                         };
                         let _ = reply.send(Ok(payment_response(
@@ -301,6 +408,9 @@ mod tests {
                             }
                             NetworkPaymentMockMode::ReloadInflight => {
                                 (PaymentStatus::Inflight, None)
+                            }
+                            NetworkPaymentMockMode::SendInflightThenReloadSettled(preimage) => {
+                                (PaymentStatus::Success, Some(preimage))
                             }
                             _ => unreachable!("get payment mode must reload"),
                         };
