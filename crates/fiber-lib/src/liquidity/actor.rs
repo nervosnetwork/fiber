@@ -197,10 +197,9 @@ where
             LiquidityActorMessage::PaymentRecoveryFinished(swap_id) => {
                 state.active_payment_swaps.remove(&swap_id);
             }
-            LiquidityActorMessage::QuoteLoopOut(_params, reply) => {
-                let _ = reply.send(Err(LiquidityLoopOutError::Store(
-                    "client quote delegation is wired in a later task".to_string(),
-                )));
+            LiquidityActorMessage::QuoteLoopOut(params, reply) => {
+                let result = state.handle_quote_loop_out(params);
+                let _ = reply.send(result);
             }
             LiquidityActorMessage::ProviderQuoteLoopOut(params, reply) => {
                 let result = state.handle_provider_quote_loop_out(params);
@@ -274,6 +273,31 @@ where
             .insert_loop_out_quote(terms.clone(), now_ms)
             .map_err(map_store_error)?;
         Ok(quote_response_from_terms(terms))
+    }
+
+    fn handle_quote_loop_out(
+        &mut self,
+        params: QuoteLoopOutParams,
+    ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        // No remote provider client is wired here; quote against the local provider registry.
+        let QuoteLoopOutParams {
+            provider: _,
+            asset_id,
+            amount,
+            receiver,
+            max_provider_fee,
+            max_routing_fee,
+            expires_after_seconds,
+        } = params;
+
+        self.handle_provider_quote_loop_out(ProviderQuoteLoopOutParams {
+            asset_id,
+            amount,
+            receiver,
+            max_provider_fee,
+            max_routing_fee,
+            expires_after_seconds,
+        })
     }
 
     fn handle_payout_confirmed(
@@ -1062,12 +1086,12 @@ where
         }
     })?;
 
-    chain
-        .broadcast_claim(claim_plan.into())
-        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
     if swap.state == LiquiditySwapState::PaymentSettled {
         transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
     }
+    chain
+        .broadcast_claim(claim_plan.into())
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
     Ok(())
 }
 
@@ -1856,6 +1880,17 @@ mod tests {
             .unwrap()
         }
 
+        async fn call_quote(
+            &self,
+            params: QuoteLoopOutParams,
+        ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+            let actor = self.spawn_actor().await;
+            ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopOut(
+                params, reply
+            ))
+            .unwrap()
+        }
+
         async fn confirm_payout(
             &self,
             swap_id: Hash256,
@@ -2392,7 +2427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payment_settled_recovery_failed_claim_broadcast_does_not_fake_claim_pending() {
+    async fn payment_settled_recovery_failed_claim_broadcast_persists_claim_pending() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let swap = recovery_swap(17, LiquiditySwapState::PaymentSettled);
@@ -2409,12 +2444,13 @@ mod tests {
         let resumed = call_resume_non_terminal(actor).await;
 
         assert_eq!(resumed, 0);
+        assert_eq!(event_count(&events, "client_transition_claim_pending"), 1);
         assert_eq!(event_count(&events, "broadcast_claim"), 1);
         assert_eq!(event_count(&events, "watch_claim"), 0);
         let swap_after_failed_broadcast = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
         assert_eq!(
             swap_after_failed_broadcast.state,
-            LiquiditySwapState::PaymentSettled
+            LiquiditySwapState::ClaimPending
         );
     }
 
@@ -2666,8 +2702,8 @@ mod tests {
                 "send_payment",
                 "client_persist_preimage",
                 "client_transition_payment_settled",
-                "broadcast_claim",
                 "client_transition_claim_pending",
+                "broadcast_claim",
                 "watch_claim",
             ]
         );
@@ -2727,6 +2763,34 @@ mod tests {
         assert_eq!(persisted_quote.amount, quote.amount);
         assert_eq!(persisted_quote.provider_fee, quote.provider_fee);
         assert_eq!(persisted_quote.routing_fee_limit, quote.routing_fee_limit);
+    }
+
+    #[tokio::test]
+    async fn quote_loop_out_uses_local_provider_quote_path() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+
+        let quote = harness
+            .call_quote(QuoteLoopOutParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                receiver: "ckt1receiver".to_string(),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(quote.asset_id, "ckb");
+        assert_eq!(quote.amount, 1000);
+        assert!(quote.provider_fee <= 100);
+        assert!(quote.routing_fee_limit <= 50);
+        assert!(harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]
@@ -3128,8 +3192,8 @@ mod tests {
             [
                 "client_persist_preimage",
                 "client_transition_payment_settled",
-                "broadcast_claim",
                 "client_transition_claim_pending",
+                "broadcast_claim",
                 "watch_claim",
             ]
         );
@@ -3453,8 +3517,8 @@ mod tests {
                 "client_transition_payment_settled",
                 "provider_transition_payment_in_flight",
                 "provider_transition_payment_settled",
-                "chain_broadcast_claim",
                 "client_transition_claim_pending",
+                "chain_broadcast_claim",
                 "client_transition_success",
                 "provider_transition_claim_pending",
                 "provider_transition_success",
@@ -3509,7 +3573,7 @@ mod tests {
         );
         assert_eq!(
             events.borrow().as_slice(),
-            ["chain_broadcast_claim", "client_transition_claim_pending"]
+            ["client_transition_claim_pending", "chain_broadcast_claim"]
         );
 
         mark_client_claim_confirmed(&store, quote.quote_id, now_ms + 5).unwrap();
@@ -3525,8 +3589,8 @@ mod tests {
         assert_eq!(
             events.borrow().as_slice(),
             [
-                "chain_broadcast_claim",
                 "client_transition_claim_pending",
+                "chain_broadcast_claim",
                 "client_transition_success",
             ]
         );
@@ -3725,7 +3789,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_out_client_claim_retries_after_transient_chain_failure() {
+    fn loop_out_client_claim_failure_persists_pending_for_retry() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
@@ -3771,7 +3835,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            LiquiditySwapState::PaymentSettled
+            LiquiditySwapState::ClaimPending
         );
 
         assert_eq!(
@@ -3782,9 +3846,9 @@ mod tests {
         assert_eq!(
             events.borrow().as_slice(),
             [
-                "chain_broadcast_claim",
-                "chain_broadcast_claim",
                 "client_transition_claim_pending",
+                "chain_broadcast_claim",
+                "chain_broadcast_claim",
             ]
         );
         assert_eq!(
