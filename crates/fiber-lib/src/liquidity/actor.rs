@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use ckb_types::packed::{OutPoint, Script};
+use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 use fiber_json_types::{
     LiquidityQuoteResponse, LiquiditySwapResponse, LoopOutParams, ProviderAcceptLoopOutParams,
@@ -16,6 +16,9 @@ use fiber_types::{Hash256, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use secp256k1::{SecretKey, SECP256K1};
 
+pub use crate::liquidity::chain::{
+    LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimRequest,
+};
 use crate::liquidity::quote::validate_loop_out_quote_request;
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
@@ -499,51 +502,6 @@ fn parse_script_hex(value: &str, field: &str) -> Result<Script, LiquidityLoopOut
     Script::from_slice(&bytes).map_err(|error| {
         LiquidityLoopOutError::Store(format!("invalid {field}: script decode failed: {error}"))
     })
-}
-
-/// Chain boundary required by the provider Loop Out accept workflow.
-pub trait LoopOutChainAdapter {
-    /// Adapter-specific error returned by chain operations.
-    type Error;
-
-    /// Reserve the payout lock outpoint for the accepted quote before broadcast.
-    fn reserve_payout_lock_outpoint(
-        &mut self,
-        quote: &LoopOutQuoteTerms,
-    ) -> Result<OutPoint, Self::Error>;
-
-    /// Broadcast the payout lock transaction for the accepted quote and outpoint.
-    fn broadcast_payout_lock(
-        &mut self,
-        quote: &LoopOutQuoteTerms,
-        outpoint: &OutPoint,
-    ) -> Result<(), Self::Error>;
-
-    /// Broadcast the claim transaction for a paid Loop Out swap.
-    fn broadcast_claim(&mut self, request: LoopOutClaimRequest) -> Result<(), Self::Error>;
-
-    /// Schedule payout lock watching and report completion back to `myself`.
-    fn watch_payout_lock(
-        &mut self,
-        swap_id: Hash256,
-        myself: ActorRef<LiquidityActorMessage>,
-    ) -> Result<(), Self::Error>;
-
-    /// Schedule client claim watching and report completion back to `myself`.
-    fn watch_claim(
-        &mut self,
-        swap_id: Hash256,
-        myself: ActorRef<LiquidityActorMessage>,
-    ) -> Result<(), Self::Error>;
-}
-
-/// Chain claim request for a client Loop Out payout.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct LoopOutClaimRequest {
-    /// Local swap identifier being claimed.
-    pub swap_id: Hash256,
-    /// Persisted payment preimage required to unlock the claim path.
-    pub payment_preimage: Hash256,
 }
 
 /// Restart recovery action planned for a persisted Loop Out swap state.
@@ -1393,6 +1351,20 @@ mod tests {
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
             self.events.borrow_mut().push("watch_claim");
+            Ok(())
+        }
+
+        fn broadcast_refund(&mut self, _record: &LiquiditySwapRecord) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("broadcast_refund");
+            Ok(())
+        }
+
+        fn watch_refund(
+            &mut self,
+            _swap_id: Hash256,
+            _myself: ActorRef<LiquidityActorMessage>,
+        ) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("watch_refund");
             Ok(())
         }
     }
