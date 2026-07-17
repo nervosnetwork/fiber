@@ -965,7 +965,9 @@ mod tests {
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use ckb_types::{packed::Byte32, packed::OutPoint, prelude::*};
-    use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey};
+    use fiber_types::{
+        Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey,
+    };
     use ractor::concurrency::Duration;
     use secp256k1::{SecretKey, SECP256K1};
     use tokio::sync::oneshot;
@@ -1812,7 +1814,7 @@ mod tests {
             routing_fee_limit: 1,
             onchain_fee_estimate_ckb: 1_000,
             capacity_requirement_ckb: 10_000,
-            payment_hash: [2u8; 32].into(),
+            payment_hash: HashAlgorithm::CkbHash.hash([4u8; 32]).into(),
             expires_at,
             payout_deadline: expires_at + 10_000,
             refund_after_lock_time: expires_at + 20_000,
@@ -2614,6 +2616,58 @@ mod tests {
             .expect_err("default preimage must not be claimable");
 
         assert!(error.to_string().contains("preimage"));
+        assert!(events.borrow().is_empty());
+        assert_eq!(chain.claim_preimages, Vec::<Hash256>::new());
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::PaymentSettled
+        );
+    }
+
+    #[test]
+    fn loop_out_client_claim_rejects_mismatched_preimage_before_broadcast() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "chain");
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentInFlight,
+            now_ms + 2,
+        )
+        .unwrap();
+        store
+            .update_liquidity_swap(
+                &quote.quote_id,
+                LiquiditySwapUpdate {
+                    payment_preimage: Some([9u8; 32].into()),
+                    updated_at: now_ms + 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        transition_swap(
+            &store,
+            &quote.quote_id,
+            LiquiditySwapState::PaymentSettled,
+            now_ms + 3,
+        )
+        .unwrap();
+        events.borrow_mut().clear();
+
+        let error = claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 4)
+            .expect_err("mismatched preimage must not be claimable");
+
+        assert!(error.to_string().contains("payment hash"));
         assert!(events.borrow().is_empty());
         assert_eq!(chain.claim_preimages, Vec::<Hash256>::new());
         assert_eq!(
