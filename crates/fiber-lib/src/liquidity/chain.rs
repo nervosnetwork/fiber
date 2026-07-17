@@ -1,7 +1,7 @@
 //! Chain adapter boundary for loop-out liquidity operations.
 
 use ckb_types::packed;
-use fiber_types::{Hash256, LiquiditySwapState};
+use fiber_types::{Hash256, HashAlgorithm, LiquiditySwapState};
 use ractor::ActorRef;
 
 use crate::ckb::CkbChainMessage;
@@ -68,6 +68,13 @@ impl LoopOutClaimPlan {
         if payment_preimage == Hash256::default() {
             return Err(LiquidityLoopOutError::Chain(
                 "cannot claim loop out payout with default payment preimage".to_string(),
+            ));
+        }
+        let expected_payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(payment_preimage).into();
+        if expected_payment_hash != record.payment_hash {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot claim loop out payout: payment preimage does not match payment hash"
+                    .to_string(),
             ));
         }
 
@@ -251,7 +258,7 @@ pub fn build_loop_out_payout_output(
 mod tests {
     use super::*;
     use ckb_types::{bytes::Bytes, packed, prelude::*};
-    use fiber_types::{Hash256, LiquiditySwapState};
+    use fiber_types::{Hash256, HashAlgorithm, LiquiditySwapState};
 
     use crate::liquidity::store::{LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole};
 
@@ -306,6 +313,15 @@ mod tests {
 
     fn test_swap_record_with_preimage(preimage: Hash256) -> LiquiditySwapRecord {
         LiquiditySwapRecord {
+            payment_hash: HashAlgorithm::CkbHash.hash(preimage).into(),
+            payment_preimage: Some(preimage),
+            ..test_swap_record_without_preimage()
+        }
+    }
+
+    fn test_swap_record_with_mismatched_preimage(preimage: Hash256) -> LiquiditySwapRecord {
+        LiquiditySwapRecord {
+            payment_hash: HashAlgorithm::CkbHash.hash([8u8; 32]).into(),
             payment_preimage: Some(preimage),
             ..test_swap_record_without_preimage()
         }
@@ -393,5 +409,14 @@ mod tests {
 
         assert_eq!(plan.swap_id, record.swap_id);
         assert_eq!(plan.payment_preimage, preimage);
+    }
+
+    #[test]
+    fn chain_watcher_refuses_claim_with_mismatched_preimage() {
+        let record = test_swap_record_with_mismatched_preimage([9u8; 32].into());
+
+        let error = LoopOutClaimPlan::from_record(&record).unwrap_err();
+
+        assert!(error.to_string().contains("payment hash"));
     }
 }
