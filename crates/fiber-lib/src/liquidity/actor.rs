@@ -488,9 +488,13 @@ where
                             now_ms(),
                         )?;
                     } else {
+                        if self.watched_claim_swaps.contains(&swap.swap_id) {
+                            continue;
+                        }
                         self.chain
                             .watch_claim(swap.swap_id, myself.clone())
                             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                        self.watched_claim_swaps.insert(swap.swap_id);
                     }
                     resumed += 1;
                 }
@@ -508,15 +512,17 @@ where
                     if self.active_refund_swaps.contains(&swap.swap_id) {
                         continue;
                     }
-                    if swap.onchain_outpoint.is_some() {
-                        self.chain
-                            .watch_refund(swap.swap_id, myself.clone())
-                            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
-                    } else {
-                        self.chain
-                            .broadcast_refund(&swap)
-                            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                    if swap.onchain_outpoint.is_none() {
+                        persist_loop_out_payment_failure_context(
+                            &self.store,
+                            swap.swap_id,
+                            "refund recovery missing persisted outpoint".to_string(),
+                        );
+                        continue;
                     }
+                    self.chain
+                        .watch_refund(swap.swap_id, myself.clone())
+                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
                     self.active_refund_swaps.insert(swap.swap_id);
                     resumed += 1;
                 }
@@ -987,12 +993,12 @@ where
         }
     })?;
 
-    if swap.state == LiquiditySwapState::PaymentSettled {
-        transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
-    }
     chain
         .broadcast_claim(claim_plan.into())
         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+    if swap.state == LiquiditySwapState::PaymentSettled {
+        transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    }
     Ok(())
 }
 
@@ -1917,10 +1923,7 @@ mod tests {
             LiquiditySwapState::RefundPending,
         ];
         for (index, state) in states.into_iter().enumerate() {
-            let mut swap = recovery_swap(index as u8 + 1, state);
-            if state == LiquiditySwapState::RefundPending {
-                swap.onchain_outpoint = None;
-            }
+            let swap = recovery_swap(index as u8 + 1, state);
             store.insert_liquidity_swap(swap.clone()).unwrap();
             store
                 .insert_loop_out_quote(
@@ -1956,7 +1959,7 @@ mod tests {
         assert_eq!(event_count(&events, "reload_payment"), 1);
         assert_eq!(event_count(&events, "broadcast_claim"), 1);
         assert_eq!(event_count(&events, "watch_claim"), 1);
-        assert_eq!(event_count(&events, "broadcast_refund"), 1);
+        assert_eq!(event_count(&events, "watch_refund"), 1);
     }
 
     #[tokio::test]
@@ -2045,12 +2048,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_non_terminal_repeated_call_schedules_refund_broadcast_once() {
+    async fn refund_pending_recovery_without_outpoint_fails_closed_without_refund_action() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut refund_pending = recovery_swap(14, LiquiditySwapState::RefundPending);
         refund_pending.onchain_outpoint = None;
-        store.insert_liquidity_swap(refund_pending).unwrap();
+        store.insert_liquidity_swap(refund_pending.clone()).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 0);
+        assert_eq!(event_count(&events, "broadcast_refund"), 0);
+        assert_eq!(event_count(&events, "watch_refund"), 0);
+        assert_eq!(
+            store
+                .get_liquidity_swap(&refund_pending.swap_id)
+                .unwrap()
+                .unwrap()
+                .failure_reason,
+            Some("refund recovery missing persisted outpoint".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_non_terminal_repeated_provider_payment_settled_watches_claim_once() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut payment_settled = recovery_swap(16, LiquiditySwapState::PaymentSettled);
+        payment_settled.role = LiquiditySwapRole::Provider;
+        store.insert_liquidity_swap(payment_settled).unwrap();
         let actor = spawn_test_liquidity_actor(
             store,
             TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
@@ -2063,8 +2095,7 @@ mod tests {
 
         assert_eq!(first, 1);
         assert_eq!(second, 0);
-        assert_eq!(event_count(&events, "broadcast_refund"), 1);
-        assert_eq!(event_count(&events, "watch_refund"), 0);
+        assert_eq!(event_count(&events, "watch_claim"), 1);
     }
 
     #[tokio::test]
@@ -2118,6 +2149,35 @@ mod tests {
             LiquidityLoopOutError::InvalidStateTransition { .. }
         ));
         assert_eq!(event_count(&events, "broadcast_claim"), 0);
+    }
+
+    #[tokio::test]
+    async fn payment_settled_recovery_failed_claim_broadcast_does_not_fake_claim_pending() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let swap = recovery_swap(17, LiquiditySwapState::PaymentSettled);
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client");
+        chain.fail_next_claim();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            chain,
+        )
+        .await;
+
+        let error = ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+            .unwrap()
+            .unwrap_err();
+
+        assert!(matches!(error, LiquidityLoopOutError::Chain(_)));
+        assert_eq!(event_count(&events, "broadcast_claim"), 1);
+        assert_eq!(event_count(&events, "watch_claim"), 0);
+        let swap_after_failed_broadcast = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+        assert_eq!(
+            swap_after_failed_broadcast.state,
+            LiquiditySwapState::PaymentSettled
+        );
     }
 
     struct LoopOutActorTestHarness {
@@ -2318,8 +2378,8 @@ mod tests {
                 "send_payment",
                 "client_persist_preimage",
                 "client_transition_payment_settled",
-                "client_transition_claim_pending",
                 "broadcast_claim",
+                "client_transition_claim_pending",
                 "watch_claim",
             ]
         );
@@ -2740,8 +2800,8 @@ mod tests {
             [
                 "client_persist_preimage",
                 "client_transition_payment_settled",
-                "client_transition_claim_pending",
                 "broadcast_claim",
+                "client_transition_claim_pending",
                 "watch_claim",
             ]
         );
@@ -2992,8 +3052,8 @@ mod tests {
                 "client_transition_payment_settled",
                 "provider_transition_payment_in_flight",
                 "provider_transition_payment_settled",
-                "client_transition_claim_pending",
                 "chain_broadcast_claim",
+                "client_transition_claim_pending",
                 "client_transition_success",
                 "provider_transition_claim_pending",
                 "provider_transition_success",
@@ -3040,17 +3100,15 @@ mod tests {
 
         claim_client_loop_out(&store, &mut chain, quote.quote_id, now_ms + 4).unwrap();
 
+        let swap_after_claim_broadcast =
+            store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
         assert_eq!(
-            store
-                .get_liquidity_swap(&quote.quote_id)
-                .unwrap()
-                .unwrap()
-                .state,
+            swap_after_claim_broadcast.state,
             LiquiditySwapState::ClaimPending
         );
         assert_eq!(
             events.borrow().as_slice(),
-            ["client_transition_claim_pending", "chain_broadcast_claim"]
+            ["chain_broadcast_claim", "client_transition_claim_pending"]
         );
 
         mark_client_claim_confirmed(&store, quote.quote_id, now_ms + 5).unwrap();
@@ -3066,8 +3124,8 @@ mod tests {
         assert_eq!(
             events.borrow().as_slice(),
             [
-                "client_transition_claim_pending",
                 "chain_broadcast_claim",
+                "client_transition_claim_pending",
                 "client_transition_success",
             ]
         );
@@ -3312,7 +3370,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            LiquiditySwapState::ClaimPending
+            LiquiditySwapState::PaymentSettled
         );
 
         assert_eq!(
@@ -3323,9 +3381,9 @@ mod tests {
         assert_eq!(
             events.borrow().as_slice(),
             [
+                "chain_broadcast_claim",
+                "chain_broadcast_claim",
                 "client_transition_claim_pending",
-                "chain_broadcast_claim",
-                "chain_broadcast_claim",
             ]
         );
         assert_eq!(
