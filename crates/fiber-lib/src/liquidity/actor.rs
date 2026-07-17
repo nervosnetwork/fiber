@@ -701,11 +701,13 @@ where
     P::Error: Display,
 {
     let swap_id = quote.quote_id;
+    let payment_hash = quote.payment_hash;
     let request = start_client_loop_out_payment(store, quote, now_ms)?;
     let preimage = payment
         .send_loop_out_payment(request)
         .await
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
+    LoopOutClaimPlan::validate_payment_preimage(payment_hash, preimage)?;
     persist_client_loop_out_payment_preimage(store, swap_id, preimage, now_ms)?;
 
     Ok(preimage)
@@ -750,6 +752,21 @@ pub fn persist_client_loop_out_payment_preimage<S>(
 where
     S: LiquidityStore,
 {
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if !swap
+        .state
+        .can_transition_to(LiquiditySwapState::PaymentSettled)
+    {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::PaymentSettled,
+        });
+    }
     store
         .update_liquidity_swap(
             &swap_id,
@@ -2423,6 +2440,63 @@ mod tests {
                 from: LiquiditySwapState::Quoted,
                 to: LiquiditySwapState::PaymentInFlight,
             })
+        );
+    }
+
+    #[test]
+    fn persist_client_preimage_rejects_invalid_state_without_writing_preimage() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        events.borrow_mut().clear();
+
+        assert_eq!(
+            persist_client_loop_out_payment_preimage(
+                &store,
+                quote.quote_id,
+                [4u8; 32].into(),
+                now_ms + 2,
+            ),
+            Err(LiquidityLoopOutError::InvalidStateTransition {
+                from: LiquiditySwapState::PayoutLocked,
+                to: LiquiditySwapState::PaymentSettled,
+            })
+        );
+
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PayoutLocked);
+        assert_eq!(swap.payment_preimage, None);
+        assert!(events.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_client_loop_out_payment_rejects_mismatched_preimage_before_persistence() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut payment = TestLoopOutPayment::new(events.clone());
+        payment.preimage = [9u8; 32].into();
+        let now_ms = 1_000;
+        let quote = test_loop_out_quote(now_ms + 60_000);
+
+        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
+        events.borrow_mut().clear();
+
+        let error = send_client_loop_out_payment(&store, &mut payment, quote.clone(), now_ms + 2)
+            .await
+            .expect_err("mismatched adapter preimage must not be persisted");
+
+        assert!(error.to_string().contains("payment hash"));
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PaymentInFlight);
+        assert_eq!(swap.payment_preimage, None);
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["client_transition_payment_in_flight", "payment_send"]
         );
     }
 
