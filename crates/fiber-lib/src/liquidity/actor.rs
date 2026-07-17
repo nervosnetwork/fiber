@@ -23,7 +23,14 @@ use crate::liquidity::store::{
 };
 use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
 
+#[cfg(not(test))]
 const LOOP_OUT_PAYMENT_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const LOOP_OUT_PAYMENT_RECONCILE_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS: u32 = 60;
+#[cfg(test)]
+const LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS: u32 = 2;
 
 /// Messages accepted by the liquidity actor boundary.
 #[derive(Debug)]
@@ -103,7 +110,7 @@ pub struct LiquidityActorState<S, P, C> {
 #[async_trait]
 impl<S, P, C> Actor for LiquidityActor<S, P, C>
 where
-    S: LiquidityStore + Send + Sync + 'static,
+    S: LiquidityStore + Clone + Send + Sync + 'static,
     P: LoopOutPaymentAdapter + Clone + Send + Sync + 'static,
     P::Error: Display + Send,
     C: LoopOutChainAdapter + Send + Sync + 'static,
@@ -181,7 +188,7 @@ where
 
 impl<S, P, C> LiquidityActorState<S, P, C>
 where
-    S: LiquidityStore,
+    S: LiquidityStore + Clone + Send + Sync + 'static,
     P: LoopOutPaymentAdapter + Clone + Send + 'static,
     P::Error: Display + Send + 'static,
     C: LoopOutChainAdapter,
@@ -265,6 +272,7 @@ where
                 let request = start_client_loop_out_payment(&self.store, quote, now_ms)?;
                 let payment_hash = request.payment_hash;
                 let mut payment = self.payment.clone();
+                let store = self.store.clone();
                 tokio::spawn(async move {
                     match payment.send_loop_out_payment(request).await {
                         Ok(preimage) => {
@@ -273,6 +281,7 @@ where
                         Err(error) => {
                             tracing::warn!(?swap_id, %error, "loop out payment remains in flight after send failure");
                             reconcile_loop_out_payment(
+                                store,
                                 payment,
                                 myself,
                                 swap_id,
@@ -366,6 +375,7 @@ where
 }
 
 async fn reconcile_loop_out_payment<P>(
+    store: impl LiquidityStore + Send + Sync + 'static,
     mut payment: P,
     myself: ActorRef<LiquidityActorMessage>,
     swap_id: Hash256,
@@ -375,7 +385,7 @@ async fn reconcile_loop_out_payment<P>(
     P: LoopOutPaymentAdapter + Send + 'static,
     P::Error: Display,
 {
-    loop {
+    for attempt in 0..LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS {
         tokio::time::sleep(retry_interval).await;
         match payment.reload_loop_out_payment(payment_hash).await {
             Ok(LoopOutPaymentStatus::Settled(preimage)) => {
@@ -387,12 +397,37 @@ async fn reconcile_loop_out_payment<P>(
             }
             Ok(LoopOutPaymentStatus::Failed(reason)) => {
                 tracing::warn!(?swap_id, ?payment_hash, %reason, "loop out payment failed while reconciling");
+                persist_loop_out_payment_failure_context(&store, swap_id, reason);
                 return;
             }
             Err(error) => {
                 tracing::warn!(?swap_id, ?payment_hash, %error, "failed to reload loop out payment; retrying");
             }
         }
+
+        if attempt + 1 == LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS {
+            persist_loop_out_payment_failure_context(
+                &store,
+                swap_id,
+                "payment reconciliation exhausted while status remained in flight".to_string(),
+            );
+        }
+    }
+}
+
+fn persist_loop_out_payment_failure_context<S>(store: &S, swap_id: Hash256, reason: String)
+where
+    S: LiquidityStore,
+{
+    if let Err(error) = store.update_liquidity_swap(
+        &swap_id,
+        LiquiditySwapUpdate {
+            failure_reason: Some(reason),
+            updated_at: now_ms(),
+            ..Default::default()
+        },
+    ) {
+        tracing::warn!(?swap_id, %error, "failed to persist loop out payment failure context");
     }
 }
 
@@ -1635,6 +1670,28 @@ mod tests {
         panic!("timed out waiting for event {expected}");
     }
 
+    async fn wait_for_event_count(
+        events: &Shared<Vec<&'static str>>,
+        expected: &'static str,
+        count: usize,
+    ) {
+        for _ in 0..250 {
+            if event_count(events, expected) >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {count} {expected} events");
+    }
+
+    fn event_count(events: &Shared<Vec<&'static str>>, expected: &'static str) -> usize {
+        events
+            .borrow()
+            .iter()
+            .filter(|event| **event == expected)
+            .count()
+    }
+
     struct LoopOutActorTestHarness {
         events: Shared<Vec<&'static str>>,
         client_store: TestLiquidityStore,
@@ -2115,6 +2172,109 @@ mod tests {
             LiquiditySwapState::ClaimPending
         );
         assert!(events.borrow().contains(&"reload_payment"));
+    }
+
+    #[tokio::test]
+    async fn liquidity_actor_terminal_failed_reload_persists_recoverable_failure_context() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client");
+        let (payment, release_payment) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(
+                events.clone(),
+                vec![LoopOutPaymentStatus::Failed("route failed".to_string())],
+            );
+        let quote = test_loop_out_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        ractor::call!(actor.clone(), |reply| LiquidityActorMessage::LoopOut(
+            LoopOutParams {
+                quote_id: quote.quote_id.into(),
+                max_provider_fee: 1,
+                max_routing_fee: 1,
+            },
+            reply
+        ))
+        .unwrap()
+        .unwrap();
+        actor
+            .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
+            .unwrap();
+        wait_for_event(&events, "send_payment").await;
+        release_payment
+            .send(Err("polling timed out".to_string()))
+            .unwrap();
+        wait_for_event_count(&events, "reload_payment", 1).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PaymentInFlight);
+        assert_eq!(swap.failure_reason, Some("route failed".to_string()));
+        assert_eq!(event_count(&events, "reload_payment"), 1);
+        assert!(
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn liquidity_actor_reconciliation_exhaustion_persists_uncertain_context() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client");
+        let (payment, release_payment) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(
+                events.clone(),
+                vec![
+                    LoopOutPaymentStatus::InFlight,
+                    LoopOutPaymentStatus::InFlight,
+                ],
+            );
+        let quote = test_loop_out_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        ractor::call!(actor.clone(), |reply| LiquidityActorMessage::LoopOut(
+            LoopOutParams {
+                quote_id: quote.quote_id.into(),
+                max_provider_fee: 1,
+                max_routing_fee: 1,
+            },
+            reply
+        ))
+        .unwrap()
+        .unwrap();
+        actor
+            .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
+            .unwrap();
+        wait_for_event(&events, "send_payment").await;
+        release_payment
+            .send(Err("polling timed out".to_string()))
+            .unwrap();
+        wait_for_event_count(
+            &events,
+            "reload_payment",
+            LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS as usize,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PaymentInFlight);
+        assert_eq!(
+            swap.failure_reason,
+            Some("payment reconciliation exhausted while status remained in flight".to_string())
+        );
+        assert_eq!(
+            event_count(&events, "reload_payment"),
+            LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS as usize
+        );
     }
 
     #[tokio::test]
