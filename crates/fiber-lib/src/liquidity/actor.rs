@@ -141,7 +141,7 @@ where
                 let _ = reply.send(Ok(0));
             }
             LiquidityActorMessage::PayoutConfirmed(swap_id) => {
-                if let Err(error) = state.handle_payout_confirmed(swap_id, myself.clone()) {
+                if let Err(error) = state.handle_payout_confirmed(swap_id, myself.clone()).await {
                     tracing::warn!(?swap_id, %error, "ignoring loop out payout continuation");
                 }
             }
@@ -236,7 +236,7 @@ where
         Ok(quote_response_from_terms(terms))
     }
 
-    fn handle_payout_confirmed(
+    async fn handle_payout_confirmed(
         &mut self,
         swap_id: Hash256,
         myself: ActorRef<LiquidityActorMessage>,
@@ -254,7 +254,7 @@ where
             LiquiditySwapRole::Client => {
                 mark_client_payout_locked(&self.store, swap_id, now_ms)?;
                 let quote = self.quote_terms(&swap_id)?;
-                send_client_loop_out_payment(&self.store, &mut self.payment, quote, now_ms)?;
+                send_client_loop_out_payment(&self.store, &mut self.payment, quote, now_ms).await?;
                 claim_client_loop_out(&self.store, &mut self.chain, swap_id, now_ms)?;
                 self.chain
                     .watch_claim(swap_id, myself)
@@ -463,12 +463,13 @@ pub fn recovery_action_for_loop_out_state(state: LiquiditySwapState) -> Option<R
 }
 
 /// Payment boundary required by the client Loop Out execution workflow.
+#[async_trait]
 pub trait LoopOutPaymentAdapter {
     /// Adapter-specific error returned by payment operations.
     type Error;
 
     /// Send the Fiber payment for a Loop Out swap and return the settled payment preimage.
-    fn send_loop_out_payment(
+    async fn send_loop_out_payment(
         &mut self,
         request: crate::liquidity::payment::LoopOutPaymentRequest,
     ) -> Result<Hash256, Self::Error>;
@@ -589,7 +590,7 @@ where
 }
 
 /// Send the client Fiber payment after payout lock persistence and persist the preimage.
-pub fn send_client_loop_out_payment<S, P>(
+pub async fn send_client_loop_out_payment<S, P>(
     store: &S,
     payment: &mut P,
     quote: LoopOutQuoteTerms,
@@ -618,6 +619,7 @@ where
     transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
     let preimage = payment
         .send_loop_out_payment(request)
+        .await
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
     store
         .update_liquidity_swap(
@@ -1250,10 +1252,11 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl LoopOutPaymentAdapter for TestLoopOutPayment {
         type Error = String;
 
-        fn send_loop_out_payment(
+        async fn send_loop_out_payment(
             &mut self,
             _request: crate::liquidity::payment::LoopOutPaymentRequest,
         ) -> Result<Hash256, Self::Error> {
@@ -1439,7 +1442,7 @@ mod tests {
             }
         }
 
-        fn run_happy_path(&mut self) {
+        async fn run_happy_path(&mut self) {
             let now_ms = 1_000;
             let quote = test_loop_out_quote(now_ms + 60_000);
 
@@ -1454,6 +1457,7 @@ mod tests {
                 quote.clone(),
                 now_ms + 2,
             )
+            .await
             .unwrap();
             mark_provider_payment_settled(&self.provider_store, quote.quote_id, now_ms + 2)
                 .unwrap();
@@ -1491,10 +1495,10 @@ mod tests {
         claim_broadcast: bool,
     }
 
-    fn run_loop_out_end_to_end_test() -> LoopOutEndToEndResult {
+    async fn run_loop_out_end_to_end_test() -> LoopOutEndToEndResult {
         let mut harness = LoopOutActorTestHarness::new_with_real_orchestrator();
 
-        harness.run_happy_path();
+        harness.run_happy_path().await;
 
         let client_swap = harness.client_swap();
         let provider_swap = harness.provider_swap();
@@ -1909,11 +1913,11 @@ mod tests {
         assert!(store.swaps.borrow().is_empty());
     }
 
-    #[test]
-    fn loop_out_happy_path_orders_side_effects_after_persistence() {
+    #[tokio::test]
+    async fn loop_out_happy_path_orders_side_effects_after_persistence() {
         let mut harness = LoopOutActorTestHarness::new_with_real_orchestrator();
 
-        harness.run_happy_path();
+        harness.run_happy_path().await;
 
         assert_eq!(
             harness.events.borrow().as_slice(),
@@ -2041,9 +2045,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn loop_out_end_to_end_uses_real_actor_boundary_and_store() {
-        let result = run_loop_out_end_to_end_test();
+    #[tokio::test]
+    async fn loop_out_end_to_end_uses_real_actor_boundary_and_store() {
+        let result = run_loop_out_end_to_end_test().await;
 
         assert_eq!(
             result.client_final_state,
@@ -2191,8 +2195,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn loop_out_payment_request_overflow_does_not_mark_payment_in_flight() {
+    #[tokio::test]
+    async fn loop_out_payment_request_overflow_does_not_mark_payment_in_flight() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let mut payment = TestLoopOutPayment::new(events.clone());
@@ -2208,7 +2212,7 @@ mod tests {
         events.borrow_mut().clear();
 
         assert_eq!(
-            send_client_loop_out_payment(&store, &mut payment, quote.clone(), now_ms + 2),
+            send_client_loop_out_payment(&store, &mut payment, quote.clone(), now_ms + 2).await,
             Err(LiquidityLoopOutError::GrossAmountOverflow)
         );
 
