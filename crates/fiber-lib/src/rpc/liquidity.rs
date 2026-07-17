@@ -396,6 +396,22 @@ mod tests {
                 .clone())
         }
 
+        fn list_liquidity_swaps_by_states(
+            &self,
+            states: &[LiquiditySwapState],
+            swap_kind: LiquiditySwapKind,
+        ) -> Result<Vec<StoreLiquiditySwapRecord>, LiquidityStoreError> {
+            Ok(self
+                .list_swaps_result
+                .lock()
+                .expect("list result lock")
+                .swaps
+                .iter()
+                .filter(|swap| swap.swap_kind == swap_kind && states.contains(&swap.state))
+                .cloned()
+                .collect())
+        }
+
         fn update_liquidity_swap_state(
             &self,
             _swap_id: &Hash256,

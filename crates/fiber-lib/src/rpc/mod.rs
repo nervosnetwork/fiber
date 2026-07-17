@@ -24,8 +24,11 @@ pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {
+    use crate::ckb::CkbChainMessage;
     use crate::ckb::CkbConfig;
     use crate::fiber::gossip::GossipMessageStore;
+    #[cfg(debug_assertions)]
+    use crate::fiber::types::Hash256;
     #[cfg(feature = "watchtower")]
     use crate::invoice::PreimageStore;
     use crate::rpc::admin::{AdminRpcServer, AdminRpcServerImpl};
@@ -52,11 +55,14 @@ pub mod server {
             NetworkActorMessage,
         },
         invoice::InvoiceStore,
-        liquidity::store::LiquidityStore,
+        liquidity::{
+            actor::{LiquidityActor, LiquidityActorArguments, LiquidityActorMessage},
+            chain::CkbLiquidityChainWatcher,
+            payment::NetworkLoopOutPaymentAdapter,
+            store::LiquidityStore,
+        },
         FiberConfig,
     };
-    #[cfg(debug_assertions)]
-    use crate::{ckb::CkbChainMessage, fiber::types::Hash256};
     #[cfg(feature = "watchtower")]
     use crate::{
         rpc::watchtower::{WatchtowerRpcServer, WatchtowerRpcServerImpl},
@@ -70,7 +76,7 @@ pub mod server {
     };
     use jsonrpsee::ws_client::RpcServiceBuilder;
     use jsonrpsee::{Methods, RpcModule};
-    use ractor::ActorRef;
+    use ractor::{Actor, ActorRef};
     #[cfg(debug_assertions)]
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -287,7 +293,7 @@ pub mod server {
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
         store_change_port: Option<Arc<OutputPort<StoreChange>>>,
-        #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
+        ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
         >,
@@ -326,9 +332,43 @@ pub mod server {
                     .unwrap();
             }
         }
+        let liquidity_actor = if config.is_module_enabled("liquidity") {
+            {
+                match (network_actor.clone(), ckb_chain_actor.clone()) {
+                    (Some(network_actor), Some(ckb_chain_actor)) => {
+                        let (actor, _handle) = Actor::spawn(
+                            None,
+                            LiquidityActor::<_, _, _>(std::marker::PhantomData),
+                            LiquidityActorArguments {
+                                store: store.clone(),
+                                payment: NetworkLoopOutPaymentAdapter::new(network_actor),
+                                chain: CkbLiquidityChainWatcher::new(ckb_chain_actor),
+                            },
+                        )
+                        .await?;
+                        match ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal) {
+                            Ok(Ok(resumed)) => {
+                                tracing::info!(resumed, "resumed non-terminal liquidity swaps");
+                            }
+                            Ok(Err(error)) => {
+                                tracing::warn!(%error, "failed to resume non-terminal liquidity swaps");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to call liquidity actor recovery");
+                            }
+                        }
+                        Some(actor)
+                    }
+                    _ => None,
+                }
+            }
+        } else {
+            None
+        };
+
         if config.is_module_enabled("liquidity") {
             modules
-                .merge(LiquidityRpcServerImpl::new(store.clone(), None).into_rpc())
+                .merge(LiquidityRpcServerImpl::new(store.clone(), liquidity_actor).into_rpc())
                 .unwrap();
         }
         if let Some(network_actor) = network_actor {
