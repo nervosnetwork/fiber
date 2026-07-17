@@ -71,6 +71,8 @@ pub enum LiquidityActorMessage {
     ProviderClaimObserved(Hash256),
     /// Internal continuation after provider refund confirmation.
     RefundConfirmed(Hash256),
+    /// Internal continuation after a payment recovery task reaches a non-settled terminal point.
+    PaymentRecoveryFinished(Hash256),
 }
 
 impl LiquidityActorMessage {
@@ -87,6 +89,7 @@ impl LiquidityActorMessage {
             "claim_confirmed",
             "provider_claim_observed",
             "refund_confirmed",
+            "payment_recovery_finished",
         ]
     }
 }
@@ -190,6 +193,9 @@ where
             }
             LiquidityActorMessage::RefundConfirmed(swap_id) => {
                 state.prune_recovery_guards(swap_id);
+            }
+            LiquidityActorMessage::PaymentRecoveryFinished(swap_id) => {
+                state.active_payment_swaps.remove(&swap_id);
             }
             LiquidityActorMessage::QuoteLoopOut(_params, reply) => {
                 let _ = reply.send(Err(LiquidityLoopOutError::Store(
@@ -496,24 +502,21 @@ where
                         return Ok(false);
                     }
                     self.active_payment_swaps.insert(swap.swap_id);
-                    let mut payment = self.payment.clone();
+                    let payment = self.payment.clone();
                     let store = self.store.clone();
                     let actor = myself.clone();
                     let swap_id = swap.swap_id;
                     let payment_hash = swap.payment_hash;
                     tokio::spawn(async move {
-                        match payment.reload_loop_out_payment(payment_hash).await {
-                            Ok(LoopOutPaymentStatus::Settled(preimage)) => {
-                                send_payment_settled(&actor, swap_id, preimage);
-                            }
-                            Ok(LoopOutPaymentStatus::InFlight) => {}
-                            Ok(LoopOutPaymentStatus::Failed(reason)) => {
-                                persist_loop_out_payment_failure_context(&store, swap_id, reason);
-                            }
-                            Err(error) => {
-                                tracing::warn!(?swap_id, %error, "failed to reload loop out payment during restart");
-                            }
-                        }
+                        reconcile_loop_out_payment(
+                            store,
+                            payment,
+                            actor,
+                            swap_id,
+                            payment_hash,
+                            LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
+                        )
+                        .await;
                     });
                 }
                 Ok(true)
@@ -631,6 +634,7 @@ async fn reconcile_loop_out_payment<P>(
             Ok(LoopOutPaymentStatus::Failed(reason)) => {
                 tracing::warn!(?swap_id, ?payment_hash, %reason, "loop out payment failed while reconciling");
                 persist_loop_out_payment_failure_context(&store, swap_id, reason);
+                send_payment_recovery_finished(&myself, swap_id);
                 return;
             }
             Err(error) => {
@@ -644,6 +648,7 @@ async fn reconcile_loop_out_payment<P>(
                 swap_id,
                 "payment reconciliation exhausted while status remained in flight".to_string(),
             );
+            send_payment_recovery_finished(&myself, swap_id);
         }
     }
 }
@@ -673,6 +678,13 @@ fn send_payment_settled(
         myself.send_message(LiquidityActorMessage::PaymentSettled(swap_id, preimage))
     {
         tracing::warn!(?swap_id, %error, "failed to schedule loop out payment settlement");
+    }
+}
+
+fn send_payment_recovery_finished(myself: &ActorRef<LiquidityActorMessage>, swap_id: Hash256) {
+    if let Err(error) = myself.send_message(LiquidityActorMessage::PaymentRecoveryFinished(swap_id))
+    {
+        tracing::warn!(?swap_id, %error, "failed to finish loop out payment recovery");
     }
 }
 
@@ -1243,6 +1255,7 @@ mod tests {
                 "claim_confirmed",
                 "provider_claim_observed",
                 "refund_confirmed",
+                "payment_recovery_finished",
             ]
         );
     }
@@ -2203,7 +2216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_non_terminal_repeated_call_reloads_payment_once() {
+    async fn resume_non_terminal_retries_payment_after_in_flight_recovery_exhausts() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         store
@@ -2212,7 +2225,11 @@ mod tests {
         let (payment, _release_payment) =
             TestLoopOutPayment::with_pending_result_and_reload_statuses(
                 events.clone(),
-                vec![LoopOutPaymentStatus::InFlight],
+                vec![
+                    LoopOutPaymentStatus::InFlight,
+                    LoopOutPaymentStatus::InFlight,
+                    LoopOutPaymentStatus::InFlight,
+                ],
             );
         let actor = spawn_test_liquidity_actor(
             store,
@@ -2222,12 +2239,16 @@ mod tests {
         .await;
 
         let first = call_resume_non_terminal(actor.clone()).await;
-        let second = call_resume_non_terminal(actor).await;
-        wait_for_event(&events, "reload_payment").await;
+        let second = call_resume_non_terminal(actor.clone()).await;
+        wait_for_event_count(&events, "reload_payment", 2).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let third = call_resume_non_terminal(actor).await;
+        wait_for_event_count(&events, "reload_payment", 3).await;
 
         assert_eq!(first, 1);
         assert_eq!(second, 0);
-        assert_eq!(event_count(&events, "reload_payment"), 1);
+        assert_eq!(third, 1);
+        assert_eq!(event_count(&events, "reload_payment"), 3);
     }
 
     #[tokio::test]
