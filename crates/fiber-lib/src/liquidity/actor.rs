@@ -343,6 +343,7 @@ where
                     LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
                 })?;
             if swap.role == LiquiditySwapRole::Provider {
+                LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
                 mark_provider_payment_settled(&self.store, swap_id, now_ms())?;
                 return Ok(());
             }
@@ -3204,6 +3205,79 @@ mod tests {
         assert_eq!(swap.state, LiquiditySwapState::PaymentInFlight);
         assert_eq!(swap.payment_preimage, None);
         assert!(events.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn liquidity_actor_provider_payment_settled_rejects_default_preimage_before_transition() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_provider");
+        let payment = TestLoopOutPayment::new_with_label(events.clone(), "runtime");
+        let quote = test_loop_out_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        accept_provider_loop_out(&store, &mut chain.clone(), quote.clone(), now_ms()).unwrap();
+        mark_provider_payout_locked(&store, quote.quote_id, now_ms()).unwrap();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        actor
+            .send_message(LiquidityActorMessage::PaymentSettled(
+                quote.quote_id,
+                Hash256::default(),
+            ))
+            .unwrap();
+        actor
+            .send_message(LiquidityActorMessage::ProviderClaimObserved(quote.quote_id))
+            .unwrap();
+        ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+            .unwrap()
+            .unwrap();
+
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PayoutLocked);
+        assert!(!events
+            .borrow()
+            .contains(&"provider_transition_payment_settled"));
+        assert!(!events.borrow().contains(&"provider_transition_success"));
+    }
+
+    #[tokio::test]
+    async fn liquidity_actor_provider_payment_settled_rejects_mismatched_preimage_before_transition(
+    ) {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_provider");
+        let payment = TestLoopOutPayment::new_with_label(events.clone(), "runtime");
+        let quote = test_loop_out_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        accept_provider_loop_out(&store, &mut chain.clone(), quote.clone(), now_ms()).unwrap();
+        mark_provider_payout_locked(&store, quote.quote_id, now_ms()).unwrap();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        actor
+            .send_message(LiquidityActorMessage::PaymentSettled(
+                quote.quote_id,
+                [9u8; 32].into(),
+            ))
+            .unwrap();
+        actor
+            .send_message(LiquidityActorMessage::ProviderClaimObserved(quote.quote_id))
+            .unwrap();
+        ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+            .unwrap()
+            .unwrap();
+
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PayoutLocked);
+        assert!(!events
+            .borrow()
+            .contains(&"provider_transition_payment_settled"));
+        assert!(!events.borrow().contains(&"provider_transition_success"));
     }
 
     #[test]
