@@ -334,22 +334,29 @@ where
         preimage: Hash256,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), LiquidityLoopOutError> {
-        let swap = self
-            .store
-            .get_liquidity_swap(&swap_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| {
-                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
-            })?;
-        LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
-        persist_client_loop_out_payment_preimage(&self.store, swap_id, preimage, now_ms())?;
-        self.active_payment_swaps.remove(&swap_id);
-        claim_client_loop_out(&self.store, &mut self.chain, swap_id, now_ms())?;
-        self.chain
-            .watch_claim(swap_id, myself)
-            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
-        self.watched_claim_swaps.insert(swap_id);
-        Ok(())
+        let result = (|| {
+            let swap = self
+                .store
+                .get_liquidity_swap(&swap_id)
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+                })?;
+            LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
+            persist_client_loop_out_payment_preimage(&self.store, swap_id, preimage, now_ms())?;
+            self.active_payment_swaps.remove(&swap_id);
+            claim_client_loop_out(&self.store, &mut self.chain, swap_id, now_ms())?;
+            self.chain
+                .watch_claim(swap_id, myself)
+                .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+            self.watched_claim_swaps.insert(swap_id);
+            Ok(())
+        })();
+
+        if result.is_err() {
+            self.active_payment_swaps.remove(&swap_id);
+        }
+        result
     }
 
     fn handle_provider_accept_loop_out(
@@ -2249,6 +2256,44 @@ mod tests {
         assert_eq!(second, 0);
         assert_eq!(third, 1);
         assert_eq!(event_count(&events, "reload_payment"), 3);
+    }
+
+    #[tokio::test]
+    async fn payment_settled_failure_clears_active_guard_for_future_recovery() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let swap = recovery_swap(23, LiquiditySwapState::PaymentInFlight);
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+        let mut state = LiquidityActorState {
+            store,
+            payment: TestLoopOutPayment::with_pending_result_and_reload_statuses(
+                events.clone(),
+                vec![LoopOutPaymentStatus::InFlight],
+            )
+            .0,
+            chain: TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+            watched_payout_swaps: HashSet::new(),
+            active_payment_swaps: HashSet::new(),
+            watched_claim_swaps: HashSet::new(),
+            active_refund_swaps: HashSet::new(),
+        };
+        state.active_payment_swaps.insert(swap.swap_id);
+
+        let error = state
+            .handle_payment_settled(swap.swap_id, [9u8; 32].into(), actor.clone())
+            .expect_err("mismatched preimage should fail");
+        assert!(matches!(error, LiquidityLoopOutError::Chain(_)));
+        let resumed = state.resume_swap(swap, actor).unwrap();
+
+        assert!(resumed);
+        wait_for_event(&events, "reload_payment").await;
+        assert_eq!(event_count(&events, "reload_payment"), 1);
     }
 
     #[tokio::test]
