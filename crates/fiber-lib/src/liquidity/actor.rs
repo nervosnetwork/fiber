@@ -109,8 +109,10 @@ pub struct LiquidityActorState<S, P, C> {
     store: S,
     payment: P,
     chain: C,
+    watched_payout_swaps: HashSet<Hash256>,
     active_payment_swaps: HashSet<Hash256>,
     watched_claim_swaps: HashSet<Hash256>,
+    active_refund_swaps: HashSet<Hash256>,
 }
 
 #[async_trait]
@@ -135,8 +137,10 @@ where
             store: args.store,
             payment: args.payment,
             chain: args.chain,
+            watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
+            active_refund_swaps: HashSet::new(),
         })
     }
 
@@ -395,9 +399,13 @@ where
                         );
                         continue;
                     }
+                    if self.watched_payout_swaps.contains(&swap.swap_id) {
+                        continue;
+                    }
                     self.chain
                         .watch_payout_lock(swap.swap_id, myself.clone())
                         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                    self.watched_payout_swaps.insert(swap.swap_id);
                     resumed += 1;
                 }
                 Some(RecoveryAction::ResumePayment) => {
@@ -431,9 +439,13 @@ where
                             }
                         });
                     } else {
+                        if self.watched_payout_swaps.contains(&swap.swap_id) {
+                            continue;
+                        }
                         self.chain
                             .watch_payout_lock(swap.swap_id, myself.clone())
                             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                        self.watched_payout_swaps.insert(swap.swap_id);
                     }
                     resumed += 1;
                 }
@@ -493,6 +505,9 @@ where
                     resumed += 1;
                 }
                 Some(RecoveryAction::RefundProviderPayout) => {
+                    if self.active_refund_swaps.contains(&swap.swap_id) {
+                        continue;
+                    }
                     if swap.onchain_outpoint.is_some() {
                         self.chain
                             .watch_refund(swap.swap_id, myself.clone())
@@ -502,6 +517,7 @@ where
                             .broadcast_refund(&swap)
                             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
                     }
+                    self.active_refund_swaps.insert(swap.swap_id);
                     resumed += 1;
                 }
                 None => {}
@@ -1992,6 +2008,91 @@ mod tests {
                 .failure_reason,
             Some("payout recovery missing persisted outpoint".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn resume_non_terminal_repeated_call_schedules_watches_once() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let payout_pending = recovery_swap(10, LiquiditySwapState::PayoutPending);
+        let mut provider_payout_locked = recovery_swap(11, LiquiditySwapState::PayoutLocked);
+        provider_payout_locked.role = LiquiditySwapRole::Provider;
+        let claim_pending = recovery_swap(12, LiquiditySwapState::ClaimPending);
+        let refund_pending = recovery_swap(13, LiquiditySwapState::RefundPending);
+        for swap in [
+            payout_pending,
+            provider_payout_locked,
+            claim_pending,
+            refund_pending,
+        ] {
+            store.insert_liquidity_swap(swap).unwrap();
+        }
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let first = call_resume_non_terminal(actor.clone()).await;
+        let second = call_resume_non_terminal(actor).await;
+
+        assert_eq!(first, 4);
+        assert_eq!(second, 0);
+        assert_eq!(event_count(&events, "watch_payout"), 2);
+        assert_eq!(event_count(&events, "watch_claim"), 1);
+        assert_eq!(event_count(&events, "watch_refund"), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_non_terminal_repeated_call_schedules_refund_broadcast_once() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut refund_pending = recovery_swap(14, LiquiditySwapState::RefundPending);
+        refund_pending.onchain_outpoint = None;
+        store.insert_liquidity_swap(refund_pending).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let first = call_resume_non_terminal(actor.clone()).await;
+        let second = call_resume_non_terminal(actor).await;
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
+        assert_eq!(event_count(&events, "broadcast_refund"), 1);
+        assert_eq!(event_count(&events, "watch_refund"), 0);
+    }
+
+    #[tokio::test]
+    async fn resume_non_terminal_repeated_call_reloads_payment_once() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        store
+            .insert_liquidity_swap(recovery_swap(15, LiquiditySwapState::PaymentInFlight))
+            .unwrap();
+        let (payment, _release_payment) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(
+                events.clone(),
+                vec![LoopOutPaymentStatus::InFlight],
+            );
+        let actor = spawn_test_liquidity_actor(
+            store,
+            payment,
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let first = call_resume_non_terminal(actor.clone()).await;
+        let second = call_resume_non_terminal(actor).await;
+        wait_for_event(&events, "reload_payment").await;
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 0);
+        assert_eq!(event_count(&events, "reload_payment"), 1);
     }
 
     #[tokio::test]
