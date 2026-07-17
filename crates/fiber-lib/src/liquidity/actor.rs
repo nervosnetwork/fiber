@@ -342,6 +342,10 @@ where
                 .ok_or_else(|| {
                     LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
                 })?;
+            if swap.role == LiquiditySwapRole::Provider {
+                mark_provider_payment_settled(&self.store, swap_id, now_ms())?;
+                return Ok(());
+            }
             LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
             persist_client_loop_out_payment_preimage(&self.store, swap_id, preimage, now_ms())?;
             self.active_payment_swaps.remove(&swap_id);
@@ -1791,6 +1795,35 @@ mod tests {
             self.store.insert_loop_out_quote(quote, now_ms()).unwrap();
         }
 
+        fn use_fake_payment_preimage_for_quote(&self, quote: &mut LiquidityQuoteResponse) {
+            let quote_id = quote.quote_id.into();
+            let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash([4u8; 32]).into();
+            quote.payment_hash = payment_hash.into();
+            self.store
+                .quotes
+                .borrow_mut()
+                .get_mut(&quote_id)
+                .unwrap()
+                .payment_hash = payment_hash;
+        }
+
+        fn import_provider_quote(&self, provider: &RuntimeActorHarness, quote_id: Hash256) {
+            let quote = provider
+                .store
+                .get_loop_out_quote(&quote_id)
+                .unwrap()
+                .unwrap();
+            self.store_quote(quote);
+        }
+
+        fn swap_state(&self, swap_id: Hash256) -> LiquiditySwapState {
+            self.store
+                .get_liquidity_swap(&swap_id)
+                .unwrap()
+                .unwrap()
+                .state
+        }
+
         fn events(&self) -> Vec<&'static str> {
             self.events.borrow().clone()
         }
@@ -1832,6 +1865,39 @@ mod tests {
             actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id))?;
             tokio::task::yield_now().await;
             ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+        }
+
+        async fn call_payment_settled(&self, swap_id: Hash256) {
+            let actor = self.spawn_actor().await;
+            actor
+                .send_message(LiquidityActorMessage::PaymentSettled(
+                    swap_id,
+                    [4u8; 32].into(),
+                ))
+                .unwrap();
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+                .unwrap()
+                .unwrap();
+        }
+
+        async fn call_claim_confirmed(&self, swap_id: Hash256) {
+            let actor = self.spawn_actor().await;
+            actor
+                .send_message(LiquidityActorMessage::ClaimConfirmed(swap_id))
+                .unwrap();
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+                .unwrap()
+                .unwrap();
+        }
+
+        async fn call_provider_claim_observed(&self, swap_id: Hash256) {
+            let actor = self.spawn_actor().await;
+            actor
+                .send_message(LiquidityActorMessage::ProviderClaimObserved(swap_id))
+                .unwrap();
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+                .unwrap()
+                .unwrap();
         }
 
         async fn call_provider_accept(
@@ -2660,6 +2726,46 @@ mod tests {
         assert_eq!(persisted_quote.amount, quote.amount);
         assert_eq!(persisted_quote.provider_fee, quote.provider_fee);
         assert_eq!(persisted_quote.routing_fee_limit, quote.routing_fee_limit);
+    }
+
+    #[tokio::test]
+    async fn manual_loop_out_runtime_harness_reaches_success_only_after_claim_confirmation() {
+        let client = RuntimeActorHarness::new_client();
+        let provider = RuntimeActorHarness::new_provider_with_asset();
+
+        let mut quote = provider
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                receiver: "ckt1receiver".to_string(),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        let quote_id = quote.quote_id.into();
+        provider.use_fake_payment_preimage_for_quote(&mut quote);
+        provider.call_provider_accept(quote_id).await.unwrap();
+        client.import_provider_quote(&provider, quote_id);
+        client.call_loop_out(quote_id).await.unwrap();
+
+        provider.confirm_payout(quote_id).await.unwrap().unwrap();
+        provider.call_payment_settled(quote_id).await;
+        client.confirm_payout(quote_id).await.unwrap().unwrap();
+
+        assert_ne!(client.swap_state(quote_id), LiquiditySwapState::Success);
+        assert_ne!(provider.swap_state(quote_id), LiquiditySwapState::Success);
+
+        client.call_claim_confirmed(quote_id).await;
+        assert_eq!(client.swap_state(quote_id), LiquiditySwapState::Success);
+        assert_ne!(provider.swap_state(quote_id), LiquiditySwapState::Success);
+
+        provider.call_provider_claim_observed(quote_id).await;
+
+        assert_eq!(client.swap_state(quote_id), LiquiditySwapState::Success);
+        assert_eq!(provider.swap_state(quote_id), LiquiditySwapState::Success);
     }
 
     #[tokio::test]
