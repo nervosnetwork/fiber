@@ -808,7 +808,7 @@ pub fn recovery_action_for_loop_out_state(state: LiquiditySwapState) -> Option<R
         PayoutLocked => Some(RecoveryAction::ResumePayment),
         PaymentInFlight => Some(RecoveryAction::ReloadPayment),
         PaymentSettled => Some(RecoveryAction::BroadcastClaim),
-        ClaimPending => Some(RecoveryAction::WatchClaim),
+        ClaimPending => Some(RecoveryAction::BroadcastClaim),
         RefundPending => Some(RecoveryAction::RefundProviderPayout),
         Created | Quoted | OnchainLockPending | OnchainLocked | Success | Failed | Refunded => None,
     }
@@ -2130,13 +2130,13 @@ mod tests {
         assert_eq!(event_count(&events, "watch_payout"), 1);
         assert_eq!(event_count(&events, "send_payment"), 1);
         assert_eq!(event_count(&events, "reload_payment"), 1);
-        assert_eq!(event_count(&events, "broadcast_claim"), 1);
+        assert_eq!(event_count(&events, "broadcast_claim"), 2);
         assert_eq!(event_count(&events, "watch_claim"), 2);
         assert_eq!(event_count(&events, "watch_refund"), 1);
     }
 
     #[tokio::test]
-    async fn claim_pending_recovery_watches_existing_claim_without_rebroadcast() {
+    async fn claim_pending_recovery_broadcasts_claim_and_schedules_watch() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         store
@@ -2152,8 +2152,8 @@ mod tests {
         let resumed = call_resume_non_terminal(actor).await;
 
         assert_eq!(resumed, 1);
+        assert_eq!(event_count(&events, "broadcast_claim"), 1);
         assert_eq!(event_count(&events, "watch_claim"), 1);
-        assert_eq!(event_count(&events, "broadcast_claim"), 0);
     }
 
     #[tokio::test]
@@ -2249,6 +2249,7 @@ mod tests {
         assert_eq!(first, 4);
         assert_eq!(second, 0);
         assert_eq!(event_count(&events, "watch_payout"), 2);
+        assert_eq!(event_count(&events, "broadcast_claim"), 1);
         assert_eq!(event_count(&events, "watch_claim"), 1);
         assert_eq!(event_count(&events, "watch_refund"), 1);
     }
@@ -2473,8 +2474,8 @@ mod tests {
         let resumed = call_resume_non_terminal_result(actor).await.unwrap();
 
         assert_eq!(resumed, 1);
+        assert_eq!(event_count(&events, "broadcast_claim"), 1);
         assert_eq!(event_count(&events, "watch_claim"), 1);
-        assert_eq!(event_count(&events, "broadcast_claim"), 0);
     }
 
     #[test]
@@ -3378,7 +3379,7 @@ mod tests {
         );
         assert_eq!(
             recovery_action_for_loop_out_state(ClaimPending),
-            Some(RecoveryAction::WatchClaim)
+            Some(RecoveryAction::BroadcastClaim)
         );
         assert_eq!(
             recovery_action_for_loop_out_state(RefundPending),
