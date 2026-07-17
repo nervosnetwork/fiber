@@ -8,7 +8,7 @@ use ractor::{call, ActorRef};
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::liquidity::actor::LoopOutPaymentAdapter;
+use crate::liquidity::actor::{LoopOutPaymentAdapter, LoopOutPaymentStatus};
 use crate::liquidity::types::{loop_out_gross_payment_amount, LiquidityLoopOutError};
 
 /// Fiber payment request derived from accepted Loop Out terms.
@@ -89,9 +89,21 @@ impl NetworkLoopOutPaymentAdapter {
         &self,
         payment_hash: Hash256,
     ) -> Result<Option<Hash256>, LiquidityLoopOutError> {
-        let response = self.get_payment(payment_hash).await?;
+        match self.reload_loop_out_payment_status(payment_hash).await? {
+            LoopOutPaymentStatus::Settled(preimage) => Ok(Some(preimage)),
+            LoopOutPaymentStatus::InFlight => Ok(None),
+            LoopOutPaymentStatus::Failed(reason) => {
+                Err(LiquidityLoopOutError::PaymentFailed(reason))
+            }
+        }
+    }
 
-        settled_preimage_from_response(response)
+    async fn reload_loop_out_payment_status(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<LoopOutPaymentStatus, LiquidityLoopOutError> {
+        let response = self.get_payment(payment_hash).await?;
+        payment_status_from_response(response, payment_hash)
     }
 
     async fn get_payment(
@@ -169,6 +181,13 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
 
         self.wait_for_settled_preimage(payment_hash, response).await
     }
+
+    async fn reload_loop_out_payment(
+        &mut self,
+        payment_hash: Hash256,
+    ) -> Result<LoopOutPaymentStatus, Self::Error> {
+        self.reload_loop_out_payment_status(payment_hash).await
+    }
 }
 
 fn preimage_or_terminal_error(
@@ -193,21 +212,26 @@ fn preimage_or_terminal_error(
     }
 }
 
-fn settled_preimage_from_response(
+fn payment_status_from_response(
     response: SendPaymentResponse,
-) -> Result<Option<Hash256>, LiquidityLoopOutError> {
-    if response.status == PaymentStatus::Success {
-        return response
+    payment_hash: Hash256,
+) -> Result<LoopOutPaymentStatus, LiquidityLoopOutError> {
+    match response.status {
+        PaymentStatus::Success => response
             .preimage
             .ok_or_else(|| {
                 LiquidityLoopOutError::PaymentFailed(
                     "settled payment is missing preimage".to_string(),
                 )
             })
-            .map(Some);
+            .map(LoopOutPaymentStatus::Settled),
+        PaymentStatus::Failed => Ok(LoopOutPaymentStatus::Failed(
+            response.failed_error.unwrap_or_else(|| {
+                format!("loop out payment failed without error detail: {payment_hash:?}")
+            }),
+        )),
+        PaymentStatus::Created | PaymentStatus::Inflight => Ok(LoopOutPaymentStatus::InFlight),
     }
-
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -312,6 +336,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_loop_out_payment_adapter_reloads_failed_payment_as_error() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::ReloadFailed).await;
+        let adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let error = adapter
+            .reload_settled_preimage([3u8; 32].into())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("route failed"));
+        assert_eq!(network.take_events(), vec!["get_payment"]);
+    }
+
+    #[tokio::test]
+    async fn network_loop_out_payment_adapter_classifies_failed_reload() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::ReloadFailed).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let status = adapter
+            .reload_loop_out_payment([3u8; 32].into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            status,
+            LoopOutPaymentStatus::Failed("route failed".to_string())
+        );
+        assert_eq!(network.take_events(), vec!["get_payment"]);
+    }
+
+    #[tokio::test]
     async fn network_loop_out_payment_adapter_errors_when_success_has_no_preimage() {
         let network = spawn_payment_mock(NetworkPaymentMockMode::SettleWithoutPreimage).await;
         let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
@@ -347,6 +402,7 @@ mod tests {
         SendInflightThenReloadSettled(Hash256),
         ReloadSettled(Hash256),
         ReloadInflight,
+        ReloadFailed,
         SettleWithoutPreimage,
     }
 
@@ -422,6 +478,7 @@ mod tests {
                             NetworkPaymentMockMode::ReloadInflight => {
                                 (PaymentStatus::Inflight, None)
                             }
+                            NetworkPaymentMockMode::ReloadFailed => (PaymentStatus::Failed, None),
                             NetworkPaymentMockMode::SendInflightThenReloadSettled(preimage) => {
                                 (PaymentStatus::Success, Some(preimage))
                             }
@@ -467,7 +524,7 @@ mod tests {
             status,
             created_at: 1,
             last_updated_at: 2,
-            failed_error: None,
+            failed_error: (status == PaymentStatus::Failed).then(|| "route failed".to_string()),
             custom_records: None,
             fee: 0,
             preimage,
