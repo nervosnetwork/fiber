@@ -595,6 +595,7 @@ mod tests {
 
         assert_eq!(plan.swap_id, quote.quote_id);
         assert_eq!(plan.tx_hash, tx.hash().into());
+        assert_eq!(plan.outpoint.tx_hash(), tx.hash());
         assert_eq!(u32::from(plan.outpoint.index()), 1);
     }
 
