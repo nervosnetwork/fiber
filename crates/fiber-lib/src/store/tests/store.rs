@@ -367,6 +367,87 @@ fn test_store_lists_liquidity_swaps_by_states_and_kind() {
     assert_eq!(swaps, vec![payout_pending, payment_settled]);
 }
 
+#[test]
+fn test_store_liquidity_chain_tx_insert_get_update_and_list() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [1u8; 32].into();
+    let tx_hash: fiber_types::Hash256 = [2u8; 32].into();
+    let outpoint = ckb_types::packed::OutPoint::new(
+        ckb_types::packed::Byte32::from_slice(&[3u8; 32]).unwrap(),
+        0,
+    );
+
+    let record = fiber_types::LiquidityChainTxRecord {
+        swap_id,
+        role: fiber_types::LiquidityChainTxRole::Payout,
+        tx_hash,
+        outpoint: Some(outpoint.clone()),
+        status: fiber_types::LiquidityChainTxStatus::Planned,
+        failure_reason: None,
+        created_at: 10,
+        updated_at: 10,
+    };
+
+    store.insert_liquidity_chain_tx(record.clone()).unwrap();
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap_id, fiber_types::LiquidityChainTxRole::Payout)
+            .unwrap(),
+        Some(record.clone())
+    );
+
+    store
+        .update_liquidity_chain_tx_status(
+            &swap_id,
+            fiber_types::LiquidityChainTxRole::Payout,
+            fiber_types::LiquidityChainTxStatus::Broadcast,
+            None,
+            11,
+        )
+        .unwrap();
+
+    let updated = store
+        .get_liquidity_chain_tx(&swap_id, fiber_types::LiquidityChainTxRole::Payout)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status,
+        fiber_types::LiquidityChainTxStatus::Broadcast
+    );
+    assert_eq!(updated.outpoint, Some(outpoint));
+
+    let planned = store
+        .list_liquidity_chain_txs_by_status(&[fiber_types::LiquidityChainTxStatus::Planned])
+        .unwrap();
+    assert!(planned.is_empty());
+
+    let active = store
+        .list_liquidity_chain_txs_by_status(&[fiber_types::LiquidityChainTxStatus::Broadcast])
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].tx_hash, tx_hash);
+}
+
+#[test]
+fn test_store_liquidity_chain_tx_rejects_duplicate_role_for_swap() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [4u8; 32].into();
+
+    let record = fiber_types::LiquidityChainTxRecord {
+        swap_id,
+        role: fiber_types::LiquidityChainTxRole::Claim,
+        tx_hash: [5u8; 32].into(),
+        outpoint: None,
+        status: fiber_types::LiquidityChainTxStatus::Planned,
+        failure_reason: None,
+        created_at: 10,
+        updated_at: 10,
+    };
+
+    store.insert_liquidity_chain_tx(record.clone()).unwrap();
+    assert!(store.insert_liquidity_chain_tx(record).is_err());
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_liquidity_check_validate_rejects_corrupt_records() {

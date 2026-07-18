@@ -177,6 +177,35 @@ pub trait LiquidityStore {
         update: LiquiditySwapUpdate,
     ) -> Result<(), LiquidityStoreError>;
 
+    /// Insert a liquidity CKB transaction identity record.
+    fn insert_liquidity_chain_tx(
+        &self,
+        record: fiber_types::LiquidityChainTxRecord,
+    ) -> Result<(), LiquidityStoreError>;
+
+    /// Get a liquidity CKB transaction record by swap and role.
+    fn get_liquidity_chain_tx(
+        &self,
+        swap_id: &Hash256,
+        role: fiber_types::LiquidityChainTxRole,
+    ) -> Result<Option<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError>;
+
+    /// Update a liquidity CKB transaction status and failure reason.
+    fn update_liquidity_chain_tx_status(
+        &self,
+        swap_id: &Hash256,
+        role: fiber_types::LiquidityChainTxRole,
+        status: fiber_types::LiquidityChainTxStatus,
+        failure_reason: Option<String>,
+        updated_at: u64,
+    ) -> Result<(), LiquidityStoreError>;
+
+    /// List liquidity CKB transaction records matching any supplied status.
+    fn list_liquidity_chain_txs_by_status(
+        &self,
+        statuses: &[fiber_types::LiquidityChainTxStatus],
+    ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError>;
+
     /// Insert or update a provider asset registry entry.
     fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError>;
 

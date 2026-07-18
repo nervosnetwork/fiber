@@ -428,6 +428,39 @@ mod tests {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))
         }
 
+        fn insert_liquidity_chain_tx(
+            &self,
+            _record: fiber_types::LiquidityChainTxRecord,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn get_liquidity_chain_tx(
+            &self,
+            _swap_id: &Hash256,
+            _role: fiber_types::LiquidityChainTxRole,
+        ) -> Result<Option<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn update_liquidity_chain_tx_status(
+            &self,
+            _swap_id: &Hash256,
+            _role: fiber_types::LiquidityChainTxRole,
+            _status: fiber_types::LiquidityChainTxStatus,
+            _failure_reason: Option<String>,
+            _updated_at: u64,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn list_liquidity_chain_txs_by_status(
+            &self,
+            _statuses: &[fiber_types::LiquidityChainTxStatus],
+        ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
         fn upsert_liquidity_asset(
             &self,
             _asset: LiquidityAsset,
