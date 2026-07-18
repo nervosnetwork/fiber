@@ -13,6 +13,11 @@ use crate::liquidity::tx::{
 };
 use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
 
+#[cfg(not(test))]
+const CKB_SEND_TX_TIMEOUT_MS: u64 = 8000;
+#[cfg(test)]
+const CKB_SEND_TX_TIMEOUT_MS: u64 = 50;
+
 /// Chain claim request for a client Loop Out payout.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct LoopOutClaimRequest {
@@ -263,9 +268,12 @@ impl CkbLiquidityChainWatcher {
         liquidity_actor: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), LiquidityLoopOutError> {
         let tx_hash: Hash256 = transaction.hash().into();
-        let send_result = ractor::call!(self.ckb_chain_actor, |reply| {
-            CkbChainMessage::SendTx(transaction, reply)
-        })
+        let send_result = ractor::call_t!(
+            self.ckb_chain_actor,
+            CkbChainMessage::SendTx,
+            CKB_SEND_TX_TIMEOUT_MS,
+            transaction
+        )
         .map_err(|error| {
             LiquidityLoopOutError::Chain(format!("send tx actor call failed: {error}"))
         })?;
@@ -279,7 +287,7 @@ impl CkbLiquidityChainWatcher {
             .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
                 tx_hash,
                 confirmations: 1,
-                mask: CkbTxTracingMask::Committed,
+                mask: CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
                 callback: Self::tracer_callback_for(swap_id, role, liquidity_actor),
             }))
             .map_err(|error| {
@@ -439,13 +447,13 @@ mod tests {
     use secp256k1::{SecretKey, SECP256K1};
     use tokio::sync::mpsc;
 
-    use crate::ckb::{CkbTxTracer, CkbTxTracingResult};
+    use crate::ckb::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
     use crate::liquidity::store::{LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole};
 
     #[derive(Debug, Clone, Eq, PartialEq)]
     enum MockCkbEvent {
         SendTx,
-        CreateTxTracer,
+        CreateTxTracer(CkbTxTracingMask),
     }
 
     struct MockCkbActor;
@@ -475,8 +483,59 @@ mod tests {
                     events.lock().unwrap().push(MockCkbEvent::SendTx);
                     let _ = reply.send(Ok(()));
                 }
-                CkbChainMessage::CreateTxTracer(CkbTxTracer { .. }) => {
-                    events.lock().unwrap().push(MockCkbEvent::CreateTxTracer);
+                CkbChainMessage::CreateTxTracer(CkbTxTracer { mask, .. }) => {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(MockCkbEvent::CreateTxTracer(mask));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct NoReplyCkbActor;
+
+    struct NoReplyCkbActorState {
+        events: Arc<Mutex<Vec<MockCkbEvent>>>,
+        _replies: Vec<ractor::RpcReplyPort<Result<(), ckb_sdk::RpcError>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Actor for NoReplyCkbActor {
+        type Msg = CkbChainMessage;
+        type State = NoReplyCkbActorState;
+        type Arguments = Arc<Mutex<Vec<MockCkbEvent>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            events: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(NoReplyCkbActorState {
+                events,
+                _replies: Vec::new(),
+            })
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                CkbChainMessage::SendTx(_, reply) => {
+                    state.events.lock().unwrap().push(MockCkbEvent::SendTx);
+                    state._replies.push(reply);
+                }
+                CkbChainMessage::CreateTxTracer(CkbTxTracer { mask, .. }) => {
+                    state
+                        .events
+                        .lock()
+                        .unwrap()
+                        .push(MockCkbEvent::CreateTxTracer(mask));
                 }
                 _ => {}
             }
@@ -839,8 +898,37 @@ mod tests {
 
         assert_eq!(
             *events.lock().unwrap(),
-            vec![MockCkbEvent::SendTx, MockCkbEvent::CreateTxTracer]
+            vec![
+                MockCkbEvent::SendTx,
+                MockCkbEvent::CreateTxTracer(
+                    CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
+                )
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_send_tx_timeout_returns_error_without_tracer() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, NoReplyCkbActor, events.clone())
+            .await
+            .unwrap();
+        let watcher = CkbLiquidityChainWatcher::new(ckb_actor);
+        let (liquidity_actor, _receiver) = spawn_mock_liquidity_actor().await;
+        let transaction = TransactionView::new_advanced_builder().build();
+
+        let error = watcher
+            .send_and_trace(
+                [1u8; 32].into(),
+                LiquidityChainTxRole::Payout,
+                transaction,
+                liquidity_actor,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("send tx actor call failed"));
+        assert_eq!(*events.lock().unwrap(), vec![MockCkbEvent::SendTx]);
     }
 
     #[tokio::test]
