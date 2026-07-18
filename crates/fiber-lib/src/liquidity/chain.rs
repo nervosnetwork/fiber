@@ -1,12 +1,12 @@
 //! Chain adapter boundary for loop-out liquidity operations.
 
-use ckb_types::packed;
+use ckb_types::{core::TransactionView, packed};
 use fiber_types::{Hash256, HashAlgorithm, LiquiditySwapState};
 use ractor::ActorRef;
 
 use crate::ckb::CkbChainMessage;
 use crate::liquidity::actor::LiquidityActorMessage;
-use crate::liquidity::store::LiquiditySwapRecord;
+use crate::liquidity::store::{LiquiditySwapRecord, LiquiditySwapRole};
 use crate::liquidity::tx::{
     build_liquidity_lock_output, LiquidityLockBuildError, LiquidityLockOutputParams,
     LiquidityLockScriptArtifact,
@@ -101,6 +101,99 @@ impl From<LoopOutClaimPlan> for LoopOutClaimRequest {
             swap_id: plan.swap_id,
             payment_preimage: plan.payment_preimage,
         }
+    }
+}
+
+/// Pure transaction plan for a Loop Out payout transaction.
+#[derive(Debug, Clone)]
+pub struct LoopOutPayoutTxPlan {
+    /// Local swap identifier being paid out.
+    pub swap_id: Hash256,
+    /// Fully built transaction to broadcast in a later chain integration step.
+    pub transaction: TransactionView,
+    /// Transaction hash derived from `transaction`.
+    pub tx_hash: Hash256,
+    /// Payout lock output outpoint derived from transaction hash and output index.
+    pub outpoint: packed::OutPoint,
+}
+
+impl LoopOutPayoutTxPlan {
+    /// Build a payout transaction plan and derive its persisted identity.
+    pub fn new(swap_id: Hash256, transaction: TransactionView, output_index: u32) -> Self {
+        let tx_hash = transaction.hash();
+        let outpoint = packed::OutPoint::new(tx_hash.clone(), output_index);
+        Self {
+            swap_id,
+            transaction,
+            tx_hash: tx_hash.into(),
+            outpoint,
+        }
+    }
+}
+
+/// Pure transaction plan for claiming a Loop Out payout.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LoopOutClaimTxPlan {
+    /// Local swap identifier being claimed.
+    pub swap_id: Hash256,
+    /// Persisted payout lock outpoint to spend.
+    pub payout_outpoint: packed::OutPoint,
+    /// Validated payment preimage required by the claim path.
+    pub payment_preimage: Hash256,
+}
+
+impl LoopOutClaimTxPlan {
+    /// Build a claim transaction plan from a persisted swap record.
+    pub fn from_record(record: &LiquiditySwapRecord) -> Result<Self, LiquidityLoopOutError> {
+        let claim = LoopOutClaimPlan::from_record(record)?;
+        let payout_outpoint = record.onchain_outpoint.clone().ok_or_else(|| {
+            LiquidityLoopOutError::Chain("cannot build claim without payout outpoint".to_string())
+        })?;
+
+        Ok(Self {
+            swap_id: claim.swap_id,
+            payout_outpoint,
+            payment_preimage: claim.payment_preimage,
+        })
+    }
+}
+
+/// Pure transaction plan for refunding an expired provider Loop Out payout.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LoopOutRefundTxPlan {
+    /// Local swap identifier being refunded.
+    pub swap_id: Hash256,
+    /// Persisted payout lock outpoint to spend.
+    pub payout_outpoint: packed::OutPoint,
+    /// Absolute lock time after which the refund path is valid.
+    pub refund_after_lock_time: u64,
+}
+
+impl LoopOutRefundTxPlan {
+    /// Build a refund transaction plan from a persisted provider swap record.
+    pub fn from_record(
+        record: &LiquiditySwapRecord,
+        current_lock_time: u64,
+    ) -> Result<Self, LiquidityLoopOutError> {
+        if record.role != LiquiditySwapRole::Provider {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot build refund for non-provider loop out record".to_string(),
+            ));
+        }
+        if current_lock_time < record.refund_after_lock_time {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot refund loop out payout before refund lock time".to_string(),
+            ));
+        }
+        let payout_outpoint = record.onchain_outpoint.clone().ok_or_else(|| {
+            LiquidityLoopOutError::Chain("cannot build refund without payout outpoint".to_string())
+        })?;
+
+        Ok(Self {
+            swap_id: record.swap_id,
+            payout_outpoint,
+            refund_after_lock_time: record.refund_after_lock_time,
+        })
     }
 }
 
@@ -267,8 +360,11 @@ pub fn build_loop_out_payout_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ckb_types::{bytes::Bytes, packed, prelude::*};
-    use fiber_types::{Hash256, HashAlgorithm, LiquiditySwapState};
+    use ckb_types::{bytes::Bytes, core::TransactionView, packed, prelude::*};
+    use fiber_types::{
+        Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey,
+    };
+    use secp256k1::{SecretKey, SECP256K1};
 
     use crate::liquidity::store::{LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole};
 
@@ -283,6 +379,57 @@ mod tests {
             packed::Byte32::from_slice(&[index as u8; 32]).unwrap(),
             index,
         )
+    }
+
+    fn test_loop_out_quote_terms() -> LoopOutQuoteTerms {
+        let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+        LoopOutQuoteTerms {
+            quote_id: [1u8; 32].into(),
+            provider: Pubkey::from(sk.public_key(SECP256K1)),
+            asset: LiquidityAsset {
+                asset_id: "ckb".to_string(),
+                kind: LiquidityAssetKind::Ckb,
+                udt_type_script: None,
+                min_amount: 1,
+                max_amount: 1_000,
+                available_capacity: 1_000,
+                base_fee: 1,
+                proportional_fee_ppm: 0,
+                enabled: true,
+            },
+            amount: 100,
+            provider_fee: 1,
+            routing_fee_limit: 1,
+            onchain_fee_estimate_ckb: 1_000,
+            capacity_requirement_ckb: 10_000,
+            payment_hash: HashAlgorithm::CkbHash.hash([4u8; 32]).into(),
+            expires_at: 20_000,
+            payout_deadline: 30_000,
+            refund_after_lock_time: 40_000,
+            claimant_lock: script("claimant"),
+            refund_lock: script("refund"),
+        }
+    }
+
+    fn test_transaction_with_liquidity_output(
+        quote: &LoopOutQuoteTerms,
+        output_index: u32,
+    ) -> TransactionView {
+        let outputs: Vec<_> = (0..=output_index)
+            .map(|index| {
+                packed::CellOutput::new_builder()
+                    .capacity(quote.capacity_requirement_ckb + u64::from(index))
+                    .lock(script("liquidity-output"))
+                    .build()
+            })
+            .collect();
+        let outputs_data: Vec<packed::Bytes> =
+            outputs.iter().map(|_| Bytes::new().pack()).collect();
+
+        TransactionView::new_advanced_builder()
+            .outputs(outputs)
+            .outputs_data(outputs_data.pack())
+            .build()
     }
 
     fn test_swap_record_with_outpoint(outpoint: packed::OutPoint) -> LiquiditySwapRecord {
@@ -303,6 +450,15 @@ mod tests {
             failure_reason: None,
             created_at: 5000,
             updated_at: 6000,
+        }
+    }
+
+    fn test_provider_refund_pending_record(outpoint: packed::OutPoint) -> LiquiditySwapRecord {
+        LiquiditySwapRecord {
+            role: LiquiditySwapRole::Provider,
+            state: LiquiditySwapState::RefundPending,
+            onchain_outpoint: Some(outpoint),
+            ..test_swap_record_with_outpoint(test_outpoint(8))
         }
     }
 
@@ -428,5 +584,74 @@ mod tests {
         let error = LoopOutClaimPlan::from_record(&record).unwrap_err();
 
         assert!(error.to_string().contains("payment hash"));
+    }
+
+    #[test]
+    fn payout_plan_derives_outpoint_from_transaction_hash_and_output_index() {
+        let quote = test_loop_out_quote_terms();
+        let tx = test_transaction_with_liquidity_output(&quote, 1);
+
+        let plan = LoopOutPayoutTxPlan::new(quote.quote_id, tx.clone(), 1);
+
+        assert_eq!(plan.swap_id, quote.quote_id);
+        assert_eq!(plan.tx_hash, tx.hash().into());
+        assert_eq!(u32::from(plan.outpoint.index()), 1);
+    }
+
+    #[test]
+    fn claim_plan_requires_payout_outpoint_and_valid_preimage() {
+        let mut record = test_swap_record_with_outpoint(test_outpoint(7));
+        let preimage = [9u8; 32].into();
+        record.payment_preimage = Some(preimage);
+        record.payment_hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage).into();
+
+        let plan = LoopOutClaimTxPlan::from_record(&record).unwrap();
+
+        assert_eq!(plan.swap_id, record.swap_id);
+        assert_eq!(plan.payout_outpoint, record.onchain_outpoint.unwrap());
+    }
+
+    #[test]
+    fn claim_plan_without_outpoint_fails() {
+        let preimage = [9u8; 32].into();
+        let record = test_swap_record_with_preimage(preimage);
+
+        let error = LoopOutClaimTxPlan::from_record(&record).unwrap_err();
+
+        assert!(error.to_string().contains("outpoint"));
+    }
+
+    #[test]
+    fn refund_plan_requires_provider_record_and_payout_outpoint() {
+        let record = test_provider_refund_pending_record(test_outpoint(8));
+
+        let plan =
+            LoopOutRefundTxPlan::from_record(&record, record.refund_after_lock_time).unwrap();
+
+        assert_eq!(plan.swap_id, record.swap_id);
+        assert_eq!(plan.payout_outpoint, record.onchain_outpoint.unwrap());
+    }
+
+    #[test]
+    fn refund_plan_before_lock_time_fails() {
+        let record = test_provider_refund_pending_record(test_outpoint(8));
+
+        let error = LoopOutRefundTxPlan::from_record(&record, record.refund_after_lock_time - 1)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("lock time"));
+    }
+
+    #[test]
+    fn refund_plan_for_client_role_fails() {
+        let record = LiquiditySwapRecord {
+            role: LiquiditySwapRole::Client,
+            ..test_provider_refund_pending_record(test_outpoint(8))
+        };
+
+        let error =
+            LoopOutRefundTxPlan::from_record(&record, record.refund_after_lock_time).unwrap_err();
+
+        assert!(error.to_string().contains("provider"));
     }
 }
