@@ -1,10 +1,10 @@
 //! Chain adapter boundary for loop-out liquidity operations.
 
-use ckb_types::{core::TransactionView, packed};
-use fiber_types::{Hash256, HashAlgorithm, LiquiditySwapState};
-use ractor::ActorRef;
+use ckb_types::{core::tx_pool::TxStatus, core::TransactionView, packed};
+use fiber_types::{Hash256, HashAlgorithm, LiquidityChainTxRole, LiquiditySwapState};
+use ractor::{ActorRef, RpcReplyPort};
 
-use crate::ckb::CkbChainMessage;
+use crate::ckb::{CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
 use crate::liquidity::actor::LiquidityActorMessage;
 use crate::liquidity::store::{LiquiditySwapRecord, LiquiditySwapRole};
 use crate::liquidity::tx::{
@@ -254,6 +254,68 @@ impl CkbLiquidityChainWatcher {
         Self { ckb_chain_actor }
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn send_and_trace(
+        &self,
+        swap_id: Hash256,
+        role: LiquidityChainTxRole,
+        transaction: TransactionView,
+        liquidity_actor: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let tx_hash: Hash256 = transaction.hash().into();
+        let send_result = ractor::call!(self.ckb_chain_actor, |reply| {
+            CkbChainMessage::SendTx(transaction, reply)
+        })
+        .map_err(|error| {
+            LiquidityLoopOutError::Chain(format!("send tx actor call failed: {error}"))
+        })?;
+        send_result.map_err(|error| {
+            LiquidityLoopOutError::Chain(format!(
+                "send tx failed for liquidity tx {tx_hash}: {error}"
+            ))
+        })?;
+
+        self.ckb_chain_actor
+            .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
+                tx_hash,
+                confirmations: 1,
+                mask: CkbTxTracingMask::Committed,
+                callback: Self::tracer_callback_for(swap_id, role, liquidity_actor),
+            }))
+            .map_err(|error| {
+                LiquidityLoopOutError::Chain(format!(
+                    "create tx tracer failed for liquidity tx {tx_hash}: {error}"
+                ))
+            })?;
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn tracer_callback_for(
+        swap_id: Hash256,
+        role: LiquidityChainTxRole,
+        liquidity_actor: ActorRef<LiquidityActorMessage>,
+    ) -> RpcReplyPort<CkbTxTracingResult> {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<CkbTxTracingResult>();
+        tokio::spawn(async move {
+            let Ok(result) = receiver.await else {
+                return;
+            };
+            let TxStatus::Committed(..) = result.tx_status else {
+                return;
+            };
+
+            let message = match role {
+                LiquidityChainTxRole::Payout => LiquidityActorMessage::PayoutConfirmed(swap_id),
+                LiquidityChainTxRole::Claim => LiquidityActorMessage::ClaimConfirmed(swap_id),
+                LiquidityChainTxRole::Refund => LiquidityActorMessage::RefundConfirmed(swap_id),
+            };
+            let _ = liquidity_actor.send_message(message);
+        });
+        RpcReplyPort::from(sender)
+    }
+
     fn not_wired(operation: &str) -> LiquidityLoopOutError {
         LiquidityLoopOutError::Chain(format!(
             "liquidity chain operation `{operation}` is not wired to CKB transaction builders yet"
@@ -360,13 +422,105 @@ pub fn build_loop_out_payout_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ckb_types::{bytes::Bytes, core::TransactionView, packed, prelude::*};
-    use fiber_types::{
-        Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey,
-    };
-    use secp256k1::{SecretKey, SECP256K1};
+    use std::sync::{Arc, Mutex};
 
+    use ckb_types::{
+        bytes::Bytes,
+        core::{tx_pool::TxStatus, TransactionView},
+        packed,
+        prelude::*,
+        H256,
+    };
+    use fiber_types::{
+        Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquidityChainTxRole,
+        LiquiditySwapState, Pubkey,
+    };
+    use ractor::{Actor, ActorProcessingErr};
+    use secp256k1::{SecretKey, SECP256K1};
+    use tokio::sync::mpsc;
+
+    use crate::ckb::{CkbTxTracer, CkbTxTracingResult};
     use crate::liquidity::store::{LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole};
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    enum MockCkbEvent {
+        SendTx,
+        CreateTxTracer,
+    }
+
+    struct MockCkbActor;
+
+    #[async_trait::async_trait]
+    impl Actor for MockCkbActor {
+        type Msg = CkbChainMessage;
+        type State = Arc<Mutex<Vec<MockCkbEvent>>>;
+        type Arguments = Arc<Mutex<Vec<MockCkbEvent>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            events: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(events)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            events: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                CkbChainMessage::SendTx(_, reply) => {
+                    events.lock().unwrap().push(MockCkbEvent::SendTx);
+                    let _ = reply.send(Ok(()));
+                }
+                CkbChainMessage::CreateTxTracer(CkbTxTracer { .. }) => {
+                    events.lock().unwrap().push(MockCkbEvent::CreateTxTracer);
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct MockLiquidityActor;
+
+    #[async_trait::async_trait]
+    impl Actor for MockLiquidityActor {
+        type Msg = LiquidityActorMessage;
+        type State = mpsc::UnboundedSender<LiquidityActorMessage>;
+        type Arguments = mpsc::UnboundedSender<LiquidityActorMessage>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            sender: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(sender)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            sender: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            let _ = sender.send(message);
+            Ok(())
+        }
+    }
+
+    async fn spawn_mock_liquidity_actor() -> (
+        ActorRef<LiquidityActorMessage>,
+        mpsc::UnboundedReceiver<LiquidityActorMessage>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (actor, _handle) = ractor::Actor::spawn(None, MockLiquidityActor, sender)
+            .await
+            .unwrap();
+        (actor, receiver)
+    }
 
     fn script(args: &'static str) -> packed::Script {
         packed::Script::new_builder()
@@ -430,6 +584,59 @@ mod tests {
             .outputs(outputs)
             .outputs_data(outputs_data.pack())
             .build()
+    }
+
+    fn committed_result(tx_hash: Hash256) -> CkbTxTracingResult {
+        CkbTxTracingResult {
+            tx_hash,
+            tx_status: TxStatus::Committed(1, H256::default(), 0),
+        }
+    }
+
+    async fn assert_callback_maps_committed_status(
+        role: LiquidityChainTxRole,
+        expected: impl FnOnce(Hash256) -> LiquidityActorMessage,
+    ) {
+        let swap_id: Hash256 = [7u8; 32].into();
+        let tx_hash: Hash256 = [8u8; 32].into();
+        let (liquidity_actor, mut receiver) = spawn_mock_liquidity_actor().await;
+        CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor.clone())
+            .send(CkbTxTracingResult::unknown(tx_hash))
+            .expect("callback accepts unknown status");
+        CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor.clone())
+            .send(CkbTxTracingResult {
+                tx_hash,
+                tx_status: TxStatus::Rejected("rejected".to_string()),
+            })
+            .expect("callback accepts rejected status");
+
+        assert!(receiver.try_recv().is_err());
+
+        CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor)
+            .send(committed_result(tx_hash))
+            .expect("callback accepts committed status");
+
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("liquidity actor receives continuation")
+            .expect("mock actor is alive");
+        match (message, expected(swap_id)) {
+            (
+                LiquidityActorMessage::PayoutConfirmed(actual),
+                LiquidityActorMessage::PayoutConfirmed(expected),
+            )
+            | (
+                LiquidityActorMessage::ClaimConfirmed(actual),
+                LiquidityActorMessage::ClaimConfirmed(expected),
+            )
+            | (
+                LiquidityActorMessage::RefundConfirmed(actual),
+                LiquidityActorMessage::RefundConfirmed(expected),
+            ) => {
+                assert_eq!(actual, expected);
+            }
+            (actual, expected) => panic!("unexpected message {actual:?}, expected {expected:?}"),
+        }
     }
 
     fn test_swap_record_with_outpoint(outpoint: packed::OutPoint) -> LiquiditySwapRecord {
@@ -597,6 +804,70 @@ mod tests {
         assert_eq!(plan.tx_hash, tx.hash().into());
         assert_eq!(plan.outpoint.tx_hash(), tx.hash());
         assert_eq!(u32::from(plan.outpoint.index()), 1);
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_sends_tx_then_registers_tracer() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
+            .await
+            .unwrap();
+        let watcher = CkbLiquidityChainWatcher::new(ckb_actor);
+        let (liquidity_actor, _receiver) = spawn_mock_liquidity_actor().await;
+        let transaction = TransactionView::new_advanced_builder().build();
+
+        watcher
+            .send_and_trace(
+                [1u8; 32].into(),
+                LiquidityChainTxRole::Payout,
+                transaction,
+                liquidity_actor,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if events.lock().unwrap().len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("mock ckb actor records tracer creation");
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![MockCkbEvent::SendTx, MockCkbEvent::CreateTxTracer]
+        );
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_maps_payout_confirmation_to_actor_message() {
+        assert_callback_maps_committed_status(
+            LiquidityChainTxRole::Payout,
+            LiquidityActorMessage::PayoutConfirmed,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_maps_claim_confirmation_to_actor_message() {
+        assert_callback_maps_committed_status(
+            LiquidityChainTxRole::Claim,
+            LiquidityActorMessage::ClaimConfirmed,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_maps_refund_confirmation_to_actor_message() {
+        assert_callback_maps_committed_status(
+            LiquidityChainTxRole::Refund,
+            LiquidityActorMessage::RefundConfirmed,
+        )
+        .await;
     }
 
     #[test]
