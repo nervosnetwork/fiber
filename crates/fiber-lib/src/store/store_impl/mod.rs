@@ -41,9 +41,10 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, LiquidityAsset, LiquiditySwapKind, LiquiditySwapState,
-    LoopOutQuoteRecord, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, Hash256, LiquidityAsset, LiquidityChainTxRecord, LiquidityChainTxRole,
+    LiquidityChainTxStatus, LiquiditySwapKind, LiquiditySwapState, LoopOutQuoteRecord,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey,
+    TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
@@ -135,6 +136,29 @@ impl Store {
 
     fn loop_out_quote_key(quote_id: &Hash256) -> Vec<u8> {
         [&[LIQUIDITY_LOOP_OUT_QUOTE_PREFIX], quote_id.as_ref()].concat()
+    }
+
+    fn liquidity_chain_tx_key(swap_id: &Hash256, role: LiquidityChainTxRole) -> Vec<u8> {
+        [
+            &[LIQUIDITY_CHAIN_TX_PREFIX],
+            swap_id.as_ref(),
+            &[liquidity_chain_tx_role_key(role)],
+        ]
+        .concat()
+    }
+
+    fn liquidity_chain_tx_status_index_key(
+        status: LiquidityChainTxStatus,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+    ) -> Vec<u8> {
+        [
+            &[LIQUIDITY_CHAIN_TX_STATUS_PREFIX],
+            &[liquidity_chain_tx_status_key(status)],
+            swap_id.as_ref(),
+            &[liquidity_chain_tx_role_key(role)],
+        ]
+        .concat()
     }
 
     fn liquidity_swap_state_index_key(state: LiquiditySwapState, swap_id: &Hash256) -> Vec<u8> {
@@ -239,6 +263,52 @@ impl Store {
         }
 
         Ok(swap)
+    }
+
+    fn parse_liquidity_chain_tx_index_key(
+        key: &[u8],
+        expected_status: LiquidityChainTxStatus,
+    ) -> Option<(Hash256, LiquidityChainTxRole)> {
+        if key.len() != 35
+            || key.first() != Some(&LIQUIDITY_CHAIN_TX_STATUS_PREFIX)
+            || key.get(1) != Some(&liquidity_chain_tx_status_key(expected_status))
+        {
+            return None;
+        }
+        let swap_id: [u8; 32] = key.get(2..34)?.try_into().ok()?;
+        let role = liquidity_chain_tx_role_from_key(*key.get(34)?)?;
+        Some((swap_id.into(), role))
+    }
+
+    fn get_liquidity_chain_tx_from_status_index(
+        &self,
+        key: &[u8],
+        expected_status: LiquidityChainTxStatus,
+    ) -> Result<LiquidityChainTxRecord, LiquidityStoreError> {
+        let (swap_id, role) = Self::parse_liquidity_chain_tx_index_key(key, expected_status)
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "invalid liquidity chain tx status index key: {}",
+                    hex::encode(key)
+                ))
+            })?;
+        let record = self
+            .get_liquidity_chain_tx(&swap_id, role)?
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "liquidity chain tx status index points to missing record: {:?}",
+                    swap_id
+                ))
+            })?;
+        if record.status != expected_status {
+            return Err(LiquidityStoreError::Backend(format!(
+                "stale liquidity chain tx status index: key {} points to tx {:?} with status {:?}",
+                hex::encode(key),
+                swap_id,
+                record.status
+            )));
+        }
+        Ok(record)
     }
 }
 
@@ -463,6 +533,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            LIQUIDITY_CHAIN_TX_PREFIX => {
+                check_deserialization::<LiquidityChainTxRecord>(
+                    &value,
+                    "LIQUIDITY_CHAIN_TX_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_CHAIN_TX_STATUS_PREFIX => {}
             #[cfg(not(target_arch = "wasm32"))]
             CCH_ORDER_PREFIX => {
                 check_deserialization::<CchOrder>(&value, "CCH_ORDER_PREFIX", &mut errors);
@@ -585,6 +663,32 @@ fn liquidity_state_key(state: LiquiditySwapState) -> u8 {
     }
 }
 
+fn liquidity_chain_tx_role_key(role: LiquidityChainTxRole) -> u8 {
+    match role {
+        LiquidityChainTxRole::Payout => 0,
+        LiquidityChainTxRole::Claim => 1,
+        LiquidityChainTxRole::Refund => 2,
+    }
+}
+
+fn liquidity_chain_tx_role_from_key(key: u8) -> Option<LiquidityChainTxRole> {
+    match key {
+        0 => Some(LiquidityChainTxRole::Payout),
+        1 => Some(LiquidityChainTxRole::Claim),
+        2 => Some(LiquidityChainTxRole::Refund),
+        _ => None,
+    }
+}
+
+fn liquidity_chain_tx_status_key(status: LiquidityChainTxStatus) -> u8 {
+    match status {
+        LiquidityChainTxStatus::Planned => 0,
+        LiquidityChainTxStatus::Broadcast => 1,
+        LiquidityChainTxStatus::Confirmed => 2,
+        LiquidityChainTxStatus::Rejected => 3,
+    }
+}
+
 pub enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
@@ -623,6 +727,8 @@ pub enum KeyValue {
     LiquiditySwapAssetIndex((String, Hash256)),
     LiquidityAsset(String, LiquidityAsset),
     LoopOutQuote(Hash256, LoopOutQuoteRecord),
+    LiquidityChainTx((Hash256, LiquidityChainTxRole), LiquidityChainTxRecord),
+    LiquidityChainTxStatusIndex((LiquidityChainTxStatus, Hash256, LiquidityChainTxRole)),
 }
 
 /// Recorded store changes.
@@ -780,6 +886,12 @@ impl StoreKeyValue for KeyValue {
                 [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat()
             }
             KeyValue::LoopOutQuote(quote_id, _) => Store::loop_out_quote_key(quote_id),
+            KeyValue::LiquidityChainTx((swap_id, role), _) => {
+                Store::liquidity_chain_tx_key(swap_id, *role)
+            }
+            KeyValue::LiquidityChainTxStatusIndex((status, swap_id, role)) => {
+                Store::liquidity_chain_tx_status_index_key(*status, swap_id, *role)
+            }
         }
     }
 
@@ -835,6 +947,10 @@ impl StoreKeyValue for KeyValue {
             KeyValue::LiquiditySwapAssetIndex(_) => Vec::new(),
             KeyValue::LiquidityAsset(_, asset) => serialize_to_vec(asset, "LiquidityAsset"),
             KeyValue::LoopOutQuote(_, quote) => serialize_to_vec(quote, "LoopOutQuoteRecord"),
+            KeyValue::LiquidityChainTx(_, record) => {
+                serialize_to_vec(record, "LiquidityChainTxRecord")
+            }
+            KeyValue::LiquidityChainTxStatusIndex(_) => Vec::new(),
         }
     }
 }
@@ -1661,6 +1777,89 @@ impl LiquidityStore for Store {
         batch.put(primary.key(), primary.value());
         batch.commit();
         Ok(())
+    }
+
+    fn insert_liquidity_chain_tx(
+        &self,
+        record: LiquidityChainTxRecord,
+    ) -> Result<(), LiquidityStoreError> {
+        if self
+            .get_liquidity_chain_tx(&record.swap_id, record.role)?
+            .is_some()
+        {
+            return Err(LiquidityStoreError::Backend(format!(
+                "liquidity chain tx already exists for swap {:?} role {:?}",
+                record.swap_id, record.role
+            )));
+        }
+
+        let mut batch = self.batch();
+        let primary = KeyValue::LiquidityChainTx((record.swap_id, record.role), record.clone());
+        let status_index =
+            KeyValue::LiquidityChainTxStatusIndex((record.status, record.swap_id, record.role));
+        batch.put(primary.key(), primary.value());
+        batch.put(status_index.key(), status_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_chain_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+    ) -> Result<Option<LiquidityChainTxRecord>, LiquidityStoreError> {
+        let key = Self::liquidity_chain_tx_key(swap_id, role);
+        self.get(key)
+            .map(|value| deserialize_liquidity(value.as_ref(), "LiquidityChainTxRecord"))
+            .transpose()
+    }
+
+    fn update_liquidity_chain_tx_status(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+        status: LiquidityChainTxStatus,
+        failure_reason: Option<String>,
+        updated_at: u64,
+    ) -> Result<(), LiquidityStoreError> {
+        let mut record = self.get_liquidity_chain_tx(swap_id, role)?.ok_or_else(|| {
+            LiquidityStoreError::Backend(format!(
+                "liquidity chain tx not found for swap {:?} role {:?}",
+                swap_id, role
+            ))
+        })?;
+        let old_status = record.status;
+        record.status = status;
+        record.failure_reason = failure_reason;
+        record.updated_at = updated_at;
+
+        let mut batch = self.batch();
+        batch.delete(Self::liquidity_chain_tx_status_index_key(
+            old_status, swap_id, role,
+        ));
+        let primary = KeyValue::LiquidityChainTx((*swap_id, role), record.clone());
+        let status_index = KeyValue::LiquidityChainTxStatusIndex((status, *swap_id, role));
+        batch.put(primary.key(), primary.value());
+        batch.put(status_index.key(), status_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn list_liquidity_chain_txs_by_status(
+        &self,
+        statuses: &[LiquidityChainTxStatus],
+    ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+        let mut records = Vec::new();
+        for status in statuses {
+            let prefix = vec![
+                LIQUIDITY_CHAIN_TX_STATUS_PREFIX,
+                liquidity_chain_tx_status_key(*status),
+            ];
+            for kv in self.collect_by_prefix(&prefix) {
+                records.push(self.get_liquidity_chain_tx_from_status_index(&kv.key, *status)?);
+            }
+        }
+        Ok(records)
     }
 
     fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {

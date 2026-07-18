@@ -25,6 +25,8 @@
 //! | 242          | String               | LiquiditySwapAssetIndex     |
 //! | 243          | String               | LiquidityAsset              |
 //! | 244          | Hash256              | LiquidityLoopOutQuote       |
+//! | 245          | Hash256 | role       | LiquidityChainTxRecord      |
+//! | 246          | status | Hash256 | role | ()                       |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -67,3 +69,5 @@ pub const LIQUIDITY_SWAP_STATE_PREFIX: u8 = 241;
 pub const LIQUIDITY_SWAP_ASSET_PREFIX: u8 = 242;
 pub const LIQUIDITY_ASSET_PREFIX: u8 = 243;
 pub const LIQUIDITY_LOOP_OUT_QUOTE_PREFIX: u8 = 244;
+pub const LIQUIDITY_CHAIN_TX_PREFIX: u8 = 245;
+pub const LIQUIDITY_CHAIN_TX_STATUS_PREFIX: u8 = 246;

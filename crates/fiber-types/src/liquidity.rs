@@ -149,6 +149,53 @@ pub struct LiquiditySwapRecord {
     pub updated_at: u64,
 }
 
+/// Liquidity CKB transaction role within a swap.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum LiquidityChainTxRole {
+    /// Provider payout lock transaction.
+    Payout,
+    /// Client claim transaction.
+    Claim,
+    /// Provider refund transaction.
+    Refund,
+}
+
+/// Persisted lifecycle status for a liquidity CKB transaction.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum LiquidityChainTxStatus {
+    /// Transaction identity is planned and persisted before broadcast.
+    Planned,
+    /// Transaction was submitted to the CKB actor.
+    Broadcast,
+    /// Transaction reached the required confirmations.
+    Confirmed,
+    /// Transaction was rejected or failed to broadcast.
+    Rejected,
+}
+
+/// Persisted CKB transaction identity for liquidity swap recovery.
+#[serde_as]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LiquidityChainTxRecord {
+    /// Swap that owns the transaction.
+    pub swap_id: Hash256,
+    /// Transaction role within the swap.
+    pub role: LiquidityChainTxRole,
+    /// CKB transaction hash.
+    pub tx_hash: Hash256,
+    /// Created output, if the transaction creates one tracked by recovery.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub outpoint: Option<ckb_types::packed::OutPoint>,
+    /// Current transaction status.
+    pub status: LiquidityChainTxStatus,
+    /// Optional failure reason for rejected/failed transactions.
+    pub failure_reason: Option<String>,
+    /// Creation timestamp in milliseconds.
+    pub created_at: u64,
+    /// Last update timestamp in milliseconds.
+    pub updated_at: u64,
+}
+
 impl LiquidityAsset {
     /// Validate this registry entry against the M0 asset rules.
     pub fn validate(&self) -> Result<(), LiquidityAssetError> {

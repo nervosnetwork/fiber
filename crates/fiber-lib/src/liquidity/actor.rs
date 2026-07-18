@@ -1261,7 +1261,8 @@ mod tests {
 
     use ckb_types::{packed::Byte32, packed::OutPoint, prelude::*};
     use fiber_types::{
-        Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquiditySwapState, Pubkey,
+        Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquidityChainTxRecord,
+        LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState, Pubkey,
     };
     use ractor::concurrency::Duration;
     use secp256k1::{SecretKey, SECP256K1};
@@ -1329,6 +1330,7 @@ mod tests {
         swaps: Shared<HashMap<Hash256, LiquiditySwapRecord>>,
         quotes: Shared<HashMap<Hash256, LoopOutQuoteTerms>>,
         assets: Shared<HashMap<String, LiquidityAsset>>,
+        chain_txs: Shared<HashMap<(Hash256, LiquidityChainTxRole), LiquidityChainTxRecord>>,
         events: Shared<Vec<&'static str>>,
         label: Option<&'static str>,
     }
@@ -1339,6 +1341,7 @@ mod tests {
                 swaps: Shared::new(HashMap::new()),
                 quotes: Shared::new(HashMap::new()),
                 assets: Shared::new(HashMap::new()),
+                chain_txs: Shared::new(HashMap::new()),
                 events,
                 label: Some(label),
             }
@@ -1544,6 +1547,60 @@ mod tests {
             }
             swap.updated_at = update.updated_at;
             Ok(())
+        }
+
+        fn insert_liquidity_chain_tx(
+            &self,
+            record: LiquidityChainTxRecord,
+        ) -> Result<(), LiquidityStoreError> {
+            let mut chain_txs = self.chain_txs.borrow_mut();
+            let key = (record.swap_id, record.role);
+            if chain_txs.contains_key(&key) {
+                return Err(LiquidityStoreError::Backend(
+                    "liquidity chain tx already exists".to_string(),
+                ));
+            }
+            chain_txs.insert(key, record);
+            Ok(())
+        }
+
+        fn get_liquidity_chain_tx(
+            &self,
+            swap_id: &Hash256,
+            role: LiquidityChainTxRole,
+        ) -> Result<Option<LiquidityChainTxRecord>, LiquidityStoreError> {
+            Ok(self.chain_txs.borrow().get(&(*swap_id, role)).cloned())
+        }
+
+        fn update_liquidity_chain_tx_status(
+            &self,
+            swap_id: &Hash256,
+            role: LiquidityChainTxRole,
+            status: LiquidityChainTxStatus,
+            failure_reason: Option<String>,
+            updated_at: u64,
+        ) -> Result<(), LiquidityStoreError> {
+            let mut chain_txs = self.chain_txs.borrow_mut();
+            let record = chain_txs.get_mut(&(*swap_id, role)).ok_or_else(|| {
+                LiquidityStoreError::Backend("liquidity chain tx not found".to_string())
+            })?;
+            record.status = status;
+            record.failure_reason = failure_reason;
+            record.updated_at = updated_at;
+            Ok(())
+        }
+
+        fn list_liquidity_chain_txs_by_status(
+            &self,
+            statuses: &[LiquidityChainTxStatus],
+        ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+            Ok(self
+                .chain_txs
+                .borrow()
+                .values()
+                .filter(|record| statuses.contains(&record.status))
+                .cloned()
+                .collect())
         }
 
         fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
