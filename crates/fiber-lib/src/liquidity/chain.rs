@@ -543,6 +543,47 @@ mod tests {
         }
     }
 
+    struct SendErrorCkbActor;
+
+    #[async_trait::async_trait]
+    impl Actor for SendErrorCkbActor {
+        type Msg = CkbChainMessage;
+        type State = Arc<Mutex<Vec<MockCkbEvent>>>;
+        type Arguments = Arc<Mutex<Vec<MockCkbEvent>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            events: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(events)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            events: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                CkbChainMessage::SendTx(_, reply) => {
+                    events.lock().unwrap().push(MockCkbEvent::SendTx);
+                    let _ = reply.send(Err(ckb_sdk::RpcError::Other(anyhow::anyhow!(
+                        "mock send tx error"
+                    ))));
+                }
+                CkbChainMessage::CreateTxTracer(CkbTxTracer { mask, .. }) => {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(MockCkbEvent::CreateTxTracer(mask));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
     struct MockLiquidityActor;
 
     #[async_trait::async_trait]
@@ -652,6 +693,14 @@ mod tests {
         }
     }
 
+    async fn assert_no_liquidity_message(
+        receiver: &mut mpsc::UnboundedReceiver<LiquidityActorMessage>,
+    ) {
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv()).await;
+        assert!(result.is_err(), "unexpected liquidity actor message");
+    }
+
     async fn assert_callback_maps_committed_status(
         role: LiquidityChainTxRole,
         expected: impl FnOnce(Hash256) -> LiquidityActorMessage,
@@ -669,7 +718,7 @@ mod tests {
             })
             .expect("callback accepts rejected status");
 
-        assert!(receiver.try_recv().is_err());
+        assert_no_liquidity_message(&mut receiver).await;
 
         CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor)
             .send(committed_result(tx_hash))
@@ -928,6 +977,30 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("send tx actor call failed"));
+        assert_eq!(*events.lock().unwrap(), vec![MockCkbEvent::SendTx]);
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_send_tx_error_returns_error_without_tracer() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, SendErrorCkbActor, events.clone())
+            .await
+            .unwrap();
+        let watcher = CkbLiquidityChainWatcher::new(ckb_actor);
+        let (liquidity_actor, _receiver) = spawn_mock_liquidity_actor().await;
+        let transaction = TransactionView::new_advanced_builder().build();
+
+        let error = watcher
+            .send_and_trace(
+                [1u8; 32].into(),
+                LiquidityChainTxRole::Payout,
+                transaction,
+                liquidity_actor,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("send tx failed"));
         assert_eq!(*events.lock().unwrap(), vec![MockCkbEvent::SendTx]);
     }
 
