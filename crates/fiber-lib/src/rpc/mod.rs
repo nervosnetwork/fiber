@@ -342,7 +342,10 @@ pub mod server {
                             LiquidityActorArguments {
                                 store: store.clone(),
                                 payment: NetworkLoopOutPaymentAdapter::new(network_actor),
-                                chain: CkbLiquidityChainWatcher::new(ckb_chain_actor),
+                                chain: CkbLiquidityChainWatcher::new(
+                                    ckb_chain_actor,
+                                    store.clone(),
+                                ),
                             },
                             supervisor.clone(),
                         )

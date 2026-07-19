@@ -1553,6 +1553,9 @@ mod tests {
             &self,
             record: LiquidityChainTxRecord,
         ) -> Result<(), LiquidityStoreError> {
+            if record.role == LiquidityChainTxRole::Payout {
+                self.events.borrow_mut().push("persist_payout_tx");
+            }
             let mut chain_txs = self.chain_txs.borrow_mut();
             let key = (record.swap_id, record.role);
             if chain_txs.contains_key(&key) {
@@ -1627,6 +1630,7 @@ mod tests {
         events: Shared<Vec<&'static str>>,
         outpoint: OutPoint,
         label: Option<&'static str>,
+        store: Option<TestLiquidityStore>,
         fail_next_claim: bool,
         claim_preimages: Vec<Hash256>,
         payout_locks: Shared<Vec<(ckb_types::packed::Script, ckb_types::packed::Script)>>,
@@ -1638,6 +1642,7 @@ mod tests {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
                 label: None,
+                store: None,
                 fail_next_claim: false,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
@@ -1649,10 +1654,16 @@ mod tests {
                 events,
                 outpoint: OutPoint::new(Byte32::from_slice(&[9u8; 32]).unwrap(), 0),
                 label: Some(label),
+                store: None,
                 fail_next_claim: false,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
             }
+        }
+
+        fn with_store(mut self, store: TestLiquidityStore) -> Self {
+            self.store = Some(store);
+            self
         }
 
         fn fail_next_claim(&mut self) {
@@ -1665,9 +1676,26 @@ mod tests {
 
         fn reserve_payout_lock_outpoint(
             &mut self,
-            _quote: &LoopOutQuoteTerms,
+            quote: &LoopOutQuoteTerms,
         ) -> Result<OutPoint, Self::Error> {
-            if self.label.is_some_and(|label| label.starts_with("runtime")) {
+            if self.label.is_some_and(|label| label.starts_with("ckb")) {
+                let store = self
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| "missing store".to_string())?;
+                store
+                    .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                        swap_id: quote.quote_id,
+                        role: LiquidityChainTxRole::Payout,
+                        tx_hash: [7u8; 32].into(),
+                        outpoint: Some(self.outpoint.clone()),
+                        status: LiquidityChainTxStatus::Planned,
+                        failure_reason: None,
+                        created_at: now_ms(),
+                        updated_at: now_ms(),
+                    })
+                    .map_err(|error| error.to_string())?;
+            } else if self.label.is_some_and(|label| label.starts_with("runtime")) {
                 self.events.borrow_mut().push("reserve_payout");
             }
             Ok(self.outpoint.clone())
@@ -1685,7 +1713,14 @@ mod tests {
             self.payout_locks
                 .borrow_mut()
                 .push((quote.claimant_lock.clone(), quote.refund_lock.clone()));
-            self.events.borrow_mut().push(event);
+            if self.label.is_some_and(|label| label.starts_with("ckb")) {
+                self.events.borrow_mut().push("send_tx");
+                if self.label == Some("ckb_send_failure") {
+                    return Err("chain operation failed: mock send tx error".to_string());
+                }
+            } else {
+                self.events.borrow_mut().push(event);
+            }
             Ok(())
         }
 
@@ -1708,6 +1743,9 @@ mod tests {
             _swap_id: Hash256,
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
+            if self.label.is_some_and(|label| label.starts_with("ckb")) {
+                self.events.borrow_mut().push("create_tx_tracer");
+            }
             self.events.borrow_mut().push("watch_payout");
             Ok(())
         }
@@ -1852,6 +1890,26 @@ mod tests {
             harness
         }
 
+        fn new_provider_with_realistic_ckb_watcher() -> Self {
+            Self::new_provider_with_chain_label("ckb_success")
+        }
+
+        fn new_provider_with_failing_send_tx() -> Self {
+            Self::new_provider_with_chain_label("ckb_send_failure")
+        }
+
+        fn new_provider_with_chain_label(chain_label: &'static str) -> Self {
+            let events = Shared::new(Vec::new());
+            let store = TestLiquidityStore::new(events.clone(), "provider");
+            Self {
+                events: events.clone(),
+                store: store.clone(),
+                chain: TestLiquidityChain::new_with_label(events.clone(), chain_label)
+                    .with_store(store.clone()),
+                payment: TestLoopOutPayment::new_with_label(events, "runtime"),
+            }
+        }
+
         fn new(label: &'static str) -> Self {
             let events = Shared::new(Vec::new());
             Self {
@@ -1908,6 +1966,14 @@ mod tests {
 
         fn events(&self) -> Vec<&'static str> {
             self.events.borrow().clone()
+        }
+
+        fn chain_tx_record(
+            &self,
+            swap_id: Hash256,
+            role: LiquidityChainTxRole,
+        ) -> Option<LiquidityChainTxRecord> {
+            self.store.get_liquidity_chain_tx(&swap_id, role).unwrap()
         }
 
         async fn call_loop_out(
@@ -2788,6 +2854,46 @@ mod tests {
                 "watch_payout",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_payout_persists_tx_identity_before_send_tx() {
+        let harness = RuntimeActorHarness::new_provider_with_realistic_ckb_watcher();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        harness.call_provider_accept(quote.quote_id).await.unwrap();
+
+        assert_eq!(
+            harness.events(),
+            vec![
+                "provider_insert_created",
+                "provider_transition_quoted",
+                "provider_transition_payout_pending",
+                "persist_payout_tx",
+                "provider_persist_outpoint",
+                "send_tx",
+                "create_tx_tracer",
+                "watch_payout",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_payout_send_failure_keeps_tx_identity_recoverable() {
+        let harness = RuntimeActorHarness::new_provider_with_failing_send_tx();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        let error = harness
+            .call_provider_accept(quote.quote_id)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("chain operation failed"));
+        assert!(harness
+            .chain_tx_record(quote.quote_id, LiquidityChainTxRole::Payout)
+            .is_some());
     }
 
     #[tokio::test]
