@@ -1,10 +1,7 @@
 //! Chain adapter boundary for loop-out liquidity operations.
 
 use ckb_types::{core::tx_pool::TxStatus, core::TransactionView, packed};
-use fiber_types::{
-    Hash256, HashAlgorithm, LiquidityChainTxRecord, LiquidityChainTxRole, LiquidityChainTxStatus,
-    LiquiditySwapState,
-};
+use fiber_types::{Hash256, HashAlgorithm, LiquidityChainTxRole, LiquiditySwapState};
 use ractor::{ActorRef, RpcReplyPort};
 
 use crate::ckb::{CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult};
@@ -353,61 +350,11 @@ impl<S> CkbLiquidityChainWatcher<S>
 where
     S: LiquidityStore,
 {
-    fn build_payout_transaction(
-        &self,
-        quote: &LoopOutQuoteTerms,
-    ) -> Result<TransactionView, LiquidityLoopOutError> {
-        let artifact = LiquidityLockScriptArtifact {
-            code_hash: packed::Byte32::zero(),
-            hash_type: packed::Byte::new(0),
-        };
-        let asset_type_script = quote
-            .asset
-            .udt_type_script
-            .clone()
-            .map(TryInto::try_into)
-            .transpose()
-            .map_err(|error| {
-                LiquidityLoopOutError::Chain(format!("invalid UDT script: {error}"))
-            })?;
-        let (output, output_data) = build_loop_out_payout_output(
-            &artifact,
-            &LoopOutPayoutRequest {
-                payment_hash: quote.payment_hash.into(),
-                claimant_lock: quote.claimant_lock.clone(),
-                refund_lock: quote.refund_lock.clone(),
-                refund_after_lock_time: quote.refund_after_lock_time,
-                amount: quote.amount,
-                asset_type_script,
-                capacity: quote.capacity_requirement_ckb,
-            },
+    fn missing_payout_builder() -> LiquidityLoopOutError {
+        LiquidityLoopOutError::Chain(
+            "cannot build provider payout transaction: deployed liquidity-lock script artifact is not configured"
+                .to_string(),
         )
-        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
-
-        Ok(TransactionView::new_advanced_builder()
-            .output(output)
-            .output_data(output_data)
-            .build())
-    }
-
-    fn payout_plan(
-        &self,
-        quote: &LoopOutQuoteTerms,
-    ) -> Result<LoopOutPayoutTxPlan, LiquidityLoopOutError> {
-        Ok(LoopOutPayoutTxPlan::new(
-            quote.quote_id,
-            self.build_payout_transaction(quote)?,
-            0,
-        ))
-    }
-
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX)
     }
 }
 
@@ -421,21 +368,8 @@ where
         &mut self,
         quote: &LoopOutQuoteTerms,
     ) -> Result<packed::OutPoint, Self::Error> {
-        let plan = self.payout_plan(quote)?;
-        let now_ms = Self::now_ms();
-        self.store
-            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
-                swap_id: plan.swap_id,
-                role: LiquidityChainTxRole::Payout,
-                tx_hash: plan.tx_hash,
-                outpoint: Some(plan.outpoint.clone()),
-                status: LiquidityChainTxStatus::Planned,
-                failure_reason: None,
-                created_at: now_ms,
-                updated_at: now_ms,
-            })
-            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
-        Ok(plan.outpoint)
+        let _ = quote;
+        Err(Self::missing_payout_builder())
     }
 
     fn broadcast_payout_lock(
@@ -443,76 +377,8 @@ where
         quote: &LoopOutQuoteTerms,
         outpoint: &packed::OutPoint,
     ) -> Result<(), Self::Error> {
-        let record = self
-            .store
-            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
-            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?
-            .ok_or_else(|| {
-                LiquidityLoopOutError::Chain(
-                    "cannot broadcast payout without persisted transaction identity".to_string(),
-                )
-            })?;
-        let plan = self.payout_plan(quote)?;
-        if plan.tx_hash != record.tx_hash || record.outpoint.as_ref() != Some(outpoint) {
-            return Err(LiquidityLoopOutError::Chain(
-                "rebuilt payout transaction does not match persisted identity".to_string(),
-            ));
-        }
-
-        let tx_hash = record.tx_hash;
-        let ckb_chain_actor = self.ckb_chain_actor.clone();
-        let transaction = plan.transaction.clone();
-        let send_result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(move || {
-                    handle.block_on(async move {
-                        ractor::call_t!(
-                            ckb_chain_actor,
-                            CkbChainMessage::SendTx,
-                            CKB_SEND_TX_TIMEOUT_MS,
-                            transaction
-                        )
-                        .map_err(|error| error.to_string())
-                    })
-                })
-            }
-            _ => std::thread::spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| error.to_string())?
-                    .block_on(async move {
-                        ractor::call_t!(
-                            ckb_chain_actor,
-                            CkbChainMessage::SendTx,
-                            CKB_SEND_TX_TIMEOUT_MS,
-                            transaction
-                        )
-                        .map_err(|error| error.to_string())
-                    })
-            })
-            .join()
-            .map_err(|_| LiquidityLoopOutError::Chain("send tx worker panicked".to_string()))?,
-        }
-        .map_err(|error| {
-            LiquidityLoopOutError::Chain(format!("send tx actor call failed: {error}"))
-        })?;
-        send_result.map_err(|error| {
-            LiquidityLoopOutError::Chain(format!(
-                "send tx failed for liquidity tx {tx_hash}: {error}"
-            ))
-        })?;
-
-        self.store
-            .update_liquidity_chain_tx_status(
-                &quote.quote_id,
-                LiquidityChainTxRole::Payout,
-                LiquidityChainTxStatus::Broadcast,
-                None,
-                Self::now_ms(),
-            )
-            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
-        Ok(())
+        let _ = (quote, outpoint);
+        Err(Self::missing_payout_builder())
     }
 
     fn watch_payout_lock(
@@ -1339,27 +1205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ckb_watcher_reserve_payout_persists_planned_tx_identity() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events)
-            .await
-            .unwrap();
-        let store = NoopLiquidityStore::default();
-        let mut watcher = CkbLiquidityChainWatcher::new(ckb_actor, store.clone());
-        let quote = test_loop_out_quote_terms();
-
-        let outpoint = watcher.reserve_payout_lock_outpoint(&quote).unwrap();
-
-        let record = store
-            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.status, LiquidityChainTxStatus::Planned);
-        assert_eq!(record.outpoint, Some(outpoint));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn ckb_watcher_broadcast_payout_sends_updates_status_then_watch_registers_tracer() {
+    async fn ckb_watcher_without_liquidity_lock_artifact_fails_before_payout_persistence_or_send() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
             .await
@@ -1367,41 +1213,34 @@ mod tests {
         let store = NoopLiquidityStore::default();
         let mut watcher = CkbLiquidityChainWatcher::new(ckb_actor, store.clone());
         let quote = test_loop_out_quote_terms();
-        let (liquidity_actor, _receiver) = spawn_mock_liquidity_actor().await;
 
-        let outpoint = watcher.reserve_payout_lock_outpoint(&quote).unwrap();
-        watcher.broadcast_payout_lock(&quote, &outpoint).unwrap();
-        watcher
-            .watch_payout_lock(quote.quote_id, liquidity_actor)
+        let error = watcher.reserve_payout_lock_outpoint(&quote).unwrap_err();
+
+        assert!(error.to_string().contains("liquidity-lock script artifact"));
+        assert!(store
+            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .is_none());
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_without_liquidity_lock_artifact_does_not_broadcast_payout() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
+            .await
             .unwrap();
+        let store = NoopLiquidityStore::default();
+        let mut watcher = CkbLiquidityChainWatcher::new(ckb_actor, store.clone());
+        let quote = test_loop_out_quote_terms();
+        let outpoint = test_outpoint(0);
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if events.lock().unwrap().len() == 2 {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("mock ckb actor records send and tracer creation");
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![
-                MockCkbEvent::SendTx,
-                MockCkbEvent::CreateTxTracer(
-                    CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
-                ),
-            ]
-        );
-        assert_eq!(
-            store
-                .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
-                .unwrap()
-                .unwrap()
-                .status,
-            LiquidityChainTxStatus::Broadcast
-        );
+        let error = watcher
+            .broadcast_payout_lock(&quote, &outpoint)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("liquidity-lock script artifact"));
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
