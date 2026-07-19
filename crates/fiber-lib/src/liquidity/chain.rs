@@ -310,18 +310,29 @@ impl CkbLiquidityChainWatcher {
             let Ok(result) = receiver.await else {
                 return;
             };
-            let TxStatus::Committed(..) = result.tx_status else {
+            let Some(message) = Self::continuation_for_tracing_result(swap_id, role, &result)
+            else {
                 return;
-            };
-
-            let message = match role {
-                LiquidityChainTxRole::Payout => LiquidityActorMessage::PayoutConfirmed(swap_id),
-                LiquidityChainTxRole::Claim => LiquidityActorMessage::ClaimConfirmed(swap_id),
-                LiquidityChainTxRole::Refund => LiquidityActorMessage::RefundConfirmed(swap_id),
             };
             let _ = liquidity_actor.send_message(message);
         });
         RpcReplyPort::from(sender)
+    }
+
+    fn continuation_for_tracing_result(
+        swap_id: Hash256,
+        role: LiquidityChainTxRole,
+        result: &CkbTxTracingResult,
+    ) -> Option<LiquidityActorMessage> {
+        if !matches!(result.tx_status, TxStatus::Committed(..)) {
+            return None;
+        }
+
+        Some(match role {
+            LiquidityChainTxRole::Payout => LiquidityActorMessage::PayoutConfirmed(swap_id),
+            LiquidityChainTxRole::Claim => LiquidityActorMessage::ClaimConfirmed(swap_id),
+            LiquidityChainTxRole::Refund => LiquidityActorMessage::RefundConfirmed(swap_id),
+        })
     }
 
     fn not_wired(operation: &str) -> LiquidityLoopOutError {
@@ -693,14 +704,6 @@ mod tests {
         }
     }
 
-    async fn assert_no_liquidity_message(
-        receiver: &mut mpsc::UnboundedReceiver<LiquidityActorMessage>,
-    ) {
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv()).await;
-        assert!(result.is_err(), "unexpected liquidity actor message");
-    }
-
     async fn assert_callback_maps_committed_status(
         role: LiquidityChainTxRole,
         expected: impl FnOnce(Hash256) -> LiquidityActorMessage,
@@ -708,17 +711,21 @@ mod tests {
         let swap_id: Hash256 = [7u8; 32].into();
         let tx_hash: Hash256 = [8u8; 32].into();
         let (liquidity_actor, mut receiver) = spawn_mock_liquidity_actor().await;
-        CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor.clone())
-            .send(CkbTxTracingResult::unknown(tx_hash))
-            .expect("callback accepts unknown status");
-        CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor.clone())
-            .send(CkbTxTracingResult {
+        assert!(CkbLiquidityChainWatcher::continuation_for_tracing_result(
+            swap_id,
+            role,
+            &CkbTxTracingResult::unknown(tx_hash)
+        )
+        .is_none());
+        assert!(CkbLiquidityChainWatcher::continuation_for_tracing_result(
+            swap_id,
+            role,
+            &CkbTxTracingResult {
                 tx_hash,
                 tx_status: TxStatus::Rejected("rejected".to_string()),
-            })
-            .expect("callback accepts rejected status");
-
-        assert_no_liquidity_message(&mut receiver).await;
+            }
+        )
+        .is_none());
 
         CkbLiquidityChainWatcher::tracer_callback_for(swap_id, role, liquidity_actor)
             .send(committed_result(tx_hash))
