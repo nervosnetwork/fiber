@@ -2443,7 +2443,14 @@ where
                 reply,
             } => {
                 let result = self
-                    .reconcile_onchain_payer_tlc(state, payment_hash, attempt_id, payment_preimage)
+                    .reconcile_onchain_payer_tlc(
+                        state,
+                        channel_id,
+                        tlc_id,
+                        payment_hash,
+                        attempt_id,
+                        payment_preimage,
+                    )
                     .await;
                 if let Err(err) = &result {
                     warn!(
@@ -3215,6 +3222,8 @@ where
                             if let Err(err) = self
                                 .reconcile_onchain_payer_tlc(
                                     state,
+                                    channel_id,
+                                    tlc.tlc_id,
                                     tlc.payment_hash,
                                     attempt_id,
                                     tlc.preimage,
@@ -3245,7 +3254,14 @@ where
         }
         for tlc in confirmed_payer_tlcs {
             if let Err(err) = self
-                .reconcile_onchain_payer_tlc(state, tlc.payment_hash, tlc.attempt_id, tlc.preimage)
+                .reconcile_onchain_payer_tlc(
+                    state,
+                    channel_id,
+                    tlc.tlc_id,
+                    tlc.payment_hash,
+                    tlc.attempt_id,
+                    tlc.preimage,
+                )
                 .await
             {
                 warn!(
@@ -4052,11 +4068,52 @@ where
     async fn reconcile_onchain_payer_tlc(
         &self,
         state: &mut NetworkActorState<S, C>,
+        channel_id: Hash256,
+        tlc_id: TLCId,
         payment_hash: Hash256,
         attempt_id: u64,
         payment_preimage: Hash256,
     ) -> Result<(), String> {
+        let source_channel = self
+            .store
+            .get_channel_actor_state(&channel_id)
+            .ok_or_else(|| {
+                format!("source channel not found for on-chain payer TLC: channel_id={channel_id:?}, tlc_id={tlc_id:?}")
+            })?;
+        let source_tlc = source_channel.tlc_state.get(&tlc_id).ok_or_else(|| {
+            format!("source TLC not found for on-chain payer reconciliation: channel_id={channel_id:?}, tlc_id={tlc_id:?}")
+        })?;
+        if !source_tlc.is_offered()
+            || source_tlc.forwarding_tlc.is_some()
+            || source_tlc.payment_hash != payment_hash
+            || source_tlc.attempt_id != Some(attempt_id)
+        {
+            return Err(format!(
+                "source TLC metadata does not match on-chain payer reconciliation: channel_id={channel_id:?}, tlc_id={tlc_id:?}, payment_hash={payment_hash:?}, attempt_id={attempt_id}"
+            ));
+        }
+        let source_channel_outpoint = source_channel
+            .get_funding_transaction_outpoint()
+            .ok_or_else(|| {
+                format!("source channel funding outpoint not found for on-chain payer TLC: channel_id={channel_id:?}, tlc_id={tlc_id:?}")
+            })?;
+
         if let Some(attempt) = self.store.get_attempt(payment_hash, attempt_id) {
+            // Attempt ids are local to one payment generation and are reused after retry deletes
+            // the previous attempts. A proof from the old force-closed channel must therefore be
+            // acknowledged as stale instead of being applied to a replacement attempt that only
+            // happens to have the same `(payment_hash, attempt_id)`.
+            if !attempt.first_hop_channel_outpoint_eq(&source_channel_outpoint) {
+                warn!(
+                    "Ignoring stale on-chain payer TLC {:?} in channel {:?}: attempt {:?} now belongs to first-hop channel {:?}",
+                    tlc_id,
+                    channel_id,
+                    attempt_id,
+                    attempt.first_hop_channel_outpoint()
+                );
+                return Ok(());
+            }
+
             if let Some(existing_preimage) = attempt.preimage {
                 if existing_preimage != payment_preimage {
                     return Err(format!(
@@ -4065,19 +4122,33 @@ where
                 }
             }
 
-            // `get_payment_session` refreshes its status from separately persisted attempts. It
-            // can therefore report Success during the crash window after the attempt write but
-            // before the aggregate session write. Only the raw persisted Success proves that the
-            // acknowledgement from a previous reconciliation was durably completed.
-            if attempt.is_success()
-                && attempt.preimage == Some(payment_preimage)
-                && self.store.get_persisted_payment_status(payment_hash)
-                    == Some(PaymentStatus::Success)
-            {
-                // This also closes the crash window between persisting the final session and
-                // removing the retry index. Clearing an already-empty index is harmless.
-                self.store.clear_attempts_channel_index(payment_hash);
-                return Ok(());
+            if attempt.is_success() && attempt.preimage == Some(payment_preimage) {
+                let aggregate_is_fully_paid = self
+                    .store
+                    .get_payment_session(payment_hash)
+                    .is_some_and(|session| {
+                        session
+                            .attempts()
+                            .filter(|attempt| attempt.is_success())
+                            .map(|attempt| attempt.route.receiver_amount())
+                            .sum::<u128>()
+                            >= session.request.amount
+                    });
+                let persisted_status = self.store.get_persisted_payment_status(payment_hash);
+
+                // Per-attempt acknowledgement is independent of the aggregate payment. A
+                // successfully persisted MPP shard is already reconciled while other shards are
+                // still in flight or have left the aggregate Failed. If successful shards cover
+                // the full amount, however, a non-Success session is the crash window between the
+                // attempt and session writes and must still be repaired through PaymentActor.
+                if !aggregate_is_fully_paid || persisted_status == Some(PaymentStatus::Success) {
+                    if persisted_status == Some(PaymentStatus::Success) {
+                        // This also closes the crash window between persisting the final session
+                        // and removing the retry index. Clearing an already-empty index is harmless.
+                        self.store.clear_attempts_channel_index(payment_hash);
+                    }
+                    return Ok(());
+                }
             }
         }
 

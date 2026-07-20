@@ -5322,6 +5322,7 @@ struct MppRemoteRemovedPayerFixture {
     completed_attempt_id: Option<u64>,
     stuck_attempt_id: Option<u64>,
     stuck_tlc_id: u64,
+    retry_channel_ids: Vec<Hash256>,
 }
 
 #[cfg(feature = "watchtower")]
@@ -5425,17 +5426,31 @@ impl MppRemoteRemovedPayerFixture {
 
 #[cfg(feature = "watchtower")]
 async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixture {
+    setup_mpp_remote_removed_payer_fixture_with_parts(2).await
+}
+
+#[cfg(feature = "watchtower")]
+async fn setup_mpp_remote_removed_payer_fixture_with_parts(
+    payment_parts: usize,
+) -> MppRemoteRemovedPayerFixture {
+    setup_mpp_remote_removed_payer_fixture_with_retry_channels(payment_parts, 0).await
+}
+
+#[cfg(feature = "watchtower")]
+async fn setup_mpp_remote_removed_payer_fixture_with_retry_channels(
+    payment_parts: usize,
+    retry_channel_count: usize,
+) -> MppRemoteRemovedPayerFixture {
+    assert!(
+        payment_parts >= 2,
+        "fixture requires at least two MPP parts"
+    );
     let part_amount = 10_000_000_000;
-    let total_amount = part_amount * 2;
-    let (nodes, channels) = create_n_nodes_network(
-        &[
-            ((0, 1), (MIN_RESERVED_CKB + part_amount, MIN_RESERVED_CKB)),
-            ((0, 1), (MIN_RESERVED_CKB + part_amount, MIN_RESERVED_CKB)),
-        ],
-        2,
-    )
-    .await;
-    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+    let total_amount = part_amount * payment_parts as u128;
+    let channel_specs =
+        vec![((0, 1), (MIN_RESERVED_CKB + part_amount, MIN_RESERVED_CKB)); payment_parts];
+    let (nodes, channels) = create_n_nodes_network(&channel_specs, 2).await;
+    let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");
 
     let payment_preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -5451,7 +5466,7 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
     let payment_hash = *invoice.payment_hash();
     node_0
         .send_payment(SendPaymentCommand {
-            max_parts: Some(2),
+            max_parts: Some(payment_parts as u64),
             invoice: Some(invoice.to_string()),
             ..Default::default()
         })
@@ -5486,8 +5501,20 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
             .cloned()
             .expect("payer offered MPP TLC exists")
     };
-    let completed_tlc = offered_tlc(channels[0]);
-    let stuck_tlc = offered_tlc(channels[1]);
+    let channel_tlcs = channels
+        .iter()
+        .map(|channel_id| offered_tlc(*channel_id))
+        .collect::<Vec<_>>();
+    let stuck_channel_index = channel_tlcs
+        .iter()
+        .position(|tlc| tlc.attempt_id == Some(1))
+        .expect("the first MPP attempt id is allocated from one");
+    let completed_channel_index = (0..channel_tlcs.len())
+        .find(|index| *index != stuck_channel_index)
+        .expect("fixture has another MPP part to complete normally");
+    let completed_tlc = channel_tlcs[completed_channel_index].clone();
+    let stuck_tlc = channel_tlcs[stuck_channel_index].clone();
+    let stuck_channel_id = channels[stuck_channel_index];
     assert_ne!(completed_tlc.attempt_id, stuck_tlc.attempt_id);
 
     // Model the online split that completed normally. This leaves the aggregate MPP session
@@ -5519,13 +5546,13 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
     // Deliver the fulfill through the real peer-message handler. The test-only lookup only
     // exposes the live actor selected by channel id; all state transitions remain production code.
     let stuck_channel_actor = node_0
-        .get_channel_actor(channels[1])
+        .get_channel_actor(stuck_channel_id)
         .await
         .expect("stuck payer channel actor is live");
     stuck_channel_actor
         .send_message(ChannelActorMessage::PeerMessage(
             FiberChannelMessage::RemoveTlc(RemoveTlc {
-                channel_id: channels[1],
+                channel_id: stuck_channel_id,
                 tlc_id: stuck_tlc_id,
                 reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
             }),
@@ -5533,7 +5560,7 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
         .expect("stuck payer channel actor alive");
     wait_until_timeout(10_000, || {
         node_0
-            .get_tlc(channels[1], TLCId::Offered(stuck_tlc_id))
+            .get_tlc(stuck_channel_id, TLCId::Offered(stuck_tlc_id))
             .is_some_and(|tlc| {
                 tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved
                     && matches!(
@@ -5558,7 +5585,7 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
         .send_message(NetworkActorMessage::Event(
             NetworkActorEvent::ClosingTransactionConfirmed(
                 node_1.pubkey,
-                channels[1],
+                stuck_channel_id,
                 tx_hash,
                 true,
                 false,
@@ -5567,7 +5594,7 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
         .expect("payer network actor alive");
     wait_until_timeout(10_000, || {
         matches!(
-            node_0.get_channel_actor_state(channels[1]).state,
+            node_0.get_channel_actor_state(stuck_channel_id).state,
             ChannelState::Closed(flags)
                 if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
                     && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
@@ -5575,21 +5602,45 @@ async fn setup_mpp_remote_removed_payer_fixture() -> MppRemoteRemovedPayerFixtur
     })
     .await;
 
-    // The synthetic payee is no longer part of the scenario after delivering the fulfill. Stop it
-    // so its hold-invoice timeout cannot inject unrelated late completion events into idempotency
-    // assertions. The payer's closed watch-chain actor remains live.
-    node_1.stop().await;
+    // Retry-specific tests need unused first-hop capacity that did not participate in the old
+    // payment. Opening these channels only after the old MPP parts are fixed guarantees that a
+    // later replacement attempt is backed by a real new TLC on a different channel.
+    let mut retry_channel_ids = Vec::with_capacity(retry_channel_count);
+    for _ in 0..retry_channel_count {
+        let (channel_id, _) = establish_channel_between_nodes(
+            &mut node_0,
+            &mut node_1,
+            ChannelParameters {
+                a_max_tlc_value_in_flight: Some(total_amount),
+                b_max_tlc_value_in_flight: Some(total_amount),
+                ..ChannelParameters::new(MIN_RESERVED_CKB + total_amount, MIN_RESERVED_CKB)
+            },
+        )
+        .await;
+        retry_channel_ids.push(channel_id);
+    }
+    if retry_channel_count > 0 {
+        wait_for_network_graph_update(&node_0, payment_parts + retry_channel_count).await;
+    }
+
+    // The synthetic payee is normally no longer part of the scenario after delivering the
+    // fulfill. Retry tests keep it online only so production route finding and AddTlc can create a
+    // real replacement TLC on the freshly opened channel.
+    if retry_channel_count == 0 {
+        node_1.stop().await;
+    }
 
     let fixture = MppRemoteRemovedPayerFixture {
         payer: node_0,
         _payee: node_1,
         stuck_channel_actor,
-        stuck_channel_id: channels[1],
+        stuck_channel_id,
         payment_hash,
         payment_preimage,
         completed_attempt_id: completed_tlc.attempt_id,
         stuck_attempt_id: stuck_tlc.attempt_id,
         stuck_tlc_id,
+        retry_channel_ids,
     };
     fixture.assert_pre_reconcile_state();
     fixture
@@ -5840,6 +5891,267 @@ async fn test_mpp_payer_onchain_reconciliation_repairs_partial_session_commit_af
     assert_eq!(
         payment_actor_starts, 1,
         "the incomplete session commit must pass through the PaymentActor exactly once"
+    );
+}
+
+// A failed payment retry deletes its old attempts and allocates attempt ids from one again. The
+// old force-closed channel can still retain an on-chain-confirmed TLC with one of those ids. That
+// proof belongs to both the old attempt generation and the old first-hop channel, so it must not
+// update a replacement attempt that happens to reuse `(payment_hash, attempt_id)` on another
+// channel.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_mpp_payer_old_onchain_tlc_does_not_reconcile_reused_attempt_id() {
+    init_tracing();
+
+    let fixture = setup_mpp_remote_removed_payer_fixture_with_retry_channels(3, 1).await;
+    let payment_hash = fixture.payment_hash;
+    let stale_attempt_id = fixture
+        .stuck_attempt_id
+        .expect("remote-removed payer TLC has an attempt id");
+
+    // First reconcile the old source TLC normally. This keeps the stale TLC and its attempt fully
+    // consistent: both now record Success with the same preimage, while the third MPP shard keeps
+    // the aggregate payment Inflight.
+    fixture.insert_onchain_settlement();
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    fixture.payer.node_info().await;
+    let stale_attempt = fixture
+        .payer
+        .store
+        .get_attempt(payment_hash, stale_attempt_id)
+        .expect("stale payer attempt exists");
+    assert_eq!(stale_attempt.status, AttemptStatus::Success);
+    assert_eq!(stale_attempt.preimage, Some(fixture.payment_preimage));
+
+    // Model the independent third shard exhausting its retries after two shards have succeeded.
+    // A partial-success MPP can therefore be terminal Failed without contradicting the stale
+    // fulfilled TLC that will continue to be scanned on the force-closed channel.
+    let completed_attempt_id = fixture
+        .completed_attempt_id
+        .expect("normally completed payer TLC has an attempt id");
+    let mut failed_attempt = fixture
+        .payer
+        .get_payment_session(payment_hash)
+        .expect("old payer payment session exists")
+        .attempts()
+        .find(|attempt| attempt.id != stale_attempt_id && attempt.id != completed_attempt_id)
+        .cloned()
+        .expect("the third MPP shard is still in flight");
+    assert_eq!(failed_attempt.status, AttemptStatus::Inflight);
+    failed_attempt.set_failed_status("third MPP shard exhausted its retries", false);
+    fixture.payer.store.insert_attempt(failed_attempt);
+
+    // Model only the durable terminal outcome of the old generation. From this point onward the
+    // retry itself is entirely production code: the old actor stops, send_payment deletes the old
+    // attempts, allocates ids from one, builds fresh routes, and adds fresh first-hop TLCs.
+    let mut failed_session = fixture
+        .payer
+        .get_payment_session(payment_hash)
+        .expect("old payer payment session exists");
+    let retry_invoice = failed_session
+        .request
+        .invoice
+        .clone()
+        .expect("MPP fixture pays an invoice");
+    failed_session.set_failed_status("third MPP shard exhausted its retries");
+    fixture.payer.store.insert_payment_session(failed_session);
+
+    let payment_actor_name = format!(
+        "Payment-{} Node({:?})",
+        payment_hash,
+        fixture.payer.network_actor.get_name()
+    );
+    let old_payment_actor: ractor::ActorRef<PaymentActorMessage> =
+        ractor::registry::where_is(payment_actor_name.clone())
+            .expect("old payment actor is still running")
+            .into();
+    old_payment_actor
+        .send_message(PaymentActorMessage::CheckPaymentStatus)
+        .expect("old payment actor accepts its final status check");
+    wait_until_timeout(10_000, || {
+        old_payment_actor.get_status() == ractor::ActorStatus::Stopped
+    })
+    .await;
+    wait_until_timeout(10_000, || {
+        ractor::registry::where_is(payment_actor_name.clone()).is_none()
+    })
+    .await;
+    fixture.payer.node_info().await;
+
+    crate::invoice::InvoiceStore::update_invoice_status(
+        &fixture._payee.store,
+        &payment_hash,
+        CkbInvoiceStatus::Open,
+    )
+    .expect("reopen the hold invoice for the production retry");
+    fixture
+        .payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(retry_invoice),
+            max_parts: Some(3),
+            ..Default::default()
+        })
+        .await
+        .expect("retry the failed MPP payment through production send_payment");
+    wait_until_timeout(10_000, || {
+        fixture
+            .payer
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| {
+                session.status == PaymentStatus::Inflight
+                    && session.attempts().count() == 1
+                    && session
+                        .attempts()
+                        .all(|attempt| attempt.status == AttemptStatus::Inflight)
+            })
+    })
+    .await;
+
+    let replacement_attempt = fixture
+        .payer
+        .store
+        .get_attempt(payment_hash, stale_attempt_id)
+        .expect("the retry reuses the old attempt id");
+    assert_ne!(
+        stale_attempt.first_hop_channel_outpoint(),
+        replacement_attempt.first_hop_channel_outpoint(),
+        "the reused attempt id must now belong to another first-hop channel"
+    );
+    assert!(
+        fixture.retry_channel_ids.iter().any(|channel_id| {
+            fixture
+                .payer
+                .get_channel_actor_state(*channel_id)
+                .tlc_state
+                .offered_tlcs
+                .tlcs
+                .iter()
+                .any(|tlc| {
+                    tlc.payment_hash == payment_hash && tlc.attempt_id == Some(stale_attempt_id)
+                })
+        }),
+        "the replacement attempt must have a real offered TLC on a fresh retry channel"
+    );
+
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    fixture.payer.node_info().await;
+
+    let replacement_after_scan = fixture
+        .payer
+        .store
+        .get_attempt(payment_hash, stale_attempt_id)
+        .expect("replacement attempt must remain present");
+    assert_eq!(
+        replacement_after_scan.status,
+        AttemptStatus::Inflight,
+        "an old channel's on-chain TLC must not fulfill a reused attempt id from another channel"
+    );
+    assert_eq!(
+        replacement_after_scan.preimage, None,
+        "the stale on-chain preimage must not be attached to the replacement attempt"
+    );
+}
+
+// Per-attempt reconciliation must be idempotent independently of the aggregate payment status.
+// One MPP shard can be durably fulfilled on-chain while the requested amount is still incomplete.
+// After the PaymentActor stops (as it does on its periodic non-final status check or a restart), a
+// repeated settlement scan should acknowledge the already-reconciled shard without starting a new
+// actor.
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_mpp_payer_partial_onchain_reconciliation_does_not_restart_payment_actor() {
+    init_tracing();
+
+    // Three real route parts keep the aggregate payment incomplete after the first two parts
+    // succeed: one completed normally, one is reconciled below, and one remains in flight.
+    let mut fixture = setup_mpp_remote_removed_payer_fixture_with_parts(3).await;
+    let attempt_id = fixture
+        .stuck_attempt_id
+        .expect("remote-removed payer TLC has an attempt id");
+
+    fixture.insert_onchain_settlement();
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    let reconciled_attempt = fixture
+        .payer
+        .store
+        .get_attempt(fixture.payment_hash, attempt_id)
+        .expect("the reconciled attempt is durable");
+    assert_eq!(reconciled_attempt.status, AttemptStatus::Success);
+    assert_eq!(
+        reconciled_attempt.preimage,
+        Some(fixture.payment_preimage),
+        "the first scan must durably reconcile the exact on-chain shard"
+    );
+    assert_eq!(
+        fixture
+            .payer
+            .store
+            .get_persisted_payment_status(fixture.payment_hash),
+        Some(PaymentStatus::Inflight),
+        "the third real MPP shard keeps the aggregate payment incomplete"
+    );
+    assert_eq!(
+        fixture
+            .payer
+            .get_payment_session(fixture.payment_hash)
+            .expect("payer payment session exists")
+            .attempts()
+            .filter(|attempt| attempt.status == AttemptStatus::Inflight)
+            .count(),
+        1,
+        "exactly one real MPP shard must still be in flight"
+    );
+
+    let payment_actor_name = format!(
+        "Payment-{} Node({:?})",
+        fixture.payment_hash,
+        fixture.payer.network_actor.get_name()
+    );
+    let payment_actor: ractor::ActorRef<PaymentActorMessage> =
+        ractor::registry::where_is(payment_actor_name.clone())
+            .expect("the partial payment actor is still running after reconciliation")
+            .into();
+    payment_actor
+        .send_message(PaymentActorMessage::CheckPaymentStatus)
+        .expect("partial payment actor accepts its periodic status check");
+    wait_until_timeout(10_000, || {
+        payment_actor.get_status() == ractor::ActorStatus::Stopped
+    })
+    .await;
+    fixture.payer.node_info().await;
+    assert!(
+        ractor::registry::where_is(payment_actor_name).is_none(),
+        "the stopped payment actor must be removed before replaying the scan"
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while fixture.payer.event_emitter.try_recv().is_ok() {}
+    fixture.notify_maintain_channel_tlcs();
+    fixture.payer.node_info().await;
+    fixture.channel_barrier().await;
+    fixture.payer.node_info().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut duplicate_payment_actor_starts = 0;
+    while let Ok(event) = fixture.payer.event_emitter.try_recv() {
+        if matches!(
+            event,
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                if message.starts_with("payment actor start:")
+        ) {
+            duplicate_payment_actor_starts += 1;
+        }
+    }
+    assert_eq!(
+        duplicate_payment_actor_starts, 0,
+        "an already-reconciled partial MPP shard must not restart PaymentActor on every scan"
     );
 }
 

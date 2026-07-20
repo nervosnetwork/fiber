@@ -2,11 +2,13 @@ use super::contracts::{get_script_by_contract, Contract};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utils::encrypt_decrypt_file::{decrypt_from_file, encrypt_to_file};
 use crate::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use ckb_sdk::IndexerRpcAsyncClient;
 use ckb_sdk::{
     traits::{
         DefaultCellCollector, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
     },
-    CkbRpcAsyncClient, IndexerRpcAsyncClient,
+    CkbRpcAsyncClient,
 };
 use ckb_types::packed::Script;
 use ckb_types::prelude::Pack;
