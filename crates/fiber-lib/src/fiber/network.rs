@@ -2977,6 +2977,7 @@ where
 
         match recv.await {
             Ok(Ok(())) => Ok(RemoveTlcDelivery::Delivered),
+            Ok(Err(ProcessingChannelError::WaitingTlcAck)) => Ok(RemoveTlcDelivery::QueuedRetry),
             Ok(Err(err)) => Err(Error::ChannelError(err)),
             Err(err) => Err(Error::ChannelError(ProcessingChannelError::InvalidState(
                 format!("RemoveTlc reply dropped for channel {channel_id:?}: {err}"),
@@ -3380,6 +3381,21 @@ where
         channel_id: Hash256,
         tlc_id: u64,
     ) {
+        let hold_still_owned = self
+            .store
+            .get_payment_hold_tlcs(payment_hash)
+            .iter()
+            .any(|hold| hold.channel_id == channel_id && hold.tlc_id == tlc_id);
+        if !hold_still_owned {
+            trace!(
+                "Ignoring stale hold timeout after ownership handoff: payment_hash={:?} channel_id={:?} tlc_id={:?}",
+                payment_hash,
+                channel_id,
+                tlc_id,
+            );
+            return;
+        }
+
         if self.store.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received) {
             // When invoice is marked as received, we ignore the hold TLC timeout and only
             // remove the TLC when it actually expires. Once it is close enough to expiry,
@@ -3421,22 +3437,15 @@ where
             )
             .await
         {
-            Ok(RemoveTlcDelivery::Delivered) => {
+            Ok(RemoveTlcDelivery::Delivered) | Ok(RemoveTlcDelivery::QueuedRetry) => {
                 debug!(
-                    "Succeeded to remove tlc {:?} for channel {:?}",
+                    "Accepted removal of tlc {:?} for channel {:?}",
                     tlc.id(),
                     channel_id,
                 );
                 // remove hold tlc from store
                 self.store
                     .remove_payment_hold_tlc(&payment_hash, &channel_id, tlc_id);
-            }
-            Ok(RemoveTlcDelivery::QueuedRetry) => {
-                debug!(
-                    "Queued timeout removal for tlc {:?} on channel {:?}, will retry on next check",
-                    tlc.id(),
-                    channel_id,
-                );
             }
             Err(err) => {
                 debug!(
@@ -3512,15 +3521,8 @@ where
                 )
                 .await
             {
-                Ok(RemoveTlcDelivery::Delivered) => {
+                Ok(RemoveTlcDelivery::Delivered) | Ok(RemoveTlcDelivery::QueuedRetry) => {
                     success_settlements.push(tlc_settlement);
-                }
-                Ok(RemoveTlcDelivery::QueuedRetry) => {
-                    debug!(
-                        "Queued settlement removal for tlc {:?} on channel {:?}, will retry before marking settlement successful",
-                        tlc_settlement.tlc_id(),
-                        tlc_settlement.channel_id(),
-                    );
                 }
                 Err(err) => {
                     error!(

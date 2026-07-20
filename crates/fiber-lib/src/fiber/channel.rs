@@ -2777,6 +2777,10 @@ where
                                 TLCId::Received(command.id),
                                 command.reason,
                             );
+                            // `WaitingTlcAck` means the operation was accepted for retry. Persist
+                            // the queue before replying so callers can safely hand ownership over
+                            // and remove their own durable retry record.
+                            self.store.insert_channel_actor_state(state.clone());
                         }
                         let _ = reply.send(Err(err.clone()));
                         Err(err)

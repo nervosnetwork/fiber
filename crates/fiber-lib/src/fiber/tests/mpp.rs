@@ -5,7 +5,10 @@ use tracing::debug;
 use crate::{
     create_n_nodes_network_with_params,
     fiber::{
-        channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId},
+        channel::{
+            ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+            ReloadParams,
+        },
         config::{
             CKB_SHANNONS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
             PAYMENT_MAX_PARTS_LIMIT,
@@ -15,15 +18,16 @@ use crate::{
         types::RemoveTlcReason,
         AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, Hash256, HashAlgorithm,
         NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
-        PaymentStatus, PeeledPaymentOnionPacket, TLCId, USER_CUSTOM_RECORDS_MAX_INDEX,
+        PaymentStatus, PeeledPaymentOnionPacket, RetryableTlcOperation, TLCId,
+        USER_CUSTOM_RECORDS_MAX_INDEX,
     },
     gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash, gen_rpc_config,
-    invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
+    invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore},
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
     test_utils::{
-        create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
-        NetworkNode, MIN_RESERVED_CKB,
+        create_n_nodes_network, establish_channel_between_nodes, init_tracing, wait_until_timeout,
+        ChannelParameters, NetworkNode, MIN_RESERVED_CKB,
     },
     NetworkServiceEvent, HUGE_CKB_AMOUNT,
 };
@@ -3836,6 +3840,248 @@ async fn test_send_payment_tlc_expiry_soon() {
         .last_error
         .unwrap()
         .contains("IncorrectTlcExpiry"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
+    fn queued_fulfills(
+        node: &NetworkNode,
+        channel_id: Hash256,
+        payment_preimage: Hash256,
+    ) -> Vec<u64> {
+        let mut tlc_ids = node
+            .get_channel_actor_state(channel_id)
+            .retryable_tlc_operations
+            .iter()
+            .filter_map(|operation| match operation {
+                RetryableTlcOperation::RemoveTlc(
+                    TLCId::Received(tlc_id),
+                    RemoveTlcReason::RemoveTlcFulfill(fulfill),
+                ) if fulfill.payment_preimage == payment_preimage => Some(*tlc_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        tlc_ids.sort_unstable();
+        tlc_ids
+    }
+
+    fn has_conflicting_queued_fail(
+        node: &NetworkNode,
+        channel_id: Hash256,
+        expected_tlc_ids: &[u64],
+    ) -> bool {
+        node.get_channel_actor_state(channel_id)
+            .retryable_tlc_operations
+            .iter()
+            .any(|operation| {
+                matches!(
+                    operation,
+                    RetryableTlcOperation::RemoveTlc(
+                        TLCId::Received(tlc_id),
+                        RemoveTlcReason::RemoveTlcFail(_),
+                    ) if expected_tlc_ids.contains(tlc_id)
+                )
+            })
+    }
+
+    init_tracing();
+
+    let part_amount = 1000 * 100000000;
+    let total_amount = part_amount * 2;
+    let (nodes, channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + part_amount,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + part_amount,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: MIN_RESERVED_CKB + total_amount,
+                    node_b_funding_amount: MIN_RESERVED_CKB,
+                    a_tlc_fee_proportional_millionths: Some(0),
+                    b_tlc_fee_proportional_millionths: Some(0),
+                    ..Default::default()
+                },
+            ),
+        ],
+        3,
+        None,
+    )
+    .await;
+    let [node_0, mut node_1, mut node_2] = nodes.try_into().expect("3 nodes");
+    let payee_channel_id = channels[2];
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash
+        .hash(payment_preimage.as_ref())
+        .into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(total_amount))
+        .payment_hash(payment_hash)
+        .hash_algorithm(HashAlgorithm::CkbHash)
+        .payee_pub_key(node_2.pubkey.into())
+        .allow_mpp(true)
+        .payment_secret(gen_rand_sha256_hash())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build MPP hold invoice");
+    node_2.insert_invoice(invoice.clone(), None);
+
+    node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_parts: Some(2),
+            ..Default::default()
+        })
+        .await
+        .expect("send MPP payment");
+    node_0.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        node_2.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+            && node_2.store.get_payment_hold_tlcs(payment_hash).len() == 2
+    })
+    .await;
+    let held_tlcs = node_2.store.get_payment_hold_tlcs(payment_hash);
+    assert!(held_tlcs
+        .iter()
+        .all(|hold| hold.channel_id == payee_channel_id));
+    let mut held_tlc_ids = held_tlcs.iter().map(|hold| hold.tlc_id).collect::<Vec<_>>();
+    held_tlc_ids.sort_unstable();
+
+    // Deterministically exercise the durable handoff midpoint: neither fulfill can be applied
+    // until the outstanding commitment is acknowledged, so both must enter the channel retry
+    // queue.
+    let mut payee_channel_state = node_2.get_channel_actor_state(payee_channel_id);
+    payee_channel_state.tlc_state.set_waiting_ack(true);
+    node_2
+        .update_channel_actor_state(
+            payee_channel_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+    let payee_channel_actor = node_2
+        .get_channel_actor(payee_channel_id)
+        .await
+        .expect("payee channel actor is live");
+
+    node_2
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle MPP hold invoice");
+    // Cross the NetworkActor mailbox after SettleReceivedHoldTlcSet has awaited both channel
+    // replies. This makes the following store assertions independent of actor scheduling.
+    node_2.node_info().await;
+    ractor::call_t!(
+        payee_channel_actor.clone(),
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+        5_000
+    )
+    .expect("payee channel actor processes settlement before the barrier");
+    assert_eq!(
+        queued_fulfills(&node_2, payee_channel_id, payment_preimage),
+        held_tlc_ids,
+        "the durable queue must own exactly the two held MPP fulfill operations"
+    );
+    assert!(
+        !has_conflicting_queued_fail(&node_2, payee_channel_id, &held_tlc_ids),
+        "the queued MPP fulfills must not be overwritten by timeout failures"
+    );
+    assert!(
+        node_2.store.get_payment_hold_tlcs(payment_hash).is_empty(),
+        "durably queued settlements must no longer remain in the NetworkActor hold store"
+    );
+
+    // Recreate the safe overlap window after the channel queue was persisted but before the
+    // NetworkActor removed its hold record. Replaying the same settlement must be idempotent.
+    for hold_tlc in held_tlcs.iter().cloned() {
+        node_2.store.insert_payment_hold_tlc(payment_hash, hold_tlc);
+    }
+    node_2
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+        ))
+        .expect("network actor alive");
+    node_2.node_info().await;
+    ractor::call_t!(
+        payee_channel_actor.clone(),
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+        5_000
+    )
+    .expect("payee channel actor processes replay before the barrier");
+    assert_eq!(
+        queued_fulfills(&node_2, payee_channel_id, payment_preimage),
+        held_tlc_ids,
+        "replaying settlement must not duplicate the durable retry operations"
+    );
+    assert!(node_2.store.get_payment_hold_tlcs(payment_hash).is_empty());
+
+    // Removing a hold cannot cancel an already scheduled timeout message. A stale timer must
+    // observe that ownership moved to the durable fulfill queue and leave the TLC untouched. A
+    // sibling fulfill may already have marked the invoice Paid before this old timer is handled.
+    node_2
+        .store
+        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+        .expect("simulate the first MPP fulfill completing");
+    for hold_tlc in &held_tlcs {
+        node_2
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::TimeoutHoldTlc(
+                    payment_hash,
+                    hold_tlc.channel_id,
+                    hold_tlc.tlc_id,
+                ),
+            ))
+            .expect("network actor alive");
+    }
+    node_2.node_info().await;
+    ractor::call_t!(
+        payee_channel_actor,
+        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+        5_000
+    )
+    .expect("payee channel actor processes stale timeouts before the barrier");
+    assert_eq!(
+        queued_fulfills(&node_2, payee_channel_id, payment_preimage),
+        held_tlc_ids,
+        "stale hold timers must not disturb the queued MPP fulfills"
+    );
+    assert!(
+        !has_conflicting_queued_fail(&node_2, payee_channel_id, &held_tlc_ids),
+        "stale hold timers must not enqueue timeout failures after ownership handoff"
+    );
+
+    // Keep the peer offline so the restored channel cannot consume the queue before we inspect it.
+    node_1.stop().await;
+    node_2.restart().await;
+    assert_eq!(
+        queued_fulfills(&node_2, payee_channel_id, payment_preimage),
+        held_tlc_ids,
+        "restart must restore both queued MPP fulfill operations"
+    );
+    assert!(node_2.store.get_payment_hold_tlcs(payment_hash).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
