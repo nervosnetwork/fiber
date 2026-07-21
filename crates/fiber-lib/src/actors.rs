@@ -1,4 +1,6 @@
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, error};
 
@@ -11,19 +13,35 @@ pub struct RootActor;
 
 pub type RootActorMessage = String;
 
+#[cfg(test)]
+static NEXT_TEST_ROOT_ACTOR_ID: AtomicU64 = AtomicU64::new(0);
+
 impl RootActor {
     pub async fn start(
         tracker: TaskTracker,
         token: CancellationToken,
     ) -> ActorRef<RootActorMessage> {
-        Actor::spawn(
-            Some("root actor".to_string()),
-            RootActor {},
-            (tracker, token),
-        )
-        .await
-        .expect("start root actor")
-        .0
+        Self::start_named(Some("root actor".to_string()), tracker, token).await
+    }
+
+    async fn start_named(
+        name: Option<String>,
+        tracker: TaskTracker,
+        token: CancellationToken,
+    ) -> ActorRef<RootActorMessage> {
+        Actor::spawn(name, RootActor {}, (tracker, token))
+            .await
+            .expect("start root actor")
+            .0
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn start_for_test(
+        tracker: TaskTracker,
+        token: CancellationToken,
+    ) -> ActorRef<RootActorMessage> {
+        let id = NEXT_TEST_ROOT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
+        Self::start_named(Some(format!("test root actor {id}")), tracker, token).await
     }
 }
 
@@ -119,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_actor_does_not_panic_when_linked_child_fails() {
-        let root = RootActor::start(TaskTracker::new(), CancellationToken::new()).await;
+        let root = RootActor::start_for_test(TaskTracker::new(), CancellationToken::new()).await;
         let (child, _) = Actor::spawn_linked(
             Some("panicking child".to_string()),
             PanickingActor,
