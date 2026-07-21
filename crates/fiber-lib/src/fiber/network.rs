@@ -1426,10 +1426,25 @@ where
                 }
 
                 if !found {
-                    error!(
+                    warn!(
                         "Received a channel message for a channel that is not created with peer: {:?}",
                         channel_id
                     );
+                    // Rate-limit: increment counter and disconnect if peer is flooding
+                    // invalid channel messages.
+                    let count = state
+                        .invalid_channel_msg_count
+                        .entry(peer_pubkey)
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                    if *count > 20 {
+                        warn!(
+                            "Disconnecting peer {:?} after {} repeated messages for non-existent channel {:?}",
+                            peer_pubkey, *count, channel_id
+                        );
+                        state.disconnect_and_ban_peer(peer_pubkey).await;
+                        return Ok(());
+                    }
                     return Err(Error::ChannelNotFound(channel_id));
                 }
                 state
@@ -4085,6 +4100,7 @@ pub struct NetworkActorState<S, C> {
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
     invalid_channel_msg_count: HashMap<Pubkey, u32>,
+    banned_peers: HashMap<Pubkey, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -5350,6 +5366,25 @@ where
 
     async fn on_peer_connected(&mut self, remote_pubkey: Pubkey, session: &SessionContext) {
         debug!("Peer {:?} connected", remote_pubkey);
+
+        // Check if peer is banned
+        if let Some(ban_until) = self.banned_peers.get(&remote_pubkey) {
+            if now_timestamp_as_millis_u64() < *ban_until {
+                warn!(
+                    "Rejecting banned peer {:?} (ban expires in {}ms)",
+                    remote_pubkey,
+                    ban_until.saturating_sub(now_timestamp_as_millis_u64())
+                );
+                if let Err(err) = self.control.disconnect(session.id).await {
+                    error!("Failed to disconnect banned peer: {:?}", err);
+                }
+                return;
+            }
+            // Ban expired, clean up
+            self.banned_peers.remove(&remote_pubkey);
+            self.requested_disconnect_peers.remove(&remote_pubkey);
+        }
+
         self.peer_session_map.insert(
             remote_pubkey,
             ConnectedPeer {
@@ -5480,10 +5515,16 @@ where
     }
 
     async fn disconnect_and_ban_peer(&mut self, pubkey: Pubkey) {
-        if let Some(peer) = self.peer_session_map.remove(&pubkey) {
-            self.invalid_channel_msg_count.remove(&pubkey);
-            self.requested_disconnect_peers.insert(pubkey);
-            if let Err(err) = self.control.disconnect(peer.session_id).await {
+        // Don't remove from peer_session_map — let the normal disconnect flow
+        // handle cleanup (channel actor notifications, pending records, etc.).
+        // Record the ban with expiry so the peer cannot reconnect for a cooldown.
+        self.invalid_channel_msg_count.remove(&pubkey);
+        self.requested_disconnect_peers.insert(pubkey);
+        let ban_until = now_timestamp_as_millis_u64().saturating_add(10 * 60 * 1000);
+        self.banned_peers.insert(pubkey, ban_until);
+        if let Some(peer) = self.peer_session_map.get(&pubkey) {
+            let session_id = peer.session_id;
+            if let Err(err) = self.control.disconnect(session_id).await {
                 error!("Failed to disconnect peer {:?}: {:?}", pubkey, err);
             }
         }
@@ -6402,6 +6443,7 @@ where
             pending_channel_ready_retry_scans: Default::default(),
             inflight_tracers: Default::default(),
             invalid_channel_msg_count: Default::default(),
+            banned_peers: Default::default(),
         };
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
