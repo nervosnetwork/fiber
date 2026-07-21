@@ -230,6 +230,7 @@ pub async fn fiber(
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
+                None,
                 network_graph.clone(),
                 default_shutdown_script,
             )

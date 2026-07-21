@@ -54,14 +54,15 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, is_tlc_key_derivation_safe, AddTlcCommand, AppliedFlags,
-    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus,
-    ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, InboundTlcStatus,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlc,
-    RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck, ShuttingDownFlags,
-    SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
-    NO_SHARED_SECRET,
+    derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
+    AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
+    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
+    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
+    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
+
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};
@@ -236,6 +237,7 @@ fn test_channel_state_bincode_compatibility() {
         ChannelState::Closed(CloseFlags::empty()),
         &[7, 0, 0, 0, 0, 0, 0, 0],
     );
+    assert_channel_state_encoding(ChannelState::Stale, &[8, 0, 0, 0]);
     assert_channel_state_encoding(
         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
         &[0, 0, 0, 0, 4, 0, 0, 0],
@@ -268,7 +270,8 @@ fn test_derive_private_and_public_tlc_keys() {
     let privkey = Privkey::from(&[1; 32]);
     let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
     let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
-    let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
+    let derived_pubkey =
+        try_derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point).expect("honest keys");
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
 }
 
@@ -314,23 +317,19 @@ fn test_is_tlc_key_derivation_safe_accepts_honest_keys() {
 }
 
 #[test]
-fn test_malicious_keys_would_have_caused_panic() {
-    use fiber_types::derive_tlc_pubkey;
+fn test_try_derive_tlc_pubkey_rejects_malicious_keys() {
+    use fiber_types::try_derive_tlc_pubkey;
     let (tlc_basepoint, commitment_point) = malicious_tlc_basepoint_and_commitment_point();
 
-    let result = std::panic::catch_unwind(|| {
-        let _ = derive_tlc_pubkey(&tlc_basepoint, &commitment_point);
-    });
-
     assert!(
-        result.is_err(),
-        "malicious TLC basepoint and commitment point should cause a panic in derive_tlc_pubkey"
+        try_derive_tlc_pubkey(&tlc_basepoint, &commitment_point).is_err(),
+        "malicious TLC basepoint and commitment point should be rejected"
     );
 }
 
 #[test]
 fn test_revoke_and_ack_bypass_safe_initial_keys_with_malicious_later_key() {
-    use fiber_types::derive_tlc_pubkey;
+    use fiber_types::try_derive_tlc_pubkey;
     let (malicious_tlc_basepoint, bad_commitment_point) =
         malicious_tlc_basepoint_and_commitment_point();
 
@@ -352,12 +351,9 @@ fn test_revoke_and_ack_bypass_safe_initial_keys_with_malicious_later_key() {
         "malicious next_per_commitment_point in RevokeAndAck should be rejected by the fix"
     );
 
-    let result = std::panic::catch_unwind(|| {
-        let _ = derive_tlc_pubkey(&malicious_tlc_basepoint, &bad_commitment_point);
-    });
     assert!(
-        result.is_err(),
-        "without validation, the malicious next_per_commitment_point would cause a panic"
+        try_derive_tlc_pubkey(&malicious_tlc_basepoint, &bad_commitment_point).is_err(),
+        "without validation, the malicious next_per_commitment_point should be rejected"
     );
 }
 
@@ -7881,14 +7877,14 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
 
-    let expected_minimal_tlc_expiry_limit =
-        DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let base_route_tlc_expiry_limit = DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let expected_minimal_tlc_expiry_limit = base_route_tlc_expiry_limit + DEFAULT_TLC_EXPIRY_DELTA;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
+            tlc_expiry_limit: Some(base_route_tlc_expiry_limit - 1),
             keysend: Some(true),
             ..Default::default()
         })
@@ -10242,6 +10238,137 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
 }
 
 #[tokio::test]
+async fn test_channel_stale_passive_wait_no_proactive_send() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+    let state_b = node_a.get_channel_actor_state(channel_id);
+    let peer_commitment_number = state_b.get_local_commitment_number();
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: peer_commitment_number,
+                    remote_commitment_number: peer_commitment_number,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(current_state.state, ChannelState::Stale);
+}
+
+#[tokio::test]
+async fn test_channel_stale_audit_success_resumes_ready() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("disconnect sent");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        current_state.state,
+        ChannelState::ChannelReady,
+        "Should resume to ChannelReady"
+    );
+    assert!(
+        !current_state.reestablishing,
+        "Reestablishing should be finished"
+    );
+}
+
+#[tokio::test]
+async fn test_channel_stale_audit_failure_blocks_channel() {
+    init_tracing();
+
+    let (mut node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+
+    let mut state_a_stale = state_a.clone();
+    state_a_stale.state = ChannelState::Stale;
+    state_a_stale.reestablishing = true;
+    state_b.commitment_numbers.remote = original_cn + 5;
+
+    node_a.store.insert_channel_actor_state(state_a_stale);
+    node_b.store.insert_channel_actor_state(state_b);
+
+    node_a.restart().await;
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn + 5,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+
+    assert_eq!(
+        current_state.state,
+        ChannelState::Stale,
+        "Audit should fail and stay in Stale"
+    );
+    assert!(
+        current_state.reestablishing,
+        "Should still be in reestablishing phase"
+    );
+}
+
+#[tokio::test]
 async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
     init_tracing();
 
@@ -11069,6 +11196,7 @@ mod udt_funding_cell_capacity_tests {
             ephemeral_config: Default::default(),
             private_key: None,
             funding_abort_detail: None,
+            needs_backup: false,
         }
     }
 
@@ -11226,6 +11354,17 @@ mod udt_funding_cell_capacity_tests {
     }
 
     #[test]
+    fn funding_tx_signed_rejects_invalid_state() {
+        let mut state = minimal_udt_channel_state();
+        state.core.state = ChannelState::Closed(CloseFlags::FUNDING_ABORTED);
+
+        let result = state.apply_funding_tx_signed(Transaction::default());
+
+        assert!(result.is_err());
+        assert!(state.funding_tx.is_none());
+    }
+
+    #[test]
     fn udt_funding_tx_is_final_when_capacity_matches_total_reserved() {
         let state = minimal_udt_channel_state();
         let total = LOCAL_RESERVED_SHANNONS + REMOTE_RESERVED_SHANNONS;
@@ -11247,5 +11386,51 @@ mod udt_funding_cell_capacity_tests {
             !state.is_tx_final(&tx).expect("tx shape"),
             "under-filled funding cell must not be considered final (UDT capacity bypass)"
         );
+    }
+
+    #[test]
+    fn waiting_forward_result_excludes_received_tlc_from_expiry_sweep() {
+        let mut state = minimal_udt_channel_state();
+        state.core.state = ChannelState::ChannelReady;
+        let tlc_id = TLCId::Received(0);
+        let expired_tlc = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+            tlc_id,
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            shared_secret: NO_SHARED_SECRET,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            forwarding_tlc: None,
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            onion_packet: None,
+            is_trampoline_hop: false,
+            removed_reason: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
+        };
+        state.tlc_state.received_tlcs.tlcs.push(expired_tlc);
+        state
+            .waiting_forward_tlc_tasks
+            .insert(tlc_id, NO_SHARED_SECRET);
+
+        assert!(state.is_waiting_forward_result_for_received_tlc(tlc_id));
+        let expired: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < now_timestamp_as_millis_u64()
+            })
+            .collect();
+
+        assert!(expired.is_empty());
     }
 }

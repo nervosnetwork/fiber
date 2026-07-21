@@ -1162,17 +1162,11 @@ where
         assert!(attempt.is_retrying());
 
         if attempt.last_error.as_ref().is_some_and(|e| !e.is_empty()) {
-            // `session.remain_amount()` do not contains this part of amount,
-            // so we need to add the receiver amount to it, so we may make fewer
-            // attempts to send the payment.
-            let amount = session
-                .remain_amount()
-                .checked_add(attempt.route.receiver_amount())
-                .ok_or_else(|| {
-                    Error::SendPaymentError(
-                        "Retry payment amount overflows remaining amount".to_string(),
-                    )
-                })?;
+            let amount = session.retry_amount(attempt).ok_or_else(|| {
+                Error::SendPaymentError(
+                    "Retry payment amount overflows remaining amount".to_string(),
+                )
+            })?;
             let max_fee = session.remain_fee_amount();
             let channel_stats = {
                 let graph = self.network_graph.read().await;

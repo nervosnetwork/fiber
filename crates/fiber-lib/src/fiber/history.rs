@@ -271,7 +271,10 @@ impl InternalResult {
     ) -> bool {
         let mut need_retry = true;
         let len = nodes.len();
-        assert!(len >= 2);
+        if len < 2 {
+            error!("record_payment_fail_with_index called with fewer than 2 route nodes (len={}), ignoring", len);
+            return false;
+        }
         let error_code = tlc_err.error_code;
         error!(
             "Payment failed at node index {}: len: {:?} error_code: {:?} error_node={:?} error_channel={:?} route={:?}",

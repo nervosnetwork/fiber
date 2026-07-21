@@ -14,6 +14,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
 * [RPC Methods](#rpc-methods)
 
 
+    * [Module Admin](#module-admin)
+        * [Method `backup`](#admin-backup)
     * [Module Cch](#module-cch)
         * [Method `send_btc`](#cch-send_btc)
         * [Method `receive_btc`](#cch-receive_btc)
@@ -109,6 +111,27 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `UdtScript`](#type-udtscript)
 
 ## RPC Modules
+
+<a id="admin"></a>
+### Module `Admin`
+The RPC module for node administration.
+
+
+<a id="admin-backup"></a>
+#### Method `backup`
+
+Backup the node information.
+
+##### Params
+* None
+
+##### Returns
+
+* None
+
+---
+
+
 
 <a id="cch"></a>
 ### Module `Cch`
@@ -1345,6 +1368,8 @@ The state of a channel.
  now operational.
 * `ShuttingDown` - <em>`ShuttingDownFlags`</em>, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
 * `Closed` - <em>`CloseFlags`</em>, This channel is closed.
+* `Stale` - The channel state is potentially outdated (e.g., after a database restore).
+ We must perform a passive audit with the peer before resuming operations.
 ---
 
 <a id="#type-channelupdateinfo"></a>

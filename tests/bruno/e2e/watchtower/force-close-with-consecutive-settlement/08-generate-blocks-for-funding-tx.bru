@@ -28,6 +28,15 @@ assert {
   res.status: eq 200
 }
 
-script:post-response {
+script:pre-request {
   await new Promise(r => setTimeout(r, 5000));
+}
+
+script:post-response {
+  const { waitChannelReady } = require(process.cwd() + "/scripts/wait-channel-ready");
+
+  await waitChannelReady({
+    bru,
+    rpcUrls: ["NODE1_RPC_URL", "NODE2_RPC_URL"],
+  });
 }

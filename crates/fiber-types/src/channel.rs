@@ -256,6 +256,9 @@ pub enum ChannelState {
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
+    /// The channel state is potentially outdated (e.g., after a database restore).
+    /// We must perform a passive audit with the peer before resuming operations.
+    Stale,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1183,13 +1186,32 @@ pub fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privke
 }
 
 /// Derive a public key by tweaking a base key with a commitment point.
+#[deprecated(note = "use `try_derive_public_key` instead to avoid panicking on invalid keys")]
 pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
+/// Fallibly derive a public key by tweaking a base key with a commitment point.
+pub fn try_derive_public_key(
+    base_key: &Pubkey,
+    commitment_point: &Pubkey,
+) -> Result<Pubkey, String> {
+    base_key.try_tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
 /// Derive the TLC public key from a base key and commitment point.
+#[deprecated(note = "use `try_derive_tlc_pubkey` instead to avoid panicking on invalid keys")]
 pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    #[allow(deprecated)]
     derive_public_key(base_key, commitment_point)
+}
+
+/// Fallibly derive the TLC public key from a base key and commitment point.
+pub fn try_derive_tlc_pubkey(
+    base_key: &Pubkey,
+    commitment_point: &Pubkey,
+) -> Result<Pubkey, String> {
+    try_derive_public_key(base_key, commitment_point)
 }
 
 /// Check if the TLC key derivation for a given base key and commitment point

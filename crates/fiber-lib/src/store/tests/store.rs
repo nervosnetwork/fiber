@@ -21,6 +21,7 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::store::open_store;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
@@ -812,6 +813,7 @@ fn test_channel_actor_state_store() {
         ephemeral_config: Default::default(),
         funding_abort_detail: None,
         private_key: None,
+        needs_backup: false,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -952,6 +954,7 @@ fn sample_channel_actor_state(
         ephemeral_config: Default::default(),
         funding_abort_detail: None,
         private_key: None,
+        needs_backup: false,
     }
 }
 
@@ -1483,4 +1486,142 @@ fn test_store_get_broadcast_messages_reverse_excludes_cursor() {
     assert!(store
         .get_broadcast_messages_reverse(Some(&first_cursor), 1)
         .is_empty());
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod store_actor_tests {
+    use crate::actors::RootActor;
+    use crate::store::actor::{StoreActor, StoreActorInitializationParameter, StoreActorMessage};
+    use crate::tasks::{new_tokio_cancellation_token, new_tokio_task_tracker};
+    use fiber_store::backend::TakeWhileFn;
+    use fiber_store::{IteratorDirection, KVPair, StorageBackend, StoreError};
+    use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::time::{advance, sleep};
+
+    struct MockStore {
+        backup_count: Arc<AtomicUsize>,
+    }
+
+    impl StorageBackend for MockStore {
+        type Batch = <fiber_store::Store as StorageBackend>::Batch;
+
+        fn get<K: AsRef<[u8]>>(&self, _key: K) -> Option<Vec<u8>> {
+            todo!()
+        }
+        fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, _key: K, _value: V) {
+            todo!()
+        }
+        fn delete<K: AsRef<[u8]>>(&self, _key: K) {
+            todo!()
+        }
+        fn batch(&self) -> Self::Batch {
+            todo!()
+        }
+        fn collect_iterator(
+            &self,
+            _: Vec<u8>,
+            _: IteratorDirection,
+            _: TakeWhileFn,
+            _: usize,
+        ) -> Vec<KVPair> {
+            todo!()
+        }
+        fn restore(&self, _: &Path, _: &Path) -> Result<(), StoreError> {
+            todo!()
+        }
+
+        fn backup(&self, _path: &std::path::Path) -> Result<(), StoreError> {
+            self.backup_count.fetch_add(1, SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_store_actor_buffered_backup() {
+        let backup_count = Arc::new(AtomicUsize::new(0));
+        let mock_store = MockStore {
+            backup_count: Arc::clone(&backup_count),
+        };
+        let temp_dir = tempdir().unwrap();
+
+        let (tracker, token) = (new_tokio_task_tracker(), new_tokio_cancellation_token());
+        let root_actor = RootActor::start_for_test(tracker, token).await;
+
+        let args = StoreActorInitializationParameter {
+            store: mock_store,
+            backup_path: temp_dir.path().to_path_buf(),
+            ckb_key_path: temp_dir.path().to_path_buf(),
+            fiber_key_path: temp_dir.path().to_path_buf(),
+            backup_interval_hours: 24,
+        };
+
+        let (store_actor, _handle) =
+            ractor::Actor::spawn_linked(None, StoreActor::new(), args, root_actor.get_cell())
+                .await
+                .unwrap();
+
+        // First request should trigger the backup immediately
+        store_actor.cast(StoreActorMessage::RequestBackup).unwrap();
+        tokio::task::yield_now().await;
+        sleep(Duration::from_millis(100)).await;
+
+        advance(Duration::from_secs(61)).await;
+        sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            backup_count.load(SeqCst),
+            1,
+            "The backup request must be executed."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_store_actor_backup_throttling() {
+        let backup_count = Arc::new(AtomicUsize::new(0));
+        let mock_store = MockStore {
+            backup_count: Arc::clone(&backup_count),
+        };
+        let temp_dir = tempdir().unwrap();
+        let (tracker, token) = (new_tokio_task_tracker(), new_tokio_cancellation_token());
+        let root_actor = RootActor::start_for_test(tracker, token).await;
+
+        let (store_actor, _) = ractor::Actor::spawn_linked(
+            None,
+            StoreActor::new(),
+            StoreActorInitializationParameter {
+                store: mock_store,
+                backup_path: temp_dir.path().to_path_buf(),
+                ckb_key_path: temp_dir.path().to_path_buf(),
+                fiber_key_path: temp_dir.path().to_path_buf(),
+                backup_interval_hours: 24,
+            },
+            root_actor.get_cell(),
+        )
+        .await
+        .unwrap();
+
+        // Trigger initial backup
+        store_actor.cast(StoreActorMessage::RequestBackup).unwrap();
+        tokio::task::yield_now().await;
+
+        // Send multiple requests within the 60-second cooldown period
+        for _ in 0..20 {
+            store_actor.cast(StoreActorMessage::RequestBackup).unwrap();
+        }
+        tokio::task::yield_now().await;
+
+        advance(Duration::from_secs(61)).await;
+        sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            backup_count.load(SeqCst),
+            1,
+            "Requests during cooldown should be throttled and not trigger new backups."
+        );
+    }
 }

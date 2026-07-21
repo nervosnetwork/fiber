@@ -25,6 +25,8 @@ pub struct Config {
     pub base_dir: PathBuf,
     /// When true, validate the database and exit without starting services.
     pub check_validate: bool,
+    /// Restorage path, restore database from a backup file and exit.
+    pub restore: Option<PathBuf>,
 }
 
 impl Config {
@@ -115,6 +117,10 @@ pub mod native {
         #[arg(long, default_value_t = false)]
         check_validate: bool,
 
+        /// Restore database from a backup file and exit
+        #[arg(long = "restore", value_name = "BACKUP_PATH")]
+        restore: Option<std::path::PathBuf>,
+
         /// config for fiber network
         #[command(flatten)]
         pub fiber: <FiberConfig as ClapSerde>::Opt,
@@ -163,6 +169,7 @@ pub mod native {
             // Base directory for all things to be stored to disk
             let base_dir = args.base_dir.clone().unwrap_or(get_default_base_dir());
             let check_validate = args.check_validate;
+            let restore = args.restore;
 
             // Get config file by
             // 1. Using the explicitly set command line argument `config`
@@ -251,6 +258,7 @@ pub mod native {
                 ckb,
                 base_dir,
                 check_validate,
+                restore,
             }
         }
     }
@@ -318,6 +326,7 @@ mod wasm {
                 ckb,
                 base_dir: PathBuf::from_str(&database_prefix).unwrap(),
                 check_validate: false,
+                restore: None,
             }
         }
     }

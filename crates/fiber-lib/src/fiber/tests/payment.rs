@@ -52,6 +52,7 @@ use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
 use fiber_types::TlcErrPacket;
 use fiber_types::SIGNATURE_U5_SIZE;
+use fiber_types::{Attempt, AttemptStatus, PrevTlcInfo, TrampolineContext};
 use ractor::call;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::collections::{HashMap, HashSet};
@@ -192,6 +193,268 @@ fn failed_history_outpoints(fixture: &RemoveTlcFailEventFixture) -> HashSet<OutP
         .into_iter()
         .filter_map(|(outpoint, _direction, result)| (result.fail_time != 0).then_some(outpoint))
         .collect()
+}
+
+fn test_payment_session(request: SendPaymentData, now: u64) -> PaymentSession {
+    PaymentSession {
+        request,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        status: PaymentStatus::Created,
+        created_at: now,
+        last_updated_at: now,
+        cached_attempts: vec![],
+    }
+}
+
+fn test_attempt(
+    id: u64,
+    payment_hash: Hash256,
+    source: Pubkey,
+    target: Pubkey,
+    route_hops: Vec<PaymentHopData>,
+    now: u64,
+) -> Attempt {
+    Attempt {
+        id,
+        hash: payment_hash,
+        try_limit: 3,
+        tried_times: 1,
+        payment_hash,
+        route: SessionRoute::new(source, target, &route_hops),
+        route_hops,
+        session_key: [0; 32],
+        preimage: None,
+        created_at: now,
+        last_updated_at: now,
+        last_error: None,
+        status: AttemptStatus::Created,
+    }
+}
+
+#[test]
+fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
+    init_tracing();
+
+    let final_amount = 1000;
+    let amount_to_trampoline = 1200;
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(target, final_amount, payment_hash)
+        .max_fee_amount(Some(amount_to_trampoline - final_amount))
+        .trampoline_hops(Some(vec![trampoline]))
+        .build()
+        .expect("valid trampoline payment request");
+
+    let now = now_timestamp_as_millis_u64();
+    let route_hops = vec![
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            funding_tx_hash: gen_rand_sha256_hash(),
+            next_hop: Some(trampoline),
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            ..Default::default()
+        },
+    ];
+    let mut attempt = Attempt {
+        id: 1,
+        hash: payment_hash,
+        try_limit: 3,
+        tried_times: 1,
+        payment_hash,
+        route: SessionRoute::new(source, target, &route_hops),
+        route_hops,
+        session_key: [0; 32],
+        preimage: None,
+        created_at: now,
+        last_updated_at: now,
+        last_error: Some("temporary trampoline failure".to_string()),
+        status: AttemptStatus::Retrying,
+    };
+    assert_eq!(attempt.route.receiver_amount(), amount_to_trampoline);
+
+    let mut session = PaymentSession {
+        request,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        status: PaymentStatus::Created,
+        created_at: now,
+        last_updated_at: now,
+        cached_attempts: vec![attempt.clone()],
+    };
+    assert_eq!(attempt.route.receiver_amount(), amount_to_trampoline);
+    assert_eq!(session.remain_amount(), 0);
+    assert_eq!(
+        session
+            .remain_amount()
+            .checked_add(attempt.route.receiver_amount()),
+        Some(amount_to_trampoline)
+    );
+    assert_eq!(session.retry_amount(&attempt), Some(final_amount));
+
+    attempt.set_success_status();
+    session.cached_attempts = vec![attempt];
+    assert_eq!(session.calc_payment_status(), PaymentStatus::Success);
+}
+
+#[test]
+fn test_sender_side_trampoline_with_mpp_invoice_stays_single_attempt() {
+    init_tracing();
+
+    let final_amount = 1000;
+    let amount_to_trampoline = 1200;
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(target, final_amount, payment_hash)
+        .max_fee_amount(Some(amount_to_trampoline - final_amount))
+        .allow_mpp(true)
+        .max_parts(Some(4))
+        .trampoline_hops(Some(vec![trampoline]))
+        .build()
+        .expect("valid sender-side trampoline MPP payment request");
+
+    assert!(request.allow_mpp());
+    assert!(request.use_trampoline_routing());
+
+    let now = now_timestamp_as_millis_u64();
+    let route_hops = vec![
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            funding_tx_hash: gen_rand_sha256_hash(),
+            next_hop: Some(trampoline),
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            ..Default::default()
+        },
+    ];
+    let attempt = test_attempt(1, payment_hash, source, target, route_hops, now);
+    let mut session = test_payment_session(request, now);
+
+    assert_eq!(session.max_parts(), 1);
+    assert!(session.allow_more_attempts());
+
+    session.append_attempt(attempt.clone());
+
+    assert_eq!(session.attempts_count(), 1);
+    assert_eq!(session.remain_amount(), 0);
+    assert_eq!(session.retry_amount(&attempt), Some(final_amount));
+    assert!(!session.allow_more_attempts());
+}
+
+#[test]
+fn test_trampoline_context_mpp_counts_each_shard_receiver_amount() {
+    init_tracing();
+
+    let total_amount = 1000;
+    let first_shard_amount = 400;
+    let second_shard_amount = 600;
+    let source = gen_rand_fiber_public_key();
+    let middle = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let trampoline_context = TrampolineContext {
+        remaining_trampoline_onion: vec![1, 2, 3],
+        previous_tlcs: vec![PrevTlcInfo::new_with_shared_secret(
+            gen_rand_sha256_hash(),
+            1,
+            0,
+            [0; 32],
+        )],
+        hash_algorithm: HashAlgorithm::CkbHash,
+        max_outgoing_tlc_expiry: None,
+    };
+    let request = SendPaymentDataBuilder::new(target, total_amount, payment_hash)
+        .max_fee_amount(Some(200))
+        .allow_mpp(true)
+        .max_parts(Some(2))
+        .trampoline_context(Some(trampoline_context))
+        .build()
+        .expect("valid trampoline forwarding MPP payment request");
+
+    assert!(request.allow_mpp());
+    assert!(!request.use_trampoline_routing());
+    assert!(request.trampoline_context.is_some());
+
+    let now = now_timestamp_as_millis_u64();
+    let first_attempt = test_attempt(
+        1,
+        payment_hash,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: first_shard_amount + 10,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                funding_tx_hash: gen_rand_sha256_hash(),
+                next_hop: Some(middle),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: first_shard_amount,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                ..Default::default()
+            },
+        ],
+        now,
+    );
+    let second_attempt = test_attempt(
+        2,
+        payment_hash,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: second_shard_amount + 20,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                funding_tx_hash: gen_rand_sha256_hash(),
+                next_hop: Some(middle),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: second_shard_amount,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                ..Default::default()
+            },
+        ],
+        now,
+    );
+
+    let mut session = test_payment_session(request, now);
+    assert_eq!(session.max_parts(), 2);
+    assert_eq!(first_attempt.route.receiver_amount(), first_shard_amount);
+
+    session.append_attempt(first_attempt.clone());
+    assert_eq!(session.remain_amount(), second_shard_amount);
+    assert_eq!(session.retry_amount(&first_attempt), Some(total_amount));
+    assert!(session.allow_more_attempts());
+
+    assert_eq!(second_attempt.route.receiver_amount(), second_shard_amount);
+    session.append_attempt(second_attempt);
+    assert_eq!(session.remain_amount(), 0);
+    assert!(!session.allow_more_attempts());
 }
 
 #[tokio::test]
@@ -4223,7 +4486,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             target_pubkey: Some(nodes[1].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + 1), // Ok now
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await;
@@ -7939,13 +8202,16 @@ async fn test_network_with_hops_max_number_limit() {
     )
     .await;
 
+    let thirteen_hop_base_limit = DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let thirteen_hop_limit = thirteen_hop_base_limit + DEFAULT_TLC_EXPIRY_DELTA;
+
     let payment = nodes[0]
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(nodes[14].pubkey), // can not make a payment with 14 hops
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await;
@@ -7959,7 +8225,7 @@ async fn test_network_with_hops_max_number_limit() {
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await

@@ -1,3 +1,4 @@
+use crate::store::actor::StoreActorMessage;
 use ckb_hash::blake2b_256;
 use ckb_sdk::rpc::ckb_indexer::{Order, ScriptType, SearchKey, SearchMode};
 use ckb_types::core::tx_pool::TxStatus;
@@ -52,7 +53,7 @@ use super::channel::{
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
     ChannelInitializationParameter, ChannelOpenRecordStore, OpenChannelParameter,
     ProcessingChannelError, ProcessingChannelResult, RemoveTlcCommand, StopReason,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, PEER_CHANNEL_RESPONSE_TIMEOUT,
 };
 use super::gossip::{
     get_latest_startup_broadcast_message_cursor, GossipActorMessage, GossipMessageStore,
@@ -66,6 +67,7 @@ use super::{
     FiberConfig, InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage,
     InFlightCkbTxKind, ASSUME_NETWORK_ACTOR_ALIVE,
 };
+use crate::actors::log_actor_failed;
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::config::UdtCfgInfosExt;
 use crate::ckb::contracts::{
@@ -1121,6 +1123,7 @@ pub struct NetworkActor<S, C> {
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
 }
@@ -1144,6 +1147,7 @@ where
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
     ) -> Self {
@@ -1151,6 +1155,7 @@ where
             event_sender,
             chain_actor,
             store: store.clone(),
+            store_actor,
             network_graph,
             chain_client,
         }
@@ -1771,6 +1776,11 @@ where
                             flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
                             actor_state.state = ChannelState::Closed(flags);
                             self.store.insert_channel_actor_state(actor_state);
+                            if let Some(ref store_actor) = state.store_actor {
+                                store_actor
+                                    .cast(StoreActorMessage::RequestBackup)
+                                    .map_err(|e| Error::DBInternalError(e.to_string()))?;
+                            }
                             state.channels_funding_lock_script_cache.remove(&channel_id);
                             info!(
                                 "Channel {channel_id:?} on-chain settlement completed without a live actor"
@@ -2658,14 +2668,15 @@ where
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {
-                    let message = state.get_or_create_new_node_announcement_message();
-                    myself
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::BroadcastMessages(vec![
-                                BroadcastMessageWithTimestamp::NodeAnnouncement(message),
-                            ]),
-                        ))
-                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    if let Some(message) = state.get_or_create_new_node_announcement_message() {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::BroadcastMessages(vec![
+                                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                                ]),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
                 }
             },
             NetworkActorCommand::NodeInfo(_, rpc) => {
@@ -3948,6 +3959,39 @@ where
         let funding_tx = signed_funding_tx.take().expect("take tx");
         let witnesses = funding_tx.witnesses();
 
+        let Some(channel_actor) = state.channels.get(&channel_id).cloned() else {
+            debug!(
+                "Skipping signed funding tx for channel {:?}: channel actor no longer exists",
+                channel_id
+            );
+            return Ok(());
+        };
+
+        match call_t!(
+            channel_actor,
+            |reply| ChannelActorMessage::Command(ChannelCommand::FundingTxSigned(
+                funding_tx.data(),
+                reply,
+            )),
+            PEER_CHANNEL_RESPONSE_TIMEOUT
+        ) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                warn!(
+                    "Discarding signed funding tx for channel {:?}: channel rejected FundingTxSigned: {}",
+                    channel_id, err
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(
+                    "Discarding signed funding tx for channel {:?}: failed to acknowledge FundingTxSigned: {}",
+                    channel_id, err
+                );
+                return Ok(());
+            }
+        }
+
         if has_partial_witnesses {
             let outpoint = funding_tx
                 .output_pts_iter()
@@ -3982,19 +4026,6 @@ where
             .trace_tx(tx_hash, InFlightCkbTxKind::Funding(channel_id))
             .await?;
 
-        if let Err(err) = state
-            .send_command_to_channel(
-                channel_id,
-                ChannelCommand::FundingTxSigned(funding_tx.data()),
-            )
-            .await
-        {
-            error!(
-                "Failed to update signed funding tx {:?}: {}",
-                channel_id, err
-            );
-        }
-
         myself
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
@@ -4027,6 +4058,7 @@ where
 pub struct NetworkActorState<S, C> {
     store: S,
     state_to_be_persisted: PersistentNetworkActorState,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     announced_addrs: Vec<Multiaddr>,
@@ -4171,7 +4203,13 @@ where
         }
     }
 
-    pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
+    pub fn get_or_create_new_node_announcement_message(&mut self) -> Option<NodeAnnouncement> {
+        if self.announced_addrs.is_empty() {
+            debug!("Skipping node announcement because no announced address is configured");
+            self.last_node_announcement_message = None;
+            return None;
+        }
+
         let now = now_timestamp_as_millis_u64();
         match self.last_node_announcement_message {
             // If the last node announcement message is still relatively new, we don't need to create a new one.
@@ -4203,9 +4241,7 @@ where
                 self.last_node_announcement_message = Some(announcement);
             }
         }
-        self.last_node_announcement_message
-            .clone()
-            .expect("last node announcement message is present")
+        self.last_node_announcement_message.clone()
     }
 
     pub fn get_public_key(&self) -> Pubkey {
@@ -4491,7 +4527,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
@@ -4602,7 +4644,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
@@ -4694,7 +4742,13 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(self.get_public_key(), remote_pubkey, network.clone(), store),
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                network.clone(),
+                store,
+                self.store_actor.clone(),
+            ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                     funding_amount,
@@ -5197,6 +5251,11 @@ where
                                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
                             ));
                             self.store.insert_channel_actor_state(state);
+                            if let Some(ref store_actor) = self.store_actor {
+                                store_actor
+                                    .cast(StoreActorMessage::RequestBackup)
+                                    .map_err(|e| Error::DBInternalError(e.to_string()))?;
+                            }
 
                             let _ = rpc_reply.send(Ok(()));
                             Ok(())
@@ -5316,6 +5375,7 @@ where
                 remote_pubkey,
                 self.network.clone(),
                 self.store.clone(),
+                self.store_actor.clone(),
             ),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
@@ -5403,16 +5463,17 @@ where
         }
 
         if self.auto_announce {
-            let message = self.get_or_create_new_node_announcement_message();
-            debug!(
-                "Auto announcing our node to peer {:?} (message: {:?})",
-                remote_pubkey, &message
-            );
-            let _ = self.network.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessages(vec![
-                    BroadcastMessageWithTimestamp::NodeAnnouncement(message),
-                ]),
-            ));
+            if let Some(message) = self.get_or_create_new_node_announcement_message() {
+                debug!(
+                    "Auto announcing our node to peer {:?} (message: {:?})",
+                    remote_pubkey, &message
+                );
+                let _ = self.network.send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::NodeAnnouncement(message),
+                    ]),
+                ));
+            }
         } else {
             debug!(
                 "Auto announcing is disabled, skipping node announcement to peer {:?}",
@@ -6343,6 +6404,7 @@ where
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
+            store_actor: self.store_actor.clone(),
             node_name: config.announced_node_name,
             announced_addrs,
             auto_announce: config.auto_announce_node(),
@@ -6392,8 +6454,7 @@ where
             inflight_tracers: Default::default(),
         };
 
-        let node_announcement = state.get_or_create_new_node_announcement_message();
-        {
+        if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
             let mut graph = self.network_graph.write().await;
             graph.process_node_announcement(node_announcement);
         }
@@ -6538,7 +6599,7 @@ where
                 debug!("Actor {:?} terminated with reason {:?}", who, reason);
             }
             SupervisionEvent::ActorFailed(who, err) => {
-                panic!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
+                log_actor_failed(who, err);
             }
             _ => {}
         }
@@ -6601,7 +6662,10 @@ impl ServiceProtocol for FiberProtocolHandle {
                 );
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Peer disconnected without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
@@ -6619,7 +6683,10 @@ impl ServiceProtocol for FiberProtocolHandle {
                 );
             }
             None => {
-                unreachable!("Received message without remote pubkey");
+                debug!(
+                    "Received message without remote pubkey {:?}",
+                    context.session
+                );
             }
         }
     }
@@ -6717,6 +6784,7 @@ pub async fn start_network<
     tracker: TaskTracker,
     root_actor: ActorCell,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
@@ -6728,6 +6796,7 @@ pub async fn start_network<
             event_sender,
             chain_actor,
             store,
+            store_actor,
             network_graph,
             chain_client,
         ),

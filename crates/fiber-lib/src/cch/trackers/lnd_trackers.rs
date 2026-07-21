@@ -396,7 +396,7 @@ impl PaymentTracker {
     async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
         let payment_hash = payment.payment_hash.clone();
         let status = payment.status();
-        let has_payment_preimage = !is_payment_preimage_empty(&payment.payment_preimage);
+        let has_payment_preimage = !is_payment_preimage_empty(&payment.payment_preimage, status);
         tracing::debug!(
             "payment changed payment_hash={} status={:?} has_payment_preimage={}",
             payment_hash,
@@ -484,19 +484,24 @@ impl InvoiceTracker {
     }
 }
 
-/// LND represents missing payment preimage using all zeros hash.
-fn is_payment_preimage_empty(payment_preimage: &str) -> bool {
-    // check payment_preimage is all zeros
-    payment_preimage.is_empty() || payment_preimage.chars().all(|c| c == '0')
+/// LND represents missing payment preimage using all zeros hash before success.
+fn is_payment_preimage_empty(
+    payment_preimage: &str,
+    status: lnrpc::payment::PaymentStatus,
+) -> bool {
+    payment_preimage.is_empty()
+        || (status != lnrpc::payment::PaymentStatus::Succeeded
+            && payment_preimage.chars().all(|c| c == '0'))
 }
 
 pub fn map_lnd_payment_changed_event(payment: lnrpc::Payment) -> Result<CchTrackingEvent> {
-    let payment_preimage = if !is_payment_preimage_empty(&payment.payment_preimage) {
+    let status = payment.status();
+    let payment_preimage = if !is_payment_preimage_empty(&payment.payment_preimage, status) {
         Some(Hash256::from_str(&payment.payment_preimage)?)
     } else {
         None
     };
-    let status = map_lnd_payment_status(payment.status());
+    let status = map_lnd_payment_status(status);
 
     Ok(CchTrackingEvent::PaymentChanged {
         payment_hash: Hash256::from_str(&payment.payment_hash)?,
@@ -534,5 +539,70 @@ fn map_lnd_invoice_status(status: lnrpc::invoice::InvoiceState) -> CkbInvoiceSta
         InvoiceState::Settled => CkbInvoiceStatus::Paid,
         InvoiceState::Canceled => CkbInvoiceStatus::Cancelled,
         InvoiceState::Accepted => CkbInvoiceStatus::Received,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PAYMENT_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const ZERO_PREIMAGE: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn lnd_payment(
+        status: lnrpc::payment::PaymentStatus,
+        payment_preimage: &str,
+    ) -> lnrpc::Payment {
+        lnrpc::Payment {
+            payment_hash: PAYMENT_HASH.to_string(),
+            payment_preimage: payment_preimage.to_string(),
+            status: status as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_lnd_payment_mapper_accepts_successful_zero_preimage() {
+        let event = map_lnd_payment_changed_event(lnd_payment(
+            lnrpc::payment::PaymentStatus::Succeeded,
+            ZERO_PREIMAGE,
+        ))
+        .expect("payment event should map");
+
+        match event {
+            CchTrackingEvent::PaymentChanged {
+                payment_preimage,
+                status,
+                ..
+            } => {
+                assert_eq!(status, FiberPaymentStatus::Success);
+                assert_eq!(
+                    payment_preimage,
+                    Some(Hash256::from_str(ZERO_PREIMAGE).expect("zero preimage should parse"))
+                );
+            }
+            CchTrackingEvent::InvoiceChanged { .. } => panic!("expected payment event"),
+        }
+    }
+
+    #[test]
+    fn test_lnd_payment_mapper_keeps_zero_placeholder_empty_before_success() {
+        let event = map_lnd_payment_changed_event(lnd_payment(
+            lnrpc::payment::PaymentStatus::InFlight,
+            ZERO_PREIMAGE,
+        ))
+        .expect("payment event should map");
+
+        match event {
+            CchTrackingEvent::PaymentChanged {
+                payment_preimage,
+                status,
+                ..
+            } => {
+                assert_eq!(status, FiberPaymentStatus::Inflight);
+                assert_eq!(payment_preimage, None);
+            }
+            CchTrackingEvent::InvoiceChanged { .. } => panic!("expected payment event"),
+        }
     }
 }

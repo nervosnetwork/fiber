@@ -607,9 +607,182 @@ async fn test_active_sync_rejects_future_timestamp_without_saving() {
     assert_eq!(
         context
             .get_store()
-            .get_latest_node_announcement(&announcement.node_id),
-        None
+            .get_broadcast_messages(&Cursor::default(), 0),
+        vec![]
     );
+}
+
+// Verifies that when a ChannelUpdate arrives before its ChannelAnnouncement in the
+// same active sync batch, the function continues processing the batch instead of
+// breaking at the first missing dependency. This ensures the ChannelAnnouncement
+// (which appears later in the batch due to timestamp ordering) gets verified and saved.
+#[tokio::test]
+async fn test_active_sync_continues_past_missing_dependency_and_processes_ca() {
+    let context = GossipTestingContext::new().await;
+    let peer = crate::gen_rand_fiber_public_key();
+    let channel_context = ChannelTestContext::gen().await;
+    context.submit_tx(channel_context.funding_tx.clone()).await;
+
+    let channel_outpoint = channel_context.channel_outpoint().clone();
+
+    // Create a ChannelUpdate (timestamp = now) which will sort before the
+    // ChannelAnnouncement (whose timestamp comes from the on-chain block).
+    let channel_update = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        144,
+        0,
+        0,
+        Some(now_timestamp_as_millis_u64()),
+    );
+
+    // Batch with CU first, CA second (simulating the timestamp ordering issue).
+    let messages = vec![
+        BroadcastMessage::ChannelUpdate(channel_update.clone()),
+        BroadcastMessage::ChannelAnnouncement(channel_context.channel_announcement.clone()),
+    ];
+
+    let result = call!(
+        context.get_extended_actor(),
+        ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
+        peer,
+        messages
+    )
+    .expect("store actor alive");
+
+    // CU is skipped (no_deps), so we return Pending. But critically, the CA
+    // (which appears after the skipped CU in the batch) was still processed.
+    assert!(
+        matches!(result, ActiveSyncSaveMessagesResult::Pending),
+        "expected Pending because CU was skipped due to missing dependency"
+    );
+
+    // CA should have been saved to the store despite the earlier CU being skipped.
+    let saved_ca = context
+        .get_store()
+        .get_latest_channel_announcement(&channel_outpoint);
+    assert!(
+        saved_ca.is_some(),
+        "ChannelAnnouncement should be saved even though an earlier CU was skipped"
+    );
+}
+
+// Verifies that when a ChannelUpdate has its ChannelAnnouncement already in the store
+// (from a previous sync or Tick processing), the active sync processes it as a stored
+// duplicate and advances the cursor successfully, returning Validated.
+#[tokio::test]
+async fn test_active_sync_cu_stored_duplicate_when_ca_already_saved() {
+    let context = GossipTestingContext::new().await;
+    let peer = crate::gen_rand_fiber_public_key();
+    let channel_context = ChannelTestContext::gen().await;
+    let channel_outpoint = channel_context.channel_outpoint().clone();
+
+    // Save CA first via the normal SaveMessages path
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    context.submit_tx(channel_context.funding_tx.clone()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify CA is now in the store
+    assert!(context
+        .get_store()
+        .get_latest_channel_announcement(&channel_outpoint)
+        .is_some());
+
+    // Now send CU via active sync
+    let channel_update = channel_context.create_channel_update_of_node1(
+        ChannelUpdateChannelFlags::empty(),
+        144,
+        0,
+        0,
+        Some(now_timestamp_as_millis_u64()),
+    );
+
+    let messages = vec![BroadcastMessage::ChannelUpdate(channel_update.clone())];
+
+    let result = call!(
+        context.get_extended_actor(),
+        ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
+        peer,
+        messages
+    )
+    .expect("store actor alive");
+
+    assert!(
+        matches!(result, ActiveSyncSaveMessagesResult::Validated(_)),
+        "expected Validated because CU can be verified (CA already in store)"
+    );
+
+    // CU should now be in the store
+    let saved_cu = context
+        .get_store()
+        .get_latest_channel_update(&channel_outpoint, true);
+    assert!(
+        saved_cu.is_some(),
+        "ChannelUpdate should be saved when its CA is already in the store"
+    );
+}
+
+// Verifies that when a message is a duplicate found in the in-memory cache but not
+// yet in the store, the active sync continues instead of breaking. This allows
+// subsequent messages in the batch to still be processed while Tick resolves the cached message.
+#[tokio::test]
+async fn test_active_sync_continues_past_cached_duplicate() {
+    let context = GossipTestingContext::new().await;
+    let peer = crate::gen_rand_fiber_public_key();
+    let (_, node_announcement) = gen_rand_node_announcement();
+
+    // First call: inserts the NA into the in-memory cache and verifies it.
+    // Since NodeAnnouncements don't need CKB RPC, this succeeds.
+    let messages = vec![BroadcastMessage::NodeAnnouncement(
+        node_announcement.clone(),
+    )];
+
+    let result = call!(
+        context.get_extended_actor(),
+        ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
+        peer,
+        messages.clone()
+    )
+    .expect("store actor alive");
+
+    assert!(
+        matches!(result, ActiveSyncSaveMessagesResult::Validated(_)),
+        "first save should succeed"
+    );
+
+    // Second call with a batch of two NAs: the first is a cached duplicate
+    // (already in cache from first call, and in store), the second is new.
+    let (_, na2) = gen_rand_node_announcement();
+    let batch2 = vec![
+        BroadcastMessage::NodeAnnouncement(node_announcement.clone()),
+        BroadcastMessage::NodeAnnouncement(na2.clone()),
+    ];
+
+    let result2 = call!(
+        context.get_extended_actor(),
+        ExtendedGossipMessageStoreMessage::SaveActiveSyncMessages,
+        peer,
+        batch2
+    )
+    .expect("store actor alive");
+
+    // The first NA is a stored duplicate, the second is new and verified.
+    // No missing deps → Validated.
+    assert!(
+        matches!(result2, ActiveSyncSaveMessagesResult::Validated(_)),
+        "expected Validated: first NA is stored duplicate, second is newly verified"
+    );
+
+    // Both NAs should be in the store
+    assert!(context
+        .get_store()
+        .get_latest_node_announcement(&node_announcement.node_id)
+        .is_some());
+    assert!(context
+        .get_store()
+        .get_latest_node_announcement(&na2.node_id)
+        .is_some());
 }
 
 #[tokio::test]
