@@ -14,6 +14,9 @@ use tentacle::secio::SecioKeyPair;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::cch::actions::send_outgoing_payment::{
+    outgoing_fee_budget_from_fee_sats, outgoing_max_fee_rate,
+};
 use crate::cch::actions::{ActionDispatcher, CchOrderAction};
 use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentRef};
 use crate::cch::order::CchOrderStateMachine;
@@ -22,8 +25,9 @@ use crate::cch::trackers::{
     CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
     LndTrackerArgs, LndTrackerMessage, RedactedCchTrackingEvent, MAX_TRACKED_INVOICES,
 };
-use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
+use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::now_timestamp_as_millis_u64;
@@ -659,6 +663,37 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(order)
     }
 
+    fn remaining_outgoing_invoice_expiry_seconds(
+        &self,
+        invoice: &CkbInvoice,
+        current_time_seconds: u64,
+    ) -> Result<u64, CchError> {
+        let remaining_seconds = match invoice.expiry_time() {
+            Some(expiry) => invoice
+                .data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .and_then(|expiry_at| {
+                    u64::try_from(expiry_at / 1000)
+                        .unwrap_or(u64::MAX)
+                        .checked_sub(current_time_seconds)
+                })
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+            // CKB invoices have no default expiry, so use twice the configured minimum when the
+            // outgoing invoice does not set one explicitly.
+            None => self
+                .config
+                .min_outgoing_invoice_expiry_delta_seconds
+                .checked_mul(2)
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+        };
+
+        if remaining_seconds < self.config.min_outgoing_invoice_expiry_delta_seconds {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
+        Ok(remaining_seconds)
+    }
+
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
         // `from_str` requires the invoice to carry a valid signature, so parsing
         // here also guarantees the Fiber invoice is signed.
@@ -719,30 +754,7 @@ impl<S: CchOrderStore> CchState<S> {
             });
         }
 
-        // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
-        let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {
-            Some(expiry) => invoice
-                .data
-                .timestamp
-                .checked_add(expiry.as_millis())
-                .and_then(|expiry_at| {
-                    u64::try_from(expiry_at / 1000)
-                        .unwrap_or(u64::MAX)
-                        .checked_sub(order_created_at)
-                })
-                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
-            // CKB invoice has no default expiry, use minimal * 2 to create the invoice
-            None => self
-                .config
-                .min_outgoing_invoice_expiry_delta_seconds
-                .checked_mul(2)
-                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
-        };
-        if outgoing_invoice_expiry_delta_seconds
-            < self.config.min_outgoing_invoice_expiry_delta_seconds
-        {
-            return Err(CchError::OutgoingInvoiceExpiryTooShort);
-        }
+        self.remaining_outgoing_invoice_expiry_seconds(&invoice, order_created_at)?;
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script = self.resolve_wrapped_btc_type_script()?;
@@ -766,6 +778,22 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
         }
 
+        // Do not create externally payable BTC-side state for an invoice Fiber cannot currently
+        // route. The actual payment is still attempted only after the hold invoice is accepted;
+        // this dry run is a side-effect-free snapshot that rejects already-invalid orders early.
+        let fee_budget_sats =
+            outgoing_fee_budget_from_fee_sats(fee_sats, self.config.max_outgoing_fee_percentage);
+        self.fiber_agent_ref
+            .call_payment_preflight(
+                receive_btc.fiber_pay_req.clone(),
+                (btc_final_cltv_millis / 2).min(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+                OutgoingFeeLimit {
+                    max_fee_amount: fee_budget_sats,
+                    max_fee_rate: outgoing_max_fee_rate(amount_sats, fee_budget_sats),
+                },
+            )
+            .await?;
+
         let reservation = ractor::call!(self.lnd_tracker, |reply| {
             LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply)
         })
@@ -784,6 +812,14 @@ impl<S: CchOrderStore> CchState<S> {
 
         let result = async {
             let mut client = self.lnd_connection.create_invoices_client().await?;
+
+            // Preflight and client setup may take long enough for the absolute Fiber invoice expiry
+            // to move materially closer. Refresh it immediately before creating the relative-expiry
+            // LND hold invoice so elapsed setup time is not added to the incoming invoice lifetime.
+            let refreshed_at = now_timestamp_as_millis_u64() / 1000;
+            let outgoing_invoice_expiry_delta_seconds =
+                self.remaining_outgoing_invoice_expiry_seconds(&invoice, refreshed_at)?;
+
             let req = invoicesrpc::AddHoldInvoiceRequest {
                 hash: payment_hash.as_ref().to_vec(),
                 value_msat: total_msat,
