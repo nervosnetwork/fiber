@@ -511,7 +511,7 @@ dependencies = [
  "pkcs8 0.9.0",
  "prost 0.10.4",
  "prost-types 0.10.1",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rand_core 0.6.4",
  "regex",
  "serde_json",
@@ -943,7 +943,7 @@ checksum = "42c46d018105d08f0cdbe885014228a2a205d8b9c6a8050d9d2c271d7a7d8e31"
 dependencies = [
  "ckb-fixed-hash",
  "faster-hex",
- "rand 0.8.6",
+ "rand 0.8.7",
  "secp256k1 0.30.0",
  "thiserror 1.0.69",
 ]
@@ -1304,7 +1304,7 @@ dependencies = [
  "ckb-verification",
  "faster-hex",
  "lazy_static",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -2608,7 +2608,7 @@ dependencies = [
  "parking_lot",
  "pprof",
  "ractor",
- "rand 0.8.6",
+ "rand 0.9.4",
  "regex",
  "scrypt",
  "secp256k1 0.30.0",
@@ -5228,9 +5228,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -5857,7 +5857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9465315bc9d4566e1724f0fffcbcc446268cb522e60f9a27bcded6b19c108113"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.6",
+ "rand 0.8.7",
  "secp256k1-sys",
  "serde",
 ]
@@ -5869,7 +5869,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b50c5943d326858130af85e049f2661ba3c78b26589b8ab98e65e80ae44a1252"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.6",
+ "rand 0.8.7",
  "secp256k1-sys",
  "serde",
 ]
@@ -6249,7 +6249,7 @@ dependencies = [
  "http 1.4.2",
  "httparse",
  "log",
- "rand 0.8.6",
+ "rand 0.8.7",
  "sha1",
 ]
 
@@ -6521,7 +6521,7 @@ dependencies = [
  "molecule",
  "nohash-hasher",
  "parking_lot",
- "rand 0.8.6",
+ "rand 0.8.7",
  "socket2 0.6.4",
  "tentacle-multiaddr",
  "tentacle-secio",
@@ -6568,7 +6568,7 @@ dependencies = [
  "molecule",
  "openssl",
  "openssl-sys",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rand_core 0.6.4",
  "ring",
  "secp256k1 0.30.0",
@@ -7020,7 +7020,7 @@ dependencies = [
  "indexmap 1.9.3",
  "pin-project",
  "pin-project-lite",
- "rand 0.8.6",
+ "rand 0.8.7",
  "slab",
  "tokio",
  "tokio-util",
