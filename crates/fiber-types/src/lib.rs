@@ -32,7 +32,7 @@ pub mod serde_utils;
 pub mod sample;
 
 #[cfg(feature = "cch")]
-pub use cch::{CchInvoice, CchOrder, CchOrderStatus};
+pub use cch::{CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation};
 pub use channel::*;
 pub use config::*;
 pub use invoice::*;

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::Currency as LnCurrency;
-use lnd_grpc_tonic_client::{invoicesrpc, Uri};
+use lnd_grpc_tonic_client::{invoicesrpc, lnrpc, Uri};
 use ractor::{
     port::OutputPortSubscriberTrait as _, Actor, ActorProcessingErr, ActorRef, OutputPort,
     RpcReplyPort,
@@ -33,7 +33,9 @@ use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::StoreChange;
 use crate::time::Duration;
-use fiber_types::{AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
+use fiber_types::{
+    AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation, HashAlgorithm,
+};
 use fiber_types::{Hash256, Privkey};
 
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
@@ -60,6 +62,59 @@ pub struct ReceiveBTC {
     pub fiber_pay_req: String,
 }
 
+#[async_trait::async_trait]
+pub(crate) trait LndInvoiceClient: Send + Sync {
+    async fn lookup_invoice(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<Option<lnrpc::Invoice>, CchError>;
+
+    async fn add_hold_invoice(
+        &self,
+        request: invoicesrpc::AddHoldInvoiceRequest,
+    ) -> Result<invoicesrpc::AddHoldInvoiceResp, CchError>;
+}
+
+struct TonicLndInvoiceClient {
+    connection: LndConnectionInfo,
+}
+
+#[async_trait::async_trait]
+impl LndInvoiceClient for TonicLndInvoiceClient {
+    async fn lookup_invoice(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<Option<lnrpc::Invoice>, CchError> {
+        let mut client = self.connection.create_invoices_client().await?;
+        let request = invoicesrpc::LookupInvoiceMsg {
+            lookup_modifier: invoicesrpc::LookupModifier::Default as i32,
+            invoice_ref: Some(invoicesrpc::lookup_invoice_msg::InvoiceRef::PaymentHash(
+                payment_hash.as_ref().to_vec(),
+            )),
+        };
+        match client.lookup_invoice_v2(request).await {
+            Ok(response) => Ok(Some(response.into_inner())),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(CchError::LndRpcError(format!(
+                "lookup invoice {:x}: {}",
+                payment_hash, status
+            ))),
+        }
+    }
+
+    async fn add_hold_invoice(
+        &self,
+        request: invoicesrpc::AddHoldInvoiceRequest,
+    ) -> Result<invoicesrpc::AddHoldInvoiceResp, CchError> {
+        let mut client = self.connection.create_invoices_client().await?;
+        client
+            .add_hold_invoice(request.clone())
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|status| CchError::LndRpcError(format!("{}, request: {:?}", status, request)))
+    }
+}
+
 pub enum CchMessage {
     SendBTC(SendBTC, RpcReplyPort<Result<CchOrder, CchError>>),
     ReceiveBTC(ReceiveBTC, RpcReplyPort<Result<CchOrder, CchError>>),
@@ -82,6 +137,12 @@ pub enum CchMessage {
     ExecuteAction {
         payment_hash: Hash256,
         action: CchOrderAction,
+        retry_count: u32,
+    },
+
+    /// Resume a durable `receive_btc` creation left by an interrupted attempt.
+    ResumeReceiveBTCOrderCreation {
+        payment_hash: Hash256,
         retry_count: u32,
     },
 
@@ -120,6 +181,8 @@ pub struct CchArgs<S> {
     /// The CKB network currency this node is configured for.
     /// Used to validate that incoming invoices match the expected network.
     pub currency: Currency,
+    #[cfg(test)]
+    pub(crate) lnd_invoice_client: Option<Arc<dyn LndInvoiceClient>>,
 }
 
 pub struct CchState<S> {
@@ -127,6 +190,7 @@ pub struct CchState<S> {
     pub(super) fiber_agent_ref: CchFiberAgentRef,
     pub(super) node_keypair: Option<(PublicKey, SecretKey)>,
     pub(super) lnd_connection: LndConnectionInfo,
+    lnd_invoice_client: Arc<dyn LndInvoiceClient>,
     pub(super) lnd_tracker: ActorRef<LndTrackerMessage>,
     pub(super) scheduler: ActorRef<SchedulerMessage>,
     pub(super) store: S,
@@ -177,6 +241,16 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             None => None,
         };
         let lnd_connection = LndConnectionInfo::new(lnd_rpc_url, cert, macaroon);
+        #[cfg(test)]
+        let lnd_invoice_client = args.lnd_invoice_client.unwrap_or_else(|| {
+            Arc::new(TonicLndInvoiceClient {
+                connection: lnd_connection.clone(),
+            })
+        });
+        #[cfg(not(test))]
+        let lnd_invoice_client: Arc<dyn LndInvoiceClient> = Arc::new(TonicLndInvoiceClient {
+            connection: lnd_connection.clone(),
+        });
 
         let node_keypair = args.node_keypair.map(|kp| {
             let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
@@ -245,6 +319,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             store: args.store,
             node_keypair,
             lnd_connection,
+            lnd_invoice_client,
             lnd_tracker,
             scheduler,
             currency: args.currency,
@@ -298,6 +373,15 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             }
         }
 
+        // A creation intent is persisted before the external LND side effect. Replaying these
+        // messages makes a crash between AddHoldInvoice and the final order write recoverable.
+        for payment_hash in state.store.get_receive_btc_order_creation_keys_iter() {
+            myself.send_message(CchMessage::ResumeReceiveBTCOrderCreation {
+                payment_hash,
+                retry_count: 0,
+            })?;
+        }
+
         Ok(())
     }
 
@@ -323,16 +407,39 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::ReceiveBTC(receive_btc, port) => {
+                let payment_hash = CkbInvoice::from_str(&receive_btc.fiber_pay_req)
+                    .ok()
+                    .map(|invoice| *invoice.payment_hash());
                 let result = state.receive_btc(receive_btc).await;
-                if let Ok(order) = &result {
+                if let Ok((order, true)) = &result {
                     // Schedule jobs for new order
                     state.schedule_job_for_non_final_order(order);
                     let actions = ActionDispatcher::on_starting(order);
                     append_actions(myself, order.payment_hash, actions)?;
+                } else if let (Some(payment_hash), Err(err)) = (payment_hash, &result) {
+                    if state
+                        .get_receive_btc_order_creation_or_none(&payment_hash)?
+                        .is_some()
+                    {
+                        if is_retryable_receive_btc_creation_error(err) {
+                            schedule_receive_btc_creation_retry(
+                                &myself,
+                                payment_hash,
+                                0,
+                                &err.to_string(),
+                            );
+                        } else {
+                            tracing::error!(
+                                "Permanently failed to complete receive_btc creation {:x}: {}. The durable intent is retained for operator inspection",
+                                payment_hash,
+                                err
+                            );
+                        }
+                    }
                 }
                 if !port.is_closed() {
                     // ignore error
-                    let _ = port.send(result);
+                    let _ = port.send(result.map(|(order, _)| order));
                 }
                 Ok(())
             }
@@ -422,6 +529,35 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 }
                 Ok(())
             }
+            CchMessage::ResumeReceiveBTCOrderCreation {
+                payment_hash,
+                retry_count,
+            } => {
+                match state.resume_receive_btc_order_creation(payment_hash).await {
+                    Ok(Some(order)) => {
+                        state.schedule_job_for_non_final_order(&order);
+                        let actions = ActionDispatcher::on_starting(&order);
+                        append_actions(myself, order.payment_hash, actions)?;
+                    }
+                    Ok(None) => {}
+                    Err(err) if is_retryable_receive_btc_creation_error(&err) => {
+                        schedule_receive_btc_creation_retry(
+                            &myself,
+                            payment_hash,
+                            retry_count,
+                            &err.to_string(),
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "Permanently failed to resume receive_btc creation {:x}: {}. The durable intent is retained for operator inspection",
+                            payment_hash,
+                            err
+                        );
+                    }
+                }
+                Ok(())
+            }
             #[cfg(test)]
             CchMessage::InsertOrder(order, port) => {
                 let result = state.store.insert_cch_order(order).map_err(Into::into);
@@ -444,6 +580,23 @@ fn expected_ln_currency(currency: Currency) -> LnCurrency {
         Currency::Fibb => LnCurrency::Bitcoin,
         Currency::Fibt => LnCurrency::BitcoinTestnet,
         Currency::Fibd => LnCurrency::Regtest,
+    }
+}
+
+fn receive_btc_total_msat(amount_sats: u128, fee_sats: u128) -> Result<i64, CchError> {
+    i64::try_from(
+        amount_sats
+            .checked_add(fee_sats)
+            .and_then(|sats| sats.checked_mul(1_000))
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?,
+    )
+    .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)
+}
+
+fn lnd_invoice_mismatch(payment_hash: Hash256, reason: impl Into<String>) -> CchError {
+    CchError::LndInvoiceMismatch {
+        payment_hash,
+        reason: reason.into(),
     }
 }
 
@@ -694,10 +847,26 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(remaining_seconds)
     }
 
-    async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
+    async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<(CchOrder, bool), CchError> {
         // `from_str` requires the invoice to carry a valid signature, so parsing
         // here also guarantees the Fiber invoice is signed.
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
+
+        let payment_hash = *invoice.payment_hash();
+        if let Some(order) = self.get_order_or_none(&payment_hash)? {
+            self.ensure_receive_btc_request_matches_order(&receive_btc.fiber_pay_req, &order)?;
+            return Ok((order, false));
+        }
+        if let Some(creation) = self.get_receive_btc_order_creation_or_none(&payment_hash)? {
+            self.ensure_receive_btc_request_matches_creation(
+                &receive_btc.fiber_pay_req,
+                &creation,
+            )?;
+            return self
+                .complete_receive_btc_order_creation(creation, false)
+                .await
+                .map(|order| (order, true));
+        }
 
         // Validate that the CKB invoice currency matches the configured network (#982)
         if invoice.currency != self.currency {
@@ -707,7 +876,6 @@ impl<S: CchOrderStore> CchState<S> {
             });
         }
 
-        let payment_hash = *invoice.payment_hash();
         let amount_sats = invoice.amount().ok_or(CchError::CKBInvoiceMissingAmount)?;
 
         // Validate amount and fee early so we reject overflow/too-large before other checks.
@@ -716,13 +884,7 @@ impl<S: CchOrderStore> CchState<S> {
             .and_then(|v| v.checked_div(1_000_000u128))
             .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
             .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
-        let total_msat = i64::try_from(
-            amount_sats
-                .checked_add(fee_sats)
-                .and_then(|s| s.checked_mul(1_000u128))
-                .unwrap_or(u128::MAX),
-        )
-        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
+        receive_btc_total_msat(amount_sats, fee_sats)?;
 
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
@@ -794,45 +956,301 @@ impl<S: CchOrderStore> CchState<S> {
             )
             .await?;
 
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-
-        // Preflight and client setup may take long enough for the absolute Fiber invoice expiry
-        // to move materially closer. Refresh it immediately before creating the relative-expiry
-        // LND hold invoice so elapsed setup time is not added to the incoming invoice lifetime.
+        // Preflight can take long enough for the absolute Fiber invoice expiry to move
+        // materially closer. Recheck before persisting the intent: no LND side effect has
+        // happened yet, so an invoice that became too short can still be rejected cleanly.
         let refreshed_at = now_timestamp_as_millis_u64() / 1000;
-        let outgoing_invoice_expiry_delta_seconds =
-            self.remaining_outgoing_invoice_expiry_seconds(&invoice, refreshed_at)?;
+        self.remaining_outgoing_invoice_expiry_seconds(&invoice, refreshed_at)?;
 
-        let req = invoicesrpc::AddHoldInvoiceRequest {
-            hash: payment_hash.as_ref().to_vec(),
-            value_msat: total_msat,
-            expiry: outgoing_invoice_expiry_delta_seconds as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
-            ..Default::default()
-        };
-        let add_invoice_resp = client
-            .add_hold_invoice(req.clone())
-            .await
-            .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
-            .into_inner();
-        let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
-
-        let order = CchOrder {
+        let creation = CchReceiveBtcOrderCreation {
             created_at: order_created_at,
-            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
-            failure_reason: None,
-            incoming_invoice: CchInvoice::Lightning(incoming_invoice),
-            outgoing_pay_req: receive_btc.fiber_pay_req,
-            payment_preimage: None,
-            status: CchOrderStatus::Pending,
+            order_expiry_delta_seconds: self.config.order_expiry_delta_seconds,
+            fiber_pay_req: receive_btc.fiber_pay_req,
+            payment_hash,
             amount_sats,
             fee_sats,
-            payment_hash,
             wrapped_btc_type_script,
+            btc_final_tlc_expiry_delta_blocks: self.config.btc_final_tlc_expiry_delta_blocks,
+            max_outgoing_fee_percentage: self.config.max_outgoing_fee_percentage,
+        };
+        self.store
+            .insert_receive_btc_order_creation(creation.clone())?;
+
+        self.complete_receive_btc_order_creation(creation, true)
+            .await
+            .map(|order| (order, true))
+    }
+
+    fn get_receive_btc_order_creation_or_none(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<Option<CchReceiveBtcOrderCreation>, CchError> {
+        match self.store.get_receive_btc_order_creation(payment_hash) {
+            Err(CchStoreError::NotFound(_)) => Ok(None),
+            Err(err) => Err(err.into()),
+            Ok(creation) => Ok(Some(creation)),
+        }
+    }
+
+    fn ensure_receive_btc_request_matches_order(
+        &self,
+        fiber_pay_req: &str,
+        order: &CchOrder,
+    ) -> Result<(), CchError> {
+        if order.outgoing_pay_req == fiber_pay_req
+            && matches!(order.incoming_invoice, CchInvoice::Lightning(_))
+        {
+            Ok(())
+        } else {
+            Err(CchError::ConflictingReceiveBTCRequest(order.payment_hash))
+        }
+    }
+
+    fn ensure_receive_btc_request_matches_creation(
+        &self,
+        fiber_pay_req: &str,
+        creation: &CchReceiveBtcOrderCreation,
+    ) -> Result<(), CchError> {
+        if creation.fiber_pay_req == fiber_pay_req {
+            Ok(())
+        } else {
+            Err(CchError::ConflictingReceiveBTCRequest(
+                creation.payment_hash,
+            ))
+        }
+    }
+
+    async fn resume_receive_btc_order_creation(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<Option<CchOrder>, CchError> {
+        if self.get_order_or_none(&payment_hash)?.is_some() {
+            // A crash after committing the order but before observing the completed batch is safe:
+            // the order is authoritative and any stale intent can be discarded.
+            self.store.delete_receive_btc_order_creation(&payment_hash);
+            return Ok(None);
+        }
+        let Some(creation) = self.get_receive_btc_order_creation_or_none(&payment_hash)? else {
+            return Ok(None);
+        };
+        self.complete_receive_btc_order_creation(creation, false)
+            .await
+            .map(Some)
+    }
+
+    async fn preflight_receive_btc_creation(
+        &self,
+        creation: &CchReceiveBtcOrderCreation,
+    ) -> Result<(), CchError> {
+        let btc_final_cltv_millis = creation
+            .btc_final_tlc_expiry_delta_blocks
+            .checked_mul(BTC_BLOCK_TIME_MILLIS)
+            .ok_or_else(|| {
+                CchError::ConfigError(format!(
+                    "btc_final_tlc_expiry_delta_blocks ({}) is too large and causes overflow when converting to milliseconds",
+                    creation.btc_final_tlc_expiry_delta_blocks
+                ))
+            })?;
+        let fee_budget_sats = outgoing_fee_budget_from_fee_sats(
+            creation.fee_sats,
+            creation.max_outgoing_fee_percentage,
+        );
+        self.fiber_agent_ref
+            .call_payment_preflight(
+                creation.fiber_pay_req.clone(),
+                (btc_final_cltv_millis / 2).min(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+                OutgoingFeeLimit {
+                    max_fee_amount: fee_budget_sats,
+                    max_fee_rate: outgoing_max_fee_rate(creation.amount_sats, fee_budget_sats),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn complete_receive_btc_order_creation(
+        &self,
+        creation: CchReceiveBtcOrderCreation,
+        preflight_complete: bool,
+    ) -> Result<CchOrder, CchError> {
+        let incoming_invoice = match self
+            .lnd_invoice_client
+            .lookup_invoice(creation.payment_hash)
+            .await?
+        {
+            Some(invoice) => self.validate_recovered_lnd_invoice(&creation, invoice)?,
+            None => {
+                if !preflight_complete {
+                    self.preflight_receive_btc_creation(&creation).await?;
+                }
+                self.create_or_recover_lnd_invoice(&creation).await?
+            }
         };
 
-        self.store.insert_cch_order(order.clone())?;
-        Ok(order)
+        let order = CchOrder {
+            created_at: creation.created_at,
+            expiry_delta_seconds: creation.order_expiry_delta_seconds,
+            failure_reason: None,
+            incoming_invoice: CchInvoice::Lightning(incoming_invoice),
+            outgoing_pay_req: creation.fiber_pay_req.clone(),
+            payment_preimage: None,
+            status: CchOrderStatus::Pending,
+            amount_sats: creation.amount_sats,
+            fee_sats: creation.fee_sats,
+            payment_hash: creation.payment_hash,
+            wrapped_btc_type_script: creation.wrapped_btc_type_script,
+        };
+
+        match self
+            .store
+            .complete_receive_btc_order_creation(order.clone())
+        {
+            Ok(()) => Ok(order),
+            Err(CchStoreError::Duplicated(_)) => {
+                let existing = self.store.get_cch_order(&creation.payment_hash)?;
+                self.ensure_receive_btc_request_matches_order(&creation.fiber_pay_req, &existing)?;
+                self.store
+                    .delete_receive_btc_order_creation(&creation.payment_hash);
+                Ok(existing)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    async fn create_or_recover_lnd_invoice(
+        &self,
+        creation: &CchReceiveBtcOrderCreation,
+    ) -> Result<Bolt11Invoice, CchError> {
+        let fiber_invoice = CkbInvoice::from_str(&creation.fiber_pay_req)?;
+        let refreshed_at = now_timestamp_as_millis_u64() / 1000;
+        let expiry =
+            self.remaining_outgoing_invoice_expiry_seconds(&fiber_invoice, refreshed_at)?;
+        let total_msat = receive_btc_total_msat(creation.amount_sats, creation.fee_sats)?;
+        let request = invoicesrpc::AddHoldInvoiceRequest {
+            hash: creation.payment_hash.as_ref().to_vec(),
+            value_msat: total_msat,
+            expiry: expiry as i64,
+            cltv_expiry: creation.btc_final_tlc_expiry_delta_blocks,
+            ..Default::default()
+        };
+
+        match self
+            .lnd_invoice_client
+            .add_hold_invoice(request.clone())
+            .await
+        {
+            Ok(response) => self.validate_lnd_payment_request(creation, &response.payment_request),
+            Err(add_error) => {
+                // AddHoldInvoice is not transactional with this process. Any transport error is
+                // ambiguous, so reconcile by hash before reporting the original failure.
+                match self
+                    .lnd_invoice_client
+                    .lookup_invoice(creation.payment_hash)
+                    .await
+                {
+                    Ok(Some(invoice)) => self.validate_recovered_lnd_invoice(creation, invoice),
+                    Ok(None) => Err(add_error),
+                    Err(lookup_error) => Err(CchError::LndRpcError(format!(
+                        "{}; reconciliation lookup failed: {}",
+                        add_error, lookup_error
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn validate_recovered_lnd_invoice(
+        &self,
+        creation: &CchReceiveBtcOrderCreation,
+        invoice: lnrpc::Invoice,
+    ) -> Result<Bolt11Invoice, CchError> {
+        let expected_total_msat = receive_btc_total_msat(creation.amount_sats, creation.fee_sats)?;
+        if invoice.r_hash.as_slice() != creation.payment_hash.as_ref() {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                "payment hash differs",
+            ));
+        }
+        if invoice.value_msat != expected_total_msat {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                format!(
+                    "value_msat is {}, expected {}",
+                    invoice.value_msat, expected_total_msat
+                ),
+            ));
+        }
+        if invoice.cltv_expiry != creation.btc_final_tlc_expiry_delta_blocks {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                format!(
+                    "cltv_expiry is {}, expected {}",
+                    invoice.cltv_expiry, creation.btc_final_tlc_expiry_delta_blocks
+                ),
+            ));
+        }
+        if matches!(
+            invoice.state(),
+            lnrpc::invoice::InvoiceState::Canceled | lnrpc::invoice::InvoiceState::Settled
+        ) {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                format!("invoice is already {:?}", invoice.state()),
+            ));
+        }
+        self.validate_lnd_payment_request(creation, &invoice.payment_request)
+    }
+
+    fn validate_lnd_payment_request(
+        &self,
+        creation: &CchReceiveBtcOrderCreation,
+        payment_request: &str,
+    ) -> Result<Bolt11Invoice, CchError> {
+        let invoice = Bolt11Invoice::from_str(payment_request)?;
+        let expected_total_msat = u64::try_from(receive_btc_total_msat(
+            creation.amount_sats,
+            creation.fee_sats,
+        )?)
+        .map_err(|_| CchError::ReceiveBTCOrderAmountTooLarge)?;
+        if Hash256::from(*invoice.payment_hash()) != creation.payment_hash {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                "encoded payment hash differs",
+            ));
+        }
+        if invoice.amount_milli_satoshis() != Some(expected_total_msat) {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                format!(
+                    "encoded amount is {:?}, expected {}",
+                    invoice.amount_milli_satoshis(),
+                    expected_total_msat
+                ),
+            ));
+        }
+        if invoice.min_final_cltv_expiry_delta() != creation.btc_final_tlc_expiry_delta_blocks {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                format!(
+                    "encoded CLTV delta is {}, expected {}",
+                    invoice.min_final_cltv_expiry_delta(),
+                    creation.btc_final_tlc_expiry_delta_blocks
+                ),
+            ));
+        }
+        let fiber_invoice = CkbInvoice::from_str(&creation.fiber_pay_req)?;
+        let expected_currency = expected_ln_currency(fiber_invoice.currency);
+        if invoice.currency() != expected_currency {
+            return Err(lnd_invoice_mismatch(
+                creation.payment_hash,
+                format!(
+                    "encoded currency is {:?}, expected {:?}",
+                    invoice.currency(),
+                    expected_currency
+                ),
+            ));
+        }
+        Ok(invoice)
     }
 
     async fn handle_tracking_event(&self, event: CchTrackingEvent) -> Result<Vec<CchOrderAction>> {
@@ -945,6 +1363,33 @@ fn append_actions(
         })?;
     }
     Ok(())
+}
+
+fn is_retryable_receive_btc_creation_error(error: &CchError) -> bool {
+    matches!(
+        error,
+        CchError::LndChannelError(_) | CchError::LndRpcError(_) | CchError::FiberNodeError(_)
+    )
+}
+
+fn schedule_receive_btc_creation_retry(
+    myself: &ActorRef<CchMessage>,
+    payment_hash: Hash256,
+    retry_count: u32,
+    reason: &str,
+) {
+    let delay = calculate_retry_delay(retry_count);
+    tracing::error!(
+        "receive_btc creation for payment hash {:x} failed (retry {}): {}. Retrying in {:?}",
+        payment_hash,
+        retry_count,
+        reason,
+        delay
+    );
+    myself.send_after(delay, move || CchMessage::ResumeReceiveBTCOrderCreation {
+        payment_hash,
+        retry_count: retry_count.saturating_add(1),
+    });
 }
 
 fn schedule_action_retry(

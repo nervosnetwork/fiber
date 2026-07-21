@@ -81,6 +81,13 @@ pub enum CchError {
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
     LndRpcError(String),
+    #[error("Conflicting receive_btc request for payment hash {0}")]
+    ConflictingReceiveBTCRequest(Hash256),
+    #[error("LND invoice for payment hash {payment_hash} does not match the CCH order: {reason}")]
+    LndInvoiceMismatch {
+        payment_hash: Hash256,
+        reason: String,
+    },
     #[error("Fiber node error: {0}")]
     FiberNodeError(anyhow::Error),
 }
