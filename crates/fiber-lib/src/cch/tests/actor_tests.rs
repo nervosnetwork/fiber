@@ -2138,6 +2138,51 @@ async fn test_receive_btc_rechecks_fiber_invoice_expiry_after_preflight() {
     );
 }
 
+#[tokio::test]
+async fn test_receive_btc_rechecks_order_expiry_after_preflight() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 1,
+        order_expiry_delta_seconds: 1,
+        ..Default::default()
+    };
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    let harness = setup_test_harness_with_config_store_and_lnd(
+        config,
+        MockCchOrderStore::new(),
+        Some(lnd.clone()),
+    )
+    .await;
+    harness.delay_fiber_payment_preflight(Duration::from_millis(1_100));
+    let (_, payment_hash) = create_valid_preimage_pair(191);
+    let invoice = create_receive_btc_fiber_invoice_at(
+        payment_hash,
+        100_000,
+        "order expires during preflight",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        None,
+    );
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(matches!(
+        result,
+        Err(CchError::ReceiveBTCOrderCreationExpired(hash)) if hash == payment_hash
+    ));
+    assert_eq!(lnd.add_calls(), 0);
+}
+
 /// Tests that the send_btc proxy Fiber invoice includes the fee in its amount.
 ///
 /// In the SendBTC flow, the hub creates a Fiber invoice (the proxy invoice) for the
@@ -2193,30 +2238,49 @@ fn create_receive_btc_fiber_invoice(
     amount_sats: u128,
     description: &str,
 ) -> CkbInvoice {
+    create_receive_btc_fiber_invoice_at(
+        payment_hash,
+        amount_sats,
+        description,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        Some(Duration::from_secs(3600)),
+    )
+}
+
+fn create_receive_btc_fiber_invoice_at(
+    payment_hash: Hash256,
+    amount_sats: u128,
+    description: &str,
+    timestamp: u128,
+    expiry: Option<Duration>,
+) -> CkbInvoice {
     use crate::ckb::contracts::{get_script_by_contract, Contract};
     use crate::invoice::CkbScript;
 
     let wrapped_btc_type_script = get_script_by_contract(Contract::SimpleUDT, &[]);
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+    let mut attrs = vec![
+        Attribute::FinalHtlcMinimumExpiryDelta(12),
+        Attribute::Description(description.to_string()),
+        Attribute::PayeePublicKey(public_key),
+        Attribute::UdtScript(CkbScript(wrapped_btc_type_script)),
+        Attribute::HashAlgorithm(HashAlgorithm::Sha256),
+    ];
+    if let Some(expiry) = expiry {
+        attrs.push(Attribute::ExpiryTime(expiry));
+    }
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
         amount: Some(amount_sats),
         signature: None,
         data: InvoiceData {
             payment_hash,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-            attrs: vec![
-                Attribute::FinalHtlcMinimumExpiryDelta(12),
-                Attribute::Description(description.to_string()),
-                Attribute::ExpiryTime(Duration::from_secs(3600)),
-                Attribute::PayeePublicKey(public_key),
-                Attribute::UdtScript(CkbScript(wrapped_btc_type_script)),
-                Attribute::HashAlgorithm(HashAlgorithm::Sha256),
-            ],
+            timestamp,
+            attrs,
         },
     };
     invoice
@@ -2542,6 +2606,186 @@ async fn test_receive_btc_startup_recovery_does_not_retry_permanent_mismatch() {
         Err(CchStoreError::NotFound(_))
     ));
     assert!(store.get_receive_btc_order_creation(&payment_hash).is_ok());
+}
+
+#[tokio::test]
+async fn test_receive_btc_expired_creation_does_not_create_lnd_invoice() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let (_, payment_hash) = create_valid_preimage_pair(188);
+    let mut creation = create_receive_btc_order_creation(&config, payment_hash, "expired creation");
+    creation.created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(config.order_expiry_delta_seconds)
+        .saturating_sub(1);
+    creation.fiber_pay_req = create_receive_btc_fiber_invoice_at(
+        payment_hash,
+        creation.amount_sats,
+        "expired creation without Fiber expiry",
+        u128::from(creation.created_at) * 1_000,
+        None,
+    )
+    .to_string();
+    store.insert_receive_btc_order_creation(creation).unwrap();
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+
+    let _harness =
+        setup_test_harness_with_config_store_and_lnd(config, store.clone(), Some(lnd.clone()))
+            .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while lnd.lookup_calls() == 0 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    assert_eq!(lnd.lookup_calls(), 1, "expiry is a permanent failure");
+    assert_eq!(lnd.add_calls(), 0, "expired intent must not reach LND");
+    assert!(matches!(
+        store.get_cch_order(&payment_hash),
+        Err(CchStoreError::NotFound(_))
+    ));
+    assert!(store.get_receive_btc_order_creation(&payment_hash).is_ok());
+}
+
+#[tokio::test]
+async fn test_receive_btc_expired_creation_recovers_accepted_lnd_invoice() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let (_, payment_hash) = create_valid_preimage_pair(190);
+    let mut creation =
+        create_receive_btc_order_creation(&config, payment_hash, "accepted before expiry");
+    creation.created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(config.order_expiry_delta_seconds)
+        .saturating_sub(1);
+    creation.fiber_pay_req = create_receive_btc_fiber_invoice_at(
+        payment_hash,
+        creation.amount_sats,
+        "accepted before order expiry",
+        u128::from(creation.created_at) * 1_000,
+        None,
+    )
+    .to_string();
+    let request = invoicesrpc::AddHoldInvoiceRequest {
+        hash: payment_hash.as_ref().to_vec(),
+        value_msat: ((creation.amount_sats + creation.fee_sats) * 1_000) as i64,
+        expiry: 86_400,
+        cltv_expiry: creation.btc_final_tlc_expiry_delta_blocks,
+        ..Default::default()
+    };
+    let payment_request = create_mock_lnd_hold_invoice(&request).to_string();
+    store.insert_receive_btc_order_creation(creation).unwrap();
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    lnd.insert_invoice(
+        payment_hash,
+        lnrpc::Invoice {
+            r_hash: request.hash,
+            value_msat: request.value_msat,
+            payment_request,
+            expiry: request.expiry,
+            cltv_expiry: request.cltv_expiry,
+            state: lnrpc::invoice::InvoiceState::Accepted as i32,
+            ..Default::default()
+        },
+    );
+
+    let harness = setup_test_harness_with_config_store_and_lnd(config, store, Some(lnd)).await;
+
+    let recovered = wait_for_mock_order(&harness._store, payment_hash).await;
+    assert_ne!(recovered.status, CchOrderStatus::Pending);
+    assert_ne!(recovered.status, CchOrderStatus::Failed);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 1_000)
+        .await;
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert!(harness.was_fiber_payment_sent(payment_hash));
+}
+
+#[tokio::test]
+async fn test_receive_btc_client_retries_share_one_recovery_chain() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    lnd.set_lookup_failures(10);
+    let harness =
+        setup_test_harness_with_config_store_and_lnd(config, store, Some(lnd.clone())).await;
+    let (_, payment_hash) = create_valid_preimage_pair(189);
+    let fiber_pay_req =
+        create_receive_btc_fiber_invoice(payment_hash, 100_000, "deduplicated retry").to_string();
+
+    let first_error = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: fiber_pay_req.clone(),
+        }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(first_error, CchError::LndRpcError(_)));
+
+    for _ in 0..3 {
+        let retry_error = call!(
+            harness.actor,
+            CchMessage::ReceiveBTC,
+            crate::cch::ReceiveBTC {
+                fiber_pay_req: fiber_pay_req.clone(),
+            }
+        )
+        .expect("actor call failed")
+        .unwrap_err();
+        assert!(matches!(
+            retry_error,
+            CchError::ReceiveBTCOrderCreationInProgress(hash) if hash == payment_hash
+        ));
+    }
+    assert_eq!(lnd.lookup_calls(), 1);
+
+    let conflicting_error = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: create_receive_btc_fiber_invoice(
+                payment_hash,
+                100_000,
+                "conflicting pending retry",
+            )
+            .to_string(),
+        }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(
+        conflicting_error,
+        CchError::ConflictingReceiveBTCRequest(hash) if hash == payment_hash
+    ));
+    assert_eq!(lnd.lookup_calls(), 1);
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(
+        lnd.lookup_calls(),
+        2,
+        "only the single scheduled recovery may retry LND"
+    );
+
+    let retry_error = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(
+        retry_error,
+        CchError::ReceiveBTCOrderCreationInProgress(hash) if hash == payment_hash
+    ));
+    assert_eq!(lnd.lookup_calls(), 2);
 }
 
 #[tokio::test]

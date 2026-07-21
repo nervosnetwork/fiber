@@ -83,6 +83,10 @@ pub enum CchError {
     LndRpcError(String),
     #[error("Conflicting receive_btc request for payment hash {0}")]
     ConflictingReceiveBTCRequest(Hash256),
+    #[error("receive_btc order creation for payment hash {0} is already being recovered")]
+    ReceiveBTCOrderCreationInProgress(Hash256),
+    #[error("receive_btc order creation for payment hash {0} has expired")]
+    ReceiveBTCOrderCreationExpired(Hash256),
     #[error("LND invoice for payment hash {payment_hash} does not match the CCH order: {reason}")]
     LndInvoiceMismatch {
         payment_hash: Hash256,
