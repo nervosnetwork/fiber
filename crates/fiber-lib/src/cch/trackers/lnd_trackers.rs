@@ -5,10 +5,10 @@
 //!
 //! ## Key Features
 //!
-//! - **Concurrent Tracking**: Tracks up to 5 invoices simultaneously to avoid overwhelming LND.
-//! - **Queue Management**: Maintains FIFO queue for pending invoice tracking requests.
-//! - **Timeout**: Re-queues active invoices after 5 minutes to prevent indefinite blocking.
-//! - **Completion Handling**: Properly cleans up when tracker tasks complete, timeout or fail.
+//! - **Bounded Tracking**: Tracks every admitted invoice, up to the global invoice limit.
+//! - **Connection Reuse**: Multiplexes invoice subscriptions over one shared LND client.
+//! - **Reconnect Protection**: Bounds concurrent subscription attempts and adds retry jitter.
+//! - **Completion Handling**: Properly cleans up when tracker tasks complete, stop, or fail.
 //!
 //! ## Architecture
 //!
@@ -16,18 +16,12 @@
 //! - `TrackInvoice(Hash256)`: Adds invoice to tracking queue
 //! - `InvoiceTrackerCompleted{...}`: Sent by spawned tracker tasks when they finish
 //!
-//! When a tracker task completes (successfully or with error), it ALWAYS sends
-//! `InvoiceTrackerCompleted` back to the actor. The actor maintains two data structures:
-//! - `invoice_queue`: VecDeque of pending invoice hashes
-//! - `active_invoice_trackers`: Number of active invoice trackers
-//!
-//! When completion message arrives:
-//! 1. Decrement `active_invoice_trackers` counter
-//! 2. Re-queue if failed
-//! 3. Dequeue invoices from the queue and start tracking
+//! The queue is only needed when restoring more persisted orders than the current global
+//! admission limit. Newly created orders reserve global capacity before their LND invoice is
+//! created, so every newly admitted invoice starts tracking immediately.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -40,16 +34,21 @@ use lnd_grpc_tonic_client::{
     RouterClient, Uri,
 };
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
-use tokio::{select, time::sleep};
+use tokio::{
+    sync::Semaphore,
+    time::{sleep, timeout},
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{cch::trackers::CchTrackingEvent, invoice::CkbInvoiceStatus};
 use fiber_types::payment::PaymentStatus as FiberPaymentStatus;
 use fiber_types::Hash256;
 
-const MAX_CONCURRENT_INVOICE_TRACKERS: usize = 5;
 pub(crate) const MAX_TRACKED_INVOICES: usize = 100;
-const INVOICE_TRACKING_TIMEOUT: Duration = Duration::from_secs(5 * 60); // 5 minutes
+const MAX_CONCURRENT_SUBSCRIBE_ATTEMPTS: usize = 10;
+const SUBSCRIBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+const INVOICE_TRACKER_RETRY_DELAY: Duration = Duration::from_secs(15);
+const INVOICE_TRACKER_RETRY_JITTER: Duration = Duration::from_secs(15);
 
 /// LND connection information
 ///
@@ -156,13 +155,19 @@ pub struct LndTrackerArgs {
 /// State for the LndTrackerActor
 pub struct LndTrackerState {
     port: Arc<OutputPort<CchTrackingEvent>>,
-    lnd_connection: LndConnectionInfo,
+    invoices_client: InvoicesClient,
     token: CancellationToken,
     tracker: TaskTracker,
     /// Queue of payment hashes waiting to be tracked
     invoice_queue: VecDeque<Hash256>,
     /// State of every admitted invoice tracker. The map size is the global capacity usage.
     invoice_trackers: HashMap<Hash256, InvoiceTrackingState>,
+    /// Cancellation token for each active or stopping invoice tracker.
+    active_invoice_tracker_tokens: HashMap<Hash256, CancellationToken>,
+    /// Invoices requested again while their previous tracker is stopping.
+    restart_stopping_invoices: HashSet<Hash256>,
+    /// Limits only subscription establishment. Permits are released once streams are established.
+    subscribe_attempts: Arc<Semaphore>,
 }
 
 /// Ractor Actor to track LND payments and invoices
@@ -176,9 +181,9 @@ pub struct LndTrackerState {
 ///
 /// ## Invoice Tracking
 /// - Supports tracking individual invoices via `LndTrackerMessage::TrackInvoice`
-/// - Implements concurrency control: maximum 5 concurrent invoice connections
-/// - Track invoices with a 5-minute timeout and automatically retry them later
-/// - Queues additional invoices when concurrency limit is reached
+/// - Tracks all invoices admitted by the global invoice limit
+/// - Multiplexes subscriptions over a shared LND HTTP/2 client
+/// - Limits concurrent subscription attempts to protect LND during startup and reconnects
 ///
 /// ## Example Usage
 ///
@@ -191,11 +196,11 @@ pub struct LndTrackerState {
 /// let port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 ///
 /// // Create connection info
-/// let lnd_connection = LndConnectionInfo {
-///     uri: "https://localhost:10009".parse().unwrap(),
-///     cert: Some(cert_bytes),
-///     macaroon: Some(macaroon_bytes),
-/// };
+/// let lnd_connection = LndConnectionInfo::new(
+///     "https://localhost:10009".parse().unwrap(),
+///     Some(cert_bytes),
+///     Some(macaroon_bytes),
+/// );
 ///
 /// // Start the actor
 /// let args = LndTrackerArgs {
@@ -235,13 +240,17 @@ impl Actor for LndTrackerActor {
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let invoices_client = args.lnd_connection.create_invoices_client().await?;
         let state = LndTrackerState {
             port: args.port.clone(),
-            lnd_connection: args.lnd_connection.clone(),
+            invoices_client,
             token: args.token.clone(),
             tracker: args.tracker.clone(),
             invoice_queue: VecDeque::new(),
             invoice_trackers: HashMap::new(),
+            active_invoice_tracker_tokens: HashMap::new(),
+            restart_stopping_invoices: HashSet::new(),
+            subscribe_attempts: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSCRIBE_ATTEMPTS)),
         };
 
         // Start payment tracker in background
@@ -286,10 +295,10 @@ impl Actor for LndTrackerActor {
                         state.invoice_queue.push_back(payment_hash);
                         true
                     }
-                    Some(tracker_state @ InvoiceTrackingState::Stopping) => {
-                        *tracker_state = InvoiceTrackingState::Active;
+                    Some(InvoiceTrackingState::Stopping) => {
+                        state.restart_stopping_invoices.insert(payment_hash);
                         tracing::debug!(
-                            "Resumed tracking invoice {:x} before its active tracker stopped",
+                            "Will restart invoice tracker {:x} after its previous task stops",
                             payment_hash
                         );
                         false
@@ -324,11 +333,17 @@ impl Actor for LndTrackerActor {
             LndTrackerMessage::StopTracking(payment_hash) => {
                 match state.invoice_trackers.get(&payment_hash).copied() {
                     Some(InvoiceTrackingState::Active) => {
+                        if let Some(token) = state.active_invoice_tracker_tokens.get(&payment_hash)
+                        {
+                            token.cancel();
+                        }
                         state
                             .invoice_trackers
                             .insert(payment_hash, InvoiceTrackingState::Stopping);
                     }
-                    Some(InvoiceTrackingState::Stopping) => {}
+                    Some(InvoiceTrackingState::Stopping) => {
+                        state.restart_stopping_invoices.remove(&payment_hash);
+                    }
                     Some(InvoiceTrackingState::Reserved | InvoiceTrackingState::Queued) => {
                         state.invoice_trackers.remove(&payment_hash);
                         state.invoice_queue.retain(|&hash| hash != payment_hash);
@@ -347,16 +362,28 @@ impl Actor for LndTrackerActor {
                     payment_hash,
                     completed_successfully,
                     state.active_invoice_trackers(),
-                    MAX_CONCURRENT_INVOICE_TRACKERS
+                    MAX_TRACKED_INVOICES
                 );
+                state.active_invoice_tracker_tokens.remove(&payment_hash);
                 match state.invoice_trackers.get(&payment_hash).copied() {
-                    Some(InvoiceTrackingState::Active) if !completed_successfully => {
+                    Some(InvoiceTrackingState::Active)
+                        if !completed_successfully && !state.token.is_cancelled() =>
+                    {
+                        state
+                            .invoice_trackers
+                            .insert(payment_hash, InvoiceTrackingState::Queued);
+                        state.invoice_queue.push_back(payment_hash);
+                    }
+                    Some(InvoiceTrackingState::Stopping)
+                        if state.restart_stopping_invoices.remove(&payment_hash) =>
+                    {
                         state
                             .invoice_trackers
                             .insert(payment_hash, InvoiceTrackingState::Queued);
                         state.invoice_queue.push_back(payment_hash);
                     }
                     Some(InvoiceTrackingState::Active | InvoiceTrackingState::Stopping) => {
+                        state.restart_stopping_invoices.remove(&payment_hash);
                         state.invoice_trackers.remove(&payment_hash);
                     }
                     Some(InvoiceTrackingState::Reserved | InvoiceTrackingState::Queued) | None => {
@@ -428,8 +455,10 @@ impl LndTrackerState {
         &mut self,
         myself: ActorRef<LndTrackerMessage>,
     ) -> Result<(), ActorProcessingErr> {
-        // Process invoices from queue
-        while self.active_invoice_trackers() < MAX_CONCURRENT_INVOICE_TRACKERS {
+        // New orders are globally admitted before invoice creation, so they start immediately.
+        // The bound is still enforced here because an upgrade can restore more persisted orders
+        // than the current admission limit.
+        while self.active_invoice_trackers() < MAX_TRACKED_INVOICES {
             let Some(payment_hash) = self.invoice_queue.pop_front() else {
                 break;
             };
@@ -446,10 +475,14 @@ impl LndTrackerState {
                 }
             }
 
+            let token = self.token.child_token();
+            self.active_invoice_tracker_tokens
+                .insert(payment_hash, token.clone());
             let tracker = InvoiceTracker {
                 port: self.port.clone(),
-                lnd_connection: self.lnd_connection.clone(),
-                token: self.token.clone(),
+                invoices_client: self.invoices_client.clone(),
+                token,
+                subscribe_attempts: self.subscribe_attempts.clone(),
                 payment_hash,
             };
 
@@ -458,28 +491,20 @@ impl LndTrackerState {
             // - Even on error, the tracker has quit, so we must clean up
             let myself_clone = myself.clone();
             self.tracker.spawn(async move {
-                select! {
-                    _ = sleep(INVOICE_TRACKING_TIMEOUT) => {
-                        let _ = tracker;
-                        myself_clone.cast(LndTrackerMessage::InvoiceTrackerCompleted {
-                            payment_hash,
-                            completed_successfully: false,
-                        }).expect("cast LndTrackerMessage");
-                    }
-                    completed_successfully = tracker.run() => {
-                        myself_clone.cast(LndTrackerMessage::InvoiceTrackerCompleted {
-                            payment_hash,
-                            completed_successfully,
-                        }).expect("cast LndTrackerMessage");
-                    }
-                }
+                let completed_successfully = tracker.run().await;
+                myself_clone
+                    .cast(LndTrackerMessage::InvoiceTrackerCompleted {
+                        payment_hash,
+                        completed_successfully,
+                    })
+                    .expect("cast LndTrackerMessage");
             });
 
             tracing::debug!(
                 "Started invoice tracker for payment_hash={}, active={}/{}",
                 payment_hash,
                 self.active_invoice_trackers(),
-                MAX_CONCURRENT_INVOICE_TRACKERS
+                MAX_TRACKED_INVOICES
             );
         }
 
@@ -550,8 +575,9 @@ impl PaymentTracker {
 struct InvoiceTracker {
     port: Arc<OutputPort<CchTrackingEvent>>,
     payment_hash: Hash256,
-    lnd_connection: LndConnectionInfo,
+    invoices_client: InvoicesClient,
     token: CancellationToken,
+    subscribe_attempts: Arc<Semaphore>,
 }
 
 impl InvoiceTracker {
@@ -564,12 +590,14 @@ impl InvoiceTracker {
 
     async fn run_loop(&self) {
         while let Err(err) = self.run_once().await {
+            let retry_delay = invoice_tracker_retry_delay();
             tracing::error!(
-                "Error tracking LND invoice {}, retry 15 seconds later: {:?}",
+                "Error tracking LND invoice {}, retry {:?} later: {:?}",
                 self.payment_hash,
+                retry_delay,
                 err
             );
-            sleep(Duration::from_secs(15)).await;
+            sleep(retry_delay).await;
         }
         tracing::debug!(
             "InvoiceTracker completed successfully for payment_hash={}",
@@ -578,13 +606,22 @@ impl InvoiceTracker {
     }
 
     async fn run_once(&self) -> Result<()> {
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        let mut stream = client
-            .subscribe_single_invoice(invoicesrpc::SubscribeSingleInvoiceRequest {
+        let permit = self
+            .subscribe_attempts
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("invoice subscription limiter closed"))?;
+        let mut client = self.invoices_client.clone();
+        let response = timeout(
+            SUBSCRIBE_ATTEMPT_TIMEOUT,
+            client.subscribe_single_invoice(invoicesrpc::SubscribeSingleInvoiceRequest {
                 r_hash: self.payment_hash.into(),
-            })
-            .await?
-            .into_inner();
+            }),
+        )
+        .await
+        .map_err(|_| anyhow!("invoice subscription attempt timed out"))??;
+        drop(permit);
+        let mut stream = response.into_inner();
 
         loop {
             match stream.next().await {
@@ -620,6 +657,12 @@ impl InvoiceTracker {
             }
         ))
     }
+}
+
+fn invoice_tracker_retry_delay() -> Duration {
+    let jitter_millis = INVOICE_TRACKER_RETRY_JITTER.as_millis() as u64;
+    let jitter = Duration::from_millis(rand::random::<u64>() % (jitter_millis + 1));
+    INVOICE_TRACKER_RETRY_DELAY + jitter
 }
 
 /// LND represents missing payment preimage using all zeros hash before success.
