@@ -3969,11 +3969,11 @@ where
             }
             GossipActorMessage::PeerDisconnected(pubkey, _session) => {
                 state.peer_states.remove(&pubkey);
-                state.policy.remove_outbound_peer(&pubkey);
                 state.drop_delayed_outbound_messages_for_peer(
                     &pubkey,
                     now_timestamp_as_millis_u64(),
                 );
+                state.policy.remove_outbound_peer(&pubkey);
                 state.schedule_next_delayed_flush();
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
