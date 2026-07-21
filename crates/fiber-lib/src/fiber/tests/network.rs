@@ -1865,7 +1865,7 @@ fn test_send_payment_validate_invoice() {
     assert!(result.is_ok());
 
     // When the invoice does not specify a final TLC delta, an explicit command
-    // value takes precedence over the 24-hour local default.
+    // value below the effective 24-hour minimum must be rejected before sending.
     let shorter_delta = 12 * 60 * 60 * 1000;
     let send_command = SendPaymentCommand {
         final_tlc_expiry_delta: Some(shorter_delta),
@@ -1873,8 +1873,8 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let payment_data = SendPaymentData::new(send_command).unwrap();
-    assert_eq!(payment_data.final_tlc_expiry_delta, shorter_delta);
+    let err = SendPaymentData::new(send_command).unwrap_err();
+    assert!(err.contains("final_tlc_expiry_delta is below the invoice minimum"));
 
     // Callers may still request a longer final-hop delta.
     let longer_delta = 48 * 60 * 60 * 1000;
