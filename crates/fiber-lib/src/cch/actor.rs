@@ -80,6 +80,14 @@ struct TonicLndInvoiceClient {
     connection: LndConnectionInfo,
 }
 
+const LND_NO_INVOICES_CREATED_ERROR: &str = "there are no existing invoices";
+
+fn is_lnd_invoice_not_found(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::NotFound
+        || (status.code() == tonic::Code::Unknown
+            && status.message() == LND_NO_INVOICES_CREATED_ERROR)
+}
+
 #[async_trait::async_trait]
 impl LndInvoiceClient for TonicLndInvoiceClient {
     async fn lookup_invoice(
@@ -95,7 +103,7 @@ impl LndInvoiceClient for TonicLndInvoiceClient {
         };
         match client.lookup_invoice_v2(request).await {
             Ok(response) => Ok(Some(response.into_inner())),
-            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) if is_lnd_invoice_not_found(&status) => Ok(None),
             Err(status) => Err(CchError::LndRpcError(format!(
                 "lookup invoice {:x}: {}",
                 payment_hash, status
@@ -1646,5 +1654,23 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
             payment_hash: *payment_hash,
             has_payment_preimage: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_lnd_invoice_not_found, LND_NO_INVOICES_CREATED_ERROR};
+
+    #[test]
+    fn test_lnd_invoice_not_found_status_classification() {
+        assert!(is_lnd_invoice_not_found(&tonic::Status::not_found(
+            "unable to locate invoice",
+        )));
+        assert!(is_lnd_invoice_not_found(&tonic::Status::unknown(
+            LND_NO_INVOICES_CREATED_ERROR,
+        )));
+        assert!(!is_lnd_invoice_not_found(&tonic::Status::unknown(
+            "database unavailable",
+        )));
     }
 }
