@@ -1,6 +1,7 @@
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_fulfilled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, resolve_onchain_tlc, OnChainTimeoutTlcRole, OnChainTlcResolution,
+    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, resolve_onchain_tlc,
+    OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
@@ -8,8 +9,9 @@ use crate::fiber::tests::settle_tlc_set_command_tests::{
 use crate::gen_rand_sha256_hash;
 
 use fiber_types::{
-    AppliedFlags, CommitmentNumbers, Hash256, HashAlgorithm, OutboundTlcStatus, RemoveTlcFulfill,
-    RemoveTlcReason, TLCId, TlcInfo, TlcStatus,
+    AppliedFlags, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus,
+    RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus,
 };
 
 const TEST_SHARED_SECRET: [u8; 32] = [7u8; 32];
@@ -339,6 +341,43 @@ fn collect_timeout_settled_skips_already_removed() {
     let store = MockStore::new().with_onchain_settled(channel_id, payment_hash);
 
     assert!(collect_onchain_timeout_settled_tlcs(&state, &store, 100).is_empty());
+}
+
+#[test]
+fn collect_received_timeout_skips_uncommitted_tlc_with_same_hash() {
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let committed = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        payment_hash,
+        hash_algorithm,
+    );
+    let uncommitted = tlc_info(
+        TLCId::Received(1),
+        TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
+        payment_hash,
+        hash_algorithm,
+    );
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.received_tlcs.tlcs = vec![committed, uncommitted];
+    let store = MockStore::new().with_onchain_settled(channel_id, payment_hash);
+
+    let settled = collect_onchain_received_timeout_settled_tlcs(&state, &store);
+
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].tlc_id, 0);
+    for tlc in settled {
+        state.tlc_state.set_received_tlc_removed(
+            tlc.tlc_id,
+            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                &TEST_SHARED_SECRET,
+            )),
+        );
+    }
 }
 
 #[test]

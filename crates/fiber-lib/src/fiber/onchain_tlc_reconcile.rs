@@ -255,7 +255,7 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
         .received_tlcs
         .tlcs
         .iter()
-        .filter(|tlc| tlc.removed_reason.is_none())
+        .filter(|tlc| can_reconcile_onchain_fulfillment(tlc))
         .filter_map(|tlc| {
             if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
                 return None;
