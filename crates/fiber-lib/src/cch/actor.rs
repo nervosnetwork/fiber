@@ -67,6 +67,9 @@ pub enum CchMessage {
     /// Store change event from the Fiber node (either in-process or via WebSocket).
     StoreChangeEvent(StoreChange),
 
+    /// Reconcile active outgoing Fiber payments from durable state after a WebSocket reconnect.
+    ReconcileFiberPayments,
+
     /// Schedule a retry for an action with backoff after a transient failure.
     ActionRetry {
         payment_hash: Hash256,
@@ -381,6 +384,27 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                             );
                         }
                     }
+                }
+                Ok(())
+            }
+            CchMessage::ReconcileFiberPayments => {
+                for order in state
+                    .store
+                    .get_cch_order_keys_iter()
+                    .into_iter()
+                    .filter_map(|payment_hash| state.store.get_cch_order(&payment_hash).ok())
+                    .filter(|order| {
+                        matches!(
+                            order.status,
+                            CchOrderStatus::IncomingAccepted | CchOrderStatus::OutgoingInFlight
+                        )
+                    })
+                {
+                    myself.send_message(CchMessage::ExecuteAction {
+                        payment_hash: order.payment_hash,
+                        action: CchOrderAction::TrackOutgoingPayment,
+                        retry_count: 0,
+                    })?;
                 }
                 Ok(())
             }
@@ -994,6 +1018,10 @@ async fn subscribe_store_changes_ws(
         };
 
         tracing::info!("Successfully subscribed to Fiber node store changes");
+        if let Err(err) = actor.send_message(CchMessage::ReconcileFiberPayments) {
+            tracing::error!("Failed to schedule Fiber payment reconciliation: {}", err);
+            return;
+        }
 
         loop {
             tokio::select! {

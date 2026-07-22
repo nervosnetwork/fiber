@@ -611,6 +611,10 @@ impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
         let status = session.status;
         let fee = session.fee_paid();
+        let payment_preimage = session
+            .attempts()
+            .filter(|attempt| attempt.is_success())
+            .find_map(|attempt| attempt.preimage);
         let mut all_attempts = session
             .attempts()
             .map(|a| {
@@ -633,6 +637,7 @@ impl From<PaymentSession> for SendPaymentResponse {
 
         Self {
             payment_hash: session.request.payment_hash,
+            payment_preimage,
             status,
             failed_error: session.last_error.clone(),
             created_at: session.created_at,

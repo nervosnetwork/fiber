@@ -16,13 +16,13 @@ use crate::cch::actor::CchMessage;
 use crate::cch::trackers::CchTrackingEvent;
 use crate::cch::CchError;
 use crate::fiber::{
-    payment::SendPaymentCommand, NetworkActorCommand, NetworkActorMessage,
-    ASSUME_NETWORK_ACTOR_ALIVE,
+    network::SendPaymentResponse, payment::SendPaymentCommand, NetworkActorCommand,
+    NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::invoice::CkbInvoice;
 use crate::rpc::{
     invoice::{InvoiceResult, NewInvoiceParams, SettleInvoiceParams, SettleInvoiceResult},
-    payment::{GetPaymentCommandResult, SendPaymentCommandParams},
+    payment::{GetPaymentCommandParams, GetPaymentCommandResult, SendPaymentCommandParams},
 };
 
 /// Fee limits for a CCH outgoing payment. `max_fee_amount` is the order fee budget; `max_fee_rate`
@@ -44,6 +44,7 @@ pub enum CchFiberAgentMessage {
         Option<u64>,
         RpcReplyPort<Result<PaymentStatus>>,
     ),
+    GetPayment(Hash256, RpcReplyPort<Result<GetPaymentCommandResult>>),
     SettleInvoice(Hash256, Hash256, RpcReplyPort<Result<()>>),
 }
 
@@ -94,6 +95,10 @@ impl Actor for CchFiberAgentActor {
                 let result = state
                     .send_payment(pay_req, tlc_expiry_limit, max_fee_amount, max_fee_rate)
                     .await;
+                let _ = port.send(result);
+            }
+            CchFiberAgentMessage::GetPayment(payment_hash, port) => {
+                let result = state.get_payment(payment_hash).await;
                 let _ = port.send(result);
             }
             CchFiberAgentMessage::SettleInvoice(payment_hash, payment_preimage, port) => {
@@ -184,6 +189,16 @@ impl CchFiberAgentHttpBackend {
             .request::<SettleInvoiceResult, _>("settle_invoice", rpc_params![settle_invoice_params])
             .await?;
         Ok(())
+    }
+
+    pub async fn get_payment(&self, payment_hash: Hash256) -> Result<GetPaymentCommandResult> {
+        let params = GetPaymentCommandParams {
+            payment_hash: payment_hash.into(),
+        };
+        Ok(self
+            .client
+            .request("get_payment", rpc_params![params])
+            .await?)
     }
 }
 
@@ -373,6 +388,57 @@ impl CchFiberAgentRef {
         }
     }
 
+    /// Query a durable Fiber payment and forward the result to the CCH actor.
+    pub async fn forward_get_payment(
+        &self,
+        target: &ActorRef<CchMessage>,
+        payment_hash: Hash256,
+        retry_count: u32,
+    ) -> Result<(), ractor::RactorErr<CchMessage>> {
+        let target_ref = target.clone();
+        match self {
+            Self::InProcess(network_actor) => forward!(
+                network_actor,
+                |port| NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
+                    payment_hash,
+                    port,
+                )),
+                target_ref,
+                move |result: Result<SendPaymentResponse, String>| {
+                    map_get_payment_result(
+                        result.map(|response| {
+                            (
+                                response.status,
+                                response.payment_preimage,
+                                response.failed_error,
+                            )
+                        }),
+                        payment_hash,
+                        retry_count,
+                    )
+                }
+            ),
+            Self::Rpc(rpc_actor) => forward!(
+                rpc_actor,
+                |port| CchFiberAgentMessage::GetPayment(payment_hash, port),
+                target_ref,
+                move |result| map_get_payment_result(
+                    result
+                        .map(|response| {
+                            (
+                                response.status.into(),
+                                response.payment_preimage.map(Into::into),
+                                response.failed_error,
+                            )
+                        })
+                        .map_err(|err| err.to_string()),
+                    payment_hash,
+                    retry_count,
+                )
+            ),
+        }
+    }
+
     /// Settle an invoice by payment hash and preimage.
     pub async fn call_settle_invoice(
         &self,
@@ -452,5 +518,34 @@ fn map_send_payment_result(
                 }
             }
         }
+    }
+}
+
+fn map_get_payment_result(
+    result: Result<(PaymentStatus, Option<Hash256>, Option<String>), String>,
+    payment_hash: Hash256,
+    retry_count: u32,
+) -> CchMessage {
+    match result {
+        Ok((PaymentStatus::Success, None, _)) => CchMessage::ActionRetry {
+            payment_hash,
+            action: CchOrderAction::TrackOutgoingPayment,
+            retry_count,
+            reason: "successful Fiber payment has no persisted preimage".to_string(),
+        },
+        Ok((status, payment_preimage, failure_reason)) => {
+            CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
+                payment_hash,
+                payment_preimage,
+                status,
+                failure_reason,
+            })
+        }
+        Err(reason) => CchMessage::ActionRetry {
+            payment_hash,
+            action: CchOrderAction::TrackOutgoingPayment,
+            retry_count,
+            reason: format!("failed to query Fiber payment: {reason}"),
+        },
     }
 }

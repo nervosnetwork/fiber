@@ -3984,20 +3984,17 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
         .get_channel_actor(payee_channel_id)
         .await
         .expect("payee channel actor is live");
-
     node_2
         .settle_invoice(&payment_hash, payment_preimage)
         .await
         .expect("settle MPP hold invoice");
-    // Cross the NetworkActor mailbox after SettleReceivedHoldTlcSet has awaited both channel
-    // replies. This makes the following store assertions independent of actor scheduling.
-    node_2.node_info().await;
-    ractor::call_t!(
-        payee_channel_actor.clone(),
-        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
-        5_000
-    )
-    .expect("payee channel actor processes settlement before the barrier");
+    // RemoveTlc delivery now runs as a continuation, so wait for both the ChannelActor's durable
+    // queue writes and the NetworkActor's hold-store handoff completions.
+    wait_until_timeout(5_000, || {
+        queued_fulfills(&node_2, payee_channel_id, payment_preimage) == held_tlc_ids
+            && node_2.store.get_payment_hold_tlcs(payment_hash).is_empty()
+    })
+    .await;
     assert_eq!(
         queued_fulfills(&node_2, payee_channel_id, payment_preimage),
         held_tlc_ids,
@@ -4023,13 +4020,11 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
             NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("network actor alive");
-    node_2.node_info().await;
-    ractor::call_t!(
-        payee_channel_actor.clone(),
-        |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
-        5_000
-    )
-    .expect("payee channel actor processes replay before the barrier");
+    wait_until_timeout(5_000, || {
+        queued_fulfills(&node_2, payee_channel_id, payment_preimage) == held_tlc_ids
+            && node_2.store.get_payment_hold_tlcs(payment_hash).is_empty()
+    })
+    .await;
     assert_eq!(
         queued_fulfills(&node_2, payee_channel_id, payment_preimage),
         held_tlc_ids,
