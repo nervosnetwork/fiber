@@ -5673,6 +5673,7 @@ async fn test_shutdown_with_pending_tlc() {
         .payment_hash(payment_hash)
         .hash_algorithm(hash_algorithm)
         .payee_pub_key(nodes[1].pubkey.into())
+        .final_expiry_delta(0)
         .build()
         .expect("build pending invoice");
     nodes[1].insert_invoice(invoice, None);
@@ -5827,6 +5828,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
         .hash_algorithm(HashAlgorithm::CkbHash)
         .udt_type_script(invoice_udt_script)
         .payee_pub_key(target_pubkey.into())
+        .final_expiry_delta(0)
         .build()
         .expect("build invoice");
     node_b.insert_invoice(invoice.clone(), Some(preimage));
