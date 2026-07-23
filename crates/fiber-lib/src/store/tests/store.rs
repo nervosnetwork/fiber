@@ -1684,7 +1684,7 @@ mod store_actor_tests {
         let temp_dir = tempdir().unwrap();
 
         let (tracker, token) = (new_tokio_task_tracker(), new_tokio_cancellation_token());
-        let root_actor = RootActor::start(tracker, token).await;
+        let root_actor = RootActor::start_for_test(tracker, token).await;
 
         let args = StoreActorInitializationParameter {
             store: mock_store,
@@ -1722,7 +1722,7 @@ mod store_actor_tests {
         };
         let temp_dir = tempdir().unwrap();
         let (tracker, token) = (new_tokio_task_tracker(), new_tokio_cancellation_token());
-        let root_actor = RootActor::start(tracker, token).await;
+        let root_actor = RootActor::start_for_test(tracker, token).await;
 
         let (store_actor, _) = ractor::Actor::spawn_linked(
             None,
