@@ -8,6 +8,7 @@ use api::{FIBER_WASM, WrappedFiberWasm};
 use ckb_chain_spec::ChainSpec;
 use ckb_resource::Resource;
 use fnn::fiber::network::init_chain_hash;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::{
     Config,
     actors::RootActor,
@@ -23,7 +24,7 @@ use fnn::{
         invoice::InvoiceRpcServerImpl, payment::PaymentRpcServerImpl, peer::PeerRpcServerImpl,
     },
     start_network,
-    store::open_store,
+    store::open_store_with_migration,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
@@ -33,7 +34,7 @@ use tokio::{
     select,
     sync::{RwLock, mpsc},
 };
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 
 pub mod api;
@@ -51,6 +52,22 @@ fn js_err(msg: String) -> Result<(), JsValue> {
 const FIBER_STATE_BEFORE_STARTING: u8 = 0;
 const FIBER_STATE_STARTED: u8 = 1;
 const FIBER_STATE_PANICKED: u8 = 2;
+
+fn wasm_confirm(plan: MigrationPlan) -> bool {
+    tracing::info!("{}", plan.message);
+    // In WASM/browser context, auto-confirm migrations.
+    // The browser user has already chosen to open the app.
+    true
+}
+
+fn wasm_progress(progress: MigrationProgress) {
+    tracing::info!(
+        "[{}/{}] {}",
+        progress.current_step,
+        progress.total_steps,
+        progress.message
+    );
+}
 
 static FIBER_STATE: AtomicU8 = AtomicU8::new(FIBER_STATE_BEFORE_STARTING);
 static ROOT_ACTOR: OnceLock<ActorRef<String>> = OnceLock::new();
@@ -123,7 +140,9 @@ pub async fn fiber(
         })?
         .store_path();
 
-    let store = open_store(store_path).map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
+    let store =
+        open_store_with_migration(store_path, Box::new(wasm_confirm), Box::new(wasm_progress))
+            .map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
     debug!("Store initialized");
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
@@ -211,6 +230,7 @@ pub async fn fiber(
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
+                None,
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -252,8 +272,17 @@ pub async fn fiber(
                                     break;
                                 }
                                 Some(event) => {
-                                    if let Some(watchtower_client) = watchtower_client.as_ref() {
-                                        forward_event_to_client(event.clone(), watchtower_client).await;
+                                    if let Some(watchtower_client) = watchtower_client.as_ref()
+                                        && let Err(err) = forward_event_to_client(
+                                            event.clone(),
+                                            watchtower_client,
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            "Failed to forward event to standalone watchtower: {}",
+                                            err
+                                        );
                                     }
                                 }
                             }

@@ -2,7 +2,7 @@
 build = "src/build.rs"
 edition = "2021"
 name = "fnn"
-version = "0.8.1"
+version = "0.9.0-rc7"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -22,7 +22,7 @@ ckb-types = "1"
 clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
 either = "1.15.0"
-fiber-sphinx = "2.3"
+fiber-sphinx = "3"
 fiber-json-types = { path = "../fiber-json-types", features = ["all"] }
 fiber-store = { path = "../fiber-store", default-features = false }
 fiber-types = { path = "../fiber-types", features = ["cch", "watchtower"] }
@@ -30,7 +30,6 @@ futures = "0.3.30"
 getrandom = "0.3"
 git-version = "0.3.9"
 hex = "0.4.3"
-indicatif = "0.18"
 lightning-invoice = { version = "0.33" }
 molecule = { version = "0.9.2", default-features = false }
 musig2 = { version = "0.2.4", features = ["secp256k1", "serde"] }
@@ -99,6 +98,7 @@ ckb-hash = { version = "1", features = [
   "blake2b-ref",
 ], default-features = false }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 jsonrpsee = { version = "0.25.1", features = [
   "macros",
   "server-core",
@@ -115,6 +115,7 @@ wasm-bindgen-futures = "0.4"
 [features]
 bench = ["tempfile", "ckb-testtool"]
 default = ["watchtower"]
+debug-add-tlc = []
 portable = ["fiber-store/portable"]
 rocksdb = ["fiber-store/rocksdb"]
 sample = ["fiber-types/sample"]
@@ -128,7 +129,6 @@ ciborium = "0.2.2"
 ckb-testtool = "1"
 fiber-types = { path = "../fiber-types", features = ["sample"] }
 futures = "0.3.31"
-ouroboros = "0.18.5"
 tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
@@ -139,6 +139,7 @@ jsonrpsee = { version = "0.25.1", features = [
   "macros",
   "http-client",
 ] }
+tokio = { version = "1.x", features = ["test-util"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 fiber-store = { path = "../fiber-store", features = ["browser-test"] }
@@ -160,15 +161,19 @@ ignored = ["getrandom"]
 [[bench]]
 harness = false
 name = "payment_benchmarks"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "biscuit_benchmarks"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "gossip_propagation"
+required-features = ["bench"]
 
 [[bench]]
 harness = false
 name = "gossip_sync_recovery"
+required-features = ["bench"]

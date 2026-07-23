@@ -42,6 +42,19 @@ impl CchOrderStateMachine {
                 payment_preimage,
                 failure_reason,
             } => {
+                let to = status.into();
+                if order.status == CchOrderStatus::Pending {
+                    // A pending order can only be accepted by the incoming invoice tracker.
+                    return Err(CchError::InvalidTransition(order.status, to));
+                }
+                if status == PaymentStatus::Created
+                    && matches!(
+                        order.status,
+                        CchOrderStatus::OutgoingInFlight | CchOrderStatus::OutgoingSuccess
+                    )
+                {
+                    return Ok(None);
+                }
                 if status == PaymentStatus::Success && payment_preimage.is_none() {
                     return Err(CchError::SettledPaymentMissingPreimage);
                 }
@@ -53,7 +66,7 @@ impl CchOrderStateMachine {
                         return Err(CchError::PreimageHashMismatch);
                     }
                 }
-                let new_status = Self::try_transite_to(order, status.into(), move || {
+                let new_status = Self::try_transite_to(order, to, move || {
                     failure_reason
                         .unwrap_or_else(|| format!("outgoing payment failed: {:?}", status))
                 })?;

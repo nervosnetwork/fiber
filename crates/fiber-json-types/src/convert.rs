@@ -96,7 +96,8 @@ impl TryFrom<JsonPrivkey> for fiber_types::Privkey {
     type Error = String;
 
     fn try_from(jp: JsonPrivkey) -> Result<Self, Self::Error> {
-        Ok(fiber_types::Privkey::from_slice(jp.as_bytes()))
+        fiber_types::Privkey::try_from_slice(jp.as_bytes())
+            .map_err(|e| format!("Invalid private key: {e}"))
     }
 }
 
@@ -121,6 +122,7 @@ impl From<InternalChannelState> for JsonChannelState {
                 JsonChannelState::AwaitingChannelReady(flags.bits().into())
             }
             InternalChannelState::ChannelReady => JsonChannelState::ChannelReady,
+            InternalChannelState::Stale => JsonChannelState::Stale,
             InternalChannelState::ShuttingDown(flags) => {
                 JsonChannelState::ShuttingDown(flags.bits().into())
             }
@@ -137,7 +139,8 @@ impl JsonChannelState {
             | JsonChannelState::CollaboratingFundingTx(_)
             | JsonChannelState::SigningCommitment(_)
             | JsonChannelState::AwaitingTxSignatures(_)
-            | JsonChannelState::AwaitingChannelReady(_) => true,
+            | JsonChannelState::AwaitingChannelReady(_)
+            | JsonChannelState::Stale => true,
             JsonChannelState::ChannelReady | JsonChannelState::ShuttingDown(_) => false,
             JsonChannelState::Closed(bits) => {
                 // FUNDING_ABORTED or ABANDONED are "pending-failed" states

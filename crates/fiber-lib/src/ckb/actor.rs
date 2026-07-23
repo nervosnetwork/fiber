@@ -2,7 +2,7 @@ use ckb_sdk::RpcError;
 use ckb_types::{core::TransactionView, packed, prelude::IntoTransactionView as _};
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use strum::AsRefStr;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{
     ckb::contracts::{get_script_by_contract, Contract},
@@ -60,6 +60,8 @@ pub enum CkbChainMessage {
         local_tx: packed::Transaction,
         remote_tx: packed::Transaction,
         funding_cell_lock_script: packed::Script,
+        funding_udt_type_script: Option<packed::Script>,
+        funding_source_lock_script: Option<packed::Script>,
         reply: RpcReplyPort<Result<(), FundingError>>,
     },
     /// Add funding tx. This is used to reestablish a channel that is not ready yet.
@@ -75,7 +77,7 @@ pub enum CkbChainMessage {
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
-    ReportRejected(Hash256),
+    ReportSendTxError(Hash256, RpcError),
 
     Stop,
 }
@@ -131,7 +133,22 @@ impl Actor for CkbChainActor {
         );
         match message {
             CkbChainMessage::Fund(tx, request, reply_port) => {
-                let context = state.build_funding_context(request.script.clone());
+                debug!(
+                    "[{}] Funding request received: local_amount={}, remote_amount={}, local_reserved_ckb={}, remote_reserved_ckb={}, fee_rate={}, has_udt={}, has_existing_tx={}",
+                    myself.get_name().unwrap_or_default(),
+                    request.local_amount,
+                    request.remote_amount,
+                    request.local_reserved_ckb_amount,
+                    request.remote_reserved_ckb_amount,
+                    request.funding_fee_rate,
+                    request.udt_type_script.is_some(),
+                    tx.as_ref().is_some(),
+                );
+                let context = state.build_funding_context(
+                    request.script.clone(),
+                    request.udt_type_script.clone(),
+                    None,
+                );
                 let result = match state.config.funding_tx_shell_builder_as_deref() {
                     None => {
                         tx.fulfill(request, context, &mut state.live_cells_exclusion_map)
@@ -139,6 +156,18 @@ impl Actor for CkbChainActor {
                     }
                     Some(shell_script) => fund_via_shell(shell_script, tx, request, context).await,
                 };
+                match &result {
+                    Ok(funding_tx) => debug!(
+                        "[{}] Funding request succeeded: tx_hash={:?}",
+                        myself.get_name().unwrap_or_default(),
+                        funding_tx.as_ref().map(|t| t.hash()),
+                    ),
+                    Err(err) => debug!(
+                        "[{}] Funding request failed: {}",
+                        myself.get_name().unwrap_or_default(),
+                        err,
+                    ),
+                }
                 let _ = reply_port.send(result);
             }
             CkbChainMessage::BuildUnsignedFundingTx {
@@ -149,11 +178,21 @@ impl Actor for CkbChainActor {
                 funding_cell_lock_script,
                 reply,
             } => {
+                debug!(
+                    "[{}] BuildUnsignedFundingTx: local_amount={}, remote_amount={}, fee_rate={}, has_udt={}, funding_source_lock_hash={}",
+                    myself.get_name().unwrap_or_default(),
+                    request.local_amount,
+                    request.remote_amount,
+                    request.funding_fee_rate,
+                    request.udt_type_script.is_some(),
+                    funding_source_lock_script.calc_script_hash(),
+                );
                 let context = FundingContext {
                     rpc_url: state.config.rpc_url.clone(),
                     funding_source_lock_script,
                     funding_source_lock_script_cell_deps,
                     funding_cell_lock_script,
+                    funding_udt_type_script: request.udt_type_script.clone(),
                 };
                 let result = funding_tx
                     .build_unsigned_for_external_funding(
@@ -162,19 +201,58 @@ impl Actor for CkbChainActor {
                         &mut state.live_cells_exclusion_map,
                     )
                     .await;
+                if let Err(ref err) = result {
+                    debug!(
+                        "[{}] BuildUnsignedFundingTx failed: {}",
+                        myself.get_name().unwrap_or_default(),
+                        err,
+                    );
+                }
                 let _ = reply.send(result);
             }
             CkbChainMessage::VerifyFundingTx {
                 local_tx,
                 remote_tx,
                 funding_cell_lock_script,
+                funding_udt_type_script,
+                funding_source_lock_script,
                 reply,
             } => {
+                let local_tx_hash = local_tx.calc_tx_hash();
+                let remote_tx_hash = remote_tx.calc_tx_hash();
+                debug!(
+                    "[{}] VerifyFundingTx: local_tx_hash={}, remote_tx_hash={}",
+                    myself.get_name().unwrap_or_default(),
+                    local_tx_hash,
+                    remote_tx_hash,
+                );
                 let mut funding_tx: FundingTx = local_tx.into();
-                let context = state.build_funding_context(funding_cell_lock_script);
+                let context = state.build_funding_context(
+                    funding_cell_lock_script,
+                    funding_udt_type_script,
+                    funding_source_lock_script,
+                );
                 let result = funding_tx
                     .update_for_peer(remote_tx.into_view(), context)
                     .await;
+                match &result {
+                    Ok(()) => {
+                        // The channel will replace its funding tx with the verified peer tx, so the
+                        // reserved inputs must follow the new hash. Otherwise the old local hash
+                        // leaks in the exclusion map and keeps wallet cells locked forever.
+                        state
+                            .live_cells_exclusion_map
+                            .migrate_funding_tx(&local_tx_hash, &funding_tx);
+                    }
+                    Err(err) => {
+                        debug!(
+                            "[{}] VerifyFundingTx failed for remote_tx_hash={}: {}",
+                            myself.get_name().unwrap_or_default(),
+                            remote_tx_hash,
+                            err,
+                        );
+                    }
+                }
                 let _ = reply.send(result);
             }
             CkbChainMessage::AddFundingTx(tx) => {
@@ -190,8 +268,27 @@ impl Actor for CkbChainActor {
             }
             CkbChainMessage::Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {
+                    let tx_hash = tx.as_ref().map(|t| t.hash());
+                    debug!(
+                        "[{}] Signing funding tx: tx_hash={:?}",
+                        myself.get_name().unwrap_or_default(),
+                        tx_hash,
+                    );
                     let rpc_url = state.config.rpc_url.clone();
                     let result = state.signer.sign_funding_tx(tx, rpc_url).await;
+                    match &result {
+                        Ok(signed) => debug!(
+                            "[{}] Funding tx signed: tx_hash={:?}",
+                            myself.get_name().unwrap_or_default(),
+                            signed.as_ref().map(|t| t.hash()),
+                        ),
+                        Err(err) => debug!(
+                            "[{}] Funding tx signing failed for {:?}: {}",
+                            myself.get_name().unwrap_or_default(),
+                            tx_hash,
+                            err,
+                        ),
+                    }
                     if !reply_port.is_closed() {
                         // ignore error
                         let _ = reply_port.send(result);
@@ -200,8 +297,20 @@ impl Actor for CkbChainActor {
             }
             CkbChainMessage::SendTx(tx, reply_port) => {
                 let ckb_client = state.config.ckb_rpc_client();
+                trace!(
+                    "[{}] Sending tx {} to CKB node",
+                    myself.get_name().unwrap_or_default(),
+                    tx.hash(),
+                );
                 let result = match ckb_client.send_transaction(tx.data().into(), None).await {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        debug!(
+                            "[{}] Tx {} accepted by CKB node",
+                            myself.get_name().unwrap_or_default(),
+                            tx.hash(),
+                        );
+                        Ok(())
+                    }
                     Err(err) => {
                         //FIXME(yukang): RBF or duplicated transaction handling
                         match err {
@@ -249,10 +358,10 @@ impl Actor for CkbChainActor {
                     .ckb_tx_tracing_actor
                     .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
             }
-            CkbChainMessage::ReportRejected(tx_hash) => {
+            CkbChainMessage::ReportSendTxError(tx_hash, err) => {
                 state
                     .ckb_tx_tracing_actor
-                    .send_message(CkbTxTracingMessage::ReportRejected(tx_hash))?;
+                    .send_message(CkbTxTracingMessage::ReportSendTxError(tx_hash, err))?;
             }
 
             CkbChainMessage::Stop => {
@@ -265,12 +374,19 @@ impl Actor for CkbChainActor {
 }
 
 impl CkbChainState {
-    fn build_funding_context(&self, funding_cell_lock_script: packed::Script) -> FundingContext {
+    fn build_funding_context(
+        &self,
+        funding_cell_lock_script: packed::Script,
+        funding_udt_type_script: Option<packed::Script>,
+        funding_source_lock_script: Option<packed::Script>,
+    ) -> FundingContext {
         FundingContext {
             rpc_url: self.config.rpc_url.clone(),
-            funding_source_lock_script: self.funding_source_lock_script.clone(),
+            funding_source_lock_script: funding_source_lock_script
+                .unwrap_or_else(|| self.funding_source_lock_script.clone()),
             funding_source_lock_script_cell_deps: Vec::new(),
             funding_cell_lock_script,
+            funding_udt_type_script,
         }
     }
 }

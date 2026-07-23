@@ -5,7 +5,7 @@
     "module": "esnext",
     "target": "es2017",
     "allowJs": true,
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "sourceMap": true,
     "declaration": true,
     "declarationDir": "dist",

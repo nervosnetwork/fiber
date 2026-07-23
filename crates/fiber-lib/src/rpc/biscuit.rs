@@ -1,15 +1,30 @@
-use anyhow::{anyhow, Context, Result};
-use biscuit_auth::{
-    builder::{Fact, Term},
-    AuthorizerBuilder, Biscuit, PublicKey,
-};
 use std::{
     collections::{HashMap, HashSet},
     str::FromStr,
+    time::Duration,
+};
+
+use anyhow::{anyhow, Context, Result};
+use biscuit_auth::{
+    builder::{Fact, Term},
+    Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
 };
 
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
+
+const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
+
+fn authorizer_builder() -> AuthorizerBuilder {
+    AuthorizerBuilder::new().set_limits(AuthorizerLimits {
+        max_time: DEFAULT_BISCUIT_AUTH_MAX_TIME,
+        ..Default::default()
+    })
+}
+
+fn build_authorizer(token: &Biscuit) -> Result<Authorizer> {
+    Ok(authorizer_builder().build(token)?)
+}
 
 pub struct AuthRule {
     pub(crate) code: &'static str,
@@ -31,7 +46,7 @@ impl AuthRule {
 
     /// build rule
     fn build_rule(&self) -> Result<AuthorizerBuilder> {
-        let authorizer = AuthorizerBuilder::new()
+        let authorizer = authorizer_builder()
             .code(self.code)
             .context("build authorizer code")?;
         Ok(authorizer)
@@ -77,9 +92,12 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 
     // Cch
     b.rule("send_btc", r#"allow if write("cch");"#);
-    b.rule("receive_btc", r#"allow if read("cch");"#);
+    b.rule("receive_btc", r#"allow if write("cch");"#);
     b.rule("get_cch_order", r#"allow if read("cch");"#);
-    b.rule("subscribe_store_changes", r#"allow if read("cch");"#);
+    b.rule(
+        "subscribe_store_changes",
+        r#"allow if internal("store_changes");"#,
+    );
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);
@@ -93,15 +111,12 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     );
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
     // dev
-    b.rule("commitment_signed", r#"allow if write("messages");"#);
-    b.rule("add_tlc", r#"allow if write("channels");"#);
-    b.rule("remove_tlc", r#"allow if write("channels");"#);
-    b.rule("check_channel_shutdown", r#"allow if write("channels");"#);
-    b.rule("sign_external_funding_tx", r#"allow if write("channels");"#);
-    b.rule(
-        "submit_commitment_transaction",
-        r#"allow if write("chain");"#,
-    );
+    b.rule("commitment_signed", r#"allow if write("dev");"#);
+    b.rule("add_tlc", r#"allow if write("dev");"#);
+    b.rule("remove_tlc", r#"allow if write("dev");"#);
+    b.rule("check_channel_shutdown", r#"allow if write("dev");"#);
+    b.rule("sign_external_funding_tx", r#"allow if write("dev");"#);
+    b.rule("submit_commitment_transaction", r#"allow if write("dev");"#);
     // prof
     b.rule("pprof", r#"allow if write("pprof");"#);
     // graph
@@ -115,6 +130,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("get_invoice", r#"allow if read("invoices");"#);
     b.rule("cancel_invoice", r#"allow if write("invoices");"#);
     b.rule("settle_invoice", r#"allow if write("invoices");"#);
+    b.rule("backup_now", r#"allow if write("node");"#);
 
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
@@ -236,10 +252,7 @@ impl BiscuitAuth {
         }
         // check permission
         let rule = self.get_rule(method)?;
-        if let Err(err) = rule.authorize(&b, time_in_ms) {
-            tracing::debug!("authorize failed: {err}");
-            return Err(err);
-        }
+        rule.authorize(&b, time_in_ms)?;
         Ok((b, rule))
     }
 
@@ -255,7 +268,8 @@ impl BiscuitAuth {
 /// Extract node id from token
 pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     const QUERY: &str = "data($id) <- node($id)";
-    let (id,): (String,) = token.authorizer()?.query_exactly_one(QUERY)?;
+    let mut authorizer = build_authorizer(token)?;
+    let (id,): (String,) = authorizer.query_exactly_one(QUERY)?;
     let node_id = NodeId::from_str(id.as_str())?;
     tracing::warn!("fetch {id:?} {node_id:?}");
     Ok(node_id)
@@ -269,7 +283,29 @@ mod tests {
 
     use crate::rpc::biscuit::extract_node_id;
 
-    use super::BiscuitAuth;
+    use super::{build_authorizer, AuthRule, BiscuitAuth};
+
+    #[test]
+    fn test_biscuit_auth_uses_ten_millisecond_authorizer_limit() {
+        let rule = AuthRule::new(r#"allow if read("payments");"#);
+        let authorizer = rule.build_rule().unwrap();
+        let limits = authorizer.limits();
+        let default_limits = biscuit_auth::AuthorizerLimits::default();
+
+        assert_eq!(limits.max_time, Duration::from_millis(10));
+        assert_eq!(limits.max_facts, default_limits.max_facts);
+        assert_eq!(limits.max_iterations, default_limits.max_iterations);
+    }
+
+    #[test]
+    fn test_node_id_query_uses_ten_millisecond_authorizer_limit() {
+        let root = KeyPair::new();
+        let token = biscuit!(r#"node("test-node-id");"#).build(&root).unwrap();
+        let authorizer = build_authorizer(&token).unwrap();
+        let limits = authorizer.limits();
+
+        assert_eq!(limits.max_time, Duration::from_millis(10));
+    }
 
     #[test]
     fn test_biscuit_auth() {
@@ -299,6 +335,110 @@ mod tests {
 
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_cch_receive_btc_requires_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let read_token = biscuit!(
+            r#"
+          read("cch");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+        let write_token = biscuit!(
+            r#"
+          write("cch");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+        let internal_token = biscuit!(
+            r#"
+          internal("store_changes");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        assert!(auth.check_permission("get_cch_order", &read_token).is_ok());
+        assert!(auth
+            .check_permission("subscribe_store_changes", &read_token)
+            .is_err());
+        assert!(auth.check_permission("send_btc", &read_token).is_err());
+        assert!(auth.check_permission("receive_btc", &read_token).is_err());
+
+        assert!(auth.check_permission("send_btc", &write_token).is_ok());
+        assert!(auth.check_permission("receive_btc", &write_token).is_ok());
+        assert!(auth
+            .check_permission("subscribe_store_changes", &write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("get_cch_order", &write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("subscribe_store_changes", &internal_token)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_auth_dev_methods_require_write_dev() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let production_write_token = biscuit!(
+            r#"
+          write("channels");
+          write("messages");
+          write("chain");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        let dev_write_token = biscuit!(
+            r#"
+          write("dev");
+    "#
+        )
+        .build(&root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+        let dev_methods = [
+            "commitment_signed",
+            "add_tlc",
+            "remove_tlc",
+            "check_channel_shutdown",
+            "sign_external_funding_tx",
+            "submit_commitment_transaction",
+        ];
+
+        for method in dev_methods {
+            assert!(auth
+                .check_permission(method, &production_write_token)
+                .is_err());
+            assert!(auth.check_permission(method, &dev_write_token).is_ok());
+        }
+
+        assert!(auth
+            .check_permission("open_channel", &production_write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_signed_funding_tx", &dev_write_token)
+            .is_err());
     }
 
     #[test]

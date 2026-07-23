@@ -1,8 +1,12 @@
 #![cfg(not(target_arch = "wasm32"))]
-use crate::fiber::channel::ChannelActorStateStore;
-use crate::fiber::config::{DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA};
+use crate::fiber::channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId};
+use crate::fiber::config::{
+    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
+};
 use crate::fiber::graph::*;
-use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand};
+use crate::fiber::network::{
+    DebugEvent, NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand,
+};
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
@@ -10,19 +14,126 @@ use crate::gen_rand_fiber_public_key;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
 use crate::{
-    create_channel_with_nodes, gen_rand_sha256_hash, ChannelParameters, HUGE_CKB_AMOUNT,
+    create_channel_with_nodes, gen_rand_fiber_private_key, gen_rand_sha256_hash,
+    now_timestamp_as_millis_u64, ChannelParameters, NetworkServiceEvent, HUGE_CKB_AMOUNT,
     MIN_RESERVED_CKB,
 };
 use fiber_types::Hash256;
 use fiber_types::{
-    CurrentPaymentHopData, HashAlgorithm, PeeledPaymentOnionPacket, PrevTlcInfo, TlcErrorCode,
+    AddTlcCommand, AppliedFlags, CommitmentNumbers, CurrentPaymentHopData, HashAlgorithm,
+    InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, TLCId, TlcErrorCode,
+    TlcInfo, TlcStatus,
 };
-use ractor::RpcReplyPort;
+use ractor::{call, RpcReplyPort};
 use rand::Rng;
 use secp256k1::SECP256K1;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
+
+async fn send_manual_trampoline_final_keysend_tlc(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    channel_id: Hash256,
+    actual_amount: u128,
+    final_amount: u128,
+    add_tlc_expiry: u64,
+    final_tlc_expiry_delta: u64,
+) -> Hash256 {
+    let payment_preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let payment_hash: Hash256 = hash_algorithm.hash(payment_preimage).into();
+
+    let trampoline_onion = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[2u8; 32]),
+        vec![node_b.get_public_key()],
+        vec![TrampolineHopPayload::Final {
+            final_amount,
+            final_tlc_expiry_delta,
+            payment_preimage: Some(payment_preimage),
+            custom_records: None,
+        }],
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create trampoline onion")
+    .into_bytes();
+
+    let mut final_hop = PaymentHopData {
+        amount: actual_amount,
+        expiry: add_tlc_expiry,
+        hash_algorithm,
+        ..Default::default()
+    };
+    final_hop.set_trampoline_onion(trampoline_onion);
+
+    let packet = PeeledPaymentOnionPacket::create(
+        gen_rand_fiber_private_key(),
+        vec![
+            PaymentHopData {
+                amount: actual_amount,
+                expiry: add_tlc_expiry,
+                hash_algorithm,
+                next_hop: Some(node_b.get_public_key()),
+                ..Default::default()
+            },
+            final_hop,
+        ],
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create payment onion packet");
+
+    call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: actual_amount,
+                        payment_hash,
+                        attempt_id: None,
+                        expiry: add_tlc_expiry,
+                        hash_algorithm,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("source add tlc should be accepted");
+
+    payment_hash
+}
+
+async fn expect_add_tlc_failed(
+    node: &mut NetworkNode,
+    payment_hash: Hash256,
+    expected_error: TlcErrorCode,
+) {
+    let rejected = tokio::time::timeout(
+        Duration::from_secs(5),
+        node.expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(_, hash, err)) => {
+                assert_eq!(hash, &payment_hash);
+                assert_eq!(err.error_code, expected_error);
+                true
+            }
+            _ => false,
+        }),
+    )
+    .await;
+
+    assert!(
+        rejected.is_ok(),
+        "malicious trampoline final TLC was accepted: {payment_hash:?}"
+    );
+}
 
 #[tokio::test]
 async fn test_trampoline_routing_basic() {
@@ -240,7 +351,7 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_c.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
     node_c.insert_invoice(invoice_bc.clone(), Some(preimage_bc));
     node_b
@@ -260,7 +371,7 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_d.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice_cd.clone(), Some(preimage_cd));
     node_c
@@ -280,7 +391,7 @@ async fn test_trampoline_routing_udt_private_last_will_success() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_d.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice_bd.clone(), Some(preimage_bd));
 
@@ -359,7 +470,7 @@ async fn test_trampoline_routing_udt_to_ckb_private_last_hop_no_path() {
         .hash_algorithm(HashAlgorithm::Sha256)
         .udt_type_script(udt_script.clone())
         .payee_pub_key(node_d.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice_ad.clone(), Some(preimage_ad));
 
@@ -1513,12 +1624,12 @@ async fn test_trampoline_routing_connect_two_networks() {
 }
 
 #[tokio::test]
-async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
+async fn test_trampoline_routing_rejects_tlc_expiry_limit_below_segment_budget() {
     init_tracing();
 
     // A --(public)--> T1 --(private)--> X --(private)--> C
     // A can only route to T1; T1 must forward over 2 private hops.
-    // Set a tight `tlc_expiry_limit` that is sufficient for A->T1, but insufficient for T1->X->C.
+    // Set a tight `tlc_expiry_limit` that cannot cover the trampoline segment budget.
     let (nodes, _channels) = create_n_nodes_network_with_visibility(
         &[
             ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
@@ -1538,9 +1649,9 @@ async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
     let amount: u128 = 1000;
     let (invoice, _preimage) = node_c.gen_basic_invoice(amount);
 
-    // Tight limit: large enough for payer's trampoline slack (final + 1*DEFAULT), but too small
-    // for T1 to reach C over 2 hops (final + 2*DEFAULT).
-    let tight_limit = DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA + 1;
+    let segment_budget =
+        TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT * DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+    let tight_limit = DEFAULT_FINAL_TLC_EXPIRY_DELTA + segment_budget - 1;
 
     let res = node_a
         .send_payment(SendPaymentCommand {
@@ -1550,13 +1661,11 @@ async fn test_trampoline_forwarding_respects_tlc_expiry_limit_from_payload() {
             trampoline_hops: Some(vec![node_t1.get_public_key()]),
             ..Default::default()
         })
-        .await;
-    assert!(res.is_ok());
-
-    let payment_hash = res.unwrap().payment_hash;
-    node_a.wait_until_failed(payment_hash).await;
-    let payment_res = node_a.get_payment_result(payment_hash).await;
-    assert!(payment_res.failed_error.is_some());
+        .await
+        .expect_err("tlc_expiry_limit below trampoline segment budget should fail locally");
+    assert!(res
+        .to_string()
+        .contains("trampoline tlc_expiry_delta exceeds tlc_expiry_limit"));
 }
 
 #[tokio::test]
@@ -1877,6 +1986,149 @@ async fn test_trampoline_multi_hops_fee_insufficient_then_success() {
 }
 
 #[tokio::test]
+async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
+    init_tracing();
+
+    // A -- B. We send the internal forwarding command to B without previous_tlc.
+    let (nodes, _channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+    let node_b = &nodes[1];
+    let payment_hash = gen_rand_sha256_hash();
+
+    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
+    let final_target: Pubkey = pk.into();
+    let payloads = vec![
+        TrampolineHopPayload::Forward {
+            next_node_id: final_target,
+            amount_to_forward: 1000,
+            build_max_fee_amount: 1000,
+            tlc_expiry_delta: 144,
+            tlc_expiry_limit: 5000,
+            max_parts: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+        },
+        TrampolineHopPayload::Final {
+            final_amount: 1000,
+            final_tlc_expiry_delta: 144,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let path = vec![node_b.pubkey, final_target];
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[3u8; 32]),
+        path,
+        payloads,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    let mut current_hop = CurrentPaymentHopData {
+        amount: 2000,
+        expiry: 5000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop.set_trampoline_onion(trampoline_onion_bytes);
+
+    let command = SendOnionPacketCommand {
+        peeled_onion_packet: PeeledPaymentOnionPacket {
+            current: current_hop,
+            next: None,
+            shared_secret: [0u8; 32],
+        },
+        previous_tlc: None,
+        payment_hash,
+        attempt_id: Some(1),
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let msg = NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(
+        command,
+        RpcReplyPort::from(tx),
+    ));
+    node_b
+        .network_actor
+        .send_message(msg)
+        .expect("send message");
+
+    let err = rx
+        .await
+        .expect("network actor should reject without closing the reply channel")
+        .expect_err("missing previous_tlc should be rejected");
+    assert_eq!(err.error_code(), TlcErrorCode::InvalidOnionPayload);
+}
+
+#[tokio::test]
+async fn test_trampoline_final_keysend_rejects_inner_amount_above_actual_tlc() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+    let [node_a, mut node_b] = nodes.try_into().expect("2 nodes");
+
+    let actual_amount = 1000;
+    let payment_hash = send_manual_trampoline_final_keysend_tlc(
+        &node_a,
+        &node_b,
+        channels[0],
+        actual_amount,
+        actual_amount + 1,
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+    )
+    .await;
+
+    expect_add_tlc_failed(
+        &mut node_b,
+        payment_hash,
+        TlcErrorCode::FinalIncorrectTlcAmount,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_trampoline_final_keysend_rejects_expiry_shorter_than_inner_delta() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true)],
+        2,
+    )
+    .await;
+    let [node_a, mut node_b] = nodes.try_into().expect("2 nodes");
+
+    let amount = 1000;
+    let payment_hash = send_manual_trampoline_final_keysend_tlc(
+        &node_a,
+        &node_b,
+        channels[0],
+        amount,
+        amount,
+        now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA + 5_000,
+        DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+    )
+    .await;
+
+    expect_add_tlc_failed(
+        &mut node_b,
+        payment_hash,
+        TlcErrorCode::FinalIncorrectExpiryDelta,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     init_tracing();
     // A -- B. We test B.
@@ -1952,7 +2204,12 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
     let command = NetworkActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
             peeled_onion_packet: peeled_packet,
-            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            previous_tlc: Some(PrevTlcInfo {
+                prev_channel_id: channel_ab,
+                prev_tlc_id: 1,
+                forwarding_fee: 0,
+                shared_secret: None,
+            }),
             payment_hash,
             attempt_id: None,
         },
@@ -2047,7 +2304,12 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let command = NetworkActorCommand::SendPaymentOnionPacket(
         SendOnionPacketCommand {
             peeled_onion_packet: peeled_packet,
-            previous_tlc: Some(PrevTlcInfo::new(channel_ab, 1, 0)),
+            previous_tlc: Some(PrevTlcInfo {
+                prev_channel_id: channel_ab,
+                prev_tlc_id: 1,
+                forwarding_fee: 0,
+                shared_secret: None,
+            }),
             payment_hash,
             attempt_id: None,
         },
@@ -2066,6 +2328,224 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
         }
         Ok(_) => panic!("Should have failed with FeeInsufficient"),
     }
+}
+
+#[tokio::test]
+async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budget() {
+    init_tracing();
+
+    // A -- B -- C. We test B's trampoline forwarding boundary.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let [_node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let channel_ab = channels[0];
+
+    node_b
+        .with_network_graph_mut(|graph| graph.set_fixed_rand_expiry_delta(0))
+        .await;
+    wait_until_graph_channel_has_update(&node_b, &node_b, &node_c).await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let amount_to_forward = 1000;
+    let forwarding_fee = 100;
+    let incoming_amount = amount_to_forward + forwarding_fee;
+    let upstream_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
+    node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+        tlc_id: TLCId::Received(1),
+        amount: incoming_amount,
+        payment_hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: None,
+        expiry: upstream_expiry,
+        hash_algorithm: HashAlgorithm::Sha256,
+        onion_packet: None,
+        shared_secret: [0u8; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::new(),
+        removed_reason: None,
+        forwarding_tlc: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
+    });
+    node_b.update_channel_actor_state(node_b_state, None).await;
+
+    let forward_payload = TrampolineHopPayload::Forward {
+        next_node_id: node_c.pubkey,
+        amount_to_forward,
+        build_max_fee_amount: forwarding_fee,
+        tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        max_parts: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+    };
+    let payloads = vec![
+        forward_payload,
+        TrampolineHopPayload::Final {
+            final_amount: amount_to_forward,
+            final_tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[2u8; 32]),
+        vec![node_b.pubkey, node_c.pubkey],
+        payloads,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    let mut current_hop_data = CurrentPaymentHopData {
+        amount: incoming_amount,
+        expiry: upstream_expiry,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::Sha256,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop_data.set_trampoline_onion(trampoline_onion_bytes);
+
+    let peeled_packet = PeeledPaymentOnionPacket {
+        current: current_hop_data,
+        shared_secret: [0u8; 32],
+        next: None,
+    };
+
+    let (sender, receiver) = oneshot::channel();
+    let command = NetworkActorCommand::SendPaymentOnionPacket(
+        SendOnionPacketCommand {
+            peeled_onion_packet: peeled_packet,
+            previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
+                channel_ab,
+                1,
+                forwarding_fee,
+                [0u8; 32],
+            )),
+            payment_hash,
+            attempt_id: None,
+        },
+        RpcReplyPort::from(sender),
+    );
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(command))
+        .expect("send command");
+
+    let res = receiver.await.expect("recv result");
+    match res {
+        Err(tlc_err) => assert_eq!(tlc_err.error_code, TlcErrorCode::IncorrectTlcExpiry),
+        Ok(_) => panic!("Should have failed with IncorrectTlcExpiry"),
+    }
+}
+
+#[tokio::test]
+async fn test_trampoline_final_rejects_expiry_below_inner_delta() {
+    init_tracing();
+
+    let (node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
+
+    let amount = 1000;
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = hash_algorithm.hash(payment_preimage).into();
+    let add_tlc_expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[2u8; 32]),
+        vec![node_b.pubkey],
+        vec![TrampolineHopPayload::Final {
+            final_amount: amount,
+            final_tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            payment_preimage: Some(payment_preimage),
+            custom_records: None,
+        }],
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create trampoline onion")
+    .into_bytes();
+
+    let mut final_hop = PaymentHopData {
+        amount,
+        expiry: add_tlc_expiry,
+        hash_algorithm,
+        ..Default::default()
+    };
+    final_hop.set_trampoline_onion(trampoline_onion_bytes);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry: add_tlc_expiry,
+            next_hop: Some(node_b.pubkey),
+            hash_algorithm,
+            ..Default::default()
+        },
+        final_hop,
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        Privkey::from_slice(&[3u8; 32]),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create payment onion");
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount,
+                        payment_hash,
+                        attempt_id: None,
+                        expiry: add_tlc_expiry,
+                        hash_algorithm,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+
+    let node_b_pubkey = node_b.pubkey;
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
+                pubkey,
+                failed_payment_hash,
+                err,
+            )) => {
+                assert_eq!(pubkey, &node_b_pubkey);
+                assert_eq!(failed_payment_hash, &payment_hash);
+                assert_eq!(err.error_code, TlcErrorCode::FinalIncorrectExpiryDelta);
+                true
+            }
+            _ => false,
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -2712,7 +3192,7 @@ async fn test_trampoline_routing_race_same_invoice() {
 
     let channels_params = vec![
         (
-            (0, 1), // A -> T
+            (0, 1), // A -> T1
             ChannelParameters {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
@@ -2721,7 +3201,7 @@ async fn test_trampoline_routing_race_same_invoice() {
             },
         ),
         (
-            (2, 1), // B -> T
+            (2, 3), // B -> T2
             ChannelParameters {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
@@ -2730,7 +3210,16 @@ async fn test_trampoline_routing_race_same_invoice() {
             },
         ),
         (
-            (1, 3), // T -> C
+            (1, 4), // T1 -> C
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                ..Default::default()
+            },
+        ),
+        (
+            (3, 4), // T2 -> C
             ChannelParameters {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
@@ -2740,12 +3229,12 @@ async fn test_trampoline_routing_race_same_invoice() {
         ),
     ];
 
-    // 4 nodes: A(0), T(1), B(2), C(3)
-    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 4, None).await;
-    let [node_a, node_t, node_b, node_c] = nodes.try_into().expect("4 nodes");
+    // 5 nodes: A(0), T1(1), B(2), T2(3), C(4)
+    let (nodes, _) = create_n_nodes_network_with_params(&channels_params, 5, None).await;
+    let [node_a, node_t1, node_b, node_t2, node_c] = nodes.try_into().expect("5 nodes");
 
-    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
-    wait_until_node_supports_trampoline_routing(&node_b, &node_t).await;
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t1).await;
+    wait_until_node_supports_trampoline_routing(&node_b, &node_t2).await;
 
     // C creates invoice
     let amount = 1000;
@@ -2771,7 +3260,8 @@ async fn test_trampoline_routing_race_same_invoice() {
         }
     }
 
-    let t_pk = node_t.get_public_key();
+    let t1_pk = node_t1.get_public_key();
+    let t2_pk = node_t2.get_public_key();
 
     // A pays
     let invoice_a = invoice_str.clone();
@@ -2780,7 +3270,7 @@ async fn test_trampoline_routing_race_same_invoice() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_a),
                 max_fee_amount: Some(amount),
-                trampoline_hops: Some(vec![t_pk]),
+                trampoline_hops: Some(vec![t1_pk]),
                 ..Default::default()
             })
             .await;
@@ -2798,7 +3288,7 @@ async fn test_trampoline_routing_race_same_invoice() {
             .send_payment(SendPaymentCommand {
                 invoice: Some(invoice_b),
                 max_fee_amount: Some(amount),
-                trampoline_hops: Some(vec![t_pk]),
+                trampoline_hops: Some(vec![t2_pk]),
                 ..Default::default()
             })
             .await;
@@ -2822,6 +3312,28 @@ async fn test_trampoline_routing_race_same_invoice() {
 
     assert_eq!(success, 1, "Exactly one should succeed");
     assert_eq!(failure, 1, "Exactly one should fail");
+
+    let (failed_node, failed_trampoline) = if outcome_a == "failure" {
+        (&node_a, t1_pk)
+    } else {
+        (&node_b, t2_pk)
+    };
+    let (fresh_invoice, _) = node_c.gen_basic_invoice(amount);
+    let res = failed_node
+        .send_payment(SendPaymentCommand {
+            invoice: Some(fresh_invoice.to_string()),
+            max_fee_amount: Some(amount),
+            trampoline_hops: Some(vec![failed_trampoline]),
+            ..Default::default()
+        })
+        .await;
+    assert!(
+        res.is_ok(),
+        "duplicate invoice failure must not penalize trampoline route: {res:?}"
+    );
+    failed_node
+        .wait_until_success(res.unwrap().payment_hash)
+        .await;
 }
 
 #[tokio::test]
@@ -2867,7 +3379,7 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
         .payment_preimage(preimage)
         .payment_secret(secret_real)
         .payee_pub_key(node_b.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_b.private_key.0))
         .unwrap();
     node_b.insert_invoice(invoice_real.clone(), Some(preimage));
 
@@ -2878,7 +3390,7 @@ async fn test_trampoline_routing_failure_invalid_payment_secret() {
         .payment_preimage(preimage)
         .payment_secret(secret_fake)
         .payee_pub_key(node_b.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_b.private_key.0))
         .unwrap();
 
     // Verify secrets are different
@@ -2935,7 +3447,7 @@ async fn test_trampoline_node_restart() {
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
         .expiry_time(Duration::from_secs(3600)) // 1 hour
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
 
     // We insert invoice but NOT the preimage yet.
@@ -3012,7 +3524,7 @@ async fn test_trampoline_node_restart() {
     node_c
         .network_actor
         .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SettleHoldTlcSet(payment_hash),
+            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("Failed to send settle command");
 
@@ -3254,7 +3766,7 @@ async fn test_trampoline_routing_mpp_last_hop() {
         .payee_pub_key(node_c.get_public_key().into())
         .description("mpp trampoline".to_string())
         .payment_secret(gen_rand_sha256_hash())
-        .build();
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0));
     debug!("Built invoice: {:?}", invoice);
     let invoice = invoice.expect("build invoice");
 
@@ -3327,7 +3839,7 @@ async fn test_trampoline_routing_invoice_not_allow_mpp_will_fail() {
         .allow_mpp(false) // NOT allowing MPP
         .payee_pub_key(node_c.get_public_key().into())
         .payment_secret(gen_rand_sha256_hash())
-        .build();
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0));
     debug!("Built invoice: {:?}", invoice);
     let invoice = invoice.expect("build invoice");
 
@@ -3397,7 +3909,7 @@ async fn test_trampoline_routing_mpp_intermediate_hop_will_fail() {
         .allow_mpp(true)
         .payment_secret(gen_rand_sha256_hash())
         .description("mpp trampoline intermediate".to_string())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
         .expect("build invoice");
     node_d.insert_invoice(invoice.clone(), Some(preimage));
     // A specifies B and C as trampoline hops.
@@ -3450,7 +3962,7 @@ async fn test_trampoline_routing_dry_run_basic() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
 
     // First, do a dry run to check if the payment can be made
@@ -3583,7 +4095,7 @@ async fn test_trampoline_routing_dry_run_get_default_fee() {
         .amount(Some(amount))
         .payment_preimage(preimage)
         .payee_pub_key(node_c.get_public_key().into())
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
         .expect("build invoice");
 
     // First, do a dry run to check if the payment can be made
@@ -3751,7 +4263,7 @@ async fn test_trampoline_mpp_with_oneway() {
             .payee_pub_key(node4.get_public_key().into())
             .allow_mpp(true)
             .allow_trampoline_routing(true)
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node4.private_key.0))
             .expect("build invoice");
         node4.insert_invoice(invoice.clone(), Some(preimage));
 

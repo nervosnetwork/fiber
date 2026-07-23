@@ -8,31 +8,38 @@ use super::{
     types::ForwardTlcResult,
 };
 use crate::fiber::config::MILLI_SECONDS_PER_EPOCH;
-use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
+use crate::fiber::fee::{
+    check_commitment_reserved_fee, check_open_channel_parameters, check_tlc_delta_with_epochs,
+    checked_calculate_commitment_tx_fee, checked_calculate_shutdown_tx_fee,
+};
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
+use crate::store::actor::StoreActorMessage;
 use crate::time::{SystemTime, UNIX_EPOCH};
 use crate::utils::actor::ActorHandleLogGuard;
+use crate::utils::arithmetic::{
+    checked_add_u128, checked_add_u64, checked_sub_u128, checked_sub_u64, ArithmeticError,
+};
 use crate::utils::payment::is_invoice_fulfilled;
 use crate::{
     ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
-        is_secp_sighash_placeholder_witness, FundingRequest,
+        is_secp_sighash_placeholder_witness, validate_peer_funding_tx_complexity, FundingRequest,
     },
     fiber::{
         config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
-        fee::{
-            calculate_commitment_tx_fee, calculate_shutdown_tx_fee, calculate_tlc_forward_fee,
-            shutdown_tx_size,
-        },
+        fee::{calculate_tlc_forward_fee, shutdown_tx_size},
         network::SendOnionPacketCommand,
-        network::{get_chain_hash, sign_network_message, FiberMessageWithTarget},
+        network::{
+            get_chain_hash, sign_network_message, FiberMessageWithTarget, CHECK_CHANNELS_INTERVAL,
+        },
         types::{
-            peeled_packet_mpp_custom_records, AcceptChannel, AddTlc, AnnouncementSignatures,
-            ChannelReady, ClosingSigned, CommitmentSigned, FiberChannelMessage, FiberMessage,
-            HoldTlc, OpenChannel, ReestablishChannel, RemoveTlc, Shutdown, TrampolineHopPayload,
-            TrampolineOnionPacket, TxCollaborationMsg, TxComplete, TxUpdate,
+            peeled_packet_mpp_custom_records, validate_payment_custom_records_size, AcceptChannel,
+            AddTlc, AnnouncementSignatures, ChannelReady, ClosingSigned, CommitmentSigned,
+            FiberChannelMessage, FiberMessage, HoldTlc, OpenChannel, ReestablishChannel, RemoveTlc,
+            Shutdown, TrampolineHopPayload, TrampolineOnionPacket, TxCollaborationMsg, TxComplete,
+            TxUpdate,
         },
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
     },
@@ -52,17 +59,18 @@ use ckb_types::{
     H256,
 };
 use fiber_types::{
-    blake2b_hash_with_salt, derive_tlc_pubkey, AddTlcCommand, AppliedFlags,
-    AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData, ChannelActorData,
-    ChannelAnnouncement, ChannelBasePublicKeys, ChannelConstraints, ChannelFlags,
-    ChannelOpenRecord, ChannelState, ChannelTlcInfo, ChannelUpdate, ChannelUpdateChannelFlags,
-    ChannelUpdateMessageFlags, CloseFlags, CollaboratingFundingTxFlags, CommitmentNumbers,
-    EcdsaSignature, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
-    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
-    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
-    SettlementTlc, ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr,
-    TlcErrData, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    blake2b_hash_with_salt, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
+    AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, BasicMppPaymentData,
+    ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState,
+    ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
+    ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags,
+    CollaboratingFundingTxFlags, CommitmentNumbers, EcdsaSignature, ExternalFundingPersistState,
+    Hash256, InMemorySigner, InboundTlcStatus, Musig2Context, NegotiatingFundingFlags,
+    OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc,
+    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData, SettlementTlc,
+    ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -117,6 +125,7 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 // triggered 10 times per second, plus we also trigger `apply_retryable_tlc_operations` when
 // receiving ACK from peer, so it's a reason number for 20 TPS
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
+const FUNDING_TIMEOUT_CHECK_DELAY_GRACE: Duration = Duration::from_millis(1);
 
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(any(test, feature = "bench")))]
@@ -124,7 +133,18 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
 #[cfg(any(test, feature = "bench"))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 
+pub const REESTABLISH_TIMEOUT: u64 = 5 * 60 * 1000;
+
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
+
+pub(crate) fn funding_timeout_check_delay(
+    elapsed: Duration,
+    timeout_seconds: u64,
+) -> Option<Duration> {
+    Duration::from_secs(timeout_seconds)
+        .checked_sub(elapsed)
+        .map(|delay| delay.saturating_add(FUNDING_TIMEOUT_CHECK_DELAY_GRACE))
+}
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -170,7 +190,7 @@ pub struct TlcNotification {
 #[derive(Debug, AsRefStr)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
-    FundingTxSigned(Transaction),
+    FundingTxSigned(Transaction, RpcReplyPort<Result<(), String>>),
     CommitmentSigned(Option<RpcReplyPort<Result<(), String>>>),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<ProcessingChannelResult>),
@@ -194,7 +214,7 @@ impl Display for ChannelCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ChannelCommand::TxCollaborationCommand(_) => write!(f, "TxCollaborationCommand"),
-            ChannelCommand::FundingTxSigned(_) => write!(f, "FundingTxSigned"),
+            ChannelCommand::FundingTxSigned(_, _) => write!(f, "FundingTxSigned"),
             ChannelCommand::CommitmentSigned(_) => write!(f, "CommitmentSigned"),
             ChannelCommand::AddTlc(_, _) => write!(f, "AddTlc"),
             ChannelCommand::RemoveTlc(_, _) => write!(f, "RemoveTlc"),
@@ -218,6 +238,7 @@ impl ChannelCommand {
     pub fn rpc_reply_port(self) -> Option<RpcReplyPort<Result<(), String>>> {
         match self {
             ChannelCommand::CommitmentSigned(Some(port)) => Some(port),
+            ChannelCommand::FundingTxSigned(_, port) => Some(port),
             ChannelCommand::Shutdown(_, port) => Some(port),
             ChannelCommand::Update(_, port) => Some(port),
             _ => None,
@@ -281,7 +302,6 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
-pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
 
 #[derive(Debug)]
@@ -390,8 +410,9 @@ pub enum ChannelInitializationOperation {
     /// original OpenChannel message and an oneshot
     /// channel to receive the new channel ID must be given.
     AcceptChannel(AcceptChannelParameter),
-    /// Reestablish a channel with given channel id.
-    ReestablishChannel(Hash256),
+    /// Restore a persisted channel actor during node startup, keeping it offline until
+    /// either peer reestablishment resumes message flow or on-chain tracking finishes.
+    RestoreOfflineChannel(Hash256),
     /// To open a new channel with external funding - the user will sign
     /// the funding transaction with their own wallet instead of the node.
     OpenChannelWithExternalFunding(OpenChannelWithExternalFundingParameter),
@@ -403,11 +424,18 @@ pub struct ChannelInitializationParameter {
     pub private_key: Privkey,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OfflineChannelRestoreMode {
+    ReestablishPeer,
+    WatchChain,
+}
+
 pub struct ChannelActor<S> {
     local_pubkey: Pubkey,
     remote_pubkey: Pubkey,
     network: ActorRef<NetworkActorMessage>,
     store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
 }
 
 impl<S> ChannelActor<S>
@@ -419,12 +447,14 @@ where
         remote_pubkey: Pubkey,
         network: ActorRef<NetworkActorMessage>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
     ) -> Self {
         Self {
             local_pubkey,
             remote_pubkey,
             network,
             store,
+            store_actor,
         }
     }
 
@@ -478,9 +508,9 @@ where
                         if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
                     _ => {
                         return Err(ProcessingChannelError::InvalidState(format!(
-                                "Received unexpected AnnouncementSignatures message in state {:?}, expecting state AwaitingChannelReady::CHANNEL_READY or ChannelReady",
-                                state.state
-                            )));
+                            "Received unexpected AnnouncementSignatures message in state {:?}, expecting state AwaitingChannelReady::CHANNEL_READY or ChannelReady",
+                            state.state
+                        )));
                     }
                 }
 
@@ -503,6 +533,11 @@ where
                 state.fill_in_channel_id();
 
                 if state.ephemeral_config.external_funding.enabled {
+                    // External funding may pause while the initiator leaves the app to sign
+                    // the funding tx. Persist the acceptor under the final channel id now so
+                    // reconnect/restart can still route the later TxUpdate/CommitmentSigned.
+                    self.store.move_channel_actor_state(&old_id, state.clone());
+
                     // For external funding, send a different event and transition to
                     // NegotiatingFunding(AWAITING_EXTERNAL_FUNDING).
                     self.network
@@ -559,11 +594,32 @@ where
             }
             FiberChannelMessage::TxUpdate(tx) => {
                 if state.ephemeral_config.external_funding.enabled
-                    && !state.ephemeral_config.external_funding.signed_submitted
                     && state.state.is_awaiting_external_funding()
+                    && (state.is_acceptor
+                        || state.ephemeral_config.external_funding.signed_submitted)
                 {
                     self.handle_external_funding_tx_sync(myself, state, tx.tx)
                         .await?;
+                    return Ok(());
+                }
+                if state.ephemeral_config.external_funding.enabled
+                    && state.ephemeral_config.external_funding.signed_submitted
+                    && matches!(
+                        state.state,
+                        ChannelState::CollaboratingFundingTx(_)
+                            | ChannelState::SigningCommitment(_)
+                            | ChannelState::AwaitingTxSignatures(_)
+                            | ChannelState::AwaitingChannelReady(_)
+                            | ChannelState::ChannelReady
+                    )
+                    && state.funding_tx.as_ref().is_some_and(|funding_tx| {
+                        funding_tx.raw().as_slice() == tx.tx.raw().as_slice()
+                    })
+                {
+                    debug!(
+                        "Ignoring duplicate external funding TxUpdate for channel {:?} after signed tx submission",
+                        state.get_id()
+                    );
                     return Ok(());
                 }
                 state
@@ -571,6 +627,22 @@ where
                     .await
             }
             FiberChannelMessage::TxComplete(tx) => {
+                if state.ephemeral_config.external_funding.enabled
+                    && state.ephemeral_config.external_funding.signed_submitted
+                    && matches!(
+                        state.state,
+                        ChannelState::SigningCommitment(_)
+                            | ChannelState::AwaitingTxSignatures(_)
+                            | ChannelState::AwaitingChannelReady(_)
+                            | ChannelState::ChannelReady
+                    )
+                {
+                    debug!(
+                        "Ignoring duplicate external funding TxComplete for channel {:?} after signed tx submission",
+                        state.get_id()
+                    );
+                    return Ok(());
+                }
                 state
                     .handle_tx_collaboration_msg(myself, TxCollaborationMsg::TxComplete(tx))
                     .await?;
@@ -598,8 +670,33 @@ where
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
 
+                // Peer-sent TxSignatures is only valid once both CommitmentSigned messages have
+                // been exchanged, i.e. the channel has reached AwaitingTxSignatures(_). The
+                // fast-path branches below would otherwise advance the channel to
+                // AwaitingChannelReady (and broadcast FundingTransactionPending) without
+                // verifying that we hold a latest local commitment transaction, which would
+                // leave the channel unable to force-close. See GHSA-x6rw-txsignatures-verification.
+                match state.state {
+                    ChannelState::AwaitingTxSignatures(flags)
+                        if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT) =>
+                    {
+                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                            "Received duplicate TxSignatures while channel is in state {:?}",
+                            state.state
+                        )));
+                    }
+                    ChannelState::AwaitingTxSignatures(_) => {}
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Received TxSignatures before commitment exchange completed; channel state is {:?}",
+                            state.state
+                        )));
+                    }
+                }
+
                 if state.ephemeral_config.external_funding.enabled
                     && state.ephemeral_config.external_funding.signed_submitted
+                    && !state.is_acceptor
                     && state
                         .ephemeral_config
                         .external_funding
@@ -613,27 +710,32 @@ where
                             state.state
                         )));
                     };
-                    let new_witnesses: Vec<_> = tx_signatures
+                    let peer_witnesses: Vec<_> = tx_signatures
                         .witnesses
                         .into_iter()
                         .map(|x| x.pack())
                         .collect();
+                    let merged_witnesses =
+                        merge_external_funding_witnesses(funding_tx.witnesses(), peer_witnesses);
+                    let merged_funding_tx = funding_tx
+                        .as_advanced_builder()
+                        .set_witnesses(merged_witnesses)
+                        .build()
+                        .data();
                     debug!(
-                        "Updating external funding tx witnesses of {:?} to {:?}",
-                        funding_tx.calc_tx_hash(),
-                        new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
+                        "Received peer TxSignatures after external funding tx {:?} was submitted; merging peer witnesses and replying with submitted witnesses",
+                        merged_funding_tx.calc_tx_hash(),
                     );
-                    state.funding_tx = Some(
-                        funding_tx
-                            .as_advanced_builder()
-                            .set_witnesses(new_witnesses.clone())
-                            .build()
-                            .data(),
-                    );
+                    let witnesses: Vec<Vec<u8>> = funding_tx
+                        .witnesses()
+                        .into_iter()
+                        .map(|x| x.unpack())
+                        .collect();
+                    state.funding_tx = Some(merged_funding_tx.clone());
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
-                                state.must_get_funding_transaction().clone(),
+                                merged_funding_tx,
                                 state.must_get_funding_transaction_outpoint(),
                                 state.get_id(),
                             ),
@@ -645,12 +747,57 @@ where
                                 state.get_remote_pubkey(),
                                 FiberMessage::tx_signatures(TxSignatures {
                                     channel_id: state.get_id(),
-                                    witnesses: new_witnesses
-                                        .into_iter()
-                                        .map(|x| x.unpack())
-                                        .collect(),
+                                    witnesses,
                                 }),
                             )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    state.update_state(ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::empty(),
+                    ));
+                    return Ok(());
+                }
+
+                if state.ephemeral_config.external_funding.enabled
+                    && state.ephemeral_config.external_funding.signed_submitted
+                    && !state.is_acceptor
+                    && state
+                        .ephemeral_config
+                        .external_funding
+                        .funding_lock_script
+                        .is_some()
+                    && state.should_local_send_tx_signatures_first()
+                {
+                    let Some(funding_tx) = state.funding_tx.clone() else {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Received TxSignatures message, but the channel's funding tx is none {:?}",
+                            state.state
+                        )));
+                    };
+                    let peer_witnesses: Vec<_> = tx_signatures
+                        .witnesses
+                        .into_iter()
+                        .map(|x| x.pack())
+                        .collect();
+                    let merged_witnesses =
+                        merge_external_funding_witnesses(funding_tx.witnesses(), peer_witnesses);
+                    let merged_funding_tx = funding_tx
+                        .as_advanced_builder()
+                        .set_witnesses(merged_witnesses)
+                        .build()
+                        .data();
+                    debug!(
+                        "Received peer TxSignatures after external funding tx {:?} was submitted; merging peer witnesses without re-signing",
+                        merged_funding_tx.calc_tx_hash(),
+                    );
+                    state.funding_tx = Some(merged_funding_tx.clone());
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                merged_funding_tx,
+                                state.must_get_funding_transaction_outpoint(),
+                                state.get_id(),
+                            ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     state.update_state(ChannelState::AwaitingChannelReady(
@@ -662,9 +809,9 @@ where
                 if state.should_local_send_tx_signatures_first() {
                     let Some(funding_tx) = state.funding_tx.clone() else {
                         return Err(ProcessingChannelError::InvalidState(format!(
-                        "Received TxSignatures message, but the channel's funding tx is none {:?}",
-                        state.state
-                    )));
+                            "Received TxSignatures message, but the channel's funding tx is none {:?}",
+                            state.state
+                        )));
                     };
                     let new_witnesses: Vec<_> = tx_signatures
                         .witnesses
@@ -676,10 +823,17 @@ where
                         funding_tx.calc_tx_hash(),
                         new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
                     );
+                    let witnesses = if state.ephemeral_config.external_funding.enabled
+                        && state.ephemeral_config.external_funding.signed_submitted
+                    {
+                        merge_external_funding_witnesses(funding_tx.witnesses(), new_witnesses)
+                    } else {
+                        new_witnesses
+                    };
                     state.funding_tx = Some(
                         funding_tx
                             .as_advanced_builder()
-                            .set_witnesses(new_witnesses)
+                            .set_witnesses(witnesses)
                             .build()
                             .data(),
                     );
@@ -720,20 +874,16 @@ where
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
                 let flags = match state.state {
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
-                            AwaitingChannelReadyFlags::empty()
-                        } else {
-                            return Err(ProcessingChannelError::InvalidState(format!(
-                                "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
-                                state.state
-                            )));
-                        }
+                    ChannelState::AwaitingTxSignatures(flags)
+                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
+                    {
+                        AwaitingChannelReadyFlags::empty()
                     }
                     ChannelState::AwaitingChannelReady(flags) => flags,
                     _ => {
                         return Err(ProcessingChannelError::InvalidState(format!(
-                            "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}", state.state
+                            "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
+                            state.state
                         )));
                     }
                 };
@@ -803,8 +953,12 @@ where
                     .await?;
                 Ok(())
             }
-            FiberChannelMessage::TxAbort(_) => {
+            FiberChannelMessage::TxAbort(tx_abort) => {
                 if state.state.can_abort_funding() {
+                    if !tx_abort.message.is_empty() {
+                        state.funding_abort_detail =
+                            Some(String::from_utf8_lossy(&tx_abort.message).into_owned());
+                    }
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     myself.stop(Some("Funding abort".to_string()));
                 }
@@ -931,14 +1085,22 @@ where
         let previous_remote_nonce = state.last_committed_remote_nonce.clone();
         let next_commitment_nonce = commitment_signed.next_commitment_nonce.clone();
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        if let Err(err) = state.verify_commitment_signed_and_send_ack(commitment_signed.clone()) {
-            error!(
-                "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
-                err,
-                state.get_id()
-            );
-            self.notify_network_actor_shutdown_me(state);
-            return Err(err);
+        let commitment_signed_processed = match state
+            .verify_commitment_signed_and_send_ack(commitment_signed.clone())
+        {
+            Ok(processed) => processed,
+            Err(err) => {
+                error!(
+                        "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
+                        err,
+                        state.get_id()
+                    );
+                self.notify_network_actor_shutdown_me(state);
+                return Err(err);
+            }
+        };
+        if !commitment_signed_processed {
+            return Ok(());
         }
         if was_waiting_ack_before_verify {
             self.set_pending_commit_diff_replay_order_hint(
@@ -1224,6 +1386,12 @@ where
         state: &mut ChannelActorState,
         tlc: TlcInfo,
     ) {
+        // Do not settle a forwarding TLC from a globally visible preimage
+        // before the downstream forwarding result is known.
+        if state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id) {
+            return;
+        }
+
         // When a TLC has no associated invoice, it cannot be a hold invoice or MPP payment.
         // Check if we have the preimage: if yes, fulfill the TLC.
         let Some(payment_preimage) = self.store.get_preimage(&tlc.payment_hash) else {
@@ -1270,7 +1438,7 @@ where
         // - Extract public key from onion_packet[1..34]
         // - Obtain share secret using DH Key Exchange from the public key
         // and the network private key stored in the network actor state.
-        let should_settle = match add_tlc.onion_packet.clone() {
+        let (should_settle, shared_secret) = match add_tlc.onion_packet.clone() {
             Some(onion_packet) => {
                 let peeled = onion_packet
                     .peel(
@@ -1281,18 +1449,44 @@ where
                     .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err.to_string()))
                     .map_err(ProcessingChannelError::without_shared_secret)?;
                 let shared_secret = peeled.shared_secret;
-                self.apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
-                    .map_err(move |err| err.with_shared_secret(shared_secret))?
+                // The onion payload is encrypted but the hash_algorithm field is
+                // not cryptographically bound to the onion. A malicious sender
+                // can set a different hash_algorithm on the wire AddTlc than in
+                // the onion hop data, causing the forwarding node to produce an
+                // outgoing TLC that a downstream peer can fulfill while the
+                // upstream TLC cannot be claimed with the same preimage.
+                if add_tlc.hash_algorithm != peeled.current.hash_algorithm {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "TLC hash_algorithm ({:?}) does not match onion hash_algorithm ({:?})",
+                        add_tlc.hash_algorithm, peeled.current.hash_algorithm
+                    ))
+                    .with_shared_secret(shared_secret));
+                }
+
+                let should_settle = self
+                    .apply_add_tlc_operation_with_peeled_onion_packet(state, add_tlc, peeled)
+                    .map_err(move |err| err.with_shared_secret(shared_secret))?;
+                // Persist the secret only after onion validation succeeds. Delayed
+                // final-hop failures read it later from the stored TLC.
+                state
+                    .tlc_state
+                    .get_mut(&add_tlc.tlc_id)
+                    .expect("expect tlc")
+                    .shared_secret = shared_secret;
+                (should_settle, shared_secret)
             }
             None => {
-                // The TLC is with a NO_SHARED_SECRET and no onion packet.
-                // this may only happen in testing or development environment.
-                debug_assert!(add_tlc.onion_packet.is_none());
-                if cfg!(debug_assertions) {
-                    warn!("Processing TLC with no onion packet, only for testing or development environment");
-                    // allow test code to manually add tlc without onion packet
-                    true
-                } else {
+                #[cfg(all(debug_assertions, feature = "debug-add-tlc"))]
+                {
+                    state
+                        .tlc_state
+                        .get_mut(&add_tlc.tlc_id)
+                        .expect("expect tlc")
+                        .applied_flags = AppliedFlags::ADD;
+                    (true, NO_SHARED_SECRET)
+                }
+                #[cfg(not(all(debug_assertions, feature = "debug-add-tlc")))]
+                {
                     return Err(ProcessingChannelError::PeelingOnionPacketError(
                         "TLC with no onion packet is not supported".to_string(),
                     )
@@ -1301,12 +1495,11 @@ where
             }
         };
 
-        // we don't need to settle down the tlc if it is not the last hop here,
-        // some e2e tests are calling AddTlc manually, so we can not use onion packet to
-        // check whether it's the last hop here, maybe need to revisit in future.
+        // We don't need to settle the TLC if the authenticated onion payload shows
+        // this node is not the last hop.
         if should_settle {
             self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id)
-                .map_err(|err| err.without_shared_secret())?;
+                .map_err(|err| err.with_shared_secret(shared_secret))?;
         }
 
         Ok(())
@@ -1370,10 +1563,12 @@ where
                 last_hop_inner_onion,
             )?;
         } else {
-            if add_tlc.expiry
-                < peeled_onion_packet.current.expiry + state.local_tlc_info.tlc_expiry_delta
-                && !is_trampoline
-            {
+            let min_forward_expiry = peeled_onion_packet
+                .current
+                .expiry
+                .checked_add(state.local_tlc_info.tlc_expiry_delta)
+                .ok_or(ProcessingChannelError::IncorrectTlcExpiry)?;
+            if add_tlc.expiry < min_forward_expiry && !is_trampoline {
                 return Err(ProcessingChannelError::IncorrectTlcExpiry);
             }
 
@@ -1422,12 +1617,18 @@ where
 
         if let Some(TrampolineHopPayload::Final {
             final_amount,
-            final_tlc_expiry_delta: _,
+            final_tlc_expiry_delta,
             payment_preimage,
             custom_records,
         }) = last_hop_inner_onion
         {
-            if forward_amount != add_tlc.amount || forward_amount > final_amount {
+            let inner_mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            let final_amount_matches = inner_mpp_record
+                .as_ref()
+                .map(|record| record.total_amount == final_amount && add_tlc.amount <= final_amount)
+                .unwrap_or(add_tlc.amount == final_amount);
+
+            if forward_amount != add_tlc.amount || !final_amount_matches {
                 error!(
                     "final amount mismatch for trampoline final hop: {:?}, {:?}, {:?} add_tlc.amount: {:?}",
                     payment_hash, forward_amount, final_amount, add_tlc.amount
@@ -1435,8 +1636,15 @@ where
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
 
+            let required_final_expiry = now_timestamp_as_millis_u64()
+                .checked_add(final_tlc_expiry_delta.max(MIN_TLC_EXPIRY_DELTA))
+                .ok_or(ProcessingChannelError::IncorrectFinalTlcExpiry)?;
+            if add_tlc.expiry < peeled_payment_expiry || add_tlc.expiry < required_final_expiry {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            }
+
             final_payment_preimage = payment_preimage;
-            mpp_record = custom_records.as_ref().and_then(BasicMppPaymentData::read);
+            mpp_record = inner_mpp_record;
             final_custom_records = custom_records;
         } else {
             if forward_amount != add_tlc.amount {
@@ -1451,6 +1659,15 @@ where
             let invoice_status = self.get_invoice_status(invoice);
             if !matches!(invoice_status, CkbInvoiceStatus::Open) {
                 return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+            }
+
+            let invoice_hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+            if hash_algorithm != invoice_hash_algorithm {
+                error!(
+                    "hash algorithm mismatch for invoice payment: {:?}, tlc: {:?}, invoice: {:?}",
+                    payment_hash, hash_algorithm, invoice_hash_algorithm
+                );
+                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
 
             // ensure tlc expiry is large than the now + final_tlc_minimum_expiry_delta
@@ -1492,14 +1709,14 @@ where
                 tlc.total_amount = Some(record.total_amount);
             }
             (Some(invoice), None) => {
-                if invoice.allow_mpp() {
-                    // FIXME: whether we allow MPP without MPP records in onion packet?
-                    // currently we allow it pay with enough amount
-                    // TODO: add a unit test of using single path payment pay MPP invoice successfully
-                    warn!(
-                        "invoice allows MPP but no MPP records in onion packet: {:?}",
+                if invoice.allow_mpp() || invoice.payment_secret().is_some() {
+                    error!(
+                        "invoice requires payment data but no MPP records in onion packet: {:?}",
                         payment_hash
                     );
+                    return Err(ProcessingChannelError::FinalIncorrectMPPInfo(
+                        "missing MPP payment data".to_string(),
+                    ));
                 }
                 if !is_invoice_fulfilled(invoice, std::iter::once(&*tlc)) {
                     error!("invoice is not fulfilled for payment: {:?}", payment_hash);
@@ -1530,6 +1747,8 @@ where
             }
 
             if let Some(custom_records) = final_custom_records {
+                validate_payment_custom_records_size(&custom_records)
+                    .map_err(ProcessingChannelError::InvalidParameter)?;
                 self.store
                     .insert_payment_custom_records(&payment_hash, custom_records);
             }
@@ -1565,6 +1784,7 @@ where
         state.check_for_tlc_update(TlcUpdateAction::AddTlcPeer {
             amount: add_tlc.amount,
         })?;
+        state.check_tlc_expiry(add_tlc.expiry)?;
         let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
         state.check_insert_tlc(&tlc_info)?;
         state.tlc_state.add_received_tlc(tlc_info);
@@ -1580,6 +1800,14 @@ where
         state.check_for_tlc_update(TlcUpdateAction::RemoveTlcPeer)?;
         // TODO: here if we received a invalid remove tlc, it's maybe a malioucious peer,
         // maybe we need to go through shutdown process for this error
+        if matches!(&remove_tlc.reason, RemoveTlcReason::RemoveTlcFail(packet) if packet.is_plaintext())
+        {
+            // Reject before mutating state; plaintext peer failures are unauthenticated and
+            // would otherwise strand the upstream TLC.
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Plaintext TLC failure is not accepted from peers".to_string(),
+            ));
+        }
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
         let payment_hash = state
@@ -1641,7 +1869,7 @@ where
             }
         };
 
-        if !state.check_shutdown_fee_valid(shutdown.fee_rate.as_u64()) {
+        if !state.check_shutdown_fee_valid(&shutdown.close_script, shutdown.fee_rate.as_u64()) {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Shutdown fee is invalid".to_string(),
             ));
@@ -1653,7 +1881,9 @@ where
             signature: None,
         });
 
-        state.step_shutting_down(flags).await?;
+        state
+            .step_shutting_down(flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT)
+            .await?;
         Ok(())
     }
 
@@ -1673,33 +1903,26 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            // when a hop is a forwarding hop, we need to keep preimage after relay RemoveTlc finished
-            // incase watchtower may need preimage to settledown
-            if tlc_info.is_received() || tlc_info.forwarding_tlc.is_none() {
+            if !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash) {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
 
         if tlc_info.is_offered() {
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
-                // Trampoline boundary: downstream failures are encrypted for the trampoline-originated
-                // (inner) route, so upstream senders can't decode them. Wrap the downstream error packet
-                // into a new error created with the *outer* shared secret (for this hop).
-                let remove_reason = match remove_reason.clone() {
-                    RemoveTlcReason::RemoveTlcFail(inner_error_packet)
-                        if tlc_info.is_trampoline_hop =>
-                    {
-                        let mut tlc_err = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
-                        tlc_err.set_extra_data(TlcErrData::TrampolineFailed {
-                            node_id: self.get_local_pubkey(),
-                            inner_error_packet: inner_error_packet.onion_packet,
-                        });
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                            tlc_err,
-                            &tlc_info.shared_secret,
-                        ))
+                let remove_reason = match remove_reason.backward(&tlc_info.shared_secret) {
+                    Ok(remove_reason) => remove_reason,
+                    Err(err) => {
+                        warn!(
+                            "Not forwarding TLC failure: error={}, channel_id={:?}, tlc_id={:?}, previous_channel_id={:?}, previous_tlc_id={:?}",
+                            err,
+                            state.get_id(),
+                            tlc_id,
+                            previous_channel_id,
+                            previous_tlc_id
+                        );
+                        return Ok(());
                     }
-                    other => other.backward(&tlc_info.shared_secret),
                 };
 
                 let _ = self.register_retryable_relay_tlc_remove(
@@ -1818,8 +2041,21 @@ where
             replay_order_hint: Some(ReplayOrderHint::RevokeThenCommit),
             created_at_ms: now_timestamp_as_millis_u64(),
         };
+        state.last_was_revoke = false;
+        let signing_flags = match flags {
+            CommitmentSignedFlags::SigningCommitment(flags) => {
+                let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
+                state.update_state(ChannelState::SigningCommitment(flags));
+                Some(flags)
+            }
+            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
+                state.set_waiting_ack(myself, true);
+                None
+            }
+        };
         self.store
-            .store_pending_commit_diff(&state.get_id(), &commit_diff);
+            .insert_channel_actor_state_with_pending_commit_diff(state.clone(), &commit_diff);
+
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_notification(
@@ -1842,19 +2078,14 @@ where
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        state.last_was_revoke = false;
 
         match flags {
-            CommitmentSignedFlags::SigningCommitment(flags) => {
-                let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                state.update_state(ChannelState::SigningCommitment(flags));
+            CommitmentSignedFlags::SigningCommitment(_) => {
+                let flags = signing_flags.expect("signing flags should be set");
                 state.maybe_transfer_to_tx_signatures(flags)?;
             }
-            CommitmentSignedFlags::ChannelReady() => {
-                state.set_waiting_ack(myself, true);
-            }
+            CommitmentSignedFlags::ChannelReady() => {}
             CommitmentSignedFlags::PendingShutdown() => {
-                state.set_waiting_ack(myself, true);
                 state.maybe_transfer_to_shutdown().await?;
             }
         }
@@ -1993,6 +2224,13 @@ where
             ));
             return Ok(());
         } else {
+            if state.connectivity_state != ChannelConnectivityState::Online {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Cannot cooperatively shutdown channel {} while peer is offline",
+                    state.get_id()
+                )));
+            }
+
             let flags = match state.state {
                 ChannelState::ChannelReady => {
                     debug!("Handling shutdown command in ChannelReady state");
@@ -2109,8 +2347,27 @@ where
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
+        // When channel reestablishing, tlc ops will be deferred to protect channel state
+        // To avoid lost preimage we store it immediately.
+        self.persist_retryable_remove_tlc_preimage(state, tlc_id, &reason);
         let remove_tlc = RetryableTlcOperation::RemoveTlc(tlc_id, reason);
         self.register_retryable_tlc_operation(myself, state, remove_tlc);
+    }
+
+    fn persist_retryable_remove_tlc_preimage(
+        &self,
+        state: &ChannelActorState,
+        tlc_id: TLCId,
+        reason: &RemoveTlcReason,
+    ) {
+        let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) = reason
+        else {
+            return;
+        };
+
+        if let Some(tlc) = state.tlc_state.get(&tlc_id) {
+            self.store_preimage(tlc.payment_hash, *payment_preimage);
+        }
     }
 
     pub fn register_retryable_tlc_add(
@@ -2159,10 +2416,11 @@ where
             NetworkActorCommand::SendPaymentOnionPacket(
                 SendOnionPacketCommand {
                     peeled_onion_packet: peeled_onion_packet.clone(),
-                    previous_tlc: Some(PrevTlcInfo::new(
+                    previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                         state.get_id(),
                         u64::from(tlc_id),
                         forward_fee,
+                        peeled_onion_packet.shared_secret,
                     )),
                     payment_hash,
                     // forward tlc always set attempt_id to None
@@ -2242,11 +2500,12 @@ where
         );
         state.log_ack_state("[ack] retryable_ops_start");
         loop {
-            if state.is_waiting_tlc_ack() {
+            if state.is_waiting_tlc_ack() || state.reestablishing {
                 state.log_ack_state("[ack] retryable_ops_blocked");
                 debug!(
-                    "apply_retryable_tlc_operations blocked remained_ops={}",
-                    state.retryable_tlc_operations.len()
+                    "apply_retryable_tlc_operations blocked remained_ops={} reestablishing={}",
+                    state.retryable_tlc_operations.len(),
+                    state.reestablishing
                 );
                 break;
             }
@@ -2291,7 +2550,7 @@ where
             }
         }
 
-        if trigger_next {
+        if trigger_next && !state.reestablishing {
             state.schedule_next_retry_task(myself);
         }
         debug!(
@@ -2459,15 +2718,10 @@ where
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::FundingTxSigned(tx) => {
-                if let ChannelState::AwaitingTxSignatures(flags) = state.state {
-                    let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
-                    state.funding_tx = Some(tx);
-                    state.update_state(ChannelState::AwaitingTxSignatures(flags));
-                } else {
-                    error!("Invalid state. Expect channel state to be AwaitingTxSignatures, but bot {:?}", state.state);
-                }
-                Ok(())
+            ChannelCommand::FundingTxSigned(tx, reply) => {
+                let result = state.apply_funding_tx_signed(tx);
+                let _ = reply.send(result.clone().map_err(|err| err.to_string()));
+                result
             }
             ChannelCommand::CommitmentSigned(rpc_reply) => {
                 let result = self.handle_commitment_signed_command(myself, state).await;
@@ -2583,6 +2837,7 @@ where
                     .get_channel_actor_state(&state.get_id())
                     .expect("load channel state failed");
                 state.network = Some(self.network.clone());
+                state.hydrate_external_funding_runtime();
                 state.private_key = private_key.clone();
                 let ReloadParams { notify_changes } = reload_params;
                 if notify_changes {
@@ -2591,6 +2846,240 @@ where
                 Ok(())
             }
         }
+    }
+
+    fn queue_channel_remove_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        command: RemoveTlcCommand,
+    ) -> crate::Result<()> {
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+        myself.send_message(ChannelActorMessage::Command(ChannelCommand::RemoveTlc(
+            command, rpc_reply,
+        )))?;
+        Ok(())
+    }
+
+    async fn maintain_ready_channel_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
+        let committed_tlcs: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .cloned()
+            .collect();
+
+        for tlc in &committed_tlcs {
+            let tlc_id = tlc.tlc_id;
+            let id = tlc.id();
+            let payment_hash = tlc.payment_hash;
+
+            let Some(payment_preimage) = self.store.get_preimage(&payment_hash) else {
+                continue;
+            };
+            debug!(
+                "Found payment preimage for channel {:?} tlc {:?}",
+                state.id, id
+            );
+
+            if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                if !is_invoice_fulfilled(&invoice, std::iter::once(tlc)) {
+                    continue;
+                }
+                // Hold invoices stay pending until the preimage-reveal path settles stored hold TLCs.
+                if self.store.get_invoice_status(&payment_hash) != Some(CkbInvoiceStatus::Open) {
+                    continue;
+                }
+
+                // Keep invoice settlement serialized in NetworkActor so same-invoice races
+                // cannot be fulfilled directly by multiple channel actors.
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SettleTlcSet(payment_hash, vec![(state.id, id)]),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
+
+            if self
+                .store
+                .get_invoice_status(&payment_hash)
+                .is_some_and(|status| {
+                    !matches!(status, CkbInvoiceStatus::Open | CkbInvoiceStatus::Received)
+                })
+            {
+                continue;
+            }
+
+            self.register_retryable_tlc_remove(
+                myself,
+                state,
+                tlc_id,
+                RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+            );
+        }
+
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+        // for received tlcs, check whether the tlc is expired, if so we send RemoveTlc message
+        // to previous hop, even if later hop send backup RemoveTlc message to us later,
+        // it will be ignored.
+        let expect_expiry = now_timestamp_as_millis_u64()
+            .saturating_add(epoch_delay_milliseconds)
+            .saturating_add(CHECK_CHANNELS_INTERVAL.as_millis() as u64);
+        let expired_tlcs: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < expect_expiry
+            })
+            .collect();
+        for tlc in expired_tlcs {
+            info!(
+                "Removing expired tlc {:?} for channel {:?}",
+                tlc.id(),
+                state.get_id()
+            );
+            if let Err(err) = self.queue_channel_remove_tlc(
+                myself,
+                RemoveTlcCommand {
+                    id: tlc.id(),
+                    reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                        &tlc.shared_secret,
+                    )),
+                },
+            ) {
+                error!(
+                    "Failed to remove expired tlc {:?} for channel {:?}: {}",
+                    tlc.id(),
+                    state.id,
+                    err
+                );
+            }
+        }
+
+        let expect_expiry = now_timestamp_as_millis_u64().saturating_add(epoch_delay_milliseconds);
+        if state
+            .tlc_state
+            .get_expired_offered_tlcs(expect_expiry)
+            .next()
+            .is_some()
+        {
+            info!(
+                "Force closing channel {:?} due to expired offered tlc",
+                state.get_id()
+            );
+            let (send, _recv) = oneshot::channel();
+            let rpc_reply = RpcReplyPort::from(send);
+            if let Err(err) =
+                myself.send_message(ChannelActorMessage::Command(ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: None,
+                        fee_rate: None,
+                        force: true,
+                    },
+                    rpc_reply,
+                )))
+            {
+                error!(
+                    "Failed to force close channel {:?} during maintenance: {:?}",
+                    state.get_id(),
+                    err
+                );
+            }
+        }
+    }
+
+    fn maintain_waiting_onchain_settlement_tlcs(&self, state: &mut ChannelActorState) {
+        if !state.is_waiting_onchain_settlement() {
+            return;
+        }
+        let delay_epoch = EpochNumberWithFraction::from_full_value(state.commitment_delay_epoch);
+        let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
+        let Some(expect_expiry) =
+            now_timestamp_as_millis_u64().checked_add(epoch_delay_milliseconds)
+        else {
+            error!(
+                "Failed to calculate onchain settlement TLC expiry: epoch_delay_milliseconds {}",
+                epoch_delay_milliseconds
+            );
+            return;
+        };
+        // Collect TLC data before async operations to avoid holding iterator across await
+        let expired_tlcs: Vec<_> = state
+            .tlc_state
+            .get_expired_offered_tlcs(expect_expiry)
+            .filter_map(|tlc| {
+                tlc.forwarding_tlc
+                    .map(|(forwarding_channel_id, forwarding_tlc_id)| {
+                        (
+                            forwarding_channel_id,
+                            forwarding_tlc_id,
+                            tlc.payment_hash,
+                            tlc.shared_secret,
+                        )
+                    })
+            })
+            .collect();
+        for (forwarding_channel_id, forwarding_tlc_id, payment_hash, shared_secret) in expired_tlcs
+        {
+            if self.store.is_tlc_settled(&state.id, &payment_hash) {
+                let (send, _recv) = oneshot::channel();
+                let rpc_reply = RpcReplyPort::from(send);
+                if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: forwarding_channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: forwarding_tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                    TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                                    &shared_secret,
+                                )),
+                            },
+                            rpc_reply,
+                        ),
+                    }),
+                )) {
+                    error!(
+                        "Failed to remove settled tlc {:?} for channel {:?}: {}",
+                        forwarding_tlc_id, forwarding_channel_id, err
+                    );
+                }
+            }
+        }
+    }
+
+    async fn finalize_onchain_settlement(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        let ChannelState::Closed(mut flags) = state.state else {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Expecting closed channel for on-chain settlement completion, got {:?}",
+                state.state
+            )));
+        };
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Channel {:?} is not waiting on-chain settlement",
+                state.get_id()
+            )));
+        }
+
+        self.maintain_waiting_onchain_settlement_tlcs(state);
+        flags.remove(CloseFlags::WAITING_ONCHAIN_SETTLEMENT);
+        state.update_state(ChannelState::Closed(flags));
+        info!("Channel {:?} on-chain settlement completed", state.get_id());
+        myself.stop(Some("OnChainSettlementCompleted".to_string()));
+        Ok(())
     }
 
     fn validate_external_funding_signed_tx(
@@ -2642,6 +3131,7 @@ where
         state.funding_tx = Some(signed_tx);
         state.ephemeral_config.external_funding.signed_submitted = true;
         state.ephemeral_config.external_funding.started_at = None;
+        state.persist_external_funding_state();
         if !(preserve_signing_state && matches!(state.state, ChannelState::SigningCommitment(_))) {
             state.update_state(ChannelState::CollaboratingFundingTx(
                 CollaboratingFundingTxFlags::COLLABORATION_COMPLETED,
@@ -2772,9 +3262,11 @@ where
         );
         state.ephemeral_config.external_funding.unsigned_funding_tx = Some(tx);
         state.ephemeral_config.external_funding.started_at = Some(SystemTime::now());
+        state.persist_external_funding_state();
         state.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING,
         ));
+        self.store.insert_channel_actor_state(state.clone());
         self.schedule_external_funding_timeout_check(myself, state);
         Ok(())
     }
@@ -2813,7 +3305,9 @@ where
                     }
                     _ => {
                         return Err(ProcessingChannelError::InvalidState(format!(
-                            "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
+                            "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}",
+                            &state.state
+                        )));
                     }
                 };
                 state.funding_tx_confirmed_at = Some((block_hash, tx_index, timestamp));
@@ -2831,6 +3325,12 @@ where
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(myself);
             }
+            ChannelEvent::PeerDisconnected => {
+                state.on_peer_disconnected();
+            }
+            ChannelEvent::PeerReconnected => {
+                state.on_peer_reconnected();
+            }
             ChannelEvent::RunRetryTask => {
                 self.apply_retryable_tlc_operations(myself, state, true)
                     .await;
@@ -2842,14 +3342,32 @@ where
                 debug_event!(self.network, "ChannelActorStopped");
                 if reason == StopReason::Abandon {
                     state.update_state(ChannelState::Closed(CloseFlags::ABANDONED));
-                } else if reason == StopReason::AbortFunding {
+                } else if reason.is_abort_funding() {
+                    // For timeout-based aborts: re-verify that the channel
+                    // hasn't advanced past the abortable state. FundingFailed
+                    // always proceeds unconditionally.
+                    if reason.is_timeout_abort() && !state.can_abort_funding_on_timeout() {
+                        debug!(
+                            "Skip abort funding: channel {} state {:?} no longer abortable",
+                            state.get_id(),
+                            state.state
+                        );
+                        return Ok(());
+                    }
+                    if let Some(detail) = reason.funding_abort_detail() {
+                        state.funding_abort_detail = Some(detail.to_string());
+                    }
+                    let abort_detail = state
+                        .funding_abort_detail
+                        .clone()
+                        .unwrap_or_else(|| "funding aborted".to_string());
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     let abort_message = FiberMessageWithTarget {
                         target: state.get_remote_pubkey(),
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id: state.get_id(),
-                                message: "funding aborted".as_bytes().to_vec(),
+                                message: abort_detail.into_bytes(),
                             }),
                         ),
                     };
@@ -2867,7 +3385,13 @@ where
                     .update_close_transaction_confirmed(tx_hash, force, close_by_us)
                     .await?;
                 debug_event!(self.network, "ChannelClosed");
-                myself.stop(Some("ChannelClosed".to_string()));
+                if matches!(
+                    state.state,
+                    ChannelState::Closed(flags)
+                        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+                ) {
+                    myself.stop(Some(format!("ChannelStopped: {:?}", StopReason::Closed)));
+                }
             }
             ChannelEvent::CheckActiveChannel => {
                 if state.peer_does_not_reply_ack_in_time() && !state.is_closed() {
@@ -2877,7 +3401,29 @@ where
                         state.get_remote_pubkey(),
                     );
                     self.notify_network_actor_shutdown_me(state);
+                } else if state.reestablishing
+                    && !state.is_closed()
+                    && state.reestablish_started_at.is_some_and(|started| {
+                        now_timestamp_as_millis_u64().saturating_sub(started) > REESTABLISH_TIMEOUT
+                    })
+                {
+                    error!(
+                        "Channel {} from peer {:?} has been reestablishing too long, shutting down it forcefully",
+                        state.get_id(),
+                        state.get_remote_pubkey(),
+                    );
+                    self.notify_network_actor_shutdown_me(state);
                 }
+            }
+            ChannelEvent::MaintainChannelTlcs => {
+                if state.is_ready() {
+                    self.maintain_ready_channel_tlcs(myself, state).await;
+                } else {
+                    self.maintain_waiting_onchain_settlement_tlcs(state);
+                }
+            }
+            ChannelEvent::OnChainSettlementCompleted => {
+                self.finalize_onchain_settlement(myself, state).await?;
             }
             ChannelEvent::CheckFundingTimeout => {
                 // A stale timeout message may arrive after state transitions (e.g. external
@@ -2909,8 +3455,7 @@ where
         timeout_seconds: u64,
     ) {
         let event_factory = || ChannelActorMessage::Event(ChannelEvent::CheckFundingTimeout);
-        match Duration::from_secs(timeout_seconds)
-            .checked_sub(created_at.elapsed().unwrap_or_default())
+        match funding_timeout_check_delay(created_at.elapsed().unwrap_or_default(), timeout_seconds)
         {
             Some(timeout) => {
                 // timeout in future
@@ -2938,11 +3483,6 @@ where
             created_at,
             state.ephemeral_config.external_funding_timeout_seconds,
         );
-    }
-
-    fn should_persist_channel_state(&self, state: &ChannelActorState) -> bool {
-        let external_funding = &state.ephemeral_config.external_funding;
-        !external_funding.enabled || external_funding.signed_submitted
     }
 
     fn post_add_tlc_command(
@@ -3064,7 +3604,7 @@ where
                     &open_channel, &pubkey
                 );
 
-                let counterpart_pubkeys = (&open_channel).into();
+                let counterpart_pubkeys: ChannelBasePublicKeys = (&open_channel).into();
                 let public = open_channel.is_public();
                 let is_one_way = open_channel.is_one_way();
                 let OpenChannel {
@@ -3114,6 +3654,31 @@ where
                 {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(
                         "Non-public channel should not have channel announcement nonce and public channel info".to_string(),
+                    )));
+                }
+
+                ChannelActorState::check_accept_channel_parameters_for_values(
+                    local_funding_amount,
+                    *funding_amount,
+                    local_reserved_ckb_amount,
+                    *reserved_ckb_amount,
+                    *commitment_fee_rate,
+                    funding_udt_type_script,
+                    shutdown_script,
+                    max_tlc_number_in_flight,
+                    *remote_max_tlc_number_in_flight,
+                )?;
+
+                if !is_tlc_key_derivation_safe(
+                    &counterpart_pubkeys.tlc_base_key,
+                    first_per_commitment_point,
+                ) || !is_tlc_key_derivation_safe(
+                    &counterpart_pubkeys.tlc_base_key,
+                    second_per_commitment_point,
+                ) {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "peer tlc_basepoint and per_commitment_point derive to invalid key"
+                            .to_string(),
                     )));
                 }
 
@@ -3339,14 +3904,29 @@ where
                     .expect("Receive not dropped");
                 channel
             }
-            ChannelInitializationOperation::ReestablishChannel(channel_id) => {
+            ChannelInitializationOperation::RestoreOfflineChannel(channel_id) => {
                 let mut channel = self
                     .store
                     .get_channel_actor_state(&channel_id)
                     .expect("channel should exist");
-                channel.reestablishing = true;
+                let Some(restore_mode) = channel.offline_restore_mode() else {
+                    return Err(Box::new(ProcessingChannelError::InvalidState(format!(
+                        "Channel {:x} cannot be restored offline from state {:?}",
+                        channel.get_id(),
+                        channel.state
+                    ))));
+                };
+                match restore_mode {
+                    OfflineChannelRestoreMode::ReestablishPeer => {
+                        channel.mark_reestablishing_offline();
+                    }
+                    OfflineChannelRestoreMode::WatchChain => channel.mark_watching_chain_offline(),
+                }
                 channel.network = Some(self.network.clone());
+                channel.ephemeral_config = args.ephemeral_config.clone();
+                channel.hydrate_external_funding_runtime();
                 channel.private_key = Some(args.private_key.clone());
+                self.store.insert_channel_actor_state(channel.clone());
 
                 let reestablish_channel = ReestablishChannel {
                     channel_id,
@@ -3354,14 +3934,16 @@ where
                     remote_commitment_number: channel.get_remote_commitment_number(),
                 };
 
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                            self.get_remote_pubkey(),
-                            FiberMessage::reestablish_channel(reestablish_channel),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                if channel.state != ChannelState::Stale {
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                                self.get_remote_pubkey(),
+                                FiberMessage::reestablish_channel(reestablish_channel),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
 
                 channel
             }
@@ -3583,13 +4165,18 @@ where
         // take the pending settlement tlc set
         let pending_notify_tlcs = std::mem::take(&mut state.pending_notify_settle_tlcs);
 
-        if self.should_persist_channel_state(state) {
-            self.store.insert_channel_actor_state(state.clone());
-        } else {
-            debug!(
-                "Skip persisting channel state during external funding pre-submission phase: {}",
-                state.get_id()
-            );
+        if state.ephemeral_config.external_funding.enabled {
+            state.persist_external_funding_state();
+        }
+        self.store.insert_channel_actor_state(state.clone());
+
+        if state.needs_backup {
+            if let Some(ref store_actor) = self.store_actor {
+                store_actor
+                    .cast(StoreActorMessage::RequestBackup)
+                    .map_err(|e| e.to_string())?;
+            }
+            state.needs_backup = false;
         }
 
         let channel_id = state.get_id();
@@ -3650,8 +4237,13 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
+            ChannelActorMessage::Event(ChannelEvent::MaintainChannelTlcs)
+        });
+
+        // handle funding timeout
         if state.can_abort_funding_on_timeout() {
-            if state.state.is_awaiting_external_funding() {
+            if state.is_waiting_for_external_funding_submission() {
                 self.schedule_external_funding_timeout_check(&myself, state);
             } else {
                 self.schedule_timeout_event(
@@ -3681,7 +4273,11 @@ where
         let stop_reason = match state.state {
             ChannelState::Closed(flags) => match flags {
                 CloseFlags::ABANDONED => StopReason::Abandon,
-                CloseFlags::FUNDING_ABORTED => StopReason::AbortFunding,
+                CloseFlags::FUNDING_ABORTED => state
+                    .funding_abort_detail
+                    .clone()
+                    .map(StopReason::AbortFundingWithDetail)
+                    .unwrap_or(StopReason::AbortFunding),
                 _ => StopReason::Closed,
             },
             _ => StopReason::PeerDisConnected,
@@ -3723,7 +4319,9 @@ pub fn settlement_data_to_witness(
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
     let mut vec = Vec::new();
-    vec.push(data.tlcs.len() as u8);
+    let len =
+        u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
+    vec.push(len);
     for tlc in &data.tlcs {
         vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
     }
@@ -3913,6 +4511,9 @@ pub struct ChannelActorState {
     pub waiting_peer_response: Option<u64>,
 
     #[doc = "skip_store"]
+    pub reestablish_started_at: Option<u64>,
+
+    #[doc = "skip_store"]
     pub network: Option<ActorRef<NetworkActorMessage>>,
 
     // The handle for scheduled channel update broadcasting.
@@ -3929,9 +4530,42 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub ephemeral_config: ChannelEphemeralConfig,
 
+    #[doc = "skip_store"]
+    pub funding_abort_detail: Option<String>,
+
     // signing key
     #[doc = "skip_store"]
     pub private_key: Option<Privkey>,
+
+    // Indicates that the state has changed and a backup should be triggered
+    // at the end of the current message processing loop.
+    #[doc = "skip_store"]
+    pub needs_backup: bool,
+}
+
+fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
+    witness.is_empty() || is_secp_sighash_placeholder_witness(witness.as_slice())
+}
+
+pub(crate) fn merge_external_funding_witnesses(
+    local_witnesses: packed::BytesVec,
+    remote_witnesses: Vec<Bytes>,
+) -> Vec<Bytes> {
+    let mut merged: Vec<Bytes> = local_witnesses.into_iter().collect();
+    if merged.len() < remote_witnesses.len() {
+        merged.resize_with(remote_witnesses.len(), Default::default);
+    }
+
+    for (index, remote_witness) in remote_witnesses.into_iter().enumerate() {
+        if is_empty_or_placeholder_witness(&remote_witness) {
+            continue;
+        }
+        if is_empty_or_placeholder_witness(&merged[index]) {
+            merged[index] = remote_witness;
+        }
+    }
+
+    merged
 }
 
 impl std::ops::Deref for ChannelActorState {
@@ -3957,9 +4591,10 @@ impl Serialize for ChannelActorState {
 impl<'de> Deserialize<'de> for ChannelActorState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let core = ChannelActorData::deserialize(deserializer)?;
-        Ok(Self {
+        let mut state = Self {
             core,
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -3967,8 +4602,12 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: None,
-        })
+            needs_backup: false,
+        };
+        state.hydrate_external_funding_runtime();
+        Ok(state)
     }
 }
 
@@ -3979,12 +4618,41 @@ pub struct ClosedChannel {}
 pub enum StopReason {
     Abandon,
     AbortFunding,
+    AbortFundingWithDetail(String),
+    FundingFailed,
     Closed,
     PeerDisConnected,
 }
 
+impl StopReason {
+    pub(crate) fn is_abort_funding(&self) -> bool {
+        matches!(
+            self,
+            StopReason::AbortFunding
+                | StopReason::AbortFundingWithDetail(_)
+                | StopReason::FundingFailed
+        )
+    }
+
+    pub(crate) fn is_timeout_abort(&self) -> bool {
+        matches!(
+            self,
+            StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_)
+        )
+    }
+
+    pub(crate) fn funding_abort_detail(&self) -> Option<&str> {
+        match self {
+            StopReason::AbortFundingWithDetail(detail) => Some(detail),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, AsRefStr)]
 pub enum ChannelEvent {
+    PeerDisconnected,
+    PeerReconnected,
     Stop(StopReason),
     FundingTransactionConfirmed(H256, u32, u64),
     // (tx_hash, force, close_by_us)
@@ -3992,6 +4660,8 @@ pub enum ChannelEvent {
     ForwardTlcResult(ForwardTlcResult),
     RunRetryTask,
     CheckActiveChannel,
+    MaintainChannelTlcs,
+    OnChainSettlementCompleted,
     CheckFundingTimeout,
 }
 
@@ -4021,7 +4691,9 @@ pub enum ProcessingChannelError {
     WaitingTlcAck,
     #[error("Failed to peel onion packet: {0}")]
     PeelingOnionPacketError(String),
-    #[error("Forwarding node has tampered with the intended HTLC values or origin node has an obsolete cltv_expiry_delta")]
+    #[error(
+        "Forwarding node has tampered with the intended HTLC values or origin node has an obsolete cltv_expiry_delta"
+    )]
     IncorrectTlcExpiry,
     #[error("One way channel cannot forward tlc in reverse direction")]
     IncorrectTlcDirection,
@@ -4055,6 +4727,12 @@ pub enum ProcessingChannelError {
     TlcForwardingError(TlcErr),
     #[error("Total number or bytes of to-be-accepted channels exceed the limit: {0}")]
     ToBeAcceptedChannelsExceedLimit(String),
+}
+
+impl From<ArithmeticError> for ProcessingChannelError {
+    fn from(error: ArithmeticError) -> Self {
+        Self::InvalidParameter(error.to_string())
+    }
 }
 
 /// ProcessingChannelError which brings the shared secret used in forwarding onion packet.
@@ -4130,7 +4808,17 @@ pub(crate) fn get_funding_and_reserved_amount(
                 u64::MAX
             )));
         }
-        Ok((total_amount - reserved_capacity as u128, reserved_capacity))
+        Ok((
+            total_amount
+                .checked_sub(reserved_capacity as u128)
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidParameter(format!(
+                        "The funding amount ({}) should be greater than or equal to {}",
+                        total_amount, reserved_capacity
+                    ))
+                })?,
+            reserved_capacity,
+        ))
     } else {
         Ok((total_amount, reserved_capacity))
     }
@@ -4185,6 +4873,28 @@ enum TlcUpdateAction {
 
 // Constructors for the channel actor state.
 impl ChannelActorState {
+    pub(crate) fn apply_funding_tx_signed(&mut self, tx: Transaction) -> ProcessingChannelResult {
+        match self.state {
+            ChannelState::AwaitingTxSignatures(flags) => {
+                let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
+                self.funding_tx = Some(tx);
+                self.update_state(ChannelState::AwaitingTxSignatures(flags));
+                Ok(())
+            }
+            ChannelState::AwaitingChannelReady(_)
+                if self.ephemeral_config.external_funding.enabled
+                    && self.ephemeral_config.external_funding.signed_submitted =>
+            {
+                self.funding_tx = Some(tx);
+                Ok(())
+            }
+            _ => Err(ProcessingChannelError::InvalidState(format!(
+                "Expected channel state to accept FundingTxSigned, got {:?}",
+                self.state
+            ))),
+        }
+    }
+
     pub fn network(&self) -> ActorRef<NetworkActorMessage> {
         self.network
             .as_ref()
@@ -4206,8 +4916,50 @@ impl ChannelActorState {
         matches!(self.state, ChannelState::ChannelReady)
     }
 
+    pub fn is_waiting_onchain_settlement(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    }
+
+    pub fn offline_restore_mode(&self) -> Option<OfflineChannelRestoreMode> {
+        match self.state {
+            ChannelState::ChannelReady
+            | ChannelState::NegotiatingFunding(..)
+            | ChannelState::SigningCommitment(..)
+            | ChannelState::AwaitingTxSignatures(..)
+            | ChannelState::AwaitingChannelReady(..)
+            | ChannelState::CollaboratingFundingTx(..)
+            | ChannelState::Stale => Some(OfflineChannelRestoreMode::ReestablishPeer),
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) =>
+            {
+                Some(OfflineChannelRestoreMode::WatchChain)
+            }
+            ChannelState::ShuttingDown(_) => Some(OfflineChannelRestoreMode::ReestablishPeer),
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) =>
+            {
+                Some(OfflineChannelRestoreMode::WatchChain)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn can_restore_offline_actor(&self) -> bool {
+        self.offline_restore_mode().is_some()
+    }
+
     pub fn is_tlc_forwarding_enabled(&self) -> bool {
         self.local_tlc_info.enabled
+    }
+
+    pub fn is_risk_of_penalty(&self) -> bool {
+        matches!(
+            self.state,
+            ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+        )
     }
 
     pub fn set_waiting_peer_response(&mut self) {
@@ -4356,7 +5108,13 @@ impl ChannelActorState {
             Some(x) => x,
             // We have not created a channel announcement yet.
             None => {
-                let capacity = self.get_liquid_capacity();
+                let capacity = match self.checked_liquid_capacity() {
+                    Ok(capacity) => capacity,
+                    Err(err) => {
+                        error!("Failed to build channel announcement: {}", err);
+                        return None;
+                    }
+                };
                 let (node1_id, node2_id) = if self.local_is_node1() {
                     (self.local_pubkey, self.remote_pubkey)
                 } else {
@@ -4547,6 +5305,76 @@ impl ChannelActorState {
         }
     }
 
+    fn notify_channel_connectivity(&self, connectivity_state: ChannelConnectivityState) {
+        let Some(channel_outpoint) = self.get_funding_transaction_outpoint() else {
+            return;
+        };
+        let event = match connectivity_state {
+            ChannelConnectivityState::Online => NetworkServiceEvent::ChannelOnline(
+                self.get_remote_pubkey(),
+                self.get_id(),
+                channel_outpoint,
+            ),
+            ChannelConnectivityState::Offline => NetworkServiceEvent::ChannelOffline(
+                self.get_remote_pubkey(),
+                self.get_id(),
+                channel_outpoint,
+            ),
+            ChannelConnectivityState::Syncing => return,
+        };
+        self.network()
+            .send_message(NetworkActorMessage::new_notification(event))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    pub(crate) fn mark_reestablishing_offline(&mut self) {
+        self.clear_waiting_peer_response();
+        self.reestablishing = true;
+        self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
+        self.connectivity_state = ChannelConnectivityState::Offline;
+        if let Some(handle) = self.scheduled_channel_update_handle.take() {
+            handle.abort();
+        }
+    }
+
+    pub(crate) fn mark_watching_chain_offline(&mut self) {
+        self.clear_waiting_peer_response();
+        self.reestablishing = false;
+        self.reestablish_started_at = None;
+        self.connectivity_state = ChannelConnectivityState::Offline;
+        if let Some(handle) = self.scheduled_channel_update_handle.take() {
+            handle.abort();
+        }
+    }
+
+    fn on_peer_disconnected(&mut self) {
+        match self.offline_restore_mode() {
+            Some(OfflineChannelRestoreMode::WatchChain) => self.mark_watching_chain_offline(),
+            _ => self.mark_reestablishing_offline(),
+        }
+        self.notify_channel_connectivity(ChannelConnectivityState::Offline);
+        if let Some(outpoint) = self.get_funding_transaction_outpoint() {
+            self.network()
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::OwnedChannelUpdateEvent(
+                        super::graph::OwnedChannelUpdateEvent::Down(outpoint),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
+    }
+
+    fn on_peer_reconnected(&mut self) {
+        if self.reestablishing {
+            self.connectivity_state = ChannelConnectivityState::Syncing;
+            self.send_reestablish_message();
+        }
+    }
+
+    pub(crate) fn is_waiting_forward_result_for_received_tlc(&self, tlc_id: TLCId) -> bool {
+        self.waiting_forward_tlc_tasks.contains_key(&tlc_id)
+    }
+
     fn update_graph_for_local_channel_change(&mut self) {
         let Some(channel_outpoint) = self.get_funding_transaction_outpoint() else {
             return;
@@ -4562,6 +5390,23 @@ impl ChannelActorState {
                         channel_update_info,
                     ),
                 ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    fn send_reestablish_message(&self) {
+        let reestablish_channel = ReestablishChannel {
+            channel_id: self.get_id(),
+            local_commitment_number: self.get_local_commitment_number(),
+            remote_commitment_number: self.get_remote_commitment_number(),
+        };
+
+        self.network()
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    self.get_remote_pubkey(),
+                    FiberMessage::reestablish_channel(reestablish_channel),
+                )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
@@ -4734,12 +5579,15 @@ impl ChannelActorState {
                 ),
                 latest_commitment_transaction: None,
                 reestablishing: false,
+                connectivity_state: ChannelConnectivityState::Online,
                 last_revoke_ack_msg: None,
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
+                external_funding: None,
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -4747,7 +5595,9 @@ impl ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: Some(private_key),
+            needs_backup: true,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -4825,12 +5675,15 @@ impl ChannelActorState {
                 remote_reserved_ckb_amount: 0,
                 latest_commitment_transaction: None,
                 reestablishing: false,
+                connectivity_state: ChannelConnectivityState::Online,
                 last_revoke_ack_msg: None,
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
+                external_funding: None,
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: Some(network),
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -4838,32 +5691,82 @@ impl ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: Some(private_key),
+            needs_backup: true,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
     }
 
-    fn check_accept_channel_parameters(&self) -> ProcessingChannelResult {
-        if self.remote_constraints.max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
+    fn checked_total_reserved_ckb_amount_from(
+        local_reserved_ckb_amount: u64,
+        remote_reserved_ckb_amount: u64,
+    ) -> Result<u64, ProcessingChannelError> {
+        local_reserved_ckb_amount
+            .checked_add(remote_reserved_ckb_amount)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "Total reserved CKB amount overflows: local {}, remote {}",
+                    local_reserved_ckb_amount, remote_reserved_ckb_amount
+                ))
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_accept_channel_parameters_for_values(
+        local_amount: u128,
+        remote_amount: u128,
+        local_reserved_ckb_amount: u64,
+        remote_reserved_ckb_amount: u64,
+        commitment_fee_rate: u64,
+        udt_type_script: &Option<Script>,
+        remote_shutdown_script: &Script,
+        local_max_tlc_number_in_flight: u64,
+        remote_max_tlc_number_in_flight: u64,
+    ) -> ProcessingChannelResult {
+        if local_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Remote max TLC number in flight {} is greater than the system maximal value {}",
-                self.remote_constraints.max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
+                "Local max TLC number in flight {} is greater than the system maximal value {}",
+                local_max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
             )));
         }
 
-        let udt_type_script = &self.funding_udt_type_script;
+        if remote_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Remote max TLC number in flight {} is greater than the system maximal value {}",
+                remote_max_tlc_number_in_flight, MAX_TLC_NUMBER_IN_FLIGHT
+            )));
+        }
+
+        let total_reserved_ckb_amount = Self::checked_total_reserved_ckb_amount_from(
+            local_reserved_ckb_amount,
+            remote_reserved_ckb_amount,
+        )?;
 
         if udt_type_script.is_some() {
-            if self.to_local_amount > u128::MAX - self.to_remote_amount {
+            if local_amount.checked_add(remote_amount).is_none() {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "The total UDT funding amount should be less than {}",
                     u128::MAX
                 )));
             }
         } else {
-            let total_ckb_amount = self.get_liquid_capacity();
-            let max_ckb_amount = u64::MAX as u128 - self.get_total_reserved_ckb_amount() as u128;
+            let total_ckb_amount = local_amount.checked_add(remote_amount).ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "The total funding amount overflows: local {}, remote {}",
+                    local_amount, remote_amount
+                ))
+            })?;
+            let max_ckb_amount = (u64::MAX as u128)
+                .checked_sub(total_reserved_ckb_amount as u128)
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidParameter(format!(
+                        "Total reserved CKB amount {} is greater than {}",
+                        total_reserved_ckb_amount,
+                        u64::MAX
+                    ))
+                })?;
             if total_ckb_amount > max_ckb_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "The total funding amount ({}) should be less than {}",
@@ -4874,25 +5777,40 @@ impl ChannelActorState {
 
         // reserved_ckb_amount
         let occupied_capacity =
-            occupied_capacity(&self.get_remote_shutdown_script(), udt_type_script)?.as_u64();
-        if self.remote_reserved_ckb_amount < occupied_capacity {
+            occupied_capacity(remote_shutdown_script, udt_type_script)?.as_u64();
+        if remote_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Reserved CKB amount {} is less than {}",
-                self.remote_reserved_ckb_amount, occupied_capacity,
+                remote_reserved_ckb_amount, occupied_capacity,
             )));
         }
 
         // commitment_fee_rate
-        let commitment_fee = calculate_commitment_tx_fee(self.commitment_fee_rate, udt_type_script);
-        let reserved_fee = self.remote_reserved_ckb_amount - occupied_capacity;
-        if commitment_fee * 2 > reserved_fee {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee {} which calculated by commitment fee rate {} is larger than half of reserved fee {}",
-                commitment_fee, self.commitment_fee_rate, reserved_fee
-            )));
-        }
+        let reserved_fee = remote_reserved_ckb_amount
+            .checked_sub(occupied_capacity)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "Reserved CKB amount {} is less than {}",
+                    remote_reserved_ckb_amount, occupied_capacity,
+                ))
+            })?;
+        check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
 
         Ok(())
+    }
+
+    fn check_accept_channel_parameters(&self) -> ProcessingChannelResult {
+        Self::check_accept_channel_parameters_for_values(
+            self.to_local_amount,
+            self.to_remote_amount,
+            self.local_reserved_ckb_amount,
+            self.remote_reserved_ckb_amount,
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+            &self.get_remote_shutdown_script(),
+            self.local_constraints.max_tlc_number_in_flight,
+            self.remote_constraints.max_tlc_number_in_flight,
+        )
     }
 
     fn check_shutdown_fee_rate(
@@ -4907,20 +5825,36 @@ impl ChannelActorState {
             )));
         }
 
-        let fee = calculate_shutdown_tx_fee(
+        let fee = checked_calculate_shutdown_tx_fee(
             fee_rate.as_u64(),
             &self.funding_udt_type_script,
             (self.get_remote_shutdown_script(), close_script.clone()),
-        );
+        )?;
 
         let occupied_capacity =
             occupied_capacity(close_script, &self.funding_udt_type_script)?.as_u64();
         let available_max_fee = if self.funding_udt_type_script.is_none() {
-            (self.to_local_amount as u64 + self.local_reserved_ckb_amount)
-                .saturating_sub(occupied_capacity)
+            Self::checked_ckb_amount_with_reserved(
+                self.to_local_amount,
+                self.local_reserved_ckb_amount,
+                "Local shutdown",
+            )?
+            .checked_sub(occupied_capacity)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "Local shutdown capacity is less than occupied capacity {}",
+                    occupied_capacity
+                ))
+            })?
         } else {
             self.local_reserved_ckb_amount
-                .saturating_sub(occupied_capacity)
+                .checked_sub(occupied_capacity)
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidParameter(format!(
+                        "Local reserved CKB amount {} is less than occupied capacity {}",
+                        self.local_reserved_ckb_amount, occupied_capacity
+                    ))
+                })?
         };
 
         if fee > available_max_fee {
@@ -4940,18 +5874,20 @@ impl ChannelActorState {
         self.to_remote_amount
     }
 
-    pub fn get_offered_tlc_balance(&self) -> u128 {
-        self.get_all_offer_tlcs()
-            .filter(|tlc| !tlc.is_fail_remove_confirmed())
-            .map(|tlc| tlc.amount)
-            .sum::<u128>()
+    pub fn get_offered_tlc_balance(&self) -> Result<u128, ProcessingChannelError> {
+        Ok(self
+            .get_inflight_offered_tlcs()
+            .try_fold(0_u128, |sum, tlc| {
+                checked_add_u128(sum, tlc.amount, "Offered TLC balance")
+            })?)
     }
 
-    pub fn get_received_tlc_balance(&self) -> u128 {
-        self.get_all_received_tlcs()
-            .filter(|tlc| !tlc.is_fail_remove_confirmed())
-            .map(|tlc| tlc.amount)
-            .sum::<u128>()
+    pub fn get_received_tlc_balance(&self) -> Result<u128, ProcessingChannelError> {
+        Ok(self
+            .get_inflight_received_tlcs()
+            .try_fold(0_u128, |sum, tlc| {
+                checked_add_u128(sum, tlc.amount, "Received TLC balance")
+            })?)
     }
 
     pub fn get_created_at_in_millis(&self) -> u64 {
@@ -4961,16 +5897,115 @@ impl ChannelActorState {
             .as_millis() as u64
     }
 
+    fn external_funding_started_at_ms(started_at: SystemTime) -> u64 {
+        started_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    pub(crate) fn hydrate_external_funding_runtime(&mut self) {
+        let Some(external_funding) = self.external_funding.clone() else {
+            return;
+        };
+        let restore_signing_commitment =
+            external_funding.peer_commitment_signed_received && !external_funding.signed_submitted;
+        let restore_submitted_peer_commitment = external_funding.peer_commitment_signed_received
+            && external_funding.signed_submitted
+            && matches!(
+                self.state,
+                ChannelState::SigningCommitment(flags)
+                    if !flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+            );
+        self.ephemeral_config.external_funding = ExternalFundingRuntime {
+            enabled: true,
+            funding_lock_script: Some(external_funding.funding_lock_script),
+            funding_lock_script_cell_deps: external_funding.funding_lock_script_cell_deps,
+            unsigned_funding_tx: Some(external_funding.unsigned_funding_tx),
+            started_at: Some(UNIX_EPOCH + Duration::from_millis(external_funding.started_at_ms)),
+            signed_submitted: external_funding.signed_submitted,
+        };
+        if restore_signing_commitment {
+            self.state = ChannelState::SigningCommitment(
+                SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
+            );
+        } else if restore_submitted_peer_commitment {
+            if let ChannelState::SigningCommitment(flags) = self.state {
+                self.state = ChannelState::SigningCommitment(
+                    flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn clear_external_funding_runtime(&mut self) {
+        self.ephemeral_config.external_funding = ExternalFundingRuntime::default();
+        self.external_funding = None;
+    }
+
+    pub(crate) fn persist_external_funding_state(&mut self) {
+        let external_funding = &self.ephemeral_config.external_funding;
+        if !external_funding.enabled {
+            self.external_funding = None;
+            return;
+        }
+
+        let Some(unsigned_funding_tx) = external_funding.unsigned_funding_tx.clone() else {
+            return;
+        };
+        let Some(started_at) = external_funding.started_at else {
+            let signed_submitted = external_funding.signed_submitted;
+            let peer_commitment_signed_received = matches!(
+                self.state,
+                ChannelState::SigningCommitment(flags)
+                    if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+            );
+            if let Some(persisted_state) = &mut self.external_funding {
+                persisted_state.signed_submitted = signed_submitted;
+                persisted_state.peer_commitment_signed_received = peer_commitment_signed_received;
+            }
+            return;
+        };
+        let funding_lock_script = external_funding
+            .funding_lock_script
+            .clone()
+            .unwrap_or_default();
+
+        self.external_funding = Some(ExternalFundingPersistState {
+            funding_lock_script,
+            funding_lock_script_cell_deps: external_funding.funding_lock_script_cell_deps.clone(),
+            unsigned_funding_tx,
+            started_at_ms: ChannelActorState::external_funding_started_at_ms(started_at),
+            signed_submitted: external_funding.signed_submitted,
+            peer_commitment_signed_received: matches!(
+                self.state,
+                ChannelState::SigningCommitment(flags)
+                    if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+            ),
+        });
+    }
+
     pub fn is_closed(&self) -> bool {
         self.state.is_closed()
     }
 
     pub(crate) fn update_state(&mut self, new_state: ChannelState) {
-        debug!(
-            "Updating channel state from {:?} to {:?}",
-            &self.state, &new_state
-        );
-        self.state = new_state;
+        if self.state != new_state {
+            debug!(
+                "Updating channel state from {:?} to {:?}",
+                &self.state, &new_state
+            );
+            self.state = new_state;
+            self.needs_backup = true;
+        }
+        if matches!(
+            self.state,
+            ChannelState::ChannelReady | ChannelState::Closed(_)
+        ) {
+            self.clear_external_funding_runtime();
+        } else if self.ephemeral_config.external_funding.enabled {
+            self.persist_external_funding_state();
+        }
     }
 
     pub(crate) fn local_is_node1(&self) -> bool {
@@ -5097,20 +6132,51 @@ impl ChannelActorState {
         true
     }
 
-    fn get_total_reserved_ckb_amount(&self) -> u64 {
-        self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+    fn get_total_reserved_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
+        Self::checked_total_reserved_ckb_amount_from(
+            self.local_reserved_ckb_amount,
+            self.remote_reserved_ckb_amount,
+        )
     }
 
-    fn get_total_ckb_amount(&self) -> u64 {
-        self.to_local_amount as u64
-            + self.to_remote_amount as u64
-            + self.get_total_reserved_ckb_amount()
+    fn get_total_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
+        let total_reserved_ckb_amount = self.get_total_reserved_ckb_amount()?;
+        let liquid_capacity = self.checked_liquid_capacity()?;
+        let total_ckb_amount = checked_add_u128(
+            liquid_capacity,
+            total_reserved_ckb_amount as u128,
+            "total CKB amount",
+        )?;
+
+        u64::try_from(total_ckb_amount).map_err(|_| {
+            ProcessingChannelError::InvalidParameter(format!(
+                "The total CKB amount ({}) should be less than {}",
+                total_ckb_amount,
+                u64::MAX
+            ))
+        })
     }
 
-    // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
-    // This is the capacity used for gossiping channel information.
-    pub(crate) fn get_liquid_capacity(&self) -> u128 {
-        self.to_local_amount + self.to_remote_amount
+    fn checked_ckb_amount_with_reserved(
+        liquid_amount: u128,
+        reserved_amount: u64,
+        context: &str,
+    ) -> Result<u64, ProcessingChannelError> {
+        let liquid_amount = u64::try_from(liquid_amount).map_err(|_| {
+            ProcessingChannelError::InvalidParameter(format!(
+                "{} liquid CKB amount {} does not fit into u64",
+                context, liquid_amount
+            ))
+        })?;
+        Ok(checked_add_u64(liquid_amount, reserved_amount, context)?)
+    }
+
+    pub(crate) fn checked_liquid_capacity(&self) -> Result<u128, ProcessingChannelError> {
+        Ok(checked_add_u128(
+            self.to_local_amount,
+            self.to_remote_amount,
+            "liquid capacity",
+        )?)
     }
 
     // Send RevokeAndAck message to the counterparty, and update the
@@ -5156,24 +6222,29 @@ impl ChannelActorState {
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_partial_signature = {
-            let commitment_tx_fee = calculate_commitment_tx_fee(
+            let commitment_tx_fee = checked_calculate_commitment_tx_fee(
                 self.commitment_fee_rate,
                 &self.funding_udt_type_script,
-            );
+            )?;
             let lock_script = self.get_remote_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
             {
-                let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
+                let capacity = checked_sub_u64(
+                    self.get_total_reserved_ckb_amount()?,
+                    commitment_tx_fee,
+                    "Reserved CKB",
+                )?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script)
                     .type_(Some(udt_type_script.clone()).pack())
                     .capacity(capacity)
                     .build();
 
-                let output_data = self.get_liquid_capacity().to_le_bytes().pack();
+                let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
                 (output, output_data)
             } else {
-                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                let capacity =
+                    checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .capacity(capacity)
@@ -5182,7 +6253,12 @@ impl ChannelActorState {
                 (output, output_data)
             };
 
-            let commitment_number = self.get_remote_commitment_number() - 1;
+            let commitment_number = self.get_remote_commitment_number().checked_sub(1).ok_or(
+                ProcessingChannelError::InvalidState(
+                    "Remote commitment number underflows while building revocation data"
+                        .to_string(),
+                ),
+            )?;
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -5495,7 +6571,7 @@ impl ChannelActorState {
             .collect::<Vec<TLCId>>();
 
         for tlc_id in to_be_removed_ids {
-            self.tlc_state.apply_remove_tlc(tlc_id);
+            self.apply_remove_tlc(tlc_id);
         }
     }
 
@@ -5683,41 +6759,57 @@ impl ChannelActorState {
         self.tlc_state.all_tlcs().filter(|tlc| tlc.is_offered())
     }
 
+    fn get_inflight_received_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
+        self.get_all_received_tlcs()
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
+    }
+
+    fn get_inflight_offered_tlcs(&self) -> impl Iterator<Item = &TlcInfo> {
+        self.get_all_offer_tlcs()
+            .filter(|tlc| !tlc.is_fail_remove_confirmed())
+    }
+
     // Get the pubkeys for the tlc. Tlc pubkeys are the pubkeys held by each party
     // while this tlc was created (pubkeys are derived from the commitment number
     // when this tlc was created). The pubkeys returned here are sorted.
     // The offerer who offered this tlc will have the first pubkey, and the receiver
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
-    pub fn get_tlc_pubkeys(&self, tlc: &TlcInfo) -> (Pubkey, Pubkey) {
+    pub fn get_tlc_pubkeys(
+        &self,
+        tlc: &TlcInfo,
+    ) -> Result<(Pubkey, Pubkey), ProcessingChannelError> {
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
-        let local_pubkey = derive_tlc_pubkey(
+        let local_pubkey = try_derive_tlc_pubkey(
             &self.get_local_channel_public_keys().tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
-        );
-        let remote_pubkey = derive_tlc_pubkey(
+        )
+        .map_err(ProcessingChannelError::InvalidParameter)?;
+        let remote_pubkey = try_derive_tlc_pubkey(
             &self.get_remote_channel_public_keys().tlc_base_key,
             &self.get_remote_commitment_point(local_commitment_number),
-        );
-        (local_pubkey, remote_pubkey)
+        )
+        .map_err(ProcessingChannelError::InvalidParameter)?;
+        Ok((local_pubkey, remote_pubkey))
     }
 
-    fn get_tlc_keys(&self, tlc: &TlcInfo) -> (Privkey, Pubkey) {
+    fn get_tlc_keys(&self, tlc: &TlcInfo) -> Result<(Privkey, Pubkey), ProcessingChannelError> {
         let CommitmentNumbers {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers();
 
-        (
+        Ok((
             self.signer.derive_tlc_key(remote_commitment_number),
-            derive_tlc_pubkey(
+            try_derive_tlc_pubkey(
                 &self.get_remote_channel_public_keys().tlc_base_key,
                 &self.get_remote_commitment_point(local_commitment_number),
-            ),
-        )
+            )
+            .map_err(ProcessingChannelError::InvalidParameter)?,
+        ))
     }
 
     // We are using tlc base key for settlement keys, since settlement
@@ -5749,12 +6841,15 @@ impl ChannelActorState {
         [a, b].concat()
     }
 
-    fn get_active_tlcs_for_settlement(&self, for_remote: bool) -> Vec<SettlementTlc> {
+    fn get_active_tlcs_for_settlement(
+        &self,
+        for_remote: bool,
+    ) -> Result<Vec<SettlementTlc>, ProcessingChannelError> {
         let tlcs = self.get_active_tlcs(for_remote);
         tlcs.into_iter()
             .map(|tlc| {
-                let (local_key, remote_key) = self.get_tlc_keys(&tlc);
-                SettlementTlc {
+                let (local_key, remote_key) = self.get_tlc_keys(&tlc)?;
+                Ok(SettlementTlc {
                     tlc_id: tlc.tlc_id,
                     hash_algorithm: tlc.hash_algorithm,
                     payment_amount: tlc.amount,
@@ -5762,7 +6857,7 @@ impl ChannelActorState {
                     expiry: tlc.expiry,
                     local_key,
                     remote_key,
-                }
+                })
             })
             .collect()
     }
@@ -5781,28 +6876,43 @@ impl ChannelActorState {
         &self.get_remote_channel_public_keys().funding_pubkey
     }
 
-    fn check_shutdown_fee_valid(&self, remote_fee_rate: u64) -> bool {
-        let remote_shutdown_fee = calculate_shutdown_tx_fee(
+    fn check_shutdown_fee_valid(&self, remote_close_script: &Script, remote_fee_rate: u64) -> bool {
+        let remote_shutdown_fee = match checked_calculate_shutdown_tx_fee(
             remote_fee_rate,
             &self.funding_udt_type_script,
             (
-                self.get_remote_shutdown_script(),
+                remote_close_script.clone(),
                 self.get_local_shutdown_script(),
             ),
-        );
-        let occupied_capacity = match occupied_capacity(
-            &self.get_remote_shutdown_script(),
-            &self.funding_udt_type_script,
         ) {
-            Ok(capacity) => capacity.as_u64(),
+            Ok(fee) => fee,
             Err(_) => return false,
         };
+        let occupied_capacity =
+            match occupied_capacity(remote_close_script, &self.funding_udt_type_script) {
+                Ok(capacity) => capacity.as_u64(),
+                Err(_) => return false,
+            };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
-            (self.to_remote_amount as u64 + self.remote_reserved_ckb_amount)
-                .saturating_sub(occupied_capacity)
+            match Self::checked_ckb_amount_with_reserved(
+                self.to_remote_amount,
+                self.remote_reserved_ckb_amount,
+                "Remote shutdown",
+            ) {
+                Ok(amount) => match amount.checked_sub(occupied_capacity) {
+                    Some(amount) => amount,
+                    None => return false,
+                },
+                Err(_) => return false,
+            }
         } else {
-            self.remote_reserved_ckb_amount
-                .saturating_sub(occupied_capacity)
+            match self
+                .remote_reserved_ckb_amount
+                .checked_sub(occupied_capacity)
+            {
+                Some(amount) => amount,
+                None => return false,
+            }
         };
         return remote_shutdown_fee <= remote_available_max_fee;
     }
@@ -5815,7 +6925,10 @@ impl ChannelActorState {
 
     fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
         let current_time = now_timestamp_as_millis_u64();
-        if expiry <= current_time + MIN_TLC_EXPIRY_DELTA {
+        let min_expiry = current_time
+            .checked_add(MIN_TLC_EXPIRY_DELTA)
+            .ok_or(ProcessingChannelError::TlcExpiryTooFar)?;
+        if expiry <= min_expiry {
             error!(
                 "TLC expiry {} is too soon, current time: {}, MIN_TLC_EXPIRY_DELTA: {}",
                 expiry, current_time, MIN_TLC_EXPIRY_DELTA
@@ -5824,7 +6937,9 @@ impl ChannelActorState {
         }
         let delay_epoch = EpochNumberWithFraction::from_full_value(self.commitment_delay_epoch);
         let epoch_delay_milliseconds = tlc_expiry_delay(&delay_epoch);
-        let expect_expiry = current_time + epoch_delay_milliseconds;
+        let expect_expiry = current_time
+            .checked_add(epoch_delay_milliseconds)
+            .ok_or(ProcessingChannelError::TlcExpiryTooFar)?;
         if expiry < expect_expiry {
             error!(
                 "TLC expiry {} is too soon, current time + epoch delay: {}",
@@ -5833,7 +6948,10 @@ impl ChannelActorState {
             return Err(ProcessingChannelError::TlcExpirySoon);
         }
 
-        if expiry >= current_time + MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+        let max_expiry = current_time
+            .checked_add(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+            .ok_or(ProcessingChannelError::TlcExpiryTooFar)?;
+        if expiry >= max_expiry {
             debug!(
                 "TLC expiry {} is too far in the future, current time: {}",
                 expiry, current_time
@@ -5980,7 +7098,15 @@ impl ChannelActorState {
             TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::RemoveTlcCommand
         );
 
-        if is_tlc_command_message && (self.is_waiting_tlc_ack() || self.reestablishing) {
+        if is_tlc_command_message && self.is_waiting_tlc_ack() {
+            return Err(ProcessingChannelError::WaitingTlcAck);
+        }
+
+        if matches!(
+            action,
+            TlcUpdateAction::AddTlcCommand { .. } | TlcUpdateAction::RemoveTlcCommand
+        ) && self.reestablishing
+        {
             return Err(ProcessingChannelError::WaitingTlcAck);
         }
 
@@ -5999,40 +7125,68 @@ impl ChannelActorState {
         }
         if is_sent {
             // local peer can not sent more tlc amount than they have
-            let pending_sent_amount = self.get_offered_tlc_balance();
-            if add_amount > self.to_local_amount.saturating_sub(pending_sent_amount) {
+            let pending_sent_amount = self.get_offered_tlc_balance()?;
+            if add_amount
+                > self
+                    .to_local_amount
+                    .checked_sub(pending_sent_amount)
+                    .ok_or(ProcessingChannelError::TlcAmountExceedLimit)?
+            {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
-            let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
-            if active_offered_tls_number > self.local_constraints.max_tlc_number_in_flight {
+            // The remote peer's constraints are its advertised incoming TLC
+            // limits, so they constrain TLCs we offer to it.
+            let active_offered_tls_number = self.get_inflight_offered_tlcs().count() as u64 + 1;
+            let max_offered_tlcs = self
+                .remote_constraints
+                .max_tlc_number_in_flight
+                .min(MAX_TLC_NUMBER_IN_FLIGHT);
+            if active_offered_tls_number > max_offered_tlcs {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
             let active_offered_amount = self
-                .get_all_offer_tlcs()
-                .fold(0_u128, |sum, tlc| sum + tlc.amount)
-                + add_amount;
-            if active_offered_amount > self.local_constraints.max_tlc_value_in_flight {
+                .get_inflight_offered_tlcs()
+                .try_fold(0_u128, |sum, tlc| {
+                    checked_add_u128(sum, tlc.amount, "Offered TLC")
+                })
+                .and_then(|sum| checked_add_u128(sum, add_amount, "Offered TLC"))?;
+            if active_offered_amount > self.remote_constraints.max_tlc_value_in_flight {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
             // remote peer can not sent more tlc amount than they have
-            let pending_recv_amount = self.get_received_tlc_balance();
-            if add_amount > self.to_remote_amount.saturating_sub(pending_recv_amount) {
+            let pending_recv_amount = self.get_received_tlc_balance()?;
+            if add_amount
+                > self
+                    .to_remote_amount
+                    .checked_sub(pending_recv_amount)
+                    .ok_or(ProcessingChannelError::TlcAmountExceedLimit)?
+            {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
 
-            let active_received_tls_number = self.get_all_received_tlcs().count() as u64 + 1;
-            if active_received_tls_number > self.remote_constraints.max_tlc_number_in_flight {
+            let active_received_tls_number = (self.get_inflight_received_tlcs().count() as u64)
+                .checked_add(1)
+                .ok_or(ProcessingChannelError::TlcNumberExceedLimit)?;
+            // Our local constraints are our advertised incoming TLC limits,
+            // so they constrain TLCs the remote peer offers to us.
+            let max_received_tlcs = self
+                .local_constraints
+                .max_tlc_number_in_flight
+                .min(MAX_TLC_NUMBER_IN_FLIGHT);
+            if active_received_tls_number > max_received_tlcs {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
             let active_received_amount = self
-                .get_all_received_tlcs()
-                .fold(0_u128, |sum, tlc| sum + tlc.amount)
-                + add_amount;
-            if active_received_amount > self.remote_constraints.max_tlc_value_in_flight {
+                .get_inflight_received_tlcs()
+                .try_fold(0_u128, |sum, tlc| {
+                    checked_add_u128(sum, tlc.amount, "Received TLC")
+                })
+                .and_then(|sum| checked_add_u128(sum, add_amount, "Received TLC"))?;
+            if active_received_amount > self.local_constraints.max_tlc_value_in_flight {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         }
@@ -6223,6 +7377,30 @@ impl ChannelActorState {
             )));
         }
 
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            self.to_local_amount,
+            accept_channel.funding_amount,
+            self.local_reserved_ckb_amount,
+            accept_channel.reserved_ckb_amount,
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+            &accept_channel.shutdown_script,
+            self.local_constraints.max_tlc_number_in_flight,
+            accept_channel.max_tlc_number_in_flight,
+        )?;
+
+        if !is_tlc_key_derivation_safe(
+            &accept_channel.tlc_basepoint,
+            &accept_channel.first_per_commitment_point,
+        ) || !is_tlc_key_derivation_safe(
+            &accept_channel.tlc_basepoint,
+            &accept_channel.second_per_commitment_point,
+        ) {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "peer tlc_basepoint and per_commitment_point derive to invalid key".to_string(),
+            ));
+        }
+
         self.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::INIT_SENT,
         ));
@@ -6247,8 +7425,6 @@ impl ChannelActorState {
             accept_channel.max_tlc_value_in_flight,
             accept_channel.max_tlc_number_in_flight,
         );
-
-        self.check_accept_channel_parameters()?;
 
         match accept_channel.channel_announcement_nonce {
             Some(ref nonce) if self.is_public() => {
@@ -6311,6 +7487,17 @@ impl ChannelActorState {
             }
             ChannelState::CollaboratingFundingTx(flags) => {
                 if flags.contains(CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT) {
+                    if self.ephemeral_config.external_funding.enabled
+                        && self.ephemeral_config.external_funding.signed_submitted
+                        && is_complete_message
+                    {
+                        debug!(
+                            "Ignoring duplicate external funding TxComplete for channel {:?} in state {:?}",
+                            self.get_id(),
+                            self.state
+                        );
+                        return Ok(());
+                    }
                     return Err(ProcessingChannelError::InvalidState(format!(
                         "Received a tx collaboration message {:?}, but we are already in the state {:?} where the remote has sent a complete message",
                         &msg, &self.state
@@ -6335,14 +7522,19 @@ impl ChannelActorState {
                     && self.ephemeral_config.external_funding.signed_submitted
                 {
                     if let Some(local_tx) = self.funding_tx.as_ref() {
-                        // External funding v1 boundary: peer must not modify tx structure
-                        // after user submits the signed final tx.
-                        let local_hash = local_tx.calc_tx_hash();
-                        let remote_hash = msg.tx.calc_tx_hash();
-                        if local_hash != remote_hash {
+                        // External funding v1 boundary: after the user submits a final signed
+                        // tx, peers may echo the same raw tx but must not replace witnesses.
+                        if local_tx.raw().as_slice() == msg.tx.raw().as_slice() {
+                            debug!(
+                                "Ignoring duplicate external funding TxUpdate for {:?} after signed tx submission",
+                                self.get_id()
+                            );
+                            return Ok(());
+                        } else {
                             error!(
                                 "External funding signed tx mismatch on TxUpdate: local_hash={:?}, remote_hash={:?}",
-                                local_hash, remote_hash
+                                local_tx.calc_tx_hash(),
+                                msg.tx.calc_tx_hash()
                             );
                             myself
                                 .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
@@ -6353,11 +7545,35 @@ impl ChannelActorState {
                         }
                     }
                 }
+                // Defense in depth: reject overly complex peer funding txs before
+                // queueing work on the shared CKB chain actor. The same budget is
+                // re-checked inside VerifyFundingTx prior to any chain lookup.
+                let local_tx_view = self.funding_tx.clone().unwrap_or_default().into_view();
+                let remote_tx_view = msg.tx.clone().into_view();
+                if let Err(err) =
+                    validate_peer_funding_tx_complexity(&local_tx_view, &remote_tx_view)
+                {
+                    error!("rejecting TxUpdate from peer before verification: {}", err);
+                    let abort_reason = err.to_string();
+                    myself
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                            StopReason::AbortFundingWithDetail(abort_reason),
+                        )))
+                        .expect("myself alive");
+                    return Ok(());
+                }
+
                 if let Err(err) = call!(network, |tx| NetworkActorMessage::Command(
                     NetworkActorCommand::VerifyFundingTx {
                         local_tx: self.funding_tx.clone().unwrap_or_default(),
                         remote_tx: msg.tx.clone(),
                         funding_cell_lock_script: self.get_funding_lock_script(),
+                        funding_udt_type_script: self.funding_udt_type_script.clone(),
+                        funding_source_lock_script: self
+                            .ephemeral_config
+                            .external_funding
+                            .funding_lock_script
+                            .clone(),
                         reply: tx
                     }
                 ))
@@ -6368,13 +7584,26 @@ impl ChannelActorState {
                         err
                     );
                     if !err.is_temporary() {
+                        let abort_reason = err.to_string();
+                        myself
+                            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                                StopReason::AbortFundingWithDetail(abort_reason),
+                            )))
+                            .expect("myself alive");
+                    }
+                    return Ok(());
+                }
+
+                if self.is_acceptor && self.funding_tx.is_none() {
+                    if let Err(err) = self.check_remote_initial_funding_contribution(&msg.tx) {
+                        error!("Rejecting underfunded initial funding tx: {}", err);
                         myself
                             .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
                                 StopReason::AbortFunding,
                             )))
                             .expect("myself alive");
+                        return Ok(());
                     }
-                    return Ok(());
                 }
 
                 self.funding_tx = Some(msg.tx.clone());
@@ -6399,7 +7628,7 @@ impl ChannelActorState {
                 self.check_tx_complete_preconditions()?;
 
                 let (local_settlement_key, remote_settlement_key) = self.get_settlement_keys();
-                let settlement_data = self.build_settlement_data(false);
+                let settlement_data = self.build_settlement_data(false)?;
 
                 network
                     .send_message(NetworkActorMessage::new_notification(
@@ -6425,10 +7654,79 @@ impl ChannelActorState {
         Ok(())
     }
 
+    fn check_remote_initial_funding_contribution(
+        &self,
+        tx: &Transaction,
+    ) -> ProcessingChannelResult {
+        let tx = tx.clone().into_view();
+        let (output, data) =
+            tx.output_with_data(0)
+                .ok_or(ProcessingChannelError::InvalidParameter(
+                    "Funding transaction should have at least one output".to_string(),
+                ))?;
+        let current_capacity: u64 = output.capacity().unpack();
+
+        if self.funding_udt_type_script.is_some() {
+            if current_capacity < self.remote_reserved_ckb_amount {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Initial funding tx CKB capacity {} is less than required remote reserved CKB {}",
+                    current_capacity, self.remote_reserved_ckb_amount
+                )));
+            }
+
+            if data.as_ref().len() < 16 {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "UDT output data too short, expected at least 16 bytes".to_string(),
+                ));
+            }
+            let mut amount_bytes = [0u8; 16];
+            amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
+            let udt_amount = u128::from_le_bytes(amount_bytes);
+            if udt_amount < self.to_remote_amount {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Initial funding tx UDT amount {} is less than required remote amount {}",
+                    udt_amount, self.to_remote_amount
+                )));
+            }
+
+            return Ok(());
+        }
+
+        let remote_amount = u64::try_from(self.to_remote_amount).map_err(|_| {
+            ProcessingChannelError::InvalidState(
+                "Remote CKB funding amount does not fit into u64".to_string(),
+            )
+        })?;
+        let required_capacity = remote_amount
+            .checked_add(self.remote_reserved_ckb_amount)
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidState(
+                    "Remote CKB funding amount overflows capacity".to_string(),
+                )
+            })?;
+        if current_capacity < required_capacity {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Initial funding tx CKB capacity {} is less than required remote contribution {}",
+                current_capacity, required_capacity
+            )));
+        }
+
+        Ok(())
+    }
+
     fn verify_commitment_signed_and_send_ack(
         &mut self,
         commitment_signed: CommitmentSigned,
-    ) -> ProcessingChannelResult {
+    ) -> Result<bool, ProcessingChannelError> {
+        if self.is_duplicate_external_funding_commitment_signed(&commitment_signed) {
+            debug!(
+                "Ignoring duplicate external funding CommitmentSigned for channel {:?} in state {:?}",
+                self.get_id(),
+                self.state
+            );
+            return Ok(false);
+        }
+
         let flags = match self.state {
             ChannelState::CollaboratingFundingTx(flags)
                 if !flags.contains(CollaboratingFundingTxFlags::COLLABORATION_COMPLETED) =>
@@ -6482,8 +7780,6 @@ impl ChannelActorState {
             }
         };
 
-        self.clean_up_failed_tlcs();
-
         #[cfg(debug_assertions)]
         {
             debug!(
@@ -6495,6 +7791,8 @@ impl ChannelActorState {
 
         let (commitment_tx, settlement_data) =
             self.verify_and_complete_tx(commitment_signed.funding_tx_partial_signature)?;
+
+        self.clean_up_failed_tlcs();
 
         // Notify outside observers.
         self.network()
@@ -6520,7 +7818,7 @@ impl ChannelActorState {
         }
         self.commit_remote_nonce(commitment_signed.next_commitment_nonce);
         self.latest_commitment_transaction = Some(commitment_tx.data());
-        Ok(())
+        Ok(true)
     }
 
     fn maybe_transfer_to_tx_signatures(
@@ -6598,6 +7896,7 @@ impl ChannelActorState {
 
         if self.ephemeral_config.external_funding.enabled
             && self.ephemeral_config.external_funding.signed_submitted
+            && !self.is_acceptor
             && self
                 .ephemeral_config
                 .external_funding
@@ -6674,6 +7973,17 @@ impl ChannelActorState {
         match self.state {
             ChannelState::AwaitingChannelReady(flags) => {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    // Defense-in-depth: refuse to advertise readiness if we never received the
+                    // peer's CommitmentSigned (which is what populates
+                    // latest_commitment_transaction). Without this, get_latest_commitment_transaction
+                    // would panic on force-close. See GHSA-x6rw-txsignatures-verification.
+                    if self.latest_commitment_transaction.is_none() {
+                        error!(
+                            "Refusing to advance to ChannelReady for channel {:?}: latest_commitment_transaction is not set; the peer likely skipped sending CommitmentSigned",
+                            self.get_id()
+                        );
+                        return;
+                    }
                     if !self.is_public() {
                         self.on_new_channel_ready(myself);
                     } else {
@@ -6694,6 +8004,8 @@ impl ChannelActorState {
         self.update_state(ChannelState::ChannelReady);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
+        self.connectivity_state = ChannelConnectivityState::Online;
+        self.notify_channel_connectivity(ChannelConnectivityState::Online);
         let pubkey = self.get_remote_pubkey();
         self.on_owned_channel_updated(myself, false);
         self.network()
@@ -6714,6 +8026,9 @@ impl ChannelActorState {
 
         self.pending_reestablish_channel_ready = false;
         self.reestablishing = false;
+        self.reestablish_started_at = None;
+        self.connectivity_state = ChannelConnectivityState::Online;
+        self.notify_channel_connectivity(ChannelConnectivityState::Online);
 
         // If the channel is already ready, we should notify the network actor.
         // so that we update the network.outpoint_channel_map
@@ -6842,7 +8157,10 @@ impl ChannelActorState {
                 }
             }
             _ => {
-                unreachable!("Expect resume funding when the channel state is in AwaitingTxSignatures | AwaitingChannelReady, but got {:?}", self.state);
+                unreachable!(
+                    "Expect resume funding when the channel state is in AwaitingTxSignatures | AwaitingChannelReady, but got {:?}",
+                    self.state
+                );
             }
         }
     }
@@ -6878,6 +8196,14 @@ impl ChannelActorState {
             next_revocation_nonce,
         } = revoke_and_ack;
 
+        let remote_tlc_base_key = &self.get_remote_channel_public_keys().tlc_base_key;
+        if !is_tlc_key_derivation_safe(remote_tlc_base_key, &next_per_commitment_point) {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "peer tlc_basepoint and next_per_commitment_point in RevokeAndAck derive to invalid key"
+                    .to_string(),
+            ));
+        }
+
         let sign_ctx = match self.get_revoke_sign_context(true) {
             Some(ctx) => ctx,
             None => {
@@ -6890,24 +8216,29 @@ impl ChannelActorState {
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_data = {
-            let commitment_tx_fee = calculate_commitment_tx_fee(
+            let commitment_tx_fee = checked_calculate_commitment_tx_fee(
                 self.commitment_fee_rate,
                 &self.funding_udt_type_script,
-            );
+            )?;
             let lock_script = self.get_local_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
             {
-                let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
+                let capacity = checked_sub_u64(
+                    self.get_total_reserved_ckb_amount()?,
+                    commitment_tx_fee,
+                    "Reserved CKB",
+                )?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .type_(Some(udt_type_script.clone()).pack())
                     .capacity(capacity)
                     .build();
 
-                let output_data = self.get_liquid_capacity().to_le_bytes().pack();
+                let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
                 (output, output_data)
             } else {
-                let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+                let capacity =
+                    checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
                 let output = CellOutput::new_builder()
                     .lock(lock_script.clone())
                     .capacity(capacity)
@@ -6916,7 +8247,11 @@ impl ChannelActorState {
                 (output, output_data)
             };
 
-            let commitment_number = self.get_local_commitment_number() - 1;
+            let commitment_number = self.get_local_commitment_number().checked_sub(1).ok_or(
+                ProcessingChannelError::InvalidState(
+                    "Local commitment number underflows while building revocation data".to_string(),
+                ),
+            )?;
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -6942,7 +8277,7 @@ impl ChannelActorState {
             }
         };
 
-        let settlement_data = self.build_settlement_data(true);
+        let settlement_data = self.build_settlement_data(true)?;
 
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
@@ -6952,12 +8287,14 @@ impl ChannelActorState {
             .update_for_revoke_and_ack(commitment_numbers);
         self.set_waiting_ack(myself, false);
 
-        let tlcs = self.get_active_tlcs_for_settlement(true);
         info!(
             "After RevokeAndAckReceived settlement data for commitment_number: {}, tlcs count: {}, tlc_state: {:?}",
             self.get_local_commitment_number(),
-            tlcs.len(),
-            self.tlc_state.all_tlcs().map(|tlc| tlc.status.clone()).collect::<Vec<_>>()
+            settlement_data.tlcs.len(),
+            self.tlc_state
+                .all_tlcs()
+                .map(|tlc| tlc.status.clone())
+                .collect::<Vec<_>>()
         );
 
         // update the remote_revocation_nonce_for_send and remote_revocation_nonce_for_verify for next round if needed
@@ -6983,6 +8320,75 @@ impl ChannelActorState {
         Ok(())
     }
 
+    fn should_replay_external_funding_commitment_on_reestablish(&self) -> bool {
+        self.ephemeral_config.external_funding.enabled
+            && self.ephemeral_config.external_funding.signed_submitted
+            && matches!(self.state, ChannelState::AwaitingTxSignatures(_))
+    }
+
+    fn is_duplicate_external_funding_commitment_signed(
+        &self,
+        commitment_signed: &CommitmentSigned,
+    ) -> bool {
+        let duplicate_external_funding_nonce = self.ephemeral_config.external_funding.enabled
+            && self.ephemeral_config.external_funding.signed_submitted
+            && self.last_committed_remote_nonce.as_ref()
+                == Some(&commitment_signed.next_commitment_nonce);
+        if !duplicate_external_funding_nonce {
+            return false;
+        }
+
+        matches!(
+            self.state,
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+        ) || matches!(
+            self.state,
+            ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_)
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_duplicate_external_funding_commitment_signed_for_test(
+        &self,
+        commitment_signed: &CommitmentSigned,
+    ) -> bool {
+        self.is_duplicate_external_funding_commitment_signed(commitment_signed)
+    }
+
+    fn validate_external_funding_commit_diff_for_replay(
+        &self,
+        commit_diff: &CommitDiff,
+    ) -> ProcessingChannelResult {
+        if commit_diff.channel_id != self.get_id() {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "external funding commit diff channel mismatch: expected {}, got {}",
+                self.get_id(),
+                commit_diff.channel_id
+            )));
+        }
+
+        if commit_diff.local_commitment_number_at_send != self.get_local_commitment_number() {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "stale external funding commit diff local commitment number: expected {}, got {}",
+                self.get_local_commitment_number(),
+                commit_diff.local_commitment_number_at_send
+            )));
+        }
+
+        let diff_remote = commit_diff.remote_commitment_number_at_send;
+        let diff_remote_upper = diff_remote.saturating_add(1);
+        let remote_commitment_number = self.get_remote_commitment_number();
+        if remote_commitment_number < diff_remote || remote_commitment_number > diff_remote_upper {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "stale external funding commit diff remote commitment drift: state={}, diff_at_send={}, expected range=[{}, {}]",
+                remote_commitment_number, diff_remote, diff_remote, diff_remote_upper
+            )));
+        }
+
+        Ok(())
+    }
+
     async fn handle_reestablish_channel_message(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -6992,11 +8398,92 @@ impl ChannelActorState {
         debug!(
             "peer: {:?} Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}, has_commit_diff: {}",
             self.get_local_pubkey(),
-            reestablish_channel, self.commitment_numbers, self.state,
+            reestablish_channel,
+            self.commitment_numbers,
+            self.state,
             pending_commit_diff.is_some()
         );
         let network = self.network();
         self.notify_funding_tx(&network);
+        let external_funding_waiting_submit = self.ephemeral_config.external_funding.enabled
+            && !self.ephemeral_config.external_funding.signed_submitted
+            && (self.state.is_awaiting_external_funding()
+                || matches!(
+                    self.state,
+                    ChannelState::SigningCommitment(
+                        SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT
+                    )
+                ));
+        let external_funding_submitted_in_flight = self.ephemeral_config.external_funding.enabled
+            && self.ephemeral_config.external_funding.signed_submitted
+            && matches!(
+                self.state,
+                ChannelState::CollaboratingFundingTx(_) | ChannelState::SigningCommitment(_)
+            );
+        if external_funding_waiting_submit {
+            self.clear_waiting_peer_response();
+            self.pending_reestablish_channel_ready = false;
+            self.reestablishing = false;
+            return Ok(());
+        }
+        if external_funding_submitted_in_flight {
+            self.clear_waiting_peer_response();
+            self.pending_reestablish_channel_ready = false;
+            self.reestablishing = false;
+            if let Some(funding_tx) = self.funding_tx.clone() {
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                            self.get_remote_pubkey(),
+                            FiberMessage::tx_update(TxUpdate {
+                                channel_id: self.get_id(),
+                                tx: funding_tx,
+                            }),
+                        )),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            }
+            match self.state {
+                ChannelState::CollaboratingFundingTx(_) => myself
+                    .send_message(ChannelActorMessage::Command(
+                        ChannelCommand::CommitmentSigned(None),
+                    ))
+                    .expect("myself alive"),
+                ChannelState::SigningCommitment(flags)
+                    if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+                        && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) =>
+                {
+                    myself
+                        .send_message(ChannelActorMessage::Command(
+                            ChannelCommand::CommitmentSigned(None),
+                        ))
+                        .expect("myself alive")
+                }
+                ChannelState::SigningCommitment(flags)
+                    if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
+                        && !flags
+                            .contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
+                {
+                    if let Some(ref commit_diff) = pending_commit_diff {
+                        self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                    } else {
+                        warn!(
+                            "No CommitDiff for external funding channel {}, unable to replay CommitmentSigned during reestablish",
+                            self.get_id()
+                        );
+                    }
+                }
+                ChannelState::SigningCommitment(flags)
+                    if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) =>
+                {
+                    self.handle_tx_signatures(None)?
+                }
+                ChannelState::SigningCommitment(_) => {}
+                _ => unreachable!("checked external funding in-flight states above"),
+            }
+            return Ok(());
+        }
         match self.state {
             ChannelState::NegotiatingFunding(_)
             | ChannelState::CollaboratingFundingTx(_)
@@ -7010,6 +8497,17 @@ impl ChannelActorState {
                     .expect("myself alive");
             }
             ChannelState::AwaitingTxSignatures(_) | ChannelState::AwaitingChannelReady(_) => {
+                if self.should_replay_external_funding_commitment_on_reestablish() {
+                    if let Some(ref commit_diff) = pending_commit_diff {
+                        self.validate_external_funding_commit_diff_for_replay(commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                    } else {
+                        warn!(
+                            "No CommitDiff for external funding channel {}, unable to replay CommitmentSigned during reestablish",
+                            self.get_id()
+                        );
+                    }
+                }
                 self.on_reestablished_channel_ready(myself);
                 self.resume_funding(myself);
             }
@@ -7049,10 +8547,27 @@ impl ChannelActorState {
                 if my_local_commitment_number == peer_remote_commitment_number
                     && my_remote_commitment_number == peer_local_commitment_number
                 {
-                    // commitments are the same, sync up the tlcs
-                    self.set_waiting_ack(myself, false);
-                    self.resend_tlcs_on_reestablish(true)?;
-                } else if my_remote_commitment_number == peer_local_commitment_number + 1 {
+                    // We persist waiting_ack and CommitDiff before sending CommitmentSigned. If
+                    // the node crashes after that persist but before the frame reaches the peer,
+                    // reestablish sees equal commitment numbers and must replay the stored commit.
+                    if let (true, Some(commit_diff)) =
+                        (my_waiting_ack, pending_commit_diff.as_ref())
+                    {
+                        self.validate_commit_diff_for_replay(reestablish_channel, commit_diff)?;
+                        self.resend_commitment_from_diff(commit_diff)?;
+                        self.last_was_revoke = false;
+                        self.reestablishing = false;
+                        self.pending_reestablish_channel_ready = true;
+                        reestablish_complete = false;
+                    } else {
+                        // commitments are the same, sync up the tlcs
+                        self.set_waiting_ack(myself, false);
+                        self.resend_tlcs_on_reestablish(true)?;
+                    }
+                } else if peer_local_commitment_number
+                    .checked_add(1)
+                    .is_some_and(|next| my_remote_commitment_number == next)
+                {
                     // peer need ACK, I need to resend my revoke_and_ack message
                     // don't clear my waiting_ack flag here, since if i'm waiting for peer ack,
                     // peer will resend commitment_signed message
@@ -7135,6 +8650,36 @@ impl ChannelActorState {
                     self.on_reestablished_channel_ready(myself);
                     debug_event!(network, "Reestablished channel in ChannelReady");
                 }
+            }
+            ChannelState::Stale => {
+                let my_local = self.get_local_commitment_number();
+                let my_remote = self.get_remote_commitment_number();
+                let peer_local = reestablish_channel.local_commitment_number;
+                let peer_remote = reestablish_channel.remote_commitment_number;
+
+                if peer_local.abs_diff(my_remote) > 1 || peer_remote.abs_diff(my_local) > 1 {
+                    error!(
+                        "Audit Failed for Stale channel: Local(L:{}, R:{}), Peer(L:{}, R:{})",
+                        my_local, my_remote, peer_local, peer_remote
+                    );
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "reestablish channel message with invalid commitment numbers during audit"
+                            .to_string(),
+                    ));
+                }
+
+                info!(
+                    "Passive audit passed for channel {}. Resuming to Ready.",
+                    self.get_id()
+                );
+                self.update_state(ChannelState::ChannelReady);
+
+                return Box::pin(self.handle_reestablish_channel_message(
+                    myself,
+                    reestablish_channel,
+                    pending_commit_diff,
+                ))
+                .await;
             }
             ChannelState::ShuttingDown(flags) => {
                 // Resend the shutdown message to the peer if we have not received the peer's shutdown message.
@@ -7257,7 +8802,7 @@ impl ChannelActorState {
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend add tlc from diff");
+                    debug_event!(network, "resend add tlc");
                 }
                 TlcReplayUpdate::Remove(remove) => {
                     network
@@ -7268,7 +8813,7 @@ impl ChannelActorState {
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    debug_event!(network, "resend remove tlc from diff");
+                    debug_event!(network, "resend remove tlc");
                 }
             }
         }
@@ -7322,7 +8867,7 @@ impl ChannelActorState {
 
         Ok(())
     }
-    fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
+    pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         let tx = tx.clone().into_view();
 
         let first_output = tx
@@ -7338,6 +8883,19 @@ impl ChannelActorState {
             ));
         }
 
+        let output_type_opt: Option<packed::Script> = first_output.type_().to_opt();
+        if let Some(ref expected_udt) = self.funding_udt_type_script {
+            if output_type_opt.as_ref() != Some(expected_udt) {
+                return Err(ProcessingChannelError::InvalidState(
+                    "Funding output UDT type script does not match expected".to_string(),
+                ));
+            }
+        } else if output_type_opt.is_some() {
+            return Err(ProcessingChannelError::InvalidState(
+                "Funding output has unexpected type script for CKB-only channel".to_string(),
+            ));
+        }
+
         let current_capacity: u64 = first_output.capacity().unpack();
 
         // make sure both parties have paid the reserved ckb amount
@@ -7348,6 +8906,15 @@ impl ChannelActorState {
         }
 
         if self.funding_udt_type_script.is_some() {
+            // For UDT channels the funding cell carries the negotiated reserved CKB on top
+            // of the UDT amount in cell data. Reject anything below the negotiated total so
+            // that a peer cannot ship an under-funded output[0] (e.g. `local_reserved + 1`
+            // shannon) and silently advance the channel to a state where every close path
+            // requires more CKB than the funding cell holds.
+            if current_capacity < self.get_total_reserved_ckb_amount()? {
+                return Ok(false);
+            }
+
             let (_output, data) =
                 tx.output_with_data(0)
                     .ok_or(ProcessingChannelError::InvalidParameter(
@@ -7367,10 +8934,10 @@ impl ChannelActorState {
             );
             debug!("current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
                 current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount);
-            let is_udt_amount_ok = udt_amount == self.get_liquid_capacity();
+            let is_udt_amount_ok = udt_amount == self.checked_liquid_capacity()?;
             return Ok(is_udt_amount_ok);
         } else {
-            let is_complete = current_capacity == self.get_total_ckb_amount();
+            let is_complete = current_capacity == self.get_total_ckb_amount()?;
             Ok(is_complete)
         }
     }
@@ -7404,7 +8971,8 @@ impl ChannelActorState {
                 ChannelState::CollaboratingFundingTx(flags) => flags,
                 _ => {
                     panic!(
-                        "Expect to be in CollaboratingFundingTx state while running update_funding_tx, current state {:?}", &self.state,
+                        "Expect to be in CollaboratingFundingTx state while running update_funding_tx, current state {:?}",
+                        &self.state,
                     );
                 }
             };
@@ -7585,22 +9153,22 @@ impl ChannelActorState {
 
         let local_shutdown_script = local_shutdown_info.close_script.clone();
         let remote_shutdown_script = remote_shutdown_info.close_script.clone();
-        let local_shutdown_fee = calculate_shutdown_tx_fee(
+        let local_shutdown_fee = checked_calculate_shutdown_tx_fee(
             local_shutdown_info.fee_rate,
             &self.funding_udt_type_script,
             (
                 remote_shutdown_script.clone(),
                 local_shutdown_script.clone(),
             ),
-        );
-        let remote_shutdown_fee = calculate_shutdown_tx_fee(
+        )?;
+        let remote_shutdown_fee = checked_calculate_shutdown_tx_fee(
             remote_shutdown_info.fee_rate,
             &self.funding_udt_type_script,
             (
                 local_shutdown_script.clone(),
                 remote_shutdown_script.clone(),
             ),
-        );
+        )?;
 
         debug!(
             "build_shutdown_tx local_shutdown_fee: local {}, remote {}",
@@ -7622,7 +9190,11 @@ impl ChannelActorState {
                 self.to_local_amount, self.to_remote_amount
             );
 
-            let local_capacity: u64 = self.local_reserved_ckb_amount - local_shutdown_fee;
+            let local_capacity: u64 = checked_sub_u64(
+                self.local_reserved_ckb_amount,
+                local_shutdown_fee,
+                "Local reserved CKB",
+            )?;
             debug!(
                 "shutdown_tx local_capacity: {} - {} = {}",
                 self.local_reserved_ckb_amount, local_shutdown_fee, local_capacity
@@ -7634,7 +9206,11 @@ impl ChannelActorState {
                 .build();
             let to_local_output_data = self.to_local_amount.to_le_bytes().pack();
 
-            let remote_capacity: u64 = self.remote_reserved_ckb_amount - remote_shutdown_fee;
+            let remote_capacity: u64 = checked_sub_u64(
+                self.remote_reserved_ckb_amount,
+                remote_shutdown_fee,
+                "Remote reserved CKB",
+            )?;
             debug!(
                 "shutdown_tx remote_capacity: {} - {} = {}",
                 self.remote_reserved_ckb_amount, remote_shutdown_fee, remote_capacity
@@ -7660,10 +9236,24 @@ impl ChannelActorState {
                 self.to_local_amount, local_shutdown_fee,
                 self.to_remote_amount, remote_shutdown_fee
             );
-            let local_value =
-                self.to_local_amount as u64 + self.local_reserved_ckb_amount - local_shutdown_fee;
-            let remote_value = self.to_remote_amount as u64 + self.remote_reserved_ckb_amount
-                - remote_shutdown_fee;
+            let local_value = checked_sub_u64(
+                Self::checked_ckb_amount_with_reserved(
+                    self.to_local_amount,
+                    self.local_reserved_ckb_amount,
+                    "Local shutdown",
+                )?,
+                local_shutdown_fee,
+                "Local shutdown",
+            )?;
+            let remote_value = checked_sub_u64(
+                Self::checked_ckb_amount_with_reserved(
+                    self.to_remote_amount,
+                    self.remote_reserved_ckb_amount,
+                    "Remote shutdown",
+                )?,
+                remote_shutdown_fee,
+                "Remote shutdown",
+            )?;
             debug!(
                 "Building shutdown transaction with values: local {}, remote {}",
                 local_value, remote_value
@@ -7697,10 +9287,10 @@ impl ChannelActorState {
     fn build_commitment_tx_and_settlement_data(
         &self,
         for_remote: bool,
-    ) -> (TransactionView, SettlementData) {
+    ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
         let funding_out_point = self.must_get_funding_transaction_outpoint();
         let (output, output_data, settlement_data) =
-            self.build_commitment_transaction_output(for_remote);
+            self.build_commitment_transaction_output(for_remote)?;
 
         let commitment_tx = TransactionBuilder::default()
             .input(
@@ -7712,16 +9302,16 @@ impl ChannelActorState {
             .output_data(output_data)
             .build();
 
-        (commitment_tx, settlement_data)
+        Ok((commitment_tx, settlement_data))
     }
 
     fn build_commitment_transaction_output(
         &self,
         for_remote: bool,
-    ) -> (CellOutput, Bytes, SettlementData) {
+    ) -> Result<(CellOutput, Bytes, SettlementData), ProcessingChannelError> {
         let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(for_remote);
         let version = self.get_current_commitment_number(for_remote);
-        let settlement_data = self.build_settlement_data(for_remote);
+        let settlement_data = self.build_settlement_data(for_remote)?;
 
         let mut commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
@@ -7745,32 +9335,41 @@ impl ChannelActorState {
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &commitment_lock_script_args);
 
-        let commitment_tx_fee =
-            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        let commitment_tx_fee = checked_calculate_commitment_tx_fee(
+            self.commitment_fee_rate,
+            &self.funding_udt_type_script,
+        )?;
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
-                - commitment_tx_fee;
+            let capacity = checked_sub_u64(
+                self.get_total_reserved_ckb_amount()?,
+                commitment_tx_fee,
+                "Reserved CKB",
+            )?;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(capacity)
                 .build();
 
-            let output_data = self.get_liquid_capacity().to_le_bytes().pack();
-            (output, output_data, settlement_data)
+            let output_data = self.checked_liquid_capacity()?.to_le_bytes().pack();
+            Ok((output, output_data, settlement_data))
         } else {
-            let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
+            let capacity =
+                checked_sub_u64(self.get_total_ckb_amount()?, commitment_tx_fee, "Total CKB")?;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .capacity(capacity)
                 .build();
             let output_data = Bytes::default();
-            (output, output_data, settlement_data)
+            Ok((output, output_data, settlement_data))
         }
     }
 
-    fn build_settlement_data(&self, for_remote: bool) -> SettlementData {
+    fn build_settlement_data(
+        &self,
+        for_remote: bool,
+    ) -> Result<SettlementData, ProcessingChannelError> {
         let pending_tlcs = self
             .tlc_state
             .offered_tlcs
@@ -7809,13 +9408,18 @@ impl ChannelActorState {
                     .then(|| info.removed_reason.as_ref().unwrap());
                 match confirmed_remove_reason {
                     Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
-                        offered_fulfilled += info.amount;
+                        offered_fulfilled = checked_add_u128(
+                            offered_fulfilled,
+                            info.amount,
+                            "Offered fulfilled TLC",
+                        )?;
                     }
                     Some(RemoveTlcReason::RemoveTlcFail(_)) => {
                         // This TLC failed, so it is not counted in the pending amount and the fulfilled amount
                     }
                     None => {
-                        offered_pending += info.amount;
+                        offered_pending =
+                            checked_add_u128(offered_pending, info.amount, "Offered pending TLC")?;
                     }
                 }
             }
@@ -7826,24 +9430,49 @@ impl ChannelActorState {
                     .then(|| info.removed_reason.as_ref().unwrap());
                 match confirmed_remove_reason {
                     Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
-                        received_fulfilled += info.amount;
+                        received_fulfilled = checked_add_u128(
+                            received_fulfilled,
+                            info.amount,
+                            "Received fulfilled TLC",
+                        )?;
                     }
                     Some(RemoveTlcReason::RemoveTlcFail(_)) => {
                         // This TLC failed, so it is not counted in the pending amount and the fulfilled amount
                     }
                     None => {
-                        received_pending += info.amount;
+                        received_pending = checked_add_u128(
+                            received_pending,
+                            info.amount,
+                            "Received pending TLC",
+                        )?;
                     }
                 }
             }
         }
         let mut to_local_value =
-            self.to_local_amount + received_fulfilled - offered_pending - offered_fulfilled;
-        let mut to_remote_value =
-            self.to_remote_amount + offered_fulfilled - received_pending - received_fulfilled;
+            checked_add_u128(self.to_local_amount, received_fulfilled, "Local settlement")
+                .and_then(|amount| checked_sub_u128(amount, offered_pending, "Local settlement"))
+                .and_then(|amount| {
+                    checked_sub_u128(amount, offered_fulfilled, "Local settlement")
+                })?;
+        let mut to_remote_value = checked_add_u128(
+            self.to_remote_amount,
+            offered_fulfilled,
+            "Remote settlement",
+        )
+        .and_then(|amount| checked_sub_u128(amount, received_pending, "Remote settlement"))
+        .and_then(|amount| checked_sub_u128(amount, received_fulfilled, "Remote settlement"))?;
         if self.funding_udt_type_script.is_none() {
-            to_local_value += self.local_reserved_ckb_amount as u128;
-            to_remote_value += self.remote_reserved_ckb_amount as u128;
+            to_local_value = checked_add_u128(
+                to_local_value,
+                self.local_reserved_ckb_amount as u128,
+                "Local settlement reserved CKB",
+            )?;
+            to_remote_value = checked_add_u128(
+                to_remote_value,
+                self.remote_reserved_ckb_amount as u128,
+                "Remote settlement reserved CKB",
+            )?;
         }
 
         #[cfg(debug_assertions)]
@@ -7855,11 +9484,11 @@ impl ChannelActorState {
             );
         }
 
-        SettlementData {
+        Ok(SettlementData {
             local_amount: to_local_value,
             remote_amount: to_remote_value,
-            tlcs: self.get_active_tlcs_for_settlement(for_remote),
-        }
+            tlcs: self.get_active_tlcs_for_settlement(for_remote)?,
+        })
     }
 
     pub(crate) fn get_commitment_lock_script_xonly(&self, for_remote: bool) -> [u8; 32] {
@@ -7877,7 +9506,8 @@ impl ChannelActorState {
     fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<(PartialSignature, TransactionView, SettlementData), ProcessingChannelError> {
-        let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(true);
+        let (commitment_tx, settlement_data) =
+            self.build_commitment_tx_and_settlement_data(true)?;
         let funding_tx_partial_signature = self
             .get_funding_sign_context()
             .sign(&compute_tx_message(&commitment_tx))?;
@@ -7907,7 +9537,8 @@ impl ChannelActorState {
         &self,
         funding_tx_partial_signature: PartialSignature,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
-        let (commitment_tx, settlement_data) = self.build_commitment_tx_and_settlement_data(false);
+        let (commitment_tx, settlement_data) =
+            self.build_commitment_tx_and_settlement_data(false)?;
 
         let message = compute_tx_message(&commitment_tx);
         self.get_funding_verify_context()
@@ -7974,8 +9605,9 @@ impl ChannelActorState {
                 if force && !close_by_us => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
-                            "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}", &self.state)
-                        ));
+                    "Expecting commitment transaction confirmed event in unexpected state {:?} force {force} close_by_us {close_by_us}",
+                    &self.state
+                )));
             }
         };
 
@@ -8012,7 +9644,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn can_abort_funding_on_timeout(&self) -> bool {
+    pub(crate) fn can_abort_funding_on_timeout(&self) -> bool {
         // Can abort funding on timeout if the channel is not ready and we have
         // not signed the funding tx yet.
         match self.state {
@@ -8031,13 +9663,16 @@ impl ChannelActorState {
         }
     }
 
+    pub(crate) fn is_waiting_for_external_funding_submission(&self) -> bool {
+        self.ephemeral_config.external_funding.enabled
+            && !self.ephemeral_config.external_funding.signed_submitted
+    }
+
     fn has_funding_timeout_elapsed(&self) -> bool {
         if !self.can_abort_funding_on_timeout() {
             return false;
         }
-        let waiting_for_external_submission = self.ephemeral_config.external_funding.enabled
-            && !self.ephemeral_config.external_funding.signed_submitted;
-        let (started_at, timeout_seconds) = if waiting_for_external_submission {
+        let (started_at, timeout_seconds) = if self.is_waiting_for_external_funding_submission() {
             (
                 self.ephemeral_config
                     .external_funding
@@ -8060,7 +9695,7 @@ impl ChannelActorState {
 
     /// Perform the next step in shutting down the channel.
     async fn step_shutting_down(&mut self, flags: ShuttingDownFlags) -> ProcessingChannelResult {
-        let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+        let mut flags = flags;
 
         // Only automatically reply shutdown if only their shutdown message is sent.
         // If we are in a state other than only their shutdown is sent,
@@ -8100,9 +9735,47 @@ impl ChannelActorState {
     }
 }
 
+pub(crate) fn has_pending_tlc_for_payment_hash<S>(
+    store: &S,
+    current_state: &ChannelActorState,
+    payment_hash: Hash256,
+) -> bool
+where
+    S: ChannelActorStateStore,
+{
+    let has_matching_tlc = |state: &ChannelActorState| {
+        state
+            .tlc_state
+            .all_tlcs()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    };
+
+    if has_matching_tlc(current_state) {
+        return true;
+    }
+
+    let current_channel_id = current_state.get_id();
+    store
+        .get_channel_states(None)
+        .into_iter()
+        .filter(|(_, channel_id, _)| *channel_id != current_channel_id)
+        .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
+        .any(|state| has_matching_tlc(&state))
+}
+
 pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
+    fn insert_channel_actor_state_with_pending_commit_diff(
+        &self,
+        state: ChannelActorState,
+        diff: &CommitDiff,
+    ) {
+        let channel_id = state.get_id();
+        self.insert_channel_actor_state(state);
+        self.store_pending_commit_diff(&channel_id, diff);
+    }
+    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
     fn get_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256>;
     fn get_active_channel_ids_by_pubkey(&self, pubkey: &Pubkey) -> Vec<Hash256> {
@@ -8124,6 +9797,7 @@ pub trait ChannelActorStateStore {
             .collect()
     }
     fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState>;
     fn insert_payment_custom_records(
         &self,
         payment_hash: &Hash256,
@@ -8279,7 +9953,10 @@ impl Musig2SignContext {
                 if old.as_slice() != message {
                     panic!(
                         "Musig2 secnonce {:?} is reused for different messages: {:?} and {:?} backtrace: {}",
-                        self.secnonce.public_nonce(), old, message, Backtrace::capture()
+                        self.secnonce.public_nonce(),
+                        old,
+                        message,
+                        Backtrace::capture()
                     );
                 }
             }
@@ -8329,5 +10006,255 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             tlc_base_key: value.tlc_basepoint,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use fiber_types::{HashAlgorithm, TlcState};
+
+    fn channel_state_with_limits(
+        local_constraints: ChannelConstraints,
+        remote_constraints: ChannelConstraints,
+    ) -> ChannelActorState {
+        let signer = InMemorySigner::generate_from_seed(b"tlc-limit-local");
+        let remote_signer = InMemorySigner::generate_from_seed(b"tlc-limit-remote");
+
+        ChannelActorState {
+            core: ChannelActorData {
+                state: ChannelState::ChannelReady,
+                public_channel_info: None,
+                local_tlc_info: ChannelTlcInfo {
+                    enabled: true,
+                    ..Default::default()
+                },
+                remote_tlc_info: None,
+                local_pubkey: signer.funding_key.pubkey(),
+                remote_pubkey: remote_signer.funding_key.pubkey(),
+                id: Hash256::from([42; 32]),
+                funding_tx: None,
+                funding_tx_confirmed_at: None,
+                funding_udt_type_script: None,
+                is_acceptor: false,
+                is_one_way: false,
+                to_local_amount: 1_000_000,
+                to_remote_amount: 1_000_000,
+                local_reserved_ckb_amount: 0,
+                remote_reserved_ckb_amount: 0,
+                commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+                commitment_delay_epoch: DEFAULT_COMMITMENT_DELAY_EPOCHS,
+                funding_fee_rate: DEFAULT_FEE_RATE,
+                local_channel_public_keys: signer.get_base_public_keys(),
+                signer,
+                commitment_numbers: CommitmentNumbers::default(),
+                local_constraints,
+                remote_constraints,
+                tlc_state: TlcState::default(),
+                retryable_tlc_operations: VecDeque::new(),
+                waiting_forward_tlc_tasks: HashMap::new(),
+                remote_shutdown_script: None,
+                local_shutdown_script: Script::default(),
+                last_committed_remote_nonce: None,
+                remote_revocation_nonce_for_verify: None,
+                remote_revocation_nonce_for_send: None,
+                remote_revocation_nonce_for_next: None,
+                latest_commitment_transaction: None,
+                remote_commitment_points: Vec::new(),
+                remote_channel_public_keys: Some(remote_signer.get_base_public_keys()),
+                local_shutdown_info: None,
+                remote_shutdown_info: None,
+                shutdown_transaction_hash: None,
+                reestablishing: false,
+                last_revoke_ack_msg: None,
+                created_at: SystemTime::now(),
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
+                connectivity_state: ChannelConnectivityState::Online,
+                external_funding: None,
+            },
+            pending_reestablish_channel_ready: false,
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
+            waiting_peer_response: None,
+            reestablish_started_at: None,
+            network: None,
+            scheduled_channel_update_handle: None,
+            pending_notify_settle_tlcs: vec![],
+            ephemeral_config: ChannelEphemeralConfig::default(),
+            funding_abort_detail: None,
+            private_key: None,
+            needs_backup: false,
+        }
+    }
+
+    fn failed_remove_ack_confirmed_tlc(tlc_id: TLCId, amount: u128) -> TlcInfo {
+        let status = if tlc_id.is_offered() {
+            TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
+        } else {
+            TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
+        };
+
+        TlcInfo {
+            status,
+            tlc_id,
+            amount,
+            payment_hash: Hash256::from([u64::from(tlc_id) as u8; 32]),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            removed_reason: Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                &NO_SHARED_SECRET,
+            ))),
+            forwarding_tlc: None,
+            removed_confirmed_at: Some(1),
+            applied_flags: AppliedFlags::REMOVE,
+        }
+    }
+
+    fn committed_tlc(tlc_id: TLCId, amount: u128) -> TlcInfo {
+        let status = if tlc_id.is_offered() {
+            TlcStatus::Outbound(OutboundTlcStatus::Committed)
+        } else {
+            TlcStatus::Inbound(InboundTlcStatus::Committed)
+        };
+
+        TlcInfo {
+            status,
+            tlc_id,
+            amount,
+            payment_hash: Hash256::from([u64::from(tlc_id) as u8 + 1; 32]),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            removed_reason: None,
+            forwarding_tlc: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::ADD,
+        }
+    }
+
+    #[test]
+    fn failed_remove_ack_confirmed_tlcs_do_not_consume_number_limits() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 1),
+            ChannelConstraints::new(1_000_000, 1),
+        );
+        state
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 10));
+        assert!(
+            state.check_tlc_limits(10, true).is_ok(),
+            "settled failed offered TLC should not consume remote incoming number limit"
+        );
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 1),
+            ChannelConstraints::new(1_000_000, 1),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 10));
+        assert!(
+            state.check_tlc_limits(10, false).is_ok(),
+            "settled failed received TLC should not consume local incoming number limit"
+        );
+    }
+
+    #[test]
+    fn failed_remove_ack_confirmed_tlcs_do_not_consume_value_limits() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 10),
+            ChannelConstraints::new(100, 10),
+        );
+        state
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Offered(0), 90));
+        assert!(
+            state.check_tlc_limits(20, true).is_ok(),
+            "settled failed offered TLC should not consume remote incoming value limit"
+        );
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 10),
+            ChannelConstraints::new(100, 10),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 90));
+        assert!(
+            state.check_tlc_limits(20, false).is_ok(),
+            "settled failed received TLC should not consume local incoming value limit"
+        );
+    }
+
+    #[test]
+    fn active_received_tlcs_still_limit_peer_adds_with_settled_failed_tlcs_present() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 1),
+            ChannelConstraints::new(100, 1),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 90));
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(committed_tlc(TLCId::Received(1), 90));
+
+        assert!(matches!(
+            state.check_tlc_limits(1, false),
+            Err(ProcessingChannelError::TlcNumberExceedLimit)
+        ));
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(100, 10),
+            ChannelConstraints::new(100, 10),
+        );
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(failed_remove_ack_confirmed_tlc(TLCId::Received(0), 90));
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .push(committed_tlc(TLCId::Received(1), 90));
+        assert!(matches!(
+            state.check_tlc_limits(20, false),
+            Err(ProcessingChannelError::TlcValueInflightExceedLimit)
+        ));
     }
 }

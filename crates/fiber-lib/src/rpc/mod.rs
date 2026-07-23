@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+pub mod admin;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod biscuit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cch;
@@ -25,14 +27,14 @@ pub mod server {
     use crate::fiber::gossip::GossipMessageStore;
     #[cfg(feature = "watchtower")]
     use crate::invoice::PreimageStore;
+    use crate::rpc::admin::{AdminRpcServer, AdminRpcServerImpl};
     use crate::rpc::cch::{CchRpcServer, CchRpcServerImpl};
     use crate::rpc::channel::{ChannelRpcServer, ChannelRpcServerImpl};
     pub use crate::rpc::config::RpcConfig;
     #[cfg(debug_assertions)]
     use crate::rpc::dev::{DevRpcServer, DevRpcServerImpl};
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
-    use crate::rpc::info::InfoRpcServer;
-    use crate::rpc::info::InfoRpcServerImpl;
+    use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
     use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
@@ -77,6 +79,7 @@ pub mod server {
     use tracing::debug;
 
     use super::biscuit::BiscuitAuth;
+    use crate::store::actor::StoreActorMessage;
     use crate::store::store_impl::StoreChange;
     use ractor::{ActorCell, OutputPort};
 
@@ -273,6 +276,7 @@ pub mod server {
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
         store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
         store_change_port: Option<Arc<OutputPort<StoreChange>>>,
@@ -299,8 +303,12 @@ pub mod server {
         if config.is_module_enabled("invoice") {
             modules
                 .merge(
-                    InvoiceRpcServerImpl::new(store.clone(), network_actor.clone(), fiber_config)
-                        .into_rpc(),
+                    InvoiceRpcServerImpl::new(
+                        store.clone(),
+                        network_actor.clone(),
+                        fiber_config.clone(),
+                    )
+                    .into_rpc(),
                 )
                 .unwrap();
         }
@@ -369,6 +377,12 @@ pub mod server {
                         )
                         .into_rpc(),
                     )
+                    .unwrap();
+            }
+
+            if config.is_module_enabled("admin") {
+                modules
+                    .merge(AdminRpcServerImpl::new(store_actor).into_rpc())
                     .unwrap();
             }
 

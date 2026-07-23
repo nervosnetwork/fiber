@@ -21,6 +21,7 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::store::open_store;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
@@ -38,6 +39,9 @@ use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
 use fiber_types::protocol::AnnouncedNodeName;
+use fiber_types::{AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::{SettlementTlc, TLCId};
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -438,11 +442,11 @@ fn test_store_watchtower_preimage() {
     let path = TempDir::new("test-watchtower-store");
     let store = open_store(path).expect("created store failed");
 
-    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_a = NodeId::local();
     let preimage_a = gen_rand_sha256_hash();
     let payment_hash_a = blake2b_256(preimage_a).into();
 
-    let node_id_b = NodeId::local();
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
     let preimage_b = gen_rand_sha256_hash();
     let payment_hash_b = blake2b_256(preimage_b).into();
 
@@ -452,46 +456,166 @@ fn test_store_watchtower_preimage() {
     store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
     store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
 
-    assert!(
-        store.get_preimage(&payment_hash_a).is_some(),
-        "should return a watch preimage also"
-    );
     assert_eq!(
-        store.get_watch_preimage(&payment_hash_a).unwrap(),
+        store
+            .get_watch_preimage(&node_id_a, &payment_hash_a)
+            .unwrap(),
         preimage_a,
         "query watch preimage"
+    );
+    assert!(
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_a)
+            .is_none(),
+        "watch preimage should be scoped by node"
+    );
+    assert!(
+        store.get_preimage(&payment_hash_a).is_some(),
+        "normal preimage lookup should still read local watchtower preimages"
+    );
+    assert!(
+        store.get_preimage(&payment_hash_b).is_none(),
+        "normal preimage lookup must not read another node's watchtower preimage"
     );
 
     // watch preimage should not return a node preimage
     store.insert_preimage(payment_hash_c, preimage_c);
     assert!(
-        store.get_watch_preimage(&payment_hash_c).is_none(),
+        store
+            .get_watch_preimage(&node_id_a, &payment_hash_c)
+            .is_none(),
         "query non exist watch preimage"
     );
 
     assert!(
         store
-            .search_preimage(&payment_hash_c.as_ref()[..20])
+            .search_preimage(&node_id_a, &payment_hash_c.as_ref()[..20])
             .is_none(),
         "search a non exist watch preimage"
     );
     // search preimage only returns watch preimage
     assert_eq!(
         store
-            .search_preimage(&payment_hash_a.as_ref()[..20])
+            .search_preimage(&node_id_a, &payment_hash_a.as_ref()[..20])
             .unwrap(),
         preimage_a,
         "search"
     );
+    assert!(
+        store
+            .search_preimage(&node_id_b, &payment_hash_a.as_ref()[..20])
+            .is_none(),
+        "search should not cross node scope"
+    );
 
     // delete preimage with wrong node
     store.remove_watch_preimage(node_id_a, payment_hash_b);
-    assert!(store.get_watch_preimage(&payment_hash_b).is_some(), "exist");
-
-    store.remove_watch_preimage(node_id_b, payment_hash_b);
     assert!(
-        store.get_watch_preimage(&payment_hash_b).is_none(),
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_b)
+            .is_some(),
+        "exist"
+    );
+
+    store.remove_watch_preimage(node_id_b.clone(), payment_hash_b);
+    assert!(
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_b)
+            .is_none(),
         "removed"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_search_is_node_scoped_with_same_prefix() {
+    let path = TempDir::new("test-watchtower-store-same-prefix");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
+
+    let preimage_a = gen_rand_sha256_hash();
+    let preimage_b = gen_rand_sha256_hash();
+
+    let mut payment_hash_bytes = [7u8; 32];
+    payment_hash_bytes[31] = 1;
+    let payment_hash_a: Hash256 = payment_hash_bytes.into();
+
+    payment_hash_bytes[31] = 2;
+    let payment_hash_b: Hash256 = payment_hash_bytes.into();
+
+    let payment_hash_prefix = &payment_hash_a.as_ref()[..20];
+
+    store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
+    store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
+
+    assert_eq!(
+        store.search_preimage(&node_id_a, payment_hash_prefix),
+        Some(preimage_a),
+        "search should skip another node's preimage with the same prefix"
+    );
+    assert_eq!(
+        store.search_preimage(&node_id_b, payment_hash_prefix),
+        Some(preimage_b),
+        "search should still find the matching node's preimage"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
+    let path = TempDir::new("test-watchtower-preimage-gc-waits");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = blake2b_256(preimage).into();
+    let local_settlement_key = Privkey::from(&[1; 32]);
+    let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+    let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
+    let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 42,
+            payment_hash,
+            expiry: now_timestamp_as_millis_u64() + 60_000,
+            local_key: Privkey::from(&[5; 32]),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        local_settlement_key,
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        settlement_data,
+    );
+    store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
+
+    store.remove_watch_preimage(node_id.clone(), payment_hash);
+    assert_eq!(
+        store.get_watch_preimage(&node_id, &payment_hash),
+        Some(preimage),
+        "preimage is retained while a watched TLC still references it"
+    );
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20].try_into().unwrap();
+    store.update_tlc_settled(&channel_id, payment_hash_prefix);
+    assert!(
+        store.get_watch_preimage(&node_id, &payment_hash).is_none(),
+        "watchtower GC removes the preimage after the watched TLC is settled"
     );
 }
 
@@ -663,6 +787,7 @@ fn test_channel_actor_state_store() {
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![TlcReplayUpdate::Add(AddTlc {
                 channel_id,
@@ -674,9 +799,11 @@ fn test_channel_actor_state_store() {
                 onion_packet: None,
             })],
             last_was_revoke: true,
+            external_funding: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
+        reestablish_started_at: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -684,7 +811,9 @@ fn test_channel_actor_state_store() {
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
+        needs_backup: false,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -724,9 +853,10 @@ fn test_channel_actor_state_store() {
         .is_none());
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_serde_channel_actor_state_ciborium() {
+fn sample_channel_actor_state(
+    state: ChannelState,
+    shutdown_transaction_hash: Option<H256>,
+) -> ChannelActorState {
     let seed = [0u8; 32];
     let signer = InMemorySigner::generate_from_seed(&seed);
 
@@ -737,9 +867,9 @@ fn test_serde_channel_actor_state_ciborium() {
     let sec_nonce = SecNonce::build(seckey).build();
     let pub_nonce = sec_nonce.public_nonce();
 
-    let state = ChannelActorState {
+    ChannelActorState {
         core: ChannelActorData {
-            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            state,
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -799,19 +929,22 @@ fn test_serde_channel_actor_state_ciborium() {
             ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
-            shutdown_transaction_hash: None,
+            shutdown_transaction_hash,
             local_reserved_ckb_amount: 100,
             remote_reserved_ckb_amount: 100,
             latest_commitment_transaction: None,
             local_constraints: ChannelConstraints::default(),
             remote_constraints: ChannelConstraints::default(),
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
+            external_funding: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
+        reestablish_started_at: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -819,13 +952,60 @@ fn test_serde_channel_actor_state_ciborium() {
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: Default::default(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
-    };
+        needs_backup: false,
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_serde_channel_actor_state_ciborium() {
+    let state = sample_channel_actor_state(
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+        None,
+    );
 
     let mut serialized = Vec::new();
     ciborium::into_writer(&state, &mut serialized).unwrap();
     let _new_channel_state: ChannelActorState =
         ciborium::from_reader(serialized.as_slice()).expect("deserialize to new state");
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_closed_onchain_settlement_state_round_trips() {
+    let state = sample_channel_actor_state(
+        ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        ),
+        Some(H256::default()),
+    );
+    let (store, _dir) = generate_store();
+
+    store.insert_channel_actor_state(state.clone());
+
+    let restored = store
+        .get_channel_actor_state(&state.id)
+        .expect("restored closed channel state");
+    assert!(matches!(
+        restored.state,
+        ChannelState::Closed(flags)
+            if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+    ));
+    assert_eq!(
+        restored.shutdown_transaction_hash,
+        state.shutdown_transaction_hash
+    );
+    assert!(restored.waiting_peer_response.is_none());
+    assert!(restored.network.is_none());
+    assert!(restored.scheduled_channel_update_handle.is_none());
+    assert!(restored.pending_notify_settle_tlcs.is_empty());
+    assert!(!restored.pending_reestablish_channel_ready);
+    assert!(!restored.defer_peer_tlc_updates);
+    assert!(restored.deferred_peer_tlc_updates.is_empty());
+    assert!(restored.private_key.is_none());
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -1103,12 +1283,38 @@ fn test_store_change_watcher() {
         .insert_invoice(invoice.clone(), Some(preimage))
         .unwrap();
 
+    let payment_data = SendPaymentDataBuilder::new(gen_rand_fiber_public_key(), 100, payment_hash)
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .timeout(Some(10))
+        .max_fee_amount(Some(1000))
+        .build()
+        .expect("valid payment_data");
+    let payment_session = PaymentSession::new_session(&store, payment_data, 10);
+    let source = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let route_hops = vec![PaymentHopData {
+        amount: 100,
+        expiry: DEFAULT_TLC_EXPIRY_DELTA,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(1, source, target, route_hops);
+    attempt.set_inflight_status();
+    store.insert_attempt(attempt);
+
     let changes = saver.changes.read().unwrap();
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutCkbInvoiceStatus { payment_hash: h, invoice_status: CkbInvoiceStatus::Open } if h == &payment_hash)
     ));
     assert!(changes.iter().any(
         |e| matches!(e, StoreChange::PutPreimage { payment_hash: h, payment_preimage: i } if h == &payment_hash && i == &preimage)
+    ));
+    assert!(changes.iter().any(
+        |e| matches!(e, StoreChange::PutAttempt { payment_hash: h, attempt_status: AttemptStatus::Inflight } if h == &payment_hash)
     ));
 }
 
@@ -1280,4 +1486,142 @@ fn test_store_get_broadcast_messages_reverse_excludes_cursor() {
     assert!(store
         .get_broadcast_messages_reverse(Some(&first_cursor), 1)
         .is_empty());
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod store_actor_tests {
+    use crate::actors::RootActor;
+    use crate::store::actor::{StoreActor, StoreActorInitializationParameter, StoreActorMessage};
+    use crate::tasks::{new_tokio_cancellation_token, new_tokio_task_tracker};
+    use fiber_store::backend::TakeWhileFn;
+    use fiber_store::{IteratorDirection, KVPair, StorageBackend, StoreError};
+    use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::time::{advance, sleep};
+
+    struct MockStore {
+        backup_count: Arc<AtomicUsize>,
+    }
+
+    impl StorageBackend for MockStore {
+        type Batch = <fiber_store::Store as StorageBackend>::Batch;
+
+        fn get<K: AsRef<[u8]>>(&self, _key: K) -> Option<Vec<u8>> {
+            todo!()
+        }
+        fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, _key: K, _value: V) {
+            todo!()
+        }
+        fn delete<K: AsRef<[u8]>>(&self, _key: K) {
+            todo!()
+        }
+        fn batch(&self) -> Self::Batch {
+            todo!()
+        }
+        fn collect_iterator(
+            &self,
+            _: Vec<u8>,
+            _: IteratorDirection,
+            _: TakeWhileFn,
+            _: usize,
+        ) -> Vec<KVPair> {
+            todo!()
+        }
+        fn restore(&self, _: &Path, _: &Path) -> Result<(), StoreError> {
+            todo!()
+        }
+
+        fn backup(&self, _path: &std::path::Path) -> Result<(), StoreError> {
+            self.backup_count.fetch_add(1, SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_store_actor_buffered_backup() {
+        let backup_count = Arc::new(AtomicUsize::new(0));
+        let mock_store = MockStore {
+            backup_count: Arc::clone(&backup_count),
+        };
+        let temp_dir = tempdir().unwrap();
+
+        let (tracker, token) = (new_tokio_task_tracker(), new_tokio_cancellation_token());
+        let root_actor = RootActor::start_for_test(tracker, token).await;
+
+        let args = StoreActorInitializationParameter {
+            store: mock_store,
+            backup_path: temp_dir.path().to_path_buf(),
+            ckb_key_path: temp_dir.path().to_path_buf(),
+            fiber_key_path: temp_dir.path().to_path_buf(),
+            backup_interval_hours: 24,
+        };
+
+        let (store_actor, _handle) =
+            ractor::Actor::spawn_linked(None, StoreActor::new(), args, root_actor.get_cell())
+                .await
+                .unwrap();
+
+        // First request should trigger the backup immediately
+        store_actor.cast(StoreActorMessage::RequestBackup).unwrap();
+        tokio::task::yield_now().await;
+        sleep(Duration::from_millis(100)).await;
+
+        advance(Duration::from_secs(61)).await;
+        sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            backup_count.load(SeqCst),
+            1,
+            "The backup request must be executed."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_store_actor_backup_throttling() {
+        let backup_count = Arc::new(AtomicUsize::new(0));
+        let mock_store = MockStore {
+            backup_count: Arc::clone(&backup_count),
+        };
+        let temp_dir = tempdir().unwrap();
+        let (tracker, token) = (new_tokio_task_tracker(), new_tokio_cancellation_token());
+        let root_actor = RootActor::start_for_test(tracker, token).await;
+
+        let (store_actor, _) = ractor::Actor::spawn_linked(
+            None,
+            StoreActor::new(),
+            StoreActorInitializationParameter {
+                store: mock_store,
+                backup_path: temp_dir.path().to_path_buf(),
+                ckb_key_path: temp_dir.path().to_path_buf(),
+                fiber_key_path: temp_dir.path().to_path_buf(),
+                backup_interval_hours: 24,
+            },
+            root_actor.get_cell(),
+        )
+        .await
+        .unwrap();
+
+        // Trigger initial backup
+        store_actor.cast(StoreActorMessage::RequestBackup).unwrap();
+        tokio::task::yield_now().await;
+
+        // Send multiple requests within the 60-second cooldown period
+        for _ in 0..20 {
+            store_actor.cast(StoreActorMessage::RequestBackup).unwrap();
+        }
+        tokio::task::yield_now().await;
+
+        advance(Duration::from_secs(61)).await;
+        sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(
+            backup_count.load(SeqCst),
+            1,
+            "Requests during cooldown should be throttled and not trigger new backups."
+        );
+    }
 }

@@ -1,0 +1,72 @@
+meta {
+  name: Node1 get payment decoded final error
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {
+        "payment_hash": "{{HOLD_PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  PAYMENT_FAILED_MAX_ITERATIONS: 20
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  const result = res.body.result;
+  const iteration = Number(bru.getVar("PAYMENT_FAILED_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("PAYMENT_FAILED_MAX_ITERATIONS"));
+
+  console.log("payment status: ", result);
+
+  if (result.status !== "Failed") {
+    if (iteration + 1 < maxIterations) {
+      bru.setVar("PAYMENT_FAILED_ITERATION", iteration + 1);
+      await new Promise(r => setTimeout(r, 1000));
+      bru.setNextRequest("Node1 get payment decoded final error");
+      return;
+    }
+
+    bru.setVar("PAYMENT_FAILED_ITERATION", 0);
+    throw new Error(`payment did not fail, last_status=${String(result.status)}`);
+  }
+
+  bru.setVar("PAYMENT_FAILED_ITERATION", 0);
+
+  const failedError = result.failed_error || "";
+  if (failedError.includes("InvalidOnionError")) {
+    throw new Error(
+      `expected decoded final-hop error, got InvalidOnionError`,
+    );
+  }
+  if (!failedError.includes("InvoiceCancelled") && !failedError.includes("HoldTlcTimeout")) {
+    throw new Error(
+      `expected decoded final-hop error, got failed_error=${failedError}`,
+    );
+  }
+}

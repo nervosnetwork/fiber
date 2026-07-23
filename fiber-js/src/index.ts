@@ -15,8 +15,8 @@ const DEFAULT_BUFFER_SIZE = 50 * (1 << 20);
  * A Fiber Wasm instance
  */
 class Fiber {
-    private dbWorker: Worker | null
-    private fiberWorker: Worker | null
+    private dbWorker: Worker
+    private fiberWorker: Worker
     private inputBuffer: SharedArrayBuffer
     private outputBuffer: SharedArrayBuffer
     private commandInvokeLock: Mutex;

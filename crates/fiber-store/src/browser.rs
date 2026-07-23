@@ -1,7 +1,9 @@
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
+use fiber_wasm_db_common::load_command;
 use fiber_wasm_db_common::read_command_payload;
+use fiber_wasm_db_common::store_command;
 use fiber_wasm_db_common::write_command_with_payload;
 use fiber_wasm_db_common::DbCommandRequest;
 use fiber_wasm_db_common::DbCommandResponse;
@@ -13,7 +15,6 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use tracing::info;
-use tracing::trace;
 use tracing::warn;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsCast;
@@ -25,6 +26,7 @@ use web_sys::js_sys::Uint8Array;
 
 use crate::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use crate::iterator::{IteratorDirection, KVPair};
+use crate::StoreError;
 
 type TakeWhileCallback = Box<dyn Fn(&[u8]) -> bool + 'static>;
 
@@ -67,7 +69,7 @@ impl Store {
             output_i32_arr,
             ..
         } = &self.chan;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(output_i32_arr, OutputCommand::Waiting as i32).unwrap();
         write_command_with_payload(
             InputCommand::Shutdown as i32,
             (),
@@ -167,6 +169,18 @@ impl StorageBackend for Store {
             })
             .collect()
     }
+
+    fn backup(&self, _path: &Path) -> Result<(), StoreError> {
+        Err(StoreError::BackupError(
+            "Not supported on browser yet".into(),
+        ))
+    }
+
+    fn restore(&self, _restore_path: &Path, _db_path: &Path) -> Result<(), StoreError> {
+        Err(StoreError::RestoreError(
+            "Not supported on browser yet".into(),
+        ))
+    }
 }
 
 pub struct Batch {
@@ -188,12 +202,14 @@ impl BatchWriter for Batch {
     }
 
     fn commit(self) {
-        self.chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Delete { keys: self.delete })
-            .expect("Failed to delete batch");
-        self.chan
-            .dispatch_database_command(DbCommandRequestWithTakeWhile::Put { kvs: self.puts })
-            .expect("Failed to put batch");
+        if !self.delete.is_empty() || !self.puts.is_empty() {
+            self.chan
+                .dispatch_database_command(DbCommandRequestWithTakeWhile::BatchWrite {
+                    deletes: self.delete,
+                    puts: self.puts,
+                })
+                .expect("Failed to commit batch");
+        }
     }
 }
 
@@ -256,7 +272,7 @@ impl CommunicationChannel {
             output_i32_arr,
             output_u8_arr,
         } = &self;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(output_i32_arr, OutputCommand::Waiting as i32).unwrap();
         write_command_with_payload(
             InputCommand::OpenDatabase as i32,
             store_name,
@@ -265,8 +281,14 @@ impl CommunicationChannel {
         )
         .with_context(|| anyhow!("Failed to write db command"))
         .unwrap();
-        Atomics::wait(output_i32_arr, 0, OutputCommand::Waiting as i32).unwrap();
-        let output_cmd = OutputCommand::try_from(output_i32_arr.get_index(0)).unwrap();
+        let output_cmd = loop {
+            Atomics::wait(output_i32_arr, 0, OutputCommand::Waiting as i32).unwrap();
+            let output_cmd =
+                OutputCommand::try_from(load_command(output_i32_arr).unwrap()).unwrap();
+            if !matches!(output_cmd, OutputCommand::Waiting) {
+                break output_cmd;
+            }
+        };
         match output_cmd {
             OutputCommand::OpenDatabaseResponse => {
                 DB_INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -298,6 +320,9 @@ impl CommunicationChannel {
             DbCommandRequestWithTakeWhile::Delete { keys } => {
                 (DbCommandRequest::Delete { keys }, None)
             }
+            DbCommandRequestWithTakeWhile::BatchWrite { deletes, puts } => {
+                (DbCommandRequest::BatchWrite { deletes, puts }, None)
+            }
             DbCommandRequestWithTakeWhile::Iterator {
                 start,
                 direction,
@@ -312,14 +337,13 @@ impl CommunicationChannel {
                 Some(take_while),
             ),
         };
-        trace!("Dispatching database command: {:?}", ipc_cmd);
         let CommunicationChannel {
             input_i32_arr,
             input_u8_arr,
             output_i32_arr,
             output_u8_arr,
         } = self;
-        output_i32_arr.set_index(0, InputCommand::Waiting as i32);
+        store_command(output_i32_arr, OutputCommand::Waiting as i32).unwrap();
         write_command_with_payload(
             InputCommand::DbRequest as i32,
             ipc_cmd,
@@ -329,8 +353,11 @@ impl CommunicationChannel {
         .with_context(|| anyhow!("Failed to write db command"))?;
         loop {
             Atomics::wait(output_i32_arr, 0, OutputCommand::Waiting as i32).unwrap();
-            let output_cmd = OutputCommand::try_from(output_i32_arr.get_index(0)).unwrap();
-            output_i32_arr.set_index(0, 0);
+            let output_cmd = OutputCommand::try_from(load_command(output_i32_arr)?).unwrap();
+            if matches!(output_cmd, OutputCommand::Waiting) {
+                continue;
+            }
+            store_command(output_i32_arr, OutputCommand::Waiting as i32)?;
             match output_cmd {
                 OutputCommand::OpenDatabaseResponse | OutputCommand::Waiting => unreachable!(),
                 OutputCommand::RequestTakeWhile => {
@@ -340,11 +367,6 @@ impl CommunicationChannel {
                         "Received RequestTakeWhile but no take_while callback was provided",
                     )(&key);
 
-                    trace!(
-                        "Received take_while request for key {:?}, result {}",
-                        key,
-                        result
-                    );
                     write_command_with_payload(
                         InputCommand::ResponseTakeWhile as i32,
                         result,
@@ -381,6 +403,10 @@ pub enum DbCommandRequestWithTakeWhile {
     },
     Delete {
         keys: Vec<Vec<u8>>,
+    },
+    BatchWrite {
+        deletes: Vec<Vec<u8>>,
+        puts: Vec<KV>,
     },
     Iterator {
         start: Vec<u8>,

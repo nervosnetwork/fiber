@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use bitmask_enum::bitmask;
+use ckb_sdk::RpcError;
 use ckb_types::core::tx_pool::TxStatus;
 use ractor::{concurrency::Duration, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
@@ -8,6 +9,22 @@ use crate::ckb::config::new_ckb_rpc_async_client;
 use fiber_types::Hash256;
 
 use super::jsonrpc_types_convert::tx_status_from_json;
+
+const SYNTHETIC_REJECT_REASON: &str = "Transaction rejected when submitting";
+
+/// Permanent SendTx RPC errors that indicate the transaction cannot be accepted into the pool.
+pub(crate) fn is_permanent_send_tx_error(err: &RpcError) -> bool {
+    match err {
+        RpcError::Rpc(e) => {
+            if e.code.code() == -301 {
+                return true;
+            }
+            e.message.contains("TransactionFailedToResolve")
+        }
+        RpcError::Other(e) => e.to_string().contains("TransactionFailedToResolve"),
+        _ => false,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CkbTxTracingResult {
@@ -72,6 +89,7 @@ struct CkbTxTracersForTheSameTx {
     last_status: TxStatus,
     last_block: u64,
     tracers: Vec<CkbTxTracer>,
+    send_tx_error: Option<RpcError>,
 }
 
 impl Default for CkbTxTracersForTheSameTx {
@@ -80,6 +98,7 @@ impl Default for CkbTxTracersForTheSameTx {
             last_status: TxStatus::Unknown,
             last_block: 0,
             tracers: Default::default(),
+            send_tx_error: None,
         }
     }
 }
@@ -100,8 +119,7 @@ pub enum InternalMessage {
 pub enum CkbTxTracingMessage {
     CreateTracer(CkbTxTracer),
     RemoveTracers(Hash256),
-    // Tell tracer that the tx has been rejected when trying to send it.
-    ReportRejected(Hash256),
+    ReportSendTxError(Hash256, RpcError),
 
     Internal(InternalMessage),
 }
@@ -111,7 +129,7 @@ impl CkbTxTracingMessage {
         Self::Internal(InternalMessage::RunTracers)
     }
 
-    fn report_tracing_result(result: CkbTxTracingResult, tip_block_number: u64) -> Self {
+    pub(crate) fn report_tracing_result(result: CkbTxTracingResult, tip_block_number: u64) -> Self {
         Self::Internal(InternalMessage::ReportTracingResult(
             result,
             tip_block_number,
@@ -142,17 +160,15 @@ impl Actor for CkbTxTracingActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbTxTracingMessage::{CreateTracer, Internal, RemoveTracers, ReportRejected};
+        use CkbTxTracingMessage::{CreateTracer, Internal, RemoveTracers, ReportSendTxError};
 
         match message {
             CreateTracer(arguments) => state.create_tracer(myself, arguments).await,
             RemoveTracers(arguments) => state.remove_tracers(arguments),
-            ReportRejected(tx_hash) => state.report_rejected(myself, tx_hash).await,
+            ReportSendTxError(tx_hash, err) => state.report_send_tx_error(tx_hash, err),
             Internal(InternalMessage::RunTracers) => state.run_tracers(myself, None).await,
             Internal(InternalMessage::ReportTracingResult(result, tip_block_number)) => {
-                state
-                    .report_tracing_result(myself, result, tip_block_number)
-                    .await
+                state.report_tracing_result(result, Some(tip_block_number))
             }
         }
     }
@@ -187,36 +203,6 @@ impl CkbTxTracingState {
         Ok(())
     }
 
-    async fn report_rejected(
-        &mut self,
-        myself: ActorRef<CkbTxTracingMessage>,
-        tx_hash: Hash256,
-    ) -> Result<(), ActorProcessingErr> {
-        // Get tip block number for reporting
-        let ckb_client = new_ckb_rpc_async_client(&self.rpc_url);
-        let tip_block_number = match ckb_client.get_tip_block_number().await {
-            Ok(n) => u64::from(n),
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to get tip block number when reporting rejected tx {}: {:?}",
-                    tx_hash,
-                    err
-                );
-                return Ok(());
-            }
-        };
-
-        // Create a rejected result
-        let result = CkbTxTracingResult {
-            tx_hash,
-            tx_status: TxStatus::Rejected("Transaction rejected when submitting".to_string()),
-        };
-
-        // Report the result which will trigger callbacks for tracers with Rejected mask
-        self.report_tracing_result(myself, result, tip_block_number)
-            .await
-    }
-
     /// Run the tracers to check the txs statuses.
     ///
     /// When `tx_hashes` is None, all tracers are checked. Otherwise only the specified tx hashes are checked.
@@ -237,11 +223,28 @@ impl CkbTxTracingState {
         Ok(())
     }
 
-    async fn report_tracing_result(
+    fn report_send_tx_error(
         &mut self,
-        _myself: ActorRef<CkbTxTracingMessage>,
+        tx_hash: Hash256,
+        err: RpcError,
+    ) -> Result<(), ActorProcessingErr> {
+        if !is_permanent_send_tx_error(&err) {
+            return Ok(());
+        }
+
+        let Some(tx_tracers) = self.tracers.get_mut(&tx_hash) else {
+            return Ok(());
+        };
+
+        tx_tracers.send_tx_error = Some(err);
+
+        Ok(())
+    }
+
+    fn report_tracing_result(
+        &mut self,
         result: CkbTxTracingResult,
-        tip_block_number: u64,
+        tip_block_number: Option<u64>,
     ) -> Result<(), ActorProcessingErr> {
         let tx_tracers = if let Some(tx_tracers) = self.tracers.get_mut(&result.tx_hash) {
             tx_tracers
@@ -249,31 +252,61 @@ impl CkbTxTracingState {
             return Ok(());
         };
 
-        let tx_status = result.tx_status.clone();
+        let polled_status = result.tx_status.clone();
 
-        match tx_status {
-            TxStatus::Committed(block_number, ..) => {
-                // Always use the latest committed block number
-                tx_tracers.last_block = block_number;
-            }
-            _ => {
-                // Otherwise, use tip block number when first entered this status
-                if tx_tracers.last_block == 0 || tx_status != tx_tracers.last_status {
-                    tx_tracers.last_block = tip_block_number
+        if !matches!(polled_status, TxStatus::Unknown) {
+            tx_tracers.send_tx_error = None;
+        }
+
+        let synthesized_rejection = matches!(polled_status, TxStatus::Unknown)
+            && tx_tracers
+                .send_tx_error
+                .as_ref()
+                .is_some_and(is_permanent_send_tx_error);
+
+        let tx_status = if synthesized_rejection {
+            TxStatus::Rejected(SYNTHETIC_REJECT_REASON.to_string())
+        } else {
+            polled_status.clone()
+        };
+
+        let effective_result = CkbTxTracingResult {
+            tx_hash: result.tx_hash,
+            tx_status: tx_status.clone(),
+        };
+
+        if let Some(tip_block_number) = tip_block_number {
+            match tx_status {
+                TxStatus::Committed(block_number, ..) => {
+                    // Always use the latest committed block number
+                    tx_tracers.last_block = block_number;
+                }
+                _ => {
+                    // Otherwise, use tip block number when first entered this status
+                    if tx_tracers.last_block == 0 || tx_status != tx_tracers.last_status {
+                        tx_tracers.last_block = tip_block_number
+                    }
                 }
             }
         }
         tx_tracers.last_status = tx_status.clone();
 
+        let last_block = tx_tracers.last_block;
+        let has_enough_confirmations = |tracer: &CkbTxTracer| {
+            tip_block_number
+                .map(|tip_block_number| {
+                    tip_block_number.saturating_sub(last_block) >= tracer.confirmations
+                })
+                .unwrap_or(false)
+        };
+
         // Leave only tracers not fired
         for i in (0..tx_tracers.tracers.len()).rev() {
             let tracer = &tx_tracers.tracers[i];
-            if tracer.mask.contains((&tx_status).into())
-                && tip_block_number.saturating_sub(tx_tracers.last_block) >= tracer.confirmations
-            {
+            if tracer.mask.contains((&tx_status).into()) && has_enough_confirmations(tracer) {
                 let tracer = tx_tracers.tracers.swap_remove(i);
                 // ignore the error if the receiver is dropped
-                let _ = tracer.callback.send(result.clone());
+                let _ = tracer.callback.send(effective_result.clone());
             }
         }
 

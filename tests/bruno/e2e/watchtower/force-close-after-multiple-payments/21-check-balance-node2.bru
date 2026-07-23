@@ -35,7 +35,37 @@ script:pre-request {
   req.setBody(body);
 }
 
+vars:post-response {
+  BALANCE_CHECK_MAX_ITERATIONS: 6
+}
+
 assert {
-  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): lt 1500000
-  Number(BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"))): gt 1498000
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const minDelta = BigInt("1498000");
+  const maxDelta = BigInt("1500000");
+  const delta = BigInt(res.body.result.capacity) - BigInt(bru.getVar("NODE2_BALANCE"));
+  const iteration = Number(bru.getVar("WATCHTOWER_BALANCE_CHECK_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("BALANCE_CHECK_MAX_ITERATIONS"));
+
+  if (delta > minDelta && delta < maxDelta) {
+    return;
+  }
+
+  if (iteration + 1 < maxIterations) {
+    console.log(
+      `Node2 balance is not settled yet: delta=${delta}, retry=${iteration + 1}/${maxIterations}`,
+    );
+    bru.setVar("WATCHTOWER_BALANCE_CHECK_ITERATION", iteration + 1);
+    bru.setNextRequest("generate a few blocks for final settlement tx to be committed");
+    return;
+  }
+
+  bru.setVar("WATCHTOWER_BALANCE_CHECK_ITERATION", 0);
+  throw new Error(
+    `Node2 balance delta=${delta} is outside expected range (${minDelta}, ${maxDelta})`,
+  );
 }

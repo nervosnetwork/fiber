@@ -7,6 +7,30 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    name: Detect channel_restart_stress Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      channel_restart_stress: ${{ steps.filter.outputs.channel_restart_stress }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            channel_restart_stress:
+              - '.github/workflows/ci.yml'
+              - '.config/nextest.toml'
+              - 'crates/fiber-lib/src/fiber/channel.rs'
+              - 'crates/fiber-lib/src/fiber/network.rs'
+              - 'crates/fiber-lib/src/fiber/payment.rs'
+              - 'crates/fiber-lib/src/fiber/tests/channel_restart_stress.rs'
+              - 'crates/fiber-lib/src/fiber/tests/utils.rs'
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -56,6 +80,27 @@ jobs:
       - name: Run tests (sqlite)
         run: |
           RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run --no-fail-fast --no-default-features --features sqlite
+        env:
+          RUST_TEST_THREADS: 2
+
+  channel_restart_stress:
+    name: channel_restart_stress
+    needs: [changes]
+    if: needs.changes.outputs.channel_restart_stress == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: channel-restart-stress-${{ runner.os }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Run channel_restart_stress tests
+        run: |
+          RUST_BACKTRACE=full RUST_LOG=trace,fnn=trace,fnn::cch::actor::tracker=off,fnn::fiber::gossip=off,tentacle=off,tokio_yamux=off,tentacle_secio=off cargo nextest run -p fnn --lib --features rocksdb --run-ignored only --no-fail-fast -j 1 -- fiber::tests::channel_restart_stress::test_node_restart --exact
         env:
           RUST_TEST_THREADS: 2
 
@@ -146,9 +191,126 @@ jobs:
         if: contains(matrix.os, 'windows')
         run: |
           vcpkg integrate install
-          vcpkg install openssl:x64-windows-static-md
+          vcpkg install openssl:x64-windows-static
       - name: Build with profile
+        env:
+          RUSTFLAGS: ${{ contains(matrix.os, 'windows') && '-C target-feature=+crt-static' || '' }}
         run: cargo build --locked --verbose --profile ${{ matrix.profile }}
+      - name: Smoke test Windows store open
+        if: contains(matrix.os, 'windows')
+        run: |
+          $profileDir = if ("${{ matrix.profile }}" -eq "release") { "release" } else { "debug" }
+          & .github/actions/build-release-package/helpers/smoke-test-windows-store.ps1 -Executable "target\$profileDir\fnn.exe" -Name "fnn-smoke-${{ matrix.profile }}"
+
+  windows-release-test:
+    name: Windows release package test
+    runs-on: windows-2022
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.body || '', '#windows-release-test')
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release-test-${{ runner.os }}
+      - name: Build Windows release package
+        id: package
+        uses: ./.github/actions/build-release-package
+        with:
+          os: windows-2022
+          package-name: fnn_pr${{ github.event.pull_request.number }}_x86_64-windows.tar.gz
+          bin-suffix: .exe
+          windows-dependencies: minimal
+      - name: Upload Windows release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fnn-pr${{ github.event.pull_request.number }}-x86_64-windows
+          path: ${{ steps.package.outputs.package_name }}
+
+  linux-release-test:
+    name: Linux release package test (${{ matrix.pkg_suffix }})
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.body || '', '#linux-release-test')
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            pkg_suffix: x86_64-linux-portable
+            bin_suffix: ''
+            portable: true
+            openssl_configure: linux-x86_64 shared
+          - os: ubuntu-24.04
+            pkg_suffix: x86_64-linux
+            bin_suffix: ''
+            portable: false
+            openssl_configure: ''
+          - os: ubuntu-22.04-arm
+            pkg_suffix: aarch64-linux-portable
+            bin_suffix: ''
+            portable: true
+            openssl_configure: linux-aarch64 shared
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-release-test-${{ matrix.pkg_suffix }}
+      - name: Build Linux release package
+        id: package
+        uses: ./.github/actions/build-release-package
+        with:
+          os: ${{ matrix.os }}
+          package-name: fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz
+          bin-suffix: ${{ matrix.bin_suffix }}
+          portable: ${{ matrix.portable }}
+          openssl-configure: ${{ matrix.openssl_configure }}
+      - name: Upload Linux release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fnn-pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}
+          path: ${{ steps.package.outputs.package_name }}
+
+  macos-release-test:
+    name: macOS release package test (${{ matrix.pkg_suffix }})
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.body || '', '#macos-release-test')
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            pkg_suffix: aarch64-darwin-portable
+            bin_suffix: ''
+            portable: true
+            openssl_configure: ''
+          - os: macos-15-intel
+            pkg_suffix: x86_64-darwin-portable
+            bin_suffix: ''
+            portable: true
+            openssl_configure: ''
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-release-test-${{ matrix.pkg_suffix }}
+      - name: Build macOS release package
+        id: package
+        uses: ./.github/actions/build-release-package
+        with:
+          os: ${{ matrix.os }}
+          package-name: fnn_pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}.tar.gz
+          bin-suffix: ${{ matrix.bin_suffix }}
+          portable: ${{ matrix.portable }}
+          openssl-configure: ${{ matrix.openssl_configure }}
+      - name: Upload macOS release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: fnn-pr${{ github.event.pull_request.number }}-${{ matrix.pkg_suffix }}
+          path: ${{ steps.package.outputs.package_name }}
 
   benchmark:
     name: Benchmark (Non-Gossip)

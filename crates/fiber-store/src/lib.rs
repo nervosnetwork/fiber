@@ -11,6 +11,8 @@ pub use iterator::{IteratorDirection, KVPair, PrefixIterator};
 pub mod db_migrate;
 #[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]
 pub mod migration;
+#[cfg(any(feature = "rocksdb", feature = "sqlite", target_arch = "wasm32"))]
+pub mod migrations;
 
 #[cfg(all(
     not(target_arch = "wasm32"),
@@ -39,3 +41,6 @@ pub use browser::{Batch, Store};
 mod browser_test;
 #[cfg(all(target_arch = "wasm32", feature = "browser-test"))]
 pub use browser_test::{Batch, Store};
+
+#[cfg(test)]
+pub mod tests;

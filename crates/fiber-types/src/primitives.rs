@@ -396,6 +396,12 @@ impl Privkey {
             .into()
     }
 
+    /// Create a `Privkey` from a 32-byte slice, returning an error if the
+    /// bytes do not represent a valid secp256k1 secret key.
+    pub fn try_from_slice(key: &[u8]) -> Result<Self, secp256k1::Error> {
+        Ok(SecretKey::from_slice(key)?.into())
+    }
+
     pub fn pubkey(&self) -> Pubkey {
         Pubkey::from(self.0.public_key(SECP256K1))
     }
@@ -516,5 +522,21 @@ impl Pubkey {
         let result = Point::from(self) + scalar.base_point_mul();
         let point = result.not_inf().expect("valid public key");
         PublicKey::from(point).into()
+    }
+
+    /// Fallibly tweak this public key by a scalar.
+    pub fn try_tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Result<Self, String> {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar).map_err(|err| {
+            format!(
+                "Value {:?} must be within secp256k1 scalar range: {}",
+                &scalar, err
+            )
+        })?;
+        let result = Point::from(self) + scalar.base_point_mul();
+        let point = result
+            .not_inf()
+            .map_err(|_| "derived public key is point at infinity".to_string())?;
+        Ok(PublicKey::from(point).into())
     }
 }

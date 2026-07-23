@@ -9,7 +9,14 @@ onmessage = async (evt) => {
 
     if (fiber === undefined) {
         const data = evt.data as FiberWorkerInitializationOptions;
-        console.debug("Starting fiber, configuration: ", data);
+        console.debug(
+            "Starting fiber: logLevel=",
+            data.logLevel,
+            ", databasePrefix=",
+            data.databasePrefix,
+            ", hasChainSpec=",
+            !!(data.chainSpec),
+        );
         fiber = await import("fiber-wasm");
         fiber.default.set_shared_array(data.inputBuffer, data.outputBuffer
         );

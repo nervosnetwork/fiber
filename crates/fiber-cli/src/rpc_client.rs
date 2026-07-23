@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use anyhow::{anyhow, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -37,18 +39,25 @@ struct JsonRpcError {
 
 impl RpcClient {
     pub fn new(url: &str, raw_data: bool, auth_token: Option<String>) -> Result<Self> {
+        // Strip all whitespace/newlines from auth token (common when pasting or reading from file)
+        let auth_token = auth_token
+            .map(|t| t.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+            .filter(|t| !t.is_empty());
+        let has_auth_token = auth_token.is_some();
+        let has_explicit_scheme = url.starts_with("http://") || url.starts_with("https://");
+
         // Auto-prepend http:// if no scheme is provided
-        let url = if url.starts_with("http://") || url.starts_with("https://") {
+        let url = if has_explicit_scheme {
             url.to_string()
         } else {
             format!("http://{}", url)
         };
         // Validate the URL
-        Self::validate_url(&url)?;
-        // Strip all whitespace/newlines from auth token (common when pasting or reading from file)
-        let auth_token = auth_token
-            .map(|t| t.chars().filter(|c| !c.is_whitespace()).collect::<String>())
-            .filter(|t| !t.is_empty());
+        let parsed_url = Self::validate_url(&url)?;
+        if has_auth_token {
+            Self::validate_authenticated_url(&parsed_url, has_explicit_scheme)?;
+        }
+
         Ok(Self {
             url,
             client: reqwest::Client::new(),
@@ -58,7 +67,7 @@ impl RpcClient {
     }
 
     /// Validate the URL, catching common mistakes like duplicate schemes.
-    fn validate_url(url: &str) -> Result<()> {
+    fn validate_url(url: &str) -> Result<reqwest::Url> {
         // Check for duplicate scheme (e.g. "http://http://..." or "http://https://...")
         let after_scheme = url
             .strip_prefix("http://")
@@ -85,7 +94,45 @@ impl RpcClient {
             ));
         }
 
+        Ok(parsed)
+    }
+
+    fn validate_authenticated_url(url: &reqwest::Url, has_explicit_scheme: bool) -> Result<()> {
+        if url.scheme() == "https" || Self::is_loopback_url(url) {
+            return Ok(());
+        }
+
+        if !has_explicit_scheme {
+            let mut https_url = url.clone();
+            let _ = https_url.set_scheme("https");
+            return Err(anyhow!(
+                "Refusing to send RPC auth token over implicit plaintext HTTP to '{}'. Use '{}' or specify 'http://' explicitly if plaintext transport is intentional.",
+                url,
+                https_url
+            ));
+        }
+
+        eprintln!(
+            "warning: sending RPC auth token over plaintext HTTP to '{}'; use HTTPS unless this is intentional",
+            url
+        );
         Ok(())
+    }
+
+    fn is_loopback_url(url: &reqwest::Url) -> bool {
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        let host = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .map(|addr| addr.is_loopback())
+                .unwrap_or(false)
     }
 
     pub fn url(&self) -> &str {
@@ -197,6 +244,52 @@ mod tests {
     }
 
     #[test]
+    fn test_new_auto_prepends_http_for_remote_without_auth() {
+        let client = RpcClient::new("example.com:8227", false, None).unwrap();
+        assert_eq!(client.url(), "http://example.com:8227");
+    }
+
+    #[test]
+    fn test_new_rejects_implicit_http_for_remote_with_auth() {
+        let result = RpcClient::new(
+            "example.com:8227",
+            false,
+            Some("my-secret-token".to_string()),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("implicit plaintext HTTP"),
+            "expected 'implicit plaintext HTTP' in error: {}",
+            err
+        );
+        assert!(
+            err.contains("https://example.com:8227/"),
+            "expected HTTPS suggestion in error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_new_accepts_implicit_http_for_loopback_with_auth() {
+        let client = RpcClient::new(
+            "127.8.9.10:8227",
+            false,
+            Some("my-secret-token".to_string()),
+        )
+        .unwrap();
+        assert_eq!(client.url(), "http://127.8.9.10:8227");
+
+        let client =
+            RpcClient::new("localhost:8227", false, Some("my-secret-token".to_string())).unwrap();
+        assert_eq!(client.url(), "http://localhost:8227");
+
+        let client =
+            RpcClient::new("[::1]:8227", false, Some("my-secret-token".to_string())).unwrap();
+        assert_eq!(client.url(), "http://[::1]:8227");
+    }
+
+    #[test]
     fn test_new_preserves_http_scheme() {
         let client = RpcClient::new("http://example.com:8227", false, None).unwrap();
         assert_eq!(client.url(), "http://example.com:8227");
@@ -206,6 +299,28 @@ mod tests {
     fn test_new_preserves_https_scheme() {
         let client = RpcClient::new("https://example.com:8227", false, None).unwrap();
         assert_eq!(client.url(), "https://example.com:8227");
+    }
+
+    #[test]
+    fn test_new_accepts_https_for_remote_with_auth() {
+        let client = RpcClient::new(
+            "https://example.com:8227",
+            false,
+            Some("my-secret-token".to_string()),
+        )
+        .unwrap();
+        assert_eq!(client.url(), "https://example.com:8227");
+    }
+
+    #[test]
+    fn test_new_accepts_explicit_http_for_remote_with_auth() {
+        let client = RpcClient::new(
+            "http://example.com:8227",
+            false,
+            Some("my-secret-token".to_string()),
+        )
+        .unwrap();
+        assert_eq!(client.url(), "http://example.com:8227");
     }
 
     #[test]

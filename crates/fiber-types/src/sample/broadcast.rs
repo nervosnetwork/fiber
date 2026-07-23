@@ -47,7 +47,7 @@ impl StoreSample for BroadcastMessage {
                 features: FeatureVector::default(),
                 timestamp: 1_704_067_200_000,
                 node_id: deterministic_pubkey(seed, 21),
-                version: "0.7.0".to_string(),
+                version: "0.8.0".to_string(),
                 node_name: AnnouncedNodeName::from_slice(&[0u8; 32]).expect("valid name"),
                 addresses: vec![],
                 chain_hash: Hash256::default(),

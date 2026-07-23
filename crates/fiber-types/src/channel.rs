@@ -3,8 +3,7 @@
 use crate::crate_time::SystemTime;
 use crate::gen::fiber as molecule_fiber;
 use crate::invoice::HashAlgorithm;
-use crate::onion::PaymentOnionPacket;
-use crate::onion::TlcErrPacket;
+use crate::onion::{PaymentOnionPacket, TlcErrPacket, TlcErrPacketError};
 use crate::protocol::{ChannelAnnouncement, ChannelUpdate, EcdsaSignature};
 use crate::serde_utils::PartialSignatureAsBytes;
 use crate::serde_utils::PubNonceAsBytes;
@@ -19,6 +18,7 @@ use ckb_types::packed::Transaction;
 use ckb_types::prelude::{Pack, Unpack};
 use ckb_types::H256;
 use molecule::prelude::{Builder, Entity};
+use musig2::secp::{Point, Scalar};
 use musig2::BinaryEncoding;
 use musig2::PartialSignature;
 use musig2::PubNonce;
@@ -256,6 +256,30 @@ pub enum ChannelState {
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
     Closed(CloseFlags),
+    /// The channel state is potentially outdated (e.g., after a database restore).
+    /// We must perform a passive audit with the peer before resuming operations.
+    Stale,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelConnectivityState {
+    Online,
+    Offline,
+    Syncing,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExternalFundingPersistState {
+    #[serde_as(as = "EntityHex")]
+    pub funding_lock_script: Script,
+    #[serde_as(as = "Vec<EntityHex>")]
+    pub funding_lock_script_cell_deps: Vec<ckb_types::packed::CellDep>,
+    #[serde_as(as = "EntityHex")]
+    pub unsigned_funding_tx: Transaction,
+    pub started_at_ms: u64,
+    pub signed_submitted: bool,
+    pub peer_commitment_signed_received: bool,
 }
 
 impl ChannelState {
@@ -338,12 +362,12 @@ impl CommitmentNumbers {
     }
 }
 
-/// Channel constraints for TLC value and number limits.
+/// Channel constraints for TLC value and number limits accepted by a participant.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct ChannelConstraints {
-    /// The maximum value that can be in pending TLCs.
+    /// The maximum total value of pending TLCs this participant will accept.
     pub max_tlc_value_in_flight: u128,
-    /// The maximum number of TLCs that can be accepted.
+    /// The maximum number of pending TLCs this participant will accept.
     pub max_tlc_number_in_flight: u64,
 }
 
@@ -421,15 +445,6 @@ pub struct PrevTlcInfo {
 }
 
 impl PrevTlcInfo {
-    pub fn new(prev_channel_id: Hash256, prev_tlc_id: u64, forwarding_fee: u128) -> Self {
-        Self {
-            prev_channel_id,
-            prev_tlc_id,
-            forwarding_fee,
-            shared_secret: None,
-        }
-    }
-
     pub fn new_with_shared_secret(
         prev_channel_id: Hash256,
         prev_tlc_id: u64,
@@ -466,6 +481,11 @@ pub struct TlcInfo {
     ///
     /// Save it to backward errors. Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
+    /// Compatibility field retained for persisted channel state.
+    ///
+    /// This used to mark a trampoline-boundary TLC for channel-level error wrapping. Trampoline
+    /// payment failures are now resolved at the network/payment layer instead, so this field should
+    /// not be used for new error attribution logic. Removing it requires a storage migration.
     #[serde(default)]
     pub is_trampoline_hop: bool,
     pub created_at: CommitmentNumbers,
@@ -871,7 +891,11 @@ pub struct AddTlcCommand {
     /// Save it for outbound (offered) TLC to backward errors.
     /// Use all zeros when no shared secrets are available.
     pub shared_secret: [u8; 32],
-    /// Whether this outbound TLC is the trampoline-boundary hop.
+    /// Compatibility field retained for serialized retryable TLC operations.
+    ///
+    /// This used to mark a trampoline-boundary TLC for channel-level error wrapping. Trampoline
+    /// payment failures are now resolved at the network/payment layer instead, so this field should
+    /// not be used for new error attribution logic. Removing it requires a storage migration.
     pub is_trampoline_hop: bool,
     pub previous_tlc: Option<PrevTlcInfo>,
 }
@@ -1162,13 +1186,48 @@ pub fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privke
 }
 
 /// Derive a public key by tweaking a base key with a commitment point.
+#[deprecated(note = "use `try_derive_public_key` instead to avoid panicking on invalid keys")]
 pub fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
+/// Fallibly derive a public key by tweaking a base key with a commitment point.
+pub fn try_derive_public_key(
+    base_key: &Pubkey,
+    commitment_point: &Pubkey,
+) -> Result<Pubkey, String> {
+    base_key.try_tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
 /// Derive the TLC public key from a base key and commitment point.
+#[deprecated(note = "use `try_derive_tlc_pubkey` instead to avoid panicking on invalid keys")]
 pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    #[allow(deprecated)]
     derive_public_key(base_key, commitment_point)
+}
+
+/// Fallibly derive the TLC public key from a base key and commitment point.
+pub fn try_derive_tlc_pubkey(
+    base_key: &Pubkey,
+    commitment_point: &Pubkey,
+) -> Result<Pubkey, String> {
+    try_derive_public_key(base_key, commitment_point)
+}
+
+/// Check if the TLC key derivation for a given base key and commitment point
+/// would produce a valid (non-infinity) result.
+///
+/// This is used to validate peer-provided keys before accepting them,
+/// preventing a malicious peer from crafting key pairs that would cause
+/// `derive_tlc_pubkey` to panic with "valid public key" due to infinity.
+pub fn is_tlc_key_derivation_safe(base_key: &Pubkey, commitment_point: &Pubkey) -> bool {
+    let tweak = get_tweak_by_commitment_point(commitment_point);
+    let Ok(scalar) = Scalar::from_slice(&tweak) else {
+        return false;
+    };
+    let base_point = Point::from(base_key);
+    let result = base_point + scalar.base_point_mul();
+    result.not_inf().is_ok()
 }
 
 /// Derive the commitment secret for a given commitment number from a seed.
@@ -1537,6 +1596,13 @@ pub struct ChannelActorData {
     /// Tracks whether the last outbound sync message was RevokeAndAck.
     #[serde(default)]
     pub last_was_revoke: bool,
+
+    /// Runtime connectivity state persisted for restart recovery.
+    pub connectivity_state: ChannelConnectivityState,
+
+    /// Persisted state for an in-progress external funding flow.
+    #[serde(default)]
+    pub external_funding: Option<ExternalFundingPersistState>,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
@@ -1627,14 +1693,14 @@ impl Debug for RemoveTlcReason {
 impl RemoveTlcReason {
     /// Intermediate node backwards the error to the previous hop using the shared secret
     /// used in forwarding the onion packet.
-    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Result<Self, TlcErrPacketError> {
         match self {
             RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
+                Ok(RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill))
             }
-            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
-            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => Ok(RemoveTlcReason::RemoveTlcFail(
+                remove_tlc_fail.backward(shared_secret)?,
+            )),
         }
     }
 }

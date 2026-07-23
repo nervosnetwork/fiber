@@ -302,6 +302,7 @@ fn apply_case_by_name(
         "remove_change" => testcase_remove_change(builder),
         "modify_change" => testcase_modify_change(builder),
         "fund_from_peer" => testcase_fund_from_peer(builder),
+        "missing_inputs" => testcase_missing_inputs(builder),
         _ => Err(TxBuilderError::Other(anyhow!(
             "invalid FUNDING_TX_VERIFICATION_CASE"
         ))),
@@ -336,4 +337,19 @@ fn testcase_fund_from_peer(mut builder: FundingTxBuilder) -> Result<Transaction,
     }
 
     builder.build()
+}
+
+fn testcase_missing_inputs(builder: FundingTxBuilder) -> Result<Transaction, TxBuilderError> {
+    if !(builder.tx.inputs.is_empty() && builder.tx.outputs.is_empty()) {
+        return builder.build();
+    }
+
+    let tx: TransactionView = Into::<packed::Transaction>::into(builder.tx.clone()).into_view();
+    let (funding_cell_output, funding_cell_output_data) = builder.build_funding_cell()?;
+    let tx = tx
+        .as_advanced_builder()
+        .set_outputs(vec![funding_cell_output])
+        .set_outputs_data(vec![funding_cell_output_data])
+        .build();
+    Ok(tx.data().into())
 }

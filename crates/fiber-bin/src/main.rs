@@ -11,7 +11,10 @@ use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
 use fnn::rpc::server::start_rpc;
-use fnn::store::open_store;
+use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
+use fnn::store::open_store_with_migration;
+use fnn::store::restore::restore;
+use fnn::store::{MigrationPlan, MigrationProgress};
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -25,17 +28,39 @@ use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::{mpsc, RwLock};
-#[cfg(debug_assertions)]
-use tracing::error;
-use tracing::{debug, info, info_span, trace};
+use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+
+fn cli_confirm(plan: MigrationPlan) -> bool {
+    eprintln!("{}", plan.message);
+    if plan.has_break_change {
+        eprintln!(
+            "WARNING: This migration contains breaking changes. \
+             You should shutdown all channels and backup your data."
+        );
+    }
+    eprint!("Continue? [y/N] ");
+    std::io::stderr().flush().unwrap();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes")
+}
+
+fn cli_progress(progress: MigrationProgress) {
+    eprintln!(
+        "[{}/{}] {}",
+        progress.current_step, progress.total_steps, progress.message
+    );
+}
 
 #[tokio::main]
 pub async fn main() -> Result<(), ExitMessage> {
@@ -93,13 +118,40 @@ pub async fn main() -> Result<(), ExitMessage> {
         }
     }
 
+    if let Some(source_path) = &config.restore {
+        info!("Starting manual restore process from: {:?}", source_path);
+
+        let parsed_fiber_config = config
+            .parsed_fiber()
+            .ok_or(ExitMessage("fiber config must be set".to_string()))?;
+
+        let ckb_config = config
+            .ckb
+            .clone()
+            .ok_or_else(|| ExitMessage("ckb config must be set for restore process".to_string()))?;
+
+        let ckb_key_path = ckb_config.base_dir().join("key");
+        let fiber_key_path = parsed_fiber_config.base_dir().join("sk");
+        let store_path = parsed_fiber_config.store_path();
+
+        restore(source_path, &store_path, &fiber_key_path, &ckb_key_path)
+            .map_err(|err| ExitMessage(format!("Failed to restore database: {}", err)))?;
+
+        info!("Successfully restored database to {:?}.", store_path);
+        info!("Channels may have been marked as 'Stale' for safety audit.");
+
+        std::process::exit(0);
+    }
+
     let parsed_fiber_config = config
         .parsed_fiber()
         .ok_or(ExitMessage("fiber config must be set".to_string()))?;
 
     // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
     let store_path = parsed_fiber_config.store_path();
-    let raw_store = open_store(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+    let raw_store =
+        open_store_with_migration(store_path, Box::new(cli_confirm), Box::new(cli_progress))
+            .map_err(|err| ExitMessage(err.to_string()))?;
 
     if config.cch.is_some() || config.rpc.is_some() {
         let port = Arc::new(OutputPort::default());
@@ -131,7 +183,7 @@ async fn run_node(
     });
 
     #[allow(unused_variables)]
-    let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
+    let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
@@ -191,6 +243,27 @@ async fn run_node(
 
             info!("Starting fiber");
 
+            let backup_path = fiber_config.base_dir().join("backups");
+            let ckb_key_path = ckb_config.base_dir().join("key");
+            let fiber_key_path = fiber_config.base_dir().join("sk");
+            let store_actor = Actor::spawn_linked(
+                Some("store_actor".to_string()),
+                StoreActor {
+                    _phantom: std::marker::PhantomData,
+                },
+                StoreActorInitializationParameter {
+                    store: store.clone(),
+                    backup_path,
+                    ckb_key_path,
+                    fiber_key_path,
+                    backup_interval_hours: 24,
+                },
+                root_actor.get_cell(),
+            )
+            .await
+            .map_err(|err| ExitMessage(format!("failed to start store actor: {}", err)))?
+            .0;
+
             let chain_client = CkbRpcClient::new(&ckb_config);
             let network_actor: ActorRef<NetworkActorMessage> = start_network(
                 fiber_config.clone(),
@@ -200,6 +273,7 @@ async fn run_node(
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
+                Some(store_actor.clone()),
                 network_graph.clone(),
                 default_shutdown_script,
             )
@@ -313,7 +387,15 @@ async fn run_node(
                                         }
                                     }
                                     if let Some(watchtower_client) = watchtower_client.as_ref() {
-                                        forward_event_to_client(event.clone(), watchtower_client).await;
+                                        if let Err(err) =
+                                            forward_event_to_client(event.clone(), watchtower_client)
+                                                .await
+                                        {
+                                            error!(
+                                                "Failed to forward event to standalone watchtower: {}",
+                                                err
+                                            );
+                                        }
                                     }
                                     if let Some(watchtower_actor) = watchtower_actor.as_ref() {
                                         forward_event_to_actor(event, watchtower_actor);
@@ -334,9 +416,10 @@ async fn run_node(
                 Some(network_actor),
                 Some(ckb_chain_actor),
                 Some(network_graph),
+                Some(store_actor),
             )
         }
-        None => (None, None, None),
+        None => (None, None, None, None),
     };
 
     let cch_currency = config
@@ -427,6 +510,7 @@ async fn run_node(
                 network_actor,
                 cch_actor,
                 store,
+                store_actor,
                 network_graph,
                 root_actor.get_cell(),
                 store_change_port,
@@ -533,7 +617,6 @@ fn forward_event_to_actor(
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }
         NetworkServiceEvent::PreimageRemoved(payment_hash) => {
-            // ignore, the store of channel actor already has removed the preimage
             watchtower_actor
                 .send_message(WatchtowerMessage::RemovePreimage(payment_hash))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);

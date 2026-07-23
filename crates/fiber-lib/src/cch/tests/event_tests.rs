@@ -5,10 +5,12 @@
 //! - CkbInvoiceStatus -> CchOrderStatus mappings
 //! - PaymentStatus -> CchOrderStatus mappings
 
+use crate::cch::actor::redacted_store_change_summary;
 use crate::cch::order::state_machine::CchOrderEvent;
-use crate::cch::trackers::CchTrackingEvent;
+use crate::cch::trackers::{CchTrackingEvent, RedactedCchTrackingEvent};
+use crate::store::store_impl::StoreChange;
 use fiber_types::invoice::CkbInvoiceStatus;
-use fiber_types::{CchOrderStatus, Hash256, PaymentStatus};
+use fiber_types::{AttemptStatus, CchOrderStatus, Hash256, PaymentStatus};
 
 /// Helper function to create a test payment hash
 fn test_payment_hash(value: u8) -> Hash256 {
@@ -138,6 +140,58 @@ fn test_tracking_event_payment_hash_accessor() {
         failure_reason: None,
     };
     assert_eq!(*payment_event.payment_hash(), payment_hash);
+}
+
+#[test]
+fn test_redacted_tracking_event_debug_masks_preimage() {
+    let payment_hash = test_payment_hash(1);
+    let preimage = test_payment_hash(42);
+    let tracking_event = CchTrackingEvent::PaymentChanged {
+        payment_hash,
+        status: PaymentStatus::Success,
+        payment_preimage: Some(preimage),
+        failure_reason: None,
+    };
+
+    let redacted = format!("{:?}", RedactedCchTrackingEvent(&tracking_event));
+    let preimage_hex = format!("{:x}", preimage);
+
+    assert!(redacted.contains("has_payment_preimage"));
+    assert!(!redacted.contains(&preimage_hex));
+}
+
+#[test]
+fn test_redacted_store_change_summary_masks_preimage() {
+    let payment_hash = test_payment_hash(9);
+    let preimage = test_payment_hash(99);
+    let change = StoreChange::PutPreimage {
+        payment_hash,
+        payment_preimage: preimage,
+    };
+
+    let summary = redacted_store_change_summary(&change);
+    let redacted = format!("{:?}", summary);
+    let preimage_hex = format!("{:x}", preimage);
+
+    assert_eq!(summary.kind, "PutPreimage");
+    assert!(summary.has_payment_preimage);
+    assert!(redacted.contains("has_payment_preimage"));
+    assert!(!redacted.contains(&preimage_hex));
+}
+
+#[test]
+fn test_redacted_store_change_summary_handles_attempt() {
+    let payment_hash = test_payment_hash(9);
+    let change = StoreChange::PutAttempt {
+        payment_hash,
+        attempt_status: AttemptStatus::Inflight,
+    };
+
+    let summary = redacted_store_change_summary(&change);
+
+    assert_eq!(summary.kind, "PutAttempt");
+    assert_eq!(summary.payment_hash, payment_hash);
+    assert!(!summary.has_payment_preimage);
 }
 
 // =============================================================================

@@ -11,6 +11,7 @@ use crate::{
     gen_rand_channel_outpoint, gen_rand_fiber_public_key, init_tracing, now_timestamp_as_millis_u64,
 };
 use ckb_types::packed::OutPoint;
+use fiber_types::{TlcErr, TlcErrData, TlcErrorCode};
 
 trait Round {
     fn round_to_2(self) -> f64;
@@ -78,6 +79,235 @@ fn test_history_demo() {
         history.get_result(&channel_outpoint2, Direction::Forward),
         None,
     );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_trampoline_failure_does_not_mark_outer_route_history() {
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let nodes = vec![
+        SessionRouteNode {
+            pubkey: source,
+            amount: 1100,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: trampoline,
+            amount: 1000,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: target,
+            amount: 1000,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+    ];
+    for (error_code, expected_retry) in [
+        (TlcErrorCode::FeeInsufficient, false),
+        (TlcErrorCode::IncorrectOrUnknownPaymentDetails, false),
+    ] {
+        let tlc_err = TlcErr {
+            error_code,
+            extra_data: Some(TlcErrData::TrampolineFailed {
+                node_id: trampoline,
+                inner_error_packet: vec![1, 2, 3],
+            }),
+        };
+
+        let mut result = InternalResult::default();
+        let need_retry = result.record_payment_fail(&nodes, tlc_err);
+
+        assert_eq!(need_retry, expected_retry);
+        assert!(result.pairs.is_empty());
+        assert!(result.nodes_to_channel_map.is_empty());
+        assert!(result.fail_node.is_none());
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_authenticated_error_hop_rejects_forged_channel_attribution() {
+    let node_a = gen_rand_fiber_public_key();
+    let node_b = gen_rand_fiber_public_key();
+    let node_c = gen_rand_fiber_public_key();
+    let node_d = gen_rand_fiber_public_key();
+    let channel_ab = gen_rand_channel_outpoint();
+    let channel_bc = gen_rand_channel_outpoint();
+    let channel_cd = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node_a,
+            amount: 1000,
+            channel_outpoint: channel_ab.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_b,
+            amount: 900,
+            channel_outpoint: channel_bc,
+        },
+        SessionRouteNode {
+            pubkey: node_c,
+            amount: 800,
+            channel_outpoint: channel_cd.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_d,
+            amount: 700,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let forged_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        node_c,
+        channel_cd.clone(),
+        None,
+    );
+
+    let mut result = InternalResult::default();
+    let need_retry = result.record_payment_fail_at_hop(&route, 1, forged_error);
+
+    assert!(need_retry);
+    assert!(result
+        .pairs
+        .keys()
+        .all(|(outpoint, _)| outpoint != &channel_cd));
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_ab));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_remove_tlc_fail_decode_fallback_does_not_record_history() {
+    let route = vec![
+        SessionRouteNode {
+            pubkey: gen_rand_fiber_public_key(),
+            amount: 1000,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: gen_rand_fiber_public_key(),
+            amount: 900,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: gen_rand_fiber_public_key(),
+            amount: 800,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+    ];
+
+    let mut result = InternalResult::default();
+    let need_retry =
+        result.record_payment_fail(&route, TlcErr::new(TlcErrorCode::InvalidOnionError));
+
+    assert!(!need_retry);
+    assert!(result.pairs.is_empty());
+    assert!(result.nodes_to_channel_map.is_empty());
+    assert!(result.fail_node.is_none());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_authenticated_downstream_channel_failure_records_only_failed_channel() {
+    let node_a = gen_rand_fiber_public_key();
+    let node_b = gen_rand_fiber_public_key();
+    let node_c = gen_rand_fiber_public_key();
+    let node_d = gen_rand_fiber_public_key();
+    let channel_ab = gen_rand_channel_outpoint();
+    let channel_bc = gen_rand_channel_outpoint();
+    let channel_cd = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node_a,
+            amount: 1000,
+            channel_outpoint: channel_ab.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_b,
+            amount: 900,
+            channel_outpoint: channel_bc.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_c,
+            amount: 800,
+            channel_outpoint: channel_cd.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_d,
+            amount: 700,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        node_c,
+        channel_cd.clone(),
+        None,
+    );
+
+    let mut result = InternalResult::default();
+    let need_retry = result.record_payment_fail_at_hop(&route, 2, channel_error);
+
+    assert!(need_retry);
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_cd));
+    assert!(result
+        .pairs
+        .keys()
+        .all(|(outpoint, _)| outpoint != &channel_ab && outpoint != &channel_bc));
+    assert!(result.fail_node.is_none());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_authenticated_final_hop_error_without_extra_data_records_history() {
+    let node_a = gen_rand_fiber_public_key();
+    let node_b = gen_rand_fiber_public_key();
+    let node_c = gen_rand_fiber_public_key();
+    let channel_ab = gen_rand_channel_outpoint();
+    let channel_bc = gen_rand_channel_outpoint();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node_a,
+            amount: 1000,
+            channel_outpoint: channel_ab.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_b,
+            amount: 900,
+            channel_outpoint: channel_bc.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node_c,
+            amount: 800,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let mut result = InternalResult::default();
+    let need_retry = result.record_payment_fail_at_hop(
+        &route,
+        2,
+        TlcErr::new(TlcErrorCode::IncorrectOrUnknownPaymentDetails),
+    );
+
+    assert!(!need_retry);
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_ab));
+    assert!(result
+        .pairs
+        .keys()
+        .any(|(outpoint, _)| outpoint == &channel_bc));
 }
 
 #[test]
@@ -277,6 +507,47 @@ fn test_history_internal_result_fail_pair() {
         .unwrap();
     assert_eq!(res.amount, 0);
     assert!(!res.success);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_history_trampoline_failed_skips_outer_route_history() {
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: source,
+            amount: 10,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+        SessionRouteNode {
+            pubkey: trampoline,
+            amount: 5,
+            channel_outpoint: gen_rand_channel_outpoint(),
+        },
+    ];
+
+    for error_code in [
+        TlcErrorCode::TemporaryNodeFailure,
+        TlcErrorCode::HoldTlcTimeout,
+    ] {
+        let mut internal_result = InternalResult::default();
+        let need_retry = internal_result.record_payment_fail(
+            &route,
+            TlcErr {
+                error_code,
+                extra_data: Some(TlcErrData::TrampolineFailed {
+                    node_id: trampoline,
+                    inner_error_packet: vec![1, 2, 3],
+                }),
+            },
+        );
+
+        assert!(!need_retry);
+        assert!(internal_result.fail_node.is_none());
+        assert!(internal_result.pairs.is_empty());
+        assert!(internal_result.nodes_to_channel_map.is_empty());
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -1192,4 +1463,26 @@ fn test_history_can_not_send_with_time() {
     let before = now - DEFAULT_BIMODAL_DECAY_TIME * 3;
     let res = history.cannot_send(90, before, 100);
     assert_eq!(res, 100);
+}
+
+#[test]
+fn record_payment_fail_with_index_does_not_panic_on_empty_route() {
+    let mut result = InternalResult::default();
+    let nodes: Vec<SessionRouteNode> = vec![];
+    let tlc_err = TlcErr::new(TlcErrorCode::TemporaryChannelFailure);
+    let need_retry = result.record_payment_fail(&nodes, tlc_err);
+    assert!(!need_retry);
+}
+
+#[test]
+fn record_payment_fail_with_index_does_not_panic_on_single_node_route() {
+    let mut result = InternalResult::default();
+    let nodes = vec![SessionRouteNode {
+        pubkey: gen_rand_fiber_public_key(),
+        amount: 100,
+        channel_outpoint: gen_rand_channel_outpoint(),
+    }];
+    let tlc_err = TlcErr::new(TlcErrorCode::TemporaryChannelFailure);
+    let need_retry = result.record_payment_fail(&nodes, tlc_err);
+    assert!(!need_retry);
 }

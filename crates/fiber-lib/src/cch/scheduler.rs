@@ -6,7 +6,7 @@ use tokio::task::AbortHandle;
 use tokio::time::Duration;
 
 use crate::cch::{order::CchOrderStore, trackers::LndTrackerMessage, CchError};
-use crate::time::{SystemTime, UNIX_EPOCH};
+use crate::now_timestamp_as_millis_u64;
 use fiber_types::{CchOrderStatus, Hash256};
 
 const PRUNE_DELAY_DAYS: u64 = 21;
@@ -14,10 +14,7 @@ pub const PRUNE_DELAY_SECONDS: u64 = PRUNE_DELAY_DAYS * 24 * 60 * 60;
 
 /// Get the current time in seconds since UNIX epoch
 fn current_time_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System time should always be after UNIX_EPOCH")
-        .as_secs()
+    now_timestamp_as_millis_u64() / 1000
 }
 
 /// Scheduled job types for order expiry and pruning
@@ -252,6 +249,8 @@ impl<S: CchOrderStore> SchedulerState<S> {
             return;
         }
 
+        // already checked that next_job_time > current_time
+        // so this subtraction won't underflow
         let delay_secs = next_job_time - current_time;
         let delay = Duration::from_secs(delay_secs.min(3600));
         let handle = mailbox.send_after(delay, move || SchedulerMessage::ProcessJobs);
@@ -272,6 +271,15 @@ impl<S: CchOrderStore> SchedulerState<S> {
         // Skip if order is already final
         if order.is_final() {
             tracing::debug!("Order {:x} is already final, skipping expiry", payment_hash);
+            return Ok(());
+        }
+
+        if order.status != CchOrderStatus::Pending {
+            tracing::debug!(
+                "Order {:x} is {:?}, skipping pending-order expiry",
+                payment_hash,
+                order.status
+            );
             return Ok(());
         }
 

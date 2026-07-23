@@ -1,6 +1,8 @@
 //! Tests for SettleTlcSetCommand
 
-use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore, CommitDiff};
+use crate::fiber::channel::{
+    has_pending_tlc_for_payment_hash, ChannelActorState, ChannelActorStateStore, CommitDiff,
+};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
@@ -10,15 +12,17 @@ use crate::now_timestamp_as_millis_u64;
 use crate::tests::gen_utils::gen_rand_fiber_public_key;
 use crate::time::SystemTime;
 use ckb_types::packed::{OutPoint, Script};
+use fiber_sphinx::OnionErrorPacket;
 use fiber_types::{
     AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
     CommitmentNumbers, InMemorySigner, PaymentCustomRecords, TLCId, TlcInfo, TlcState, TlcStatus,
-    NO_SHARED_SECRET,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
-use fiber_types::{HashAlgorithm, TlcErrorCode};
+use fiber_types::{HashAlgorithm, TlcErr, TlcErrorCode};
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+const TEST_SHARED_SECRET: [u8; 32] = [42u8; 32];
 
 /// Mock store for testing that implements PreimageStore, InvoiceStore, and ChannelActorStateStore
 struct MockStore {
@@ -130,6 +134,12 @@ impl ChannelActorStateStore for MockStore {
         self.channel_states.borrow_mut().insert(channel_id, state);
     }
 
+    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+        self.channel_states.borrow_mut().remove(old_id);
+        let channel_id = state.id;
+        self.channel_states.borrow_mut().insert(channel_id, state);
+    }
+
     fn delete_channel_actor_state(&self, id: &Hash256) {
         self.channel_states.borrow_mut().remove(id);
     }
@@ -139,11 +149,19 @@ impl ChannelActorStateStore for MockStore {
     }
 
     fn get_channel_states(&self, _pubkey: Option<Pubkey>) -> Vec<(Pubkey, Hash256, ChannelState)> {
-        vec![]
+        self.channel_states
+            .borrow()
+            .values()
+            .map(|state| (state.remote_pubkey, state.id, state.state))
+            .collect()
     }
 
     fn get_channel_state_by_outpoint(&self, _id: &OutPoint) -> Option<ChannelActorState> {
         None
+    }
+
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState> {
+        vec![]
     }
 
     fn insert_payment_custom_records(
@@ -236,7 +254,7 @@ fn create_test_channel_state_with_tlc(
         expiry: now_timestamp_as_millis_u64() + 1000000,
         hash_algorithm: HashAlgorithm::CkbHash,
         onion_packet: None,
-        shared_secret: NO_SHARED_SECRET,
+        shared_secret: TEST_SHARED_SECRET,
         is_trampoline_hop: false,
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
@@ -297,12 +315,15 @@ fn create_test_channel_state_with_tlc(
             shutdown_transaction_hash: None,
             latest_commitment_transaction: None,
             reestablishing: false,
+            connectivity_state: fiber_types::ChannelConnectivityState::Online,
             last_revoke_ack_msg: None,
             pending_replay_updates: vec![],
             last_was_revoke: false,
+            external_funding: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
+        reestablish_started_at: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -310,7 +331,9 @@ fn create_test_channel_state_with_tlc(
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),
         ephemeral_config: Default::default(),
+        funding_abort_detail: None,
         private_key: None,
+        needs_backup: false,
     }
 }
 
@@ -324,10 +347,49 @@ fn is_fulfill_settlement(settlement: &TlcSettlement) -> bool {
 fn get_error_code(settlement: &TlcSettlement) -> Option<TlcErrorCode> {
     match &settlement.remove_tlc_command().reason {
         RemoveTlcReason::RemoveTlcFail(packet) => {
-            packet.decode(&[0u8; 32], vec![]).map(|e| e.error_code)
+            let (_, payload) = OnionErrorPacket::from_bytes(packet.onion_packet.clone())
+                .xor_cipher_stream(&TEST_SHARED_SECRET)
+                .split();
+            TlcErr::deserialize(&payload).map(|e| e.error_code)
         }
         _ => None,
     }
+}
+
+#[test]
+fn test_preimage_cleanup_detects_pending_same_hash_tlc_in_other_channel() {
+    let payment_hash = gen_rand_sha256_hash();
+    let current_channel_id = gen_rand_sha256_hash();
+    let other_channel_id = gen_rand_sha256_hash();
+    let mut current_state =
+        create_test_channel_state_with_tlc(current_channel_id, 0, 1000, payment_hash, None);
+    current_state.tlc_state.apply_remove_tlc(TLCId::Received(0));
+    let other_state =
+        create_test_channel_state_with_tlc(other_channel_id, 0, 1000, payment_hash, None);
+    let store = MockStore::new()
+        .with_channel_state(current_state.clone())
+        .with_channel_state(other_state);
+
+    assert!(
+        has_pending_tlc_for_payment_hash(&store, &current_state, payment_hash),
+        "preimage should stay while another channel has a same-hash tlc"
+    );
+}
+
+#[test]
+fn test_preimage_cleanup_ignores_stale_current_channel_state() {
+    let payment_hash = gen_rand_sha256_hash();
+    let current_channel_id = gen_rand_sha256_hash();
+    let persisted_current_state =
+        create_test_channel_state_with_tlc(current_channel_id, 0, 1000, payment_hash, None);
+    let mut current_state = persisted_current_state.clone();
+    current_state.tlc_state.apply_remove_tlc(TLCId::Received(0));
+    let store = MockStore::new().with_channel_state(persisted_current_state);
+
+    assert!(
+        !has_pending_tlc_for_payment_hash(&store, &current_state, payment_hash),
+        "stale persisted state for the channel currently applying removal must not keep preimage"
+    );
 }
 
 #[test]
@@ -503,7 +565,30 @@ fn test_open_invoice_proceeds_to_settlement() {
 }
 
 #[test]
-fn test_received_invoice_proceeds_to_settlement() {
+fn test_duplicate_received_hold_set_is_noop() {
+    let payment_hash = gen_rand_sha256_hash();
+    let invoice = create_test_invoice(payment_hash, Some(1000), false);
+    let channel_id = gen_rand_sha256_hash();
+    let store = MockStore::new()
+        .with_invoice(invoice, CkbInvoiceStatus::Received)
+        .with_hold_tlc(payment_hash, channel_id, 0)
+        .with_channel_state(create_test_channel_state_with_tlc(
+            channel_id,
+            0,
+            1000,
+            payment_hash,
+            None,
+        ));
+
+    let command = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &store);
+    let settlements = command.run();
+
+    assert!(settlements.is_empty());
+    assert_eq!(store.get_payment_hold_tlcs(payment_hash).len(), 1);
+}
+
+#[test]
+fn test_received_hold_invoice_after_preimage_reveal_proceeds_to_settlement() {
     let preimage = gen_rand_sha256_hash();
     let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
     let invoice = create_test_invoice(payment_hash, Some(1000), false);
@@ -520,8 +605,7 @@ fn test_received_invoice_proceeds_to_settlement() {
             None,
         ));
 
-    // Use hold path (empty channel_tlc_ids) so Received is allowed (hold-invoice re-entry with preimage).
-    let command = SettleTlcSetCommand::new(payment_hash, vec![], &store);
+    let command = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store);
     let settlements = command.run();
 
     assert_eq!(settlements.len(), 1);
@@ -1044,8 +1128,8 @@ fn test_received_invoice_can_be_settled_after_invoice_expiry() {
             None,
         ));
 
-    // Use hold path so Received is allowed (hold-invoice re-entry; invoice expiry is ignored for Received).
-    let command = SettleTlcSetCommand::new(payment_hash, vec![], &store);
+    // Use preimage-reveal retry path so Received is allowed and invoice expiry is ignored.
+    let command = SettleTlcSetCommand::new_received_hold_tlc_set(payment_hash, &store);
     let settlements = command.run();
 
     // Should still succeed with fulfill (not fail)

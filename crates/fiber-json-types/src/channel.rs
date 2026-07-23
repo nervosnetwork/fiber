@@ -155,13 +155,13 @@ pub struct OpenChannelParams {
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub tlc_fee_proportional_millionths: Option<u128>,
 
-    /// The maximum value in flight for TLCs, an optional parameter.
+    /// The maximum total value of in-flight TLCs our side will accept from the peer, an optional parameter.
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_tlc_value_in_flight: Option<u128>,
 
-    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+    /// The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
@@ -241,13 +241,13 @@ pub struct OpenChannelWithExternalFundingParams {
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub tlc_fee_proportional_millionths: Option<u128>,
 
-    /// The maximum value in flight for TLCs, an optional parameter.
+    /// The maximum total value of in-flight TLCs our side will accept from the peer, an optional parameter.
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_tlc_value_in_flight: Option<u128>,
 
-    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+    /// The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
@@ -307,13 +307,13 @@ pub struct AcceptChannelParams {
     /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
     pub shutdown_script: Option<Script>,
 
-    /// The max tlc sum value in flight for the channel, default is u128::MAX
+    /// The maximum total value of in-flight TLCs our side will accept from the peer, default is u128::MAX
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_tlc_value_in_flight: Option<u128>,
 
-    /// The max tlc number in flight send from our side, default is 125
+    /// The maximum number of in-flight TLCs our side will accept from the peer, default is 125
     /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
@@ -405,6 +405,9 @@ pub enum ChannelState {
     ShuttingDown(#[schemars(schema_with = "schema_as_string")] ShuttingDownFlags),
     /// This channel is closed.
     Closed(#[schemars(schema_with = "schema_as_string")] CloseFlags),
+    /// The channel state is potentially outdated (e.g., after a database restore).
+    /// We must perform a passive audit with the peer before resuming operations.
+    Stale,
 }
 
 /// The channel data structure.

@@ -34,6 +34,10 @@ assert {
   res.body.result.channels: length 0
 }
 
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
+}
+
 script:post-response {
   console.log(res.body.result);
 }

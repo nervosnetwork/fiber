@@ -1,0 +1,39 @@
+meta {
+  name: Node1 send hold invoice payment
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "invoice": "{{HOLD_INVOICE}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.payment_hash: eq "{{HOLD_PAYMENT_HASH}}"
+}
+
+script:post-response {
+  console.log("send payment result: ", res.body.result);
+  await new Promise(r => setTimeout(r, 1000));
+}

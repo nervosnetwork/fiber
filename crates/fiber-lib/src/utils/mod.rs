@@ -1,4 +1,5 @@
 pub mod actor;
+pub(crate) mod arithmetic;
 pub mod encrypt_decrypt_file;
 pub(crate) mod payment;
 pub mod tx;

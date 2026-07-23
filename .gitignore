@@ -15,7 +15,6 @@ tests/nodes/.ports
 /*.info
 .vscode
 /migrate/target
-/package-lock.json
 *.txt
 /node_modules
 /index.html
@@ -29,6 +28,6 @@ tests/nodes/.ports
 /crates/fiber-wasm-db-worker/dist
 crates/fiber-lib/fuzz/corpus/
 crash-*
-package-lock.json
 target
 /tests/perf/artifacts/
+.tool-versions

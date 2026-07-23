@@ -318,3 +318,150 @@ fn test_invoice_and_payment_handlers_are_inverse_for_lightning() {
     assert_eq!(invoice_handler, InvoiceHandlerType::Lightning);
     assert_eq!(payment_handler, PaymentHandlerType::Fiber);
 }
+
+// =============================================================================
+// outgoing_fee_budget_sats tests
+// =============================================================================
+
+#[test]
+fn test_outgoing_fee_budget_full_percentage_uses_entire_fee() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fee_sats = 1_000;
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 100),
+        1_000
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_scales_with_percentage() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fee_sats = 1_000;
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 50),
+        500
+    );
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 1),
+        10
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_rounds_down() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    order.fee_sats = 99;
+    // 99 * 50 / 100 = 49.5 -> 49 (integer division floors, never exceeding the collected fee)
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, 50),
+        49
+    );
+}
+
+#[test]
+fn test_outgoing_fee_budget_never_exceeds_collected_fee() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::IncomingAccepted);
+    for fee_sats in [0u128, 1, 7, 1_000, u128::from(u64::MAX)] {
+        order.fee_sats = fee_sats;
+        for pct in 1..=100u64 {
+            let budget =
+                crate::cch::actions::send_outgoing_payment::outgoing_fee_budget_sats(&order, pct);
+            assert!(
+                budget <= fee_sats,
+                "budget {} must never exceed collected fee {} (pct {})",
+                budget,
+                fee_sats,
+                pct
+            );
+        }
+    }
+}
+
+// =============================================================================
+// outgoing_max_fee_rate tests
+// =============================================================================
+
+#[test]
+fn test_outgoing_max_fee_rate_zero_amount_is_zero() {
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(0, 100),
+        0
+    );
+}
+
+#[test]
+fn test_outgoing_max_fee_rate_rounds_up() {
+    // ceil(5 * 1000 / 1000) = 5
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(1_000, 5),
+        5
+    );
+    // ceil(1 * 1000 / 1000) = 1 (would floor to 0, rounding up keeps the budget reachable)
+    assert_eq!(
+        crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(1_000, 1),
+        1
+    );
+}
+
+#[test]
+fn test_outgoing_max_fee_rate_cap_covers_budget() {
+    // The rate-derived cap, ceil(amount * rate / 1000), must always be >= the fee budget so the
+    // CCH budget (not the default rate) is the binding constraint.
+    const DENOM: u128 = 1000;
+    for amount in [1u128, 7, 1_000, 21_000, 1_000_000] {
+        for max_fee_amount in [0u128, 1, 5, 50, 999, amount] {
+            let rate = crate::cch::actions::send_outgoing_payment::outgoing_max_fee_rate(
+                amount,
+                max_fee_amount,
+            );
+            let cap = (amount * rate as u128).div_ceil(DENOM);
+            assert!(
+                cap >= max_fee_amount,
+                "rate-derived cap {} must cover budget {} (amount {}, rate {})",
+                cap,
+                max_fee_amount,
+                amount,
+                rate
+            );
+        }
+    }
+}
+
+// =============================================================================
+// CchConfig::validate tests
+// =============================================================================
+
+#[test]
+fn test_config_validate_accepts_boundaries() {
+    use crate::cch::CchConfig;
+    let mut config = CchConfig {
+        max_outgoing_fee_percentage: 1,
+        ..Default::default()
+    };
+    assert!(config.validate().is_ok());
+    config.max_outgoing_fee_percentage = 100;
+    assert!(config.validate().is_ok());
+    config.max_outgoing_fee_percentage = 50;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_config_validate_rejects_out_of_range() {
+    use crate::cch::CchConfig;
+    let mut config = CchConfig {
+        max_outgoing_fee_percentage: 0,
+        ..Default::default()
+    };
+    assert!(config.validate().is_err());
+    config.max_outgoing_fee_percentage = 101;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn test_config_default_percentage_is_full() {
+    use crate::cch::CchConfig;
+    // The default must be a valid, full-budget percentage so existing deployments keep working.
+    let config = CchConfig::default();
+    assert_eq!(config.max_outgoing_fee_percentage, 100);
+    assert!(config.validate().is_ok());
+}

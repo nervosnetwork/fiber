@@ -20,8 +20,7 @@ COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --locked -p fiber-bin -p fnn-cli \
-    && cargo build --release --locked --manifest-path migrate/Cargo.toml
+    cargo build --release --locked -p fiber-bin -p fnn-cli
 
 FROM debian:bookworm-slim AS runtime
 
@@ -38,7 +37,6 @@ ENV FIBER_HOME=/fiber
 
 COPY --from=builder /usr/src/fiber/target/release/fnn /usr/local/bin/fnn
 COPY --from=builder /usr/src/fiber/target/release/fnn-cli /usr/local/bin/fnn-cli
-COPY --from=builder /usr/src/fiber/target/release/fnn-migrate /usr/local/bin/fnn-migrate
 COPY config /usr/local/share/fiber/config
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

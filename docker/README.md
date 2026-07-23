@@ -27,7 +27,7 @@ If you prefer GHCR, replace the image reference with `ghcr.io/nervosnetwork/fibe
 
 On first start, the image copies the bundled testnet config to `/fiber/config.yml` if the file does not already exist. To bootstrap from the bundled mainnet config instead, set `FIBER_CONFIG_TEMPLATE=/usr/local/share/fiber/config/mainnet/config.yml`.
 
-The image also includes `fnn-cli` and `fnn-migrate` for administration and data migration tasks.
+The image also includes `fnn-cli` for administration tasks.
 
 The RPC service listens on `127.0.0.1:8227` in the bundled configs, so publishing port `8227` from the container is not enough by itself. If you need remote RPC access, update `rpc.listening_addr` in your mounted config first.
 
@@ -57,15 +57,15 @@ The full CLI reference is available in [../crates/fiber-cli/README.md](../crates
 
 ## Migrate data with Docker
 
-When upgrading between versions that require a storage migration, stop the node container first and back up the mounted data directory. With the default Docker layout shown above, the store path is `/fiber/fiber/store` inside the container.
+When upgrading between versions that require a storage migration, stop the node container first and back up the mounted data directory.
 
-Run the migration tool against the same mounted directory:
+Current releases run the unified migration system when `fnn` opens the store. If the existing database predates the unified migration epoch, upgrade it with the v0.8.x `fnn-migrate` binary before starting a current image:
 
 ```bash
-docker run --rm \
+docker run --rm -it \
   -v "$(pwd)/fiber-node:/fiber" \
-  nervos/fiber:<new-release-tag> \
-  fnn-migrate -p /fiber/fiber/store
+  nervos/fiber:<v0.8.x-release-tag> \
+  fnn-migrate -d /fiber
 ```
 
-After the migration finishes, start the new image version again with the same bind mount. If your config overrides the default store path, replace `/fiber/fiber/store` with that custom path.
+After the legacy migration finishes, start the new image version again with the same bind mount.

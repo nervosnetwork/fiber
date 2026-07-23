@@ -1,3 +1,4 @@
+use crate::fiber::gossip_policy::GossipPolicyConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
@@ -260,6 +261,15 @@ pub struct FiberConfig {
     )]
     pub(crate) min_outbound_peers: Option<usize>,
 
+    /// Whether to automatically schedule reconnect backoff for peers with active channels. [default: true]
+    #[arg(
+        name = "FIBER_ENABLE_PEER_RECONNECT_BACKOFF",
+        long = "fiber-enable-peer-reconnect-backoff",
+        env,
+        help = "Whether to automatically schedule reconnect backoff for peers with active channels. [default: true]"
+    )]
+    pub(crate) enable_peer_reconnect_backoff: Option<bool>,
+
     /// Gossip store maintenance interval, in milli-seconds. [default: 20000]
     /// This is the interval to maintain the gossip store, including saving messages whose complete dependencies
     /// are available, etc.
@@ -270,6 +280,13 @@ pub struct FiberConfig {
         help = "Gossip store maintenance interval, in milli-seconds. [default: 20000]"
     )]
     pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
+
+    /// Gossip policy configuration. This is loaded from config files only and is intentionally
+    /// not configurable via command-line flags or environment variables.
+    #[arg(skip)]
+    #[serde(default)]
+    #[default(GossipPolicyConfig::default())]
+    pub(crate) gossip_policy: GossipPolicyConfig,
 
     /// Gossip network num targeted active syncing peers. [default: None]
     /// This is the number of peers to target for active syncing. This is the number of peers that we will
@@ -346,12 +363,12 @@ pub struct FiberConfig {
     #[arg(skip)]
     pub wasm_key_pair: Option<KeyPair>,
 
-    /// Max allowed number of channels to be accepted from one peer. [default: 20]
+    /// Max allowed number of pending channel openings from one peer. [default: 20]
     #[arg(
         name = "FIBER_TO_BE_ACCEPTED_CHANNELS_NUMBER_LIMIT",
         long = "fiber-to-be-accepted-channels-number-limit",
         env,
-        help = "Max allowed number of channels to be accepted from one peer. [default: 20]"
+        help = "Max allowed number of pending channel openings from one peer. [default: 20]"
     )]
     pub to_be_accepted_channels_number_limit: Option<usize>,
 
@@ -363,6 +380,15 @@ pub struct FiberConfig {
         help = "Max allowed bytes of channels to be accepted from one peer. [default: 50KB]"
     )]
     pub to_be_accepted_channels_bytes_limit: Option<usize>,
+
+    /// Max allowed number of pending channel openings globally. [default: 100]
+    #[arg(
+        name = "FIBER_PENDING_CHANNELS_NUMBER_LIMIT",
+        long = "fiber-pending-channels-number-limit",
+        env,
+        help = "Max allowed number of pending channel openings globally. [default: 100]"
+    )]
+    pub pending_channels_number_limit: Option<usize>,
 
     /// Default timeout to auto close a funding channel. [default: 1 day]
     #[arg(
@@ -436,10 +462,14 @@ impl FiberConfig {
 
     pub fn create_base_dir(&self) -> Result<()> {
         if !self.base_dir().exists() {
-            fs::create_dir_all(self.base_dir()).map_err(Into::into)
-        } else {
-            Ok(())
+            fs::create_dir_all(self.base_dir())?;
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(self.base_dir(), fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -473,8 +503,15 @@ impl FiberConfig {
     pub fn store_path(&self) -> PathBuf {
         let path = self.base_dir().join("store");
         #[cfg(not(target_arch = "wasm32"))]
-        if !path.exists() {
-            fs::create_dir_all(&path).expect("create store directory");
+        {
+            if !path.exists() {
+                fs::create_dir_all(&path).expect("create store directory");
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+            }
         }
         path
     }
@@ -546,6 +583,10 @@ impl FiberConfig {
     pub fn min_outbound_peers(&self) -> usize {
         self.min_outbound_peers
             .unwrap_or(DEFAULT_MIN_OUTBOUND_PEERS)
+    }
+
+    pub fn enable_peer_reconnect_backoff(&self) -> bool {
+        self.enable_peer_reconnect_backoff.unwrap_or(true)
     }
 
     pub fn gossip_store_maintenance_interval_ms(&self) -> u64 {

@@ -5,19 +5,23 @@ use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
+use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
+use crate::fiber::ChannelConnectivityState;
 use crate::fiber::NetworkActorCommand;
 use crate::fiber::NetworkActorMessage;
 use crate::fiber::{
     AddTlcCommand, ChannelState, CloseFlags, Hash256, PaymentHopData, PaymentStatus,
     PeeledPaymentOnionPacket, SendPaymentData, ShuttingDownFlags, TLCId, TlcErrorCode,
-    NO_SHARED_SECRET,
 };
+use crate::gen_rand_channel_outpoint;
 use crate::gen_rand_fiber_public_key;
+use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::CkbInvoice;
+use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::Currency;
 use crate::invoice::InvoiceBuilder;
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,24 +29,544 @@ use crate::invoice::PreimageStore;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::NewInvoiceParams;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::payment::{GetPaymentCommandResult, SendPaymentWithRouterParams};
 use crate::tasks::cancel_tasks_and_wait_for_completion;
 use crate::test_utils::init_tracing;
 use crate::tests::test_utils::*;
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
+use bech32::{encode, u5, Variant};
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_json_types::RouterHop as JsonRouterHop;
+use fiber_sphinx::OnionSharedSecretIter;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
 use fiber_types::RemoveTlcFulfill;
+use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
+use fiber_types::TlcErrPacket;
+use fiber_types::SIGNATURE_U5_SIZE;
+use fiber_types::{Attempt, AttemptStatus, PrevTlcInfo, TrampolineContext};
 use ractor::call;
-use secp256k1::SECP256K1;
+use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
+
+struct RemoveTlcFailEventFixture {
+    node: NetworkNode,
+    _peers: Vec<NetworkNode>,
+    payment_hash: Hash256,
+    attempt_id: u64,
+    shared_secrets: Vec<[u8; 32]>,
+    node_b: Pubkey,
+    node_c: Pubkey,
+    channel_ab: OutPoint,
+    channel_bc: OutPoint,
+    channel_cd: OutPoint,
+}
+
+async fn setup_remove_tlc_fail_event_fixture() -> RemoveTlcFailEventFixture {
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((2, 3), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        4,
+    )
+    .await;
+    let [node, node_b, node_c, node_d] = nodes.try_into().expect("4 nodes");
+    let node_a = node.get_public_key();
+    let node_b_pubkey = node_b.get_public_key();
+    let node_c_pubkey = node_c.get_public_key();
+    let node_d_pubkey = node_d.get_public_key();
+    let amount = 700;
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_d_pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_d.private_key.0))
+        .expect("build hold invoice");
+    node_d.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node
+        .send_payment(SendPaymentCommand {
+            amount: Some(amount),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node.wait_until_inflight(payment_hash).await;
+
+    let session = node
+        .get_payment_session(payment_hash)
+        .expect("payment session exists");
+    let attempts = session.attempts().cloned().collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1);
+    let attempt = attempts.into_iter().next().expect("payment attempt exists");
+    assert!(attempt.is_inflight());
+    let attempt_id = attempt.id;
+
+    let route_nodes = &attempt.route.nodes;
+    assert_eq!(
+        route_nodes
+            .iter()
+            .map(|node| node.pubkey)
+            .collect::<Vec<_>>(),
+        vec![node_a, node_b_pubkey, node_c_pubkey, node_d_pubkey]
+    );
+    let hops_pubkeys: Vec<PublicKey> = attempt
+        .hops_public_keys()
+        .iter()
+        .map(|key| PublicKey::from_slice(&key.0).expect("valid pubkey"))
+        .collect();
+    let shared_secrets = OnionSharedSecretIter::new(
+        hops_pubkeys.iter(),
+        SecretKey::from_slice(&attempt.session_key).unwrap(),
+        SECP256K1,
+    )
+    .collect::<Result<Vec<_>, _>>()
+    .expect("valid shared secrets");
+
+    let channel_ab = route_nodes[0].channel_outpoint.clone();
+    let channel_bc = route_nodes[1].channel_outpoint.clone();
+    let channel_cd = route_nodes[2].channel_outpoint.clone();
+
+    RemoveTlcFailEventFixture {
+        node,
+        _peers: vec![node_b, node_c, node_d],
+        payment_hash,
+        attempt_id,
+        shared_secrets,
+        node_b: node_b_pubkey,
+        node_c: node_c_pubkey,
+        channel_ab,
+        channel_bc,
+        channel_cd,
+    }
+}
+
+async fn send_remove_tlc_fail_event(fixture: &RemoveTlcFailEventFixture, packet: TlcErrPacket) {
+    fixture
+        .node
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::TlcRemoveReceived(
+                fixture.payment_hash,
+                Some(fixture.attempt_id),
+                RemoveTlcReason::RemoveTlcFail(packet),
+            ),
+        ))
+        .expect("network actor alive");
+
+    wait_until_timeout(10_000, || {
+        fixture
+            .node
+            .get_payment_session(fixture.payment_hash)
+            .is_some_and(|session| {
+                session
+                    .attempts()
+                    .any(|attempt| attempt.id == fixture.attempt_id && attempt.last_error.is_some())
+            })
+    })
+    .await;
+}
+
+fn failed_history_outpoints(fixture: &RemoveTlcFailEventFixture) -> HashSet<OutPoint> {
+    fixture
+        .node
+        .store
+        .get_payment_history_results()
+        .into_iter()
+        .filter_map(|(outpoint, _direction, result)| (result.fail_time != 0).then_some(outpoint))
+        .collect()
+}
+
+fn test_payment_session(request: SendPaymentData, now: u64) -> PaymentSession {
+    PaymentSession {
+        request,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        status: PaymentStatus::Created,
+        created_at: now,
+        last_updated_at: now,
+        cached_attempts: vec![],
+    }
+}
+
+fn test_attempt(
+    id: u64,
+    payment_hash: Hash256,
+    source: Pubkey,
+    target: Pubkey,
+    route_hops: Vec<PaymentHopData>,
+    now: u64,
+) -> Attempt {
+    Attempt {
+        id,
+        hash: payment_hash,
+        try_limit: 3,
+        tried_times: 1,
+        payment_hash,
+        route: SessionRoute::new(source, target, &route_hops),
+        route_hops,
+        session_key: [0; 32],
+        preimage: None,
+        created_at: now,
+        last_updated_at: now,
+        last_error: None,
+        status: AttemptStatus::Created,
+    }
+}
+
+#[test]
+fn test_sender_side_trampoline_retry_does_not_reuse_visible_route_amount() {
+    init_tracing();
+
+    let final_amount = 1000;
+    let amount_to_trampoline = 1200;
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(target, final_amount, payment_hash)
+        .max_fee_amount(Some(amount_to_trampoline - final_amount))
+        .trampoline_hops(Some(vec![trampoline]))
+        .build()
+        .expect("valid trampoline payment request");
+
+    let now = now_timestamp_as_millis_u64();
+    let route_hops = vec![
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            funding_tx_hash: gen_rand_sha256_hash(),
+            next_hop: Some(trampoline),
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            ..Default::default()
+        },
+    ];
+    let mut attempt = Attempt {
+        id: 1,
+        hash: payment_hash,
+        try_limit: 3,
+        tried_times: 1,
+        payment_hash,
+        route: SessionRoute::new(source, target, &route_hops),
+        route_hops,
+        session_key: [0; 32],
+        preimage: None,
+        created_at: now,
+        last_updated_at: now,
+        last_error: Some("temporary trampoline failure".to_string()),
+        status: AttemptStatus::Retrying,
+    };
+    assert_eq!(attempt.route.receiver_amount(), amount_to_trampoline);
+
+    let mut session = PaymentSession {
+        request,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        status: PaymentStatus::Created,
+        created_at: now,
+        last_updated_at: now,
+        cached_attempts: vec![attempt.clone()],
+    };
+    assert_eq!(attempt.route.receiver_amount(), amount_to_trampoline);
+    assert_eq!(session.remain_amount(), 0);
+    assert_eq!(
+        session
+            .remain_amount()
+            .checked_add(attempt.route.receiver_amount()),
+        Some(amount_to_trampoline)
+    );
+    assert_eq!(session.retry_amount(&attempt), Some(final_amount));
+
+    attempt.set_success_status();
+    session.cached_attempts = vec![attempt];
+    assert_eq!(session.calc_payment_status(), PaymentStatus::Success);
+}
+
+#[test]
+fn test_sender_side_trampoline_with_mpp_invoice_stays_single_attempt() {
+    init_tracing();
+
+    let final_amount = 1000;
+    let amount_to_trampoline = 1200;
+    let source = gen_rand_fiber_public_key();
+    let trampoline = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let request = SendPaymentDataBuilder::new(target, final_amount, payment_hash)
+        .max_fee_amount(Some(amount_to_trampoline - final_amount))
+        .allow_mpp(true)
+        .max_parts(Some(4))
+        .trampoline_hops(Some(vec![trampoline]))
+        .build()
+        .expect("valid sender-side trampoline MPP payment request");
+
+    assert!(request.allow_mpp());
+    assert!(request.use_trampoline_routing());
+
+    let now = now_timestamp_as_millis_u64();
+    let route_hops = vec![
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            funding_tx_hash: gen_rand_sha256_hash(),
+            next_hop: Some(trampoline),
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: amount_to_trampoline,
+            expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            ..Default::default()
+        },
+    ];
+    let attempt = test_attempt(1, payment_hash, source, target, route_hops, now);
+    let mut session = test_payment_session(request, now);
+
+    assert_eq!(session.max_parts(), 1);
+    assert!(session.allow_more_attempts());
+
+    session.append_attempt(attempt.clone());
+
+    assert_eq!(session.attempts_count(), 1);
+    assert_eq!(session.remain_amount(), 0);
+    assert_eq!(session.retry_amount(&attempt), Some(final_amount));
+    assert!(!session.allow_more_attempts());
+}
+
+#[test]
+fn test_trampoline_context_mpp_counts_each_shard_receiver_amount() {
+    init_tracing();
+
+    let total_amount = 1000;
+    let first_shard_amount = 400;
+    let second_shard_amount = 600;
+    let source = gen_rand_fiber_public_key();
+    let middle = gen_rand_fiber_public_key();
+    let target = gen_rand_fiber_public_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let trampoline_context = TrampolineContext {
+        remaining_trampoline_onion: vec![1, 2, 3],
+        previous_tlcs: vec![PrevTlcInfo::new_with_shared_secret(
+            gen_rand_sha256_hash(),
+            1,
+            0,
+            [0; 32],
+        )],
+        hash_algorithm: HashAlgorithm::CkbHash,
+        max_outgoing_tlc_expiry: None,
+    };
+    let request = SendPaymentDataBuilder::new(target, total_amount, payment_hash)
+        .max_fee_amount(Some(200))
+        .allow_mpp(true)
+        .max_parts(Some(2))
+        .trampoline_context(Some(trampoline_context))
+        .build()
+        .expect("valid trampoline forwarding MPP payment request");
+
+    assert!(request.allow_mpp());
+    assert!(!request.use_trampoline_routing());
+    assert!(request.trampoline_context.is_some());
+
+    let now = now_timestamp_as_millis_u64();
+    let first_attempt = test_attempt(
+        1,
+        payment_hash,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: first_shard_amount + 10,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                funding_tx_hash: gen_rand_sha256_hash(),
+                next_hop: Some(middle),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: first_shard_amount,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                ..Default::default()
+            },
+        ],
+        now,
+    );
+    let second_attempt = test_attempt(
+        2,
+        payment_hash,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: second_shard_amount + 20,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                funding_tx_hash: gen_rand_sha256_hash(),
+                next_hop: Some(middle),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: second_shard_amount,
+                expiry: now + DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                ..Default::default()
+            },
+        ],
+        now,
+    );
+
+    let mut session = test_payment_session(request, now);
+    assert_eq!(session.max_parts(), 2);
+    assert_eq!(first_attempt.route.receiver_amount(), first_shard_amount);
+
+    session.append_attempt(first_attempt.clone());
+    assert_eq!(session.remain_amount(), second_shard_amount);
+    assert_eq!(session.retry_amount(&first_attempt), Some(total_amount));
+    assert!(session.allow_more_attempts());
+
+    assert_eq!(second_attempt.route.receiver_amount(), second_shard_amount);
+    session.append_attempt(second_attempt);
+    assert_eq!(session.remain_amount(), 0);
+    assert!(!session.allow_more_attempts());
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_decode_fallback_does_not_record_history() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let packet = TlcErrPacket {
+        onion_packet: vec![1, 2, 3],
+    };
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let session = fixture
+        .node
+        .get_payment_session(fixture.payment_hash)
+        .expect("payment session exists");
+    assert_eq!(session.status, PaymentStatus::Failed);
+    assert_eq!(
+        session.last_error_code,
+        Some(TlcErrorCode::InvalidOnionError)
+    );
+    assert!(failed_history_outpoints(&fixture).is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_rejects_forged_attribution() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let forged_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        fixture.node_c,
+        fixture.channel_cd.clone(),
+        None,
+    );
+    let packet = TlcErrPacket::new(forged_error, &fixture.shared_secrets[0]);
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let failed_outpoints = failed_history_outpoints(&fixture);
+    assert!(failed_outpoints.contains(&fixture.channel_ab));
+    assert!(!failed_outpoints.contains(&fixture.channel_bc));
+    assert!(!failed_outpoints.contains(&fixture.channel_cd));
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_records_authenticated_downstream_channel_failure() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        fixture.node_c,
+        fixture.channel_cd.clone(),
+        None,
+    );
+    let packet = TlcErrPacket::new(channel_error, &fixture.shared_secrets[1])
+        .backward(&fixture.shared_secrets[0])
+        .expect("backward encrypted error");
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let failed_outpoints = failed_history_outpoints(&fixture);
+    assert!(!failed_outpoints.contains(&fixture.channel_ab));
+    assert!(!failed_outpoints.contains(&fixture.channel_bc));
+    assert!(failed_outpoints.contains(&fixture.channel_cd));
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_first_hop_incorrect_tlc_expiry_records_reporting_channel() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::IncorrectTlcExpiry,
+        fixture.node_b,
+        fixture.channel_ab.clone(),
+        None,
+    );
+    let packet = TlcErrPacket::new(channel_error, &fixture.shared_secrets[0]);
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let failed_outpoints = failed_history_outpoints(&fixture);
+    assert!(failed_outpoints.contains(&fixture.channel_ab));
+    assert!(!failed_outpoints.contains(&fixture.channel_bc));
+    assert!(!failed_outpoints.contains(&fixture.channel_cd));
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fail_event_incorrect_tlc_expiry_records_reporting_channel() {
+    init_tracing();
+
+    let fixture = setup_remove_tlc_fail_event_fixture().await;
+    let channel_error = TlcErr::new_channel_fail(
+        TlcErrorCode::IncorrectTlcExpiry,
+        fixture.node_c,
+        fixture.channel_bc.clone(),
+        None,
+    );
+    let packet = TlcErrPacket::new(channel_error, &fixture.shared_secrets[1])
+        .backward(&fixture.shared_secrets[0])
+        .expect("backward encrypted error");
+
+    send_remove_tlc_fail_event(&fixture, packet).await;
+
+    let failed_outpoints = failed_history_outpoints(&fixture);
+    assert!(!failed_outpoints.contains(&fixture.channel_ab));
+    assert!(failed_outpoints.contains(&fixture.channel_bc));
+    assert!(!failed_outpoints.contains(&fixture.channel_cd));
+}
 
 #[tokio::test]
 async fn test_send_payment_custom_records() {
@@ -119,10 +643,10 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .await;
 
     let err = res.unwrap_err().to_string();
-    assert!(err.contains("the sum size of custom_records's value can not more than"));
+    assert!(err.contains("custom_records encoded size"));
 
     // normal case
-    let long_value = "a".repeat(1024 * 2);
+    let long_value = "a".repeat(1024);
     let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
     let custom_records = PaymentCustomRecords { data };
     let res = source_node
@@ -143,6 +667,99 @@ async fn test_send_payment_custom_records_with_limit_error() {
         .expect("custom records");
     assert_eq!(got_custom_records, custom_records);
     assert_eq!(source_node.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_receive_payment_rejects_oversized_custom_records() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+    )
+    .await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let amount = 1000;
+    let hash_algorithm = HashAlgorithm::Sha256;
+    let payment_preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = hash_algorithm.hash(payment_preimage).into();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let custom_records = PaymentCustomRecords {
+        data: vec![(1, vec![1; MAX_CUSTOM_RECORDS_SIZE + 1])]
+            .into_iter()
+            .collect(),
+    };
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry,
+            next_hop: Some(node_1.pubkey),
+            hash_algorithm,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount,
+            expiry,
+            payment_preimage: Some(payment_preimage),
+            hash_algorithm,
+            custom_records: Some(custom_records),
+            ..Default::default()
+        },
+    ];
+
+    let packet = PeeledPaymentOnionPacket::create(
+        node_0.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = ractor::call!(node_0.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount,
+                        hash_algorithm,
+                        payment_hash,
+                        expiry,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                        attempt_id: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive");
+    assert!(add_tlc_result.is_ok());
+
+    let target_pubkey = node_1.pubkey;
+    node_1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
+                pubkey,
+                failed_payment_hash,
+                err,
+            )) => {
+                pubkey == &target_pubkey
+                    && failed_payment_hash == &payment_hash
+                    && err.error_code == TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            }
+            _ => false,
+        })
+        .await;
+    assert!(node_1.get_payment_custom_records(&payment_hash).is_none());
 }
 
 // This test will send two payments from node_0 to node_1, the first payment will run
@@ -901,14 +1518,14 @@ async fn test_send_payment_with_private_channel_hints() {
 
 #[test]
 fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
-    let payee_pubkey = gen_rand_fiber_public_key();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
     let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibd)
         .amount(Some(1000))
         .payment_preimage(preimage)
-        .payee_pub_key(payee_pubkey.into())
+        .payee_pub_key(public_key)
         .allow_trampoline_routing(false)
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build invoice");
 
     let hop_hint = HopHint {
@@ -928,6 +1545,61 @@ fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
     assert!(
         err.contains("invoice does not support hop hints"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_send_payment_rejects_unsigned_invoice_by_default() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pubkey.into())
+        .build()
+        .expect("build unsigned invoice");
+
+    let err = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        ..Default::default()
+    })
+    .unwrap_err();
+
+    assert!(
+        err.contains("invoice is not signed"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_send_payment_with_router_rejects_unsigned_invoice() {
+    let payee_pubkey = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee_pubkey.into())
+        .build()
+        .expect("build unsigned invoice");
+    let router = vec![RouterHop {
+        target: payee_pubkey,
+        channel_outpoint: gen_rand_channel_outpoint(),
+        amount_received: 1000,
+        incoming_tlc_expiry: DEFAULT_TLC_EXPIRY_DELTA,
+    }];
+
+    let err = SendPaymentWithRouterCommand {
+        invoice: Some(invoice.to_string()),
+        router,
+        ..Default::default()
+    }
+    .build_send_payment_data(gen_rand_fiber_public_key())
+    .unwrap_err();
+
+    let crate::Error::InvalidParameter(message) = err else {
+        panic!("unexpected error: {err}");
+    };
+    assert!(
+        message.contains("invoice is not signed"),
+        "unexpected error: {message}"
     );
 }
 
@@ -1037,10 +1709,13 @@ async fn test_send_payment_hophint_for_middle_channels_does_not_work() {
     let payment_hash = res.payment_hash;
 
     // this router will not payment succeeded
-    node1.wait_until_failed(payment_hash).await;
+    wait_until_async_timeout(|| async {
+        node1.get_payment_status(payment_hash).await == PaymentStatus::Failed
+    })
+    .await;
     let res = node1.get_payment_result(payment_hash).await;
     eprintln!("res: {:?}", res);
-    assert!(res.failed_error.unwrap().contains("InvalidOnionPayload"));
+    assert!(res.failed_error.unwrap().contains("InvalidOnionError"));
     assert_eq!(node1.get_inflight_payment_count().await, 0);
 }
 
@@ -1908,14 +2583,11 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
         })
         .await;
 
-    assert!(res.is_ok());
-
-    let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_failed(payment_hash).await;
-    let result = node_0
-        .get_payment_session(payment_hash)
-        .expect("get payment");
-    assert_eq!(result.retry_times(), 1);
+    let err = res.expect_err("invalid router amount should be rejected before sending TLC");
+    assert!(
+        err.contains("route hop amount_received is too small for forwarding fee"),
+        "unexpected error: {err}"
+    );
 
     // ================================================================
     // now we change the expiry delta in the middle hop
@@ -1930,15 +2602,96 @@ async fn test_send_payment_with_route_with_invalid_parameters() {
         })
         .await;
 
-    assert!(res.is_ok());
+    let err = res.expect_err("invalid router expiry should be rejected before sending TLC");
+    assert!(
+        err.contains("route hop incoming_tlc_expiry is too small"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+}
 
-    let payment_hash = res.unwrap().payment_hash;
-    node_0.wait_until_failed(payment_hash).await;
-    let result = node_0
-        .get_payment_session(payment_hash)
-        .expect("get payment");
-    eprintln!("result: {:?}", result.status);
-    assert_eq!(result.attempts_count(), 1);
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_send_payment_with_router_rpc_rejects_overflowing_onion_expiry() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters::new(
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                ChannelParameters::new(
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        Some(gen_rpc_config()),
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    node_0
+        .with_network_graph_mut(|graph| graph.set_fixed_rand_expiry_delta(0))
+        .await;
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .unwrap()
+        .router_hops;
+
+    let overflow_margin = DEFAULT_TLC_EXPIRY_DELTA / 2;
+    let overflowing_incoming_expiry = u64::MAX
+        .checked_sub(now_timestamp_as_millis_u64())
+        .and_then(|expiry| expiry.checked_sub(overflow_margin))
+        .expect("current timestamp leaves room below u64::MAX");
+    let mut router = router;
+    router
+        .get_mut(1)
+        .expect("A -> B -> C route has a forwarding hop")
+        .incoming_tlc_expiry = overflowing_incoming_expiry;
+    let router = router.into_iter().map(JsonRouterHop::from).collect();
+
+    let err = node_0
+        .send_rpc_request::<_, GetPaymentCommandResult>(
+            "send_payment_with_router",
+            SendPaymentWithRouterParams {
+                payment_hash: None,
+                router,
+                invoice: None,
+                custom_records: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                dry_run: None,
+            },
+        )
+        .await
+        .expect_err("overflowing explicit router expiry should be rejected before sending TLC");
+    assert!(
+        err.to_string().contains("route hop incoming_tlc_expiry"),
+        "unexpected error: {err:?}"
+    );
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
@@ -2429,7 +3182,7 @@ async fn test_send_payment_send_with_wrong_hop() {
     assert!(res
         .unwrap_err()
         .to_string()
-        .contains("Failed to send onion packet with error UnknownNextPeer"));
+        .contains("Failed to build route, PathFind error: no path found"));
     assert_eq!(node_1.get_inflight_payment_count().await, 0);
 }
 
@@ -3111,7 +3864,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
                 node_b_funding_amount: HUGE_CKB_AMOUNT,
-                a_max_tlc_value_in_flight: Some(100000000),
+                b_max_tlc_value_in_flight: Some(100000000),
                 ..Default::default()
             },
         )
@@ -3146,7 +3899,7 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
                 public: true,
                 node_a_funding_amount: HUGE_CKB_AMOUNT,
                 node_b_funding_amount: HUGE_CKB_AMOUNT,
-                a_max_tlc_value_in_flight: Some(100000000 + 2),
+                b_max_tlc_value_in_flight: Some(100000000 + 2),
                 ..Default::default()
             },
         )
@@ -3163,6 +3916,42 @@ async fn test_send_payment_max_value_in_flight_in_first_hop() {
     node_0
         .expect_payment_used_channel(payment_hash, channel_id)
         .await;
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_router_to_offline_channel_fails_fast() {
+    init_tracing();
+
+    let (nodes, _channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [node_0, mut node_1] = nodes.try_into().expect("2 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(1000),
+            hops_info: vec![HopRequire {
+                pubkey: node_1.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .expect("build direct router");
+
+    node_1.stop().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let error = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.router_hops,
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(error.contains("Failed to build route, PathFind error: no path found"));
     assert_eq!(node_0.get_inflight_payment_count().await, 0);
 }
 
@@ -3405,7 +4194,7 @@ async fn test_send_payment_middle_hop_update_fee_should_recovery() {
 
     assert_eq!(succ_count, tx_count);
     let channel_state = nodes[0].get_channel_actor_state(channels[0]);
-    assert_eq!(channel_state.get_offered_tlc_balance(), 0);
+    assert_eq!(channel_state.get_offered_tlc_balance().unwrap(), 0);
 }
 
 async fn run_complex_network_with_params(
@@ -3697,7 +4486,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             target_pubkey: Some(nodes[1].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + 1), // Ok now
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await;
@@ -4126,6 +4915,362 @@ async fn test_send_payment_shutdown_channel_actor_may_already_stopped() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channels() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let mut closed_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    let downstream_tlc = closed_downstream_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("downstream tlc exists");
+    let (previous_channel_id, previous_tlc_id) = downstream_tlc
+        .forwarding_tlc
+        .expect("downstream tlc should track the upstream forwarding tlc");
+    assert_eq!(previous_channel_id, channels[0]);
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    closed_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    closed_downstream_state
+        .tlc_state
+        .get_mut(&TLCId::Offered(downstream_tlc.id()))
+        .expect("closed downstream tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_1
+        .update_channel_actor_state(
+            closed_downstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+        .try_into()
+        .expect("20-byte payment hash prefix");
+    node_1
+        .store
+        .update_tlc_settled(&channels[1], payment_hash_prefix);
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+
+    tokio::time::timeout(
+        Duration::from_millis(800),
+        node_0.wait_until_failed(payment_hash),
+    )
+    .await
+    .expect("closed channel actor should fail the upstream payment without CheckChannels");
+
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Failed
+    );
+    assert!(matches!(
+        node_1
+            .get_tlc(channels[0], TLCId::Received(previous_tlc_id))
+            .and_then(|tlc| tlc.removed_reason),
+        Some(RemoveTlcReason::RemoveTlcFail(..))
+    ));
+}
+
+#[tokio::test]
+async fn test_forwarded_payment_relays_remove_to_upstream() {
+    init_tracing();
+
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, _node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(payment_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build invoice");
+    let payment_hash = *invoice.payment_hash();
+    node_2.insert_invoice(invoice.clone(), Some(payment_preimage));
+
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send forwarded payment");
+    assert_eq!(payment.payment_hash, payment_hash);
+
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        node_0.wait_until_success(payment_hash),
+    )
+    .await
+    .expect("forwarded payment should settle back to the sender");
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Success
+    );
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_actor() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    let closed_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    let downstream_tlc = closed_downstream_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("downstream tlc exists");
+    let (previous_channel_id, previous_tlc_id) = downstream_tlc
+        .forwarding_tlc
+        .expect("downstream tlc should track the upstream forwarding tlc");
+    assert_eq!(previous_channel_id, channels[0]);
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let mut upstream_state = node_1.get_channel_actor_state(channels[0]);
+    upstream_state.update_state(ChannelState::ShuttingDown(
+        ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+    ));
+    node_1
+        .update_channel_actor_state(
+            upstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_1.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let restored_upstream_state = node_1.get_channel_actor_state(channels[0]);
+    assert!(
+        !restored_upstream_state.reestablishing,
+        "upstream waiting-for-confirmation channel should restore as chain-watch only"
+    );
+    assert_eq!(
+        restored_upstream_state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "upstream waiting-for-confirmation channel should stay offline after restart"
+    );
+
+    let upstream_control_before_close_confirmation = call!(node_1.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_1 alive");
+    assert!(
+        upstream_control_before_close_confirmation.is_ok(),
+        "upstream waiting-for-confirmation channel actor should be restored after restart"
+    );
+
+    let mut restarted_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    restarted_downstream_state
+        .tlc_state
+        .get_mut(&TLCId::Offered(downstream_tlc.id()))
+        .expect("closed downstream tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_1
+        .update_channel_actor_state(
+            restarted_downstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+        .try_into()
+        .expect("20-byte payment hash prefix");
+    node_1
+        .store
+        .update_tlc_settled(&channels[1], payment_hash_prefix);
+
+    node_1
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channels[1]),
+        ))
+        .expect("network actor alive");
+
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            node_0.wait_until_failed(payment_hash)
+        )
+        .await
+        .is_err(),
+        "payment should still stay pending until waiting-commitment-confirmation gains full restart recovery"
+    );
+
+    assert!(node_1
+        .get_tlc(channels[0], TLCId::Received(previous_tlc_id))
+        .and_then(|tlc| tlc.removed_reason)
+        .is_some());
+}
+
 #[tokio::test]
 async fn test_send_payment_shutdown_cooperative() {
     init_tracing();
@@ -4521,7 +5666,38 @@ async fn test_shutdown_with_pending_tlc() {
     let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
 
     let hash_algorithm = HashAlgorithm::Sha256;
-    let digest = hash_algorithm.hash(preimage);
+    let payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_hash(payment_hash)
+        .hash_algorithm(hash_algorithm)
+        .payee_pub_key(nodes[1].pubkey.into())
+        .build()
+        .expect("build pending invoice");
+    nodes[1].insert_invoice(invoice, None);
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: 1000,
+            expiry,
+            next_hop: Some(nodes[1].pubkey),
+            hash_algorithm,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount: 1000,
+            expiry,
+            hash_algorithm,
+            ..Default::default()
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        nodes[0].get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create pending onion packet");
     let add_tlc_result = call!(nodes[0].network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
@@ -4530,10 +5706,10 @@ async fn test_shutdown_with_pending_tlc() {
                     AddTlcCommand {
                         amount: 1000,
                         hash_algorithm,
-                        payment_hash: digest.into(),
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
+                        payment_hash,
+                        expiry,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
                         previous_tlc: None,
                         attempt_id: None,
@@ -4611,98 +5787,6 @@ async fn test_shutdown_with_pending_tlc() {
     assert_eq!(
         node_1_channel_actor_state.state,
         ChannelState::Closed(CloseFlags::COOPERATIVE)
-    );
-}
-
-#[tokio::test]
-async fn test_add_tlc_invoice_udt_type_script_mismatch_fails() {
-    init_tracing();
-
-    use ckb_types::prelude::*;
-
-    let channel_udt_script = Script::new_builder().args([0u8; 53].pack()).build();
-    let invoice_udt_script = Script::new_builder().args([1u8; 53].pack()).build();
-    let (nodes, channels) = create_n_nodes_network_with_params(
-        &[(
-            (0, 1),
-            ChannelParameters {
-                public: true,
-                node_a_funding_amount: HUGE_CKB_AMOUNT,
-                node_b_funding_amount: HUGE_CKB_AMOUNT,
-                funding_udt_type_script: Some(channel_udt_script.clone()),
-                ..Default::default()
-            },
-        )],
-        2,
-        None,
-    )
-    .await;
-    let [node_a, node_b] = nodes.try_into().expect("2 nodes");
-
-    let amount: u128 = 1000;
-    let preimage = gen_rand_sha256_hash();
-    let invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(preimage)
-        .hash_algorithm(HashAlgorithm::Sha256)
-        .udt_type_script(invoice_udt_script.clone())
-        .payee_pub_key(node_b.get_public_key().into())
-        .build()
-        .expect("build invoice");
-    node_b.insert_invoice(invoice.clone(), Some(preimage));
-
-    let payment_hash = *invoice.payment_hash();
-    let hash_algorithm = HashAlgorithm::Sha256;
-
-    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: channels[0],
-                command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount,
-                        hash_algorithm,
-                        payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        previous_tlc: None,
-                        attempt_id: None,
-                        is_trampoline_hop: false,
-                    },
-                    rpc_reply,
-                ),
-            },
-        ))
-    })
-    .expect("node alive");
-    assert!(add_tlc_result.is_ok(), "add tlc should be accepted locally");
-
-    let offered_id = TLCId::Offered(add_tlc_result.unwrap().tlc_id);
-
-    // The receiver should reject settling due to invoice/channel UDT script mismatch,
-    // and send back a RemoveTlcFail.
-    wait_until(|| {
-        node_a
-            .get_tlc(channels[0], offered_id)
-            .is_some_and(|tlc| tlc.removed_reason.is_some())
-    })
-    .await;
-
-    let tlc = node_a
-        .get_tlc(channels[0], offered_id)
-        .expect("offered tlc exists");
-    let RemoveTlcReason::RemoveTlcFail(packet) = tlc.removed_reason.expect("tlc should be removed")
-    else {
-        panic!("expected RemoveTlcFail due to UDT mismatch");
-    };
-
-    let err = packet
-        .decode(&[0u8; 32], vec![])
-        .expect("decode plaintext error");
-    assert_eq!(
-        err.error_code,
-        TlcErrorCode::IncorrectOrUnknownPaymentDetails
     );
 }
 
@@ -4826,9 +5910,251 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
         .decode(&session_key, vec![target_pubkey])
         .expect("decode error packet");
     assert_eq!(
-        err.error_code,
+        err.error.error_code,
         TlcErrorCode::IncorrectOrUnknownPaymentDetails
     );
+}
+
+#[tokio::test]
+async fn test_payment_onion_invoice_hash_algorithm_mismatch_fails() {
+    init_tracing();
+
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+
+    let [mut node_a, node_b] = nodes.try_into().expect("2 nodes");
+    let source_node = &mut node_a;
+    let target_pubkey = node_b.pubkey;
+
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let invoice_hash_algorithm = HashAlgorithm::CkbHash;
+    let tlc_hash_algorithm = HashAlgorithm::Sha256;
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(invoice_hash_algorithm.hash(preimage).into())
+        .hash_algorithm(invoice_hash_algorithm)
+        .payee_pub_key(target_pubkey.into())
+        .build()
+        .expect("build hold invoice");
+    node_b.insert_invoice(invoice.clone(), None);
+
+    let payment_hash = *invoice.payment_hash();
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: Some(target_pubkey),
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: tlc_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: tlc_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount,
+                        hash_algorithm: tlc_hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        is_trampoline_hop: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let offered_id = TLCId::Offered(add_tlc_result.tlc_id);
+    wait_until(|| {
+        source_node
+            .get_tlc(channels[0], offered_id)
+            .is_some_and(|tlc| tlc.removed_reason.is_some())
+    })
+    .await;
+
+    let tlc = source_node
+        .get_tlc(channels[0], offered_id)
+        .expect("offered tlc exists");
+    let RemoveTlcReason::RemoveTlcFail(packet) = tlc.removed_reason.expect("tlc should be removed")
+    else {
+        panic!("expected RemoveTlcFail due to hash algorithm mismatch");
+    };
+
+    let session_key = source_node.get_private_key().0.secret_bytes();
+    let err = packet
+        .decode(&session_key, vec![target_pubkey])
+        .expect("decode error packet");
+    assert_eq!(
+        err.error.error_code,
+        TlcErrorCode::IncorrectOrUnknownPaymentDetails
+    );
+    assert_eq!(
+        node_b.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+}
+
+#[tokio::test]
+async fn test_forward_payment_rejects_mismatched_hash_algorithm_between_wire_and_onion() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+    let source_node = &mut node_0;
+    let first_channel_funding_tx: Hash256 =
+        source_node.get_channel_funding_tx(&channels[0]).unwrap();
+    let second_channel_funding_tx: Hash256 = node_1.get_channel_funding_tx(&channels[1]).unwrap();
+
+    let forward_amount: u128 = 1000;
+    let source_amount: u128 = 1001;
+    let onion_hash_algorithm = HashAlgorithm::CkbHash;
+    let wire_hash_algorithm = HashAlgorithm::Sha256;
+    let session_key = source_node.get_private_key().0.secret_bytes();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(forward_amount))
+        .payment_preimage(preimage)
+        .hash_algorithm(onion_hash_algorithm)
+        .payee_pub_key(node_2.pubkey.into())
+        .build()
+        .expect("build invoice");
+    node_2.insert_invoice(invoice.clone(), Some(preimage));
+    let payment_hash = *invoice.payment_hash();
+
+    let old_node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let old_node_1_left_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let old_node_1_right_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let old_node_2_balance = node_2.get_local_balance_from_channel(channels[1]);
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount: source_amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA * 3,
+            next_hop: Some(node_1.pubkey),
+            funding_tx_hash: first_channel_funding_tx,
+            hash_algorithm: onion_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: forward_amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA * 2,
+            next_hop: Some(node_2.pubkey),
+            funding_tx_hash: second_channel_funding_tx,
+            hash_algorithm: onion_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+        PaymentHopData {
+            amount: forward_amount,
+            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            next_hop: None,
+            funding_tx_hash: Hash256::default(),
+            hash_algorithm: onion_hash_algorithm,
+            payment_preimage: None,
+            custom_records: None,
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        source_node.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create peeled packet");
+
+    let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: source_amount,
+                        hash_algorithm: wire_hash_algorithm,
+                        payment_hash,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA * 3,
+                        onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret,
+                        previous_tlc: None,
+                        attempt_id: None,
+                        is_trampoline_hop: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node alive")
+    .expect("tlc");
+
+    let offered_id = TLCId::Offered(add_tlc_result.tlc_id);
+    wait_until(|| {
+        source_node
+            .get_tlc(channels[0], offered_id)
+            .is_some_and(|tlc| tlc.removed_reason.is_some())
+            || node_2.get_local_balance_from_channel(channels[1]) != old_node_2_balance
+    })
+    .await;
+
+    let tlc = source_node
+        .get_tlc(channels[0], offered_id)
+        .expect("offered tlc exists");
+    let RemoveTlcReason::RemoveTlcFail(packet) = tlc.removed_reason.expect("tlc should be removed")
+    else {
+        panic!("expected RemoveTlcFail due to mismatched hash algorithm");
+    };
+
+    let err = packet
+        .decode(&session_key, vec![node_1.pubkey])
+        .expect("decode error packet");
+    assert_eq!(
+        err.error.error_code,
+        TlcErrorCode::IncorrectOrUnknownPaymentDetails
+    );
+
+    let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
+    let node_1_left_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_right_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_balance = node_2.get_local_balance_from_channel(channels[1]);
+    assert_eq!(node_0_balance, old_node_0_balance);
+    assert_eq!(node_1_left_balance, old_node_1_left_balance);
+    assert_eq!(node_1_right_balance, old_node_1_right_balance);
+    assert_eq!(node_2_balance, old_node_2_balance);
 }
 
 #[tokio::test]
@@ -5071,8 +6397,8 @@ async fn test_send_payment_remove_tlc_with_preimage_will_retry() {
     // reconnect node_0 and node_1
     node_0.connect_to_nonblocking(&node_1).await;
 
-    // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
-    // so all the payments should be succeeded after all
+    // The live channel actor keeps retryable RemoveTlc work and resumes it after reestablishment,
+    // so all the payments should succeed after reconnect.
     let started = SystemTime::now();
 
     loop {
@@ -5173,8 +6499,8 @@ async fn test_send_payment_send_each_other_reestablishing() {
     // reconnect node_0 and node_1
     node_0.connect_to_nonblocking(&node_1).await;
 
-    // the CheckChannels in network actor will continue to retry RemoveTlc for tlc already with preimage
-    // so all the payments should be succeeded after all
+    // The live channel actor keeps retryable RemoveTlc work and resumes it after reestablishment,
+    // so all the payments should succeed after reconnect.
     let started = SystemTime::now();
 
     loop {
@@ -5240,7 +6566,7 @@ async fn test_send_payment_invoice_cancel_multiple_ops() {
             .amount(Some(100))
             .payment_preimage(preimage)
             .payee_pub_key(target_pubkey.into())
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_0.private_key.0))
             .expect("build invoice success");
 
         node_0.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -5301,7 +6627,7 @@ async fn test_send_payment_no_preimage_invoice_will_make_payment_failed() {
             .amount(Some(100))
             .payment_preimage(preimage)
             .payee_pub_key(target_pubkey.into())
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
             .expect("build invoice success");
 
         invoices.push(ckb_invoice);
@@ -5406,17 +6732,11 @@ async fn test_send_payment_with_mixed_channel_hops() {
         .await;
     eprintln!("res: {:?}", res);
 
-    let payment_hash = res.unwrap().payment_hash;
-    node0.wait_until_failed(payment_hash).await;
-    let payment_res = node0.get_payment_result(payment_hash).await;
-    eprintln!("payment_res: {:?}", payment_res);
-    assert_eq!(
-        payment_res.failed_error.unwrap(),
-        "IncorrectOrUnknownPaymentDetails"
+    let err = res.expect_err("mixed CKB/UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
     );
-    let payment_session = node0.get_payment_session(payment_hash).unwrap();
-    assert_eq!(payment_session.attempts_count(), 1);
-    assert_eq!(payment_session.retry_times(), 1);
 }
 
 #[tokio::test]
@@ -5646,6 +6966,7 @@ async fn test_ckb_with_udt_mixed_routes_fail() {
             .send_payment_with_router(SendPaymentWithRouterCommand {
                 router: udt1_router.router_hops.clone(),
                 keysend: Some(true),
+                udt_type_script: Some(udt1_script.clone()),
                 ..Default::default()
             })
             .await
@@ -5664,60 +6985,74 @@ async fn test_ckb_with_udt_mixed_routes_fail() {
         udt1_router.router_hops[1].clone(),
         udt2_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed CKB/UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 
     let mixed_router = vec![
         udt1_router.router_hops[0].clone(),
         udt1_router.router_hops[1].clone(),
         udt2_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
+            udt_type_script: Some(udt1_script.clone()),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 
     let mixed_router = vec![
         ckb_router.router_hops[0].clone(),
         udt1_router.router_hops[1].clone(),
         ckb_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed CKB/UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 
     let mixed_router = vec![
         udt1_router.router_hops[0].clone(),
         udt2_router.router_hops[1].clone(),
         udt1_router.router_hops[2].clone(),
     ];
-    let res = node_a
+    let err = node_a
         .send_payment_with_router(SendPaymentWithRouterCommand {
             router: mixed_router,
             keysend: Some(true),
+            udt_type_script: Some(udt1_script.clone()),
             ..Default::default()
         })
         .await
-        .unwrap();
-    node_a.wait_until_failed(res.payment_hash).await;
+        .expect_err("mixed UDT explicit route should be rejected before sending TLC");
+    assert!(
+        err.contains("Failed to build route, PathFind error: no path found"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]
@@ -6376,6 +7711,88 @@ async fn test_payment_with_insufficient_total_amount() {
 }
 
 #[tokio::test]
+async fn test_delayed_final_hold_invoice_cancel_failure_is_decodable_by_payer() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB))],
+        2,
+    )
+    .await;
+    let [node_0, node_1] = nodes.try_into().expect("2 nodes");
+    let target_pubkey = node_1.pubkey;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let payment_secret = gen_rand_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(10000000000))
+        .payment_hash(payment_hash)
+        .payee_pub_key(target_pubkey.into())
+        .allow_mpp(false)
+        .payment_secret(payment_secret)
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_1.private_key.0))
+        .expect("build invoice success");
+
+    node_1.insert_invoice(ckb_invoice.clone(), None);
+
+    node_0
+        .send_payment(SendPaymentCommand {
+            invoice: Some(ckb_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send hold invoice payment");
+
+    wait_until_timeout(10_000, || {
+        node_1.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+
+    let payment_session = node_0
+        .get_payment_session(payment_hash)
+        .expect("payment session exists");
+    let attempt = payment_session
+        .attempts()
+        .next()
+        .expect("payment has one attempt")
+        .clone();
+    let offered_tlc_id = node_0
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .map(|tlc| TLCId::Offered(tlc.id()))
+        .expect("offered hold tlc exists");
+
+    node_1.cancel_invoice(&payment_hash);
+
+    wait_until_timeout(10_000, || {
+        node_0
+            .get_tlc(channels[0], offered_tlc_id)
+            .is_some_and(|tlc| tlc.removed_reason.is_some())
+    })
+    .await;
+
+    let tlc = node_0
+        .get_tlc(channels[0], offered_tlc_id)
+        .expect("offered tlc exists");
+    let Some(RemoveTlcReason::RemoveTlcFail(packet)) = tlc.removed_reason else {
+        panic!("expected delayed RemoveTlcFail");
+    };
+
+    let decoded = packet
+        .decode(&attempt.session_key, attempt.hops_public_keys())
+        .expect("payer should decode delayed final-hop failure");
+    assert!(matches!(
+        decoded.error.error_code,
+        TlcErrorCode::InvoiceCancelled | TlcErrorCode::HoldTlcTimeout
+    ));
+    assert_eq!(decoded.hop_index, 0);
+}
+
+#[tokio::test]
 async fn test_payment_with_wrong_payment_secret() {
     init_tracing();
 
@@ -6785,13 +8202,16 @@ async fn test_network_with_hops_max_number_limit() {
     )
     .await;
 
+    let thirteen_hop_base_limit = DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let thirteen_hop_limit = thirteen_hop_base_limit + DEFAULT_TLC_EXPIRY_DELTA;
+
     let payment = nodes[0]
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(nodes[14].pubkey), // can not make a payment with 14 hops
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await;
@@ -6805,7 +8225,7 @@ async fn test_network_with_hops_max_number_limit() {
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await
@@ -7251,4 +8671,91 @@ async fn test_send_payment_max_fee_rate_limit() {
     .expect("payment data ok");
 
     assert_eq!(payment_data.max_fee_amount, Some(10));
+}
+
+fn malicious_invoice_that_used_to_panic_parser() -> String {
+    let mut data = vec![u5::try_from_u8(0).expect("valid unsigned invoice marker")];
+    data.extend(std::iter::repeat_n(
+        u5::try_from_u8(31).expect("valid u5"),
+        SIGNATURE_U5_SIZE,
+    ));
+    encode("fibb", data, Variant::Bech32m).expect("valid bech32m invoice wrapper")
+}
+
+#[test]
+fn test_send_payment_malicious_invoice_does_not_crash_node_entrypoint() {
+    let command = SendPaymentCommand {
+        target_pubkey: Some(gen_rand_fiber_public_key()),
+        amount: Some(1000),
+        payment_hash: Some(gen_rand_sha256_hash()),
+        invoice: Some(malicious_invoice_that_used_to_panic_parser()),
+        ..Default::default()
+    };
+
+    // NetworkActor handles SendPayment by calling this builder first. Before
+    // invoice parser errors were propagated, this malformed invoice payload
+    // could panic there and take down the actor.
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(move || {
+        command.build_send_payment_data()
+    }));
+    let err = result
+        .expect("malicious invoice must be rejected without panicking")
+        .expect_err("malicious invoice must not build a payment request");
+
+    match err {
+        crate::Error::InvalidParameter(message) => {
+            assert!(
+                message.contains("invoice is invalid"),
+                "unexpected validation error: {message}"
+            );
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_send_payment_dry_run_with_too_large_hop_hint_expiry_delta() {
+    init_tracing();
+    let (nodes, _channels) = create_n_nodes_network(
+        &[((0, 1), (MIN_RESERVED_CKB + 40000000000, MIN_RESERVED_CKB))],
+        3,
+    )
+    .await;
+    let [node1, mut node2, mut node3] = nodes.try_into().expect("3 nodes");
+
+    let (_new_channel_id, funding_tx_hash) = establish_channel_between_nodes(
+        &mut node2,
+        &mut node3,
+        ChannelParameters {
+            public: false,
+            node_a_funding_amount: MIN_RESERVED_CKB + 20000000000,
+            node_b_funding_amount: MIN_RESERVED_CKB,
+            ..Default::default()
+        },
+    )
+    .await;
+    let funding_tx = node2
+        .get_transaction_view_from_hash(funding_tx_hash)
+        .await
+        .expect("get funding tx");
+    let outpoint = funding_tx.output_pts_iter().next().unwrap();
+
+    let res = node1
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node3.pubkey),
+            amount: Some(10000000000),
+            keysend: Some(true),
+            dry_run: true,
+            hop_hints: Some(vec![HopHint {
+                pubkey: node2.pubkey,
+                channel_outpoint: outpoint,
+                fee_rate: DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS as u64,
+                tlc_expiry_delta: u64::MAX,
+            }]),
+            ..Default::default()
+        })
+        .await;
+
+    assert!(res.is_err(), "Expect send payment failed: {:?}", res);
+    assert_eq!(node1.get_inflight_payment_count().await, 0);
 }

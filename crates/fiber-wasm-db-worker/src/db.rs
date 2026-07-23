@@ -125,14 +125,13 @@ pub(crate) async fn handle_db_command<F>(
 where
     F: Fn(&[u8]) -> bool,
 {
-    debug!("Handle command: {:?}", cmd);
     let tx_mode = match cmd {
         DbCommandRequest::Read { .. } | DbCommandRequest::Iterator { .. } => {
             TransactionMode::ReadOnly
         }
-        DbCommandRequest::Put { .. } | DbCommandRequest::Delete { .. } => {
-            TransactionMode::ReadWrite
-        }
+        DbCommandRequest::Put { .. }
+        | DbCommandRequest::Delete { .. }
+        | DbCommandRequest::BatchWrite { .. } => TransactionMode::ReadWrite,
     };
     let tran = db
         .transaction(&[&store_name], tx_mode)
@@ -161,7 +160,6 @@ where
             DbCommandResponse::Read { values: res }
         }
         DbCommandRequest::Put { kvs } => {
-            debug!("Putting: {:?}", kvs);
             for KV { key, value } in kvs {
                 let key = serde_wasm_bindgen::to_value(&key).unwrap();
                 let value = serde_wasm_bindgen::to_value(&value).unwrap();
@@ -184,6 +182,26 @@ where
             }
             DbCommandResponse::Delete
         }
+        DbCommandRequest::BatchWrite { deletes, puts } => {
+            for key in deletes {
+                let key = serde_wasm_bindgen::to_value(&key).unwrap();
+                store
+                    .delete(key)
+                    .map_err(|e| anyhow!("Failed to send delete request: {:?}", e))?
+                    .await
+                    .map_err(|e| anyhow!("Failed to delete: {:?}", e))?;
+            }
+            for KV { key, value } in puts {
+                let key = serde_wasm_bindgen::to_value(&key).unwrap();
+                let value = serde_wasm_bindgen::to_value(&value).unwrap();
+                store
+                    .put(&value, Some(&key))
+                    .map_err(|e| anyhow!("Failed to send put request: {:?}", e))?
+                    .await
+                    .map_err(|e| anyhow!("Failed to put: {:?}", e))?;
+            }
+            DbCommandResponse::BatchWrite
+        }
         DbCommandRequest::Iterator {
             start,
             direction,
@@ -192,18 +210,10 @@ where
             let kvs = collect_iterator(&store, &start, direction, invoke_take_while, limit)
                 .await
                 .with_context(|| anyhow!("Unable to handle iterator"))?;
-            debug!(
-                "Called iterator, args=<start={} bytes, {:?}, {:?}>, result_count={}",
-                start.len(),
-                direction,
-                limit,
-                kvs.len()
-            );
             DbCommandResponse::Iterator { kvs }
         }
     };
     assert_eq!(TransactionResult::Committed, tran.await.unwrap());
-    debug!("Command result={:?}", result);
     Ok(result)
 }
 

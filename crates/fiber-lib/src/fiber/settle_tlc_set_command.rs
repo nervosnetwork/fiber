@@ -9,6 +9,7 @@ use fiber_types::{
 pub struct SettleTlcSetCommand<'s, S> {
     payment_hash: Hash256,
     is_hold_tlc_set: bool,
+    allow_received_invoice: bool,
     tlcs: Vec<TlcSettlementContext>,
     store: &'s S,
 }
@@ -87,10 +88,23 @@ where
             tlcs,
             store,
             is_hold_tlc_set: false,
+            allow_received_invoice: false,
         }
     }
 
     pub fn new_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
+        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, false)
+    }
+
+    pub fn new_received_hold_tlc_set(payment_hash: Hash256, store: &'s S) -> Self {
+        Self::new_hold_tlc_set_with_received_invoice(payment_hash, store, true)
+    }
+
+    fn new_hold_tlc_set_with_received_invoice(
+        payment_hash: Hash256,
+        store: &'s S,
+        allow_received_invoice: bool,
+    ) -> Self {
         let tlcs = store
             .get_payment_hold_tlcs(payment_hash)
             .iter()
@@ -104,6 +118,7 @@ where
             tlcs,
             store,
             is_hold_tlc_set: true,
+            allow_received_invoice,
         }
     }
 
@@ -119,6 +134,10 @@ where
 
         if let Err(error_code) = self.verify(&invoice, &invoice_status) {
             return self.reject_all(error_code);
+        }
+
+        if self.should_skip_received_hold_set(&invoice_status) {
+            return self.skip_all();
         }
 
         let mut rejected = self.leave_just_fulfilled_tlcs(&invoice);
@@ -235,7 +254,6 @@ where
             }
             CkbInvoiceStatus::Received => {
                 if self.is_hold_tlc_set {
-                    // We allow settle Received TLCs for a hold invoice because we are processing all the TLCs for the invoice and extra paid TLCs will be rejected.
                     Ok(())
                 } else {
                     Err(TlcErrorCode::HoldTlcTimeout)
@@ -245,6 +263,15 @@ where
             CkbInvoiceStatus::Cancelled => Err(TlcErrorCode::InvoiceCancelled),
             CkbInvoiceStatus::Paid => Err(TlcErrorCode::HoldTlcTimeout),
         }
+    }
+
+    fn should_skip_received_hold_set(&self, invoice_status: &CkbInvoiceStatus) -> bool {
+        // Multiple channel actors can enqueue SettleHoldTlcSet for the same MPP hold invoice.
+        // Once one command marks the invoice Received, later stale commands must not reject the
+        // already-held TLCs. Preimage reveal uses the explicit received-hold path below.
+        *invoice_status == CkbInvoiceStatus::Received
+            && self.is_hold_tlc_set
+            && !self.allow_received_invoice
     }
 
     fn verify_mpp_tlcs_have_consistent_total_amount(

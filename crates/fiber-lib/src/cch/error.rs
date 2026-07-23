@@ -22,6 +22,13 @@ pub enum CchError {
     OutgoingInvoiceExpiryTooShort,
     #[error("BTC invoice parse error: {0}")]
     BTCInvoiceParseError(lightning_invoice::ParseOrSemanticError),
+    #[error(
+        "BTC invoice creation timestamp {invoice_created_at} is newer than CCH order creation timestamp {order_created_at}"
+    )]
+    BTCInvoiceCreationTimeInFuture {
+        invoice_created_at: u64,
+        order_created_at: u64,
+    },
     #[error("BTC invoice expired")]
     BTCInvoiceExpired,
     #[error("BTC invoice missing amount")]
@@ -30,6 +37,13 @@ pub enum CchError {
     BTCInvoiceFinalTlcExpiryDeltaTooLarge,
     #[error("CKB invoice error: {0}")]
     CKBInvoiceError(#[from] crate::invoice::InvoiceError),
+    #[error(
+        "CKB invoice creation timestamp {invoice_created_at_ms} is newer than CCH order creation timestamp {order_created_at_ms}"
+    )]
+    CKBInvoiceCreationTimeInFuture {
+        invoice_created_at_ms: u128,
+        order_created_at_ms: u128,
+    },
     #[error("CKB invoice expired")]
     CKBInvoiceExpired,
     #[error("CKB invoice missing amount")]
@@ -67,6 +81,12 @@ pub enum CchError {
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
     LndRpcError(String),
+    #[error("LND invoice {0} is already being tracked")]
+    LndInvoiceAlreadyTracked(Hash256),
+    #[error("LND invoice tracker capacity exceeded (maximum {0})")]
+    LndInvoiceTrackerCapacityExceeded(usize),
+    #[error("LND invoice tracker error: {0}")]
+    LndInvoiceTrackerError(String),
     #[error("Fiber node error: {0}")]
     FiberNodeError(anyhow::Error),
 }

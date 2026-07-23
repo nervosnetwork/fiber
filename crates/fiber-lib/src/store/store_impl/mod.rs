@@ -4,6 +4,7 @@ use ckb_types::packed::Script;
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
+use fiber_store::StoreError;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,6 +27,9 @@ use crate::{
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use fiber_store::db_migrate::DbMigrate;
+use fiber_store::migration::{
+    MigrateConfirmFn, MigrateProgressFn, INIT_DB_VERSION, MIGRATION_VERSION_KEY,
+};
 use fiber_types::schema::*;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::CchOrder;
@@ -40,6 +44,8 @@ use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
+#[cfg(not(any(target_arch = "wasm32", test)))]
+use tracing::warn;
 
 /// Wrapper around `fiber_store::Store` that embeds an optional watcher callback.
 ///
@@ -53,6 +59,27 @@ use tracing::info;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+}
+
+#[cfg(feature = "watchtower")]
+#[derive(Clone, Copy)]
+enum WatchtowerPreimageCleanupTarget<'a> {
+    Exact(&'a Hash256),
+    ExactSet(&'a HashSet<Hash256>),
+    TlcPaymentHash(&'a [u8; 20]),
+}
+
+#[cfg(feature = "watchtower")]
+impl WatchtowerPreimageCleanupTarget<'_> {
+    fn matches(self, payment_hash: &Hash256) -> bool {
+        match self {
+            WatchtowerPreimageCleanupTarget::Exact(target) => payment_hash == target,
+            WatchtowerPreimageCleanupTarget::ExactSet(targets) => targets.contains(payment_hash),
+            WatchtowerPreimageCleanupTarget::TlcPaymentHash(target) => {
+                payment_hash.as_ref()[..20] == target[..]
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Store {
@@ -106,6 +133,14 @@ impl StorageBackend for Store {
         self.inner
             .collect_iterator(start, direction, take_while_fn, limit)
     }
+
+    fn backup(&self, path: &Path) -> Result<(), StoreError> {
+        self.inner.backup(path)
+    }
+
+    fn restore(&self, restore_path: &Path, db_path: &Path) -> Result<(), StoreError> {
+        self.inner.restore(restore_path, db_path)
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -128,20 +163,37 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
-/// Open a store at `path`, with migration check.
+/// Open a store at `path`, running auto-migration with auto-confirm.
+/// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
+    open_store_with_migration(path, Box::new(|_| true), Box::new(|_| {}))
+}
+
+/// Open a store at `path`, running auto-migration with custom confirm/progress callbacks.
+/// Use this when user interaction is required (e.g. CLI, WASM).
+pub fn open_store_with_migration<P: AsRef<Path>>(
+    path: P,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<Store, String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
-    check_migrate(path, &db)?;
+    run_auto_migrate(&db, confirm_fn, progress_fn)?;
     Ok(Store {
         inner: db,
         watcher: None,
     })
 }
 
-fn check_migrate<P: AsRef<Path>>(path: P, db: &fiber_store::Store) -> Result<(), String> {
-    let migrate = DbMigrate::new(db);
-    migrate.init_or_check(path)?;
-    Ok(())
+fn run_auto_migrate(
+    db: &fiber_store::Store,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<(), String> {
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate
+        .auto_migrate(db, confirm_fn, progress_fn)
+        .map_err(|e| e.to_string())
 }
 
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
@@ -250,8 +302,46 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     }
 
     let mut errors: Vec<String> = errors.into_iter().collect();
-    if let Err(version_err) = check_migrate(path, &store.inner) {
-        errors.push(version_err);
+    {
+        let mut migrate = DbMigrate::new();
+        fiber_store::migrations::register_all_migrations(&mut migrate);
+        let ordering = migrate.check(&store.inner);
+        match ordering {
+            std::cmp::Ordering::Greater => {
+                let db_version = store
+                    .inner
+                    .get(MIGRATION_VERSION_KEY)
+                    .map(|v| String::from_utf8(v).unwrap_or_default())
+                    .unwrap_or_default();
+                errors.push(format!(
+                    "Database version ({}) is newer than the binary. \
+                     Please upgrade fiber to a newer version.",
+                    db_version
+                ));
+            }
+            std::cmp::Ordering::Less => {
+                let db_version = store
+                    .inner
+                    .get(MIGRATION_VERSION_KEY)
+                    .map(|v| String::from_utf8(v).unwrap_or_default())
+                    .unwrap_or_default();
+                let mut msg = format!(
+                    "Database version ({}) is older than the binary. Migration needed.",
+                    db_version
+                );
+                // If the DB is older than the initial migration epoch, the user
+                // must run the legacy fnn-migrate tool first.
+                if db_version.as_str() < INIT_DB_VERSION {
+                    msg.push_str(&format!(
+                        " DB version {} predates the unified migration epoch ({}). \
+                         Run fnn-migrate v0.8.x to upgrade before starting this binary.",
+                        db_version, INIT_DB_VERSION
+                    ));
+                }
+                errors.push(msg);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
     }
     if errors.is_empty() {
         info!("All keys and values in the store are valid.");
@@ -331,6 +421,10 @@ pub enum StoreChange {
     PutPaymentSession {
         payment_hash: Hash256,
         payment_session: PaymentSession,
+    },
+    PutAttempt {
+        payment_hash: Hash256,
+        attempt_status: AttemptStatus,
     },
 }
 
@@ -481,6 +575,143 @@ impl StoreKeyValue for KeyValue {
     }
 }
 
+#[cfg(feature = "watchtower")]
+impl Store {
+    fn watchtower_preimage_key(node_id: &NodeId, payment_hash: &Hash256) -> Vec<u8> {
+        [
+            &[WATCHTOWER_PREIMAGE_PREFIX],
+            payment_hash.as_ref(),
+            node_id.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn watchtower_node_payment_hash_key(node_id: &NodeId, payment_hash: &Hash256) -> Vec<u8> {
+        [
+            &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
+            node_id.as_ref(),
+            payment_hash.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn parse_watchtower_scoped_payment_hash_key(key: &[u8]) -> Option<(NodeId, Hash256)> {
+        if key.len() < 1 + 32 {
+            return None;
+        }
+        let payment_hash_offset = key.len() - 32;
+        let payment_hash: [u8; 32] = key[payment_hash_offset..].try_into().ok()?;
+        Some((
+            NodeId::from_bytes(key[1..payment_hash_offset].to_vec()),
+            payment_hash.into(),
+        ))
+    }
+
+    fn parse_watchtower_channel_key(key: &[u8]) -> Option<(NodeId, Hash256)> {
+        if key.len() < 1 + 32 {
+            return None;
+        }
+        let channel_id_offset = key.len() - 32;
+        let channel_id: [u8; 32] = key[channel_id_offset..].try_into().ok()?;
+        Some((
+            NodeId::from_bytes(key[1..channel_id_offset].to_vec()),
+            channel_id.into(),
+        ))
+    }
+
+    fn watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.collect_by_prefix(&[WATCHTOWER_CHANNEL_PREFIX])
+            .into_iter()
+            .filter_map(|kv| {
+                let (channel_node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
+                (channel_node_id == *node_id)
+                    .then(|| deserialize_from(kv.value.as_ref(), "ChannelData"))
+            })
+            .collect()
+    }
+
+    fn watch_channel_needs_preimage(
+        &self,
+        channel_data: &ChannelData,
+        payment_hash: &Hash256,
+    ) -> bool {
+        if self.is_tlc_settled(&channel_data.channel_id, payment_hash) {
+            return false;
+        }
+
+        [
+            &channel_data.remote_settlement_data,
+            &channel_data.pending_remote_settlement_data,
+            &channel_data.local_settlement_data,
+        ]
+        .into_iter()
+        .any(|settlement_data| {
+            settlement_data
+                .tlcs
+                .iter()
+                .any(|tlc| &tlc.payment_hash == payment_hash)
+        })
+    }
+
+    fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
+        [
+            &channel_data.remote_settlement_data,
+            &channel_data.pending_remote_settlement_data,
+            &channel_data.local_settlement_data,
+        ]
+        .into_iter()
+        .flat_map(|settlement_data| settlement_data.tlcs.iter().map(|tlc| tlc.payment_hash))
+        .collect()
+    }
+
+    fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
+        self.watch_channels_for_node(node_id)
+            .iter()
+            .any(|channel_data| self.watch_channel_needs_preimage(channel_data, payment_hash))
+    }
+
+    fn watch_preimage_entries(&self, node_id: Option<&NodeId>) -> Vec<(NodeId, Hash256)> {
+        self.collect_by_prefix(&[WATCHTOWER_NODE_PAYMENTHASH_PREFIX])
+            .into_iter()
+            .filter_map(|kv| Self::parse_watchtower_scoped_payment_hash_key(&kv.key))
+            .filter(|(preimage_node_id, _)| {
+                node_id.is_none_or(|node_id| preimage_node_id == node_id)
+            })
+            .collect()
+    }
+
+    fn cleanup_unused_watch_preimages(
+        &self,
+        node_id: Option<&NodeId>,
+        target: WatchtowerPreimageCleanupTarget<'_>,
+    ) {
+        let preimages = self.watch_preimage_entries(node_id);
+        if preimages.is_empty() {
+            return;
+        }
+
+        let mut batch = self.batch();
+        let mut has_change = false;
+        for (node_id, payment_hash) in preimages {
+            if !target.matches(&payment_hash) {
+                continue;
+            }
+
+            if !self.watch_preimage_in_use(&node_id, &payment_hash) {
+                batch.delete(Self::watchtower_preimage_key(&node_id, &payment_hash));
+                batch.delete(Self::watchtower_node_payment_hash_key(
+                    &node_id,
+                    &payment_hash,
+                ));
+                has_change = true;
+            }
+        }
+        if has_change {
+            batch.commit();
+        }
+    }
+}
+
 impl NetworkActorStateStore for Store {
     fn get_network_actor_state(&self, id: &Pubkey) -> Option<PersistentNetworkActorState> {
         let key = [
@@ -509,6 +740,64 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
+
+        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
+        batch.put(kv.key(), kv.value());
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
+            batch.put(kv.key(), kv.value());
+        }
+        let kv = KeyValue::ChannelActorState(state.id, state);
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+    }
+
+    fn insert_channel_actor_state_with_pending_commit_diff(
+        &self,
+        state: ChannelActorState,
+        diff: &CommitDiff,
+    ) {
+        let channel_id = state.get_id();
+        let mut batch = self.batch();
+
+        let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
+        batch.put(kv.key(), kv.value());
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            let kv = KeyValue::OutPointChannelId(outpoint, state.id);
+            batch.put(kv.key(), kv.value());
+        }
+        let kv = KeyValue::ChannelActorState(state.id, state);
+        batch.put(kv.key(), kv.value());
+
+        let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
+        batch.put(key, serialize_to_vec(diff, "CommitDiff"));
+        batch.commit();
+    }
+
+    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+        if old_id == &state.id {
+            self.insert_channel_actor_state(state);
+            return;
+        }
+
+        let old_state = self.get_channel_actor_state(old_id);
+        let mut batch = self.batch();
+
+        if let Some(old_state) = old_state {
+            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], old_id.as_ref()].concat());
+            let remote_pubkey_bytes = old_state.get_remote_pubkey().serialize();
+            batch.delete(
+                [
+                    &[PUBKEY_CHANNEL_ID_PREFIX][..],
+                    &remote_pubkey_bytes[..],
+                    old_id.as_ref(),
+                ]
+                .concat(),
+            );
+            if let Some(outpoint) = old_state.get_funding_transaction_outpoint() {
+                batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
+            }
+        }
 
         let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
         batch.put(kv.key(), kv.value());
@@ -583,6 +872,14 @@ impl ChannelActorStateStore for Store {
         self.get(key)
             .map(|channel_id| deserialize_from(channel_id.as_ref(), "Hash256"))
             .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
+    }
+
+    fn get_all_channel_states(&self) -> Vec<ChannelActorState> {
+        let prefix = &[CHANNEL_ACTOR_STATE_PREFIX];
+        self.collect_by_prefix(prefix)
+            .into_iter()
+            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelActorState"))
+            .collect()
     }
 
     fn insert_payment_custom_records(
@@ -791,15 +1088,7 @@ impl PreimageStore for Store {
         let key = [&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
-            // Try to get the preimage from watchtower store
-            .or_else(|| {
-                let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
-                let iter = self
-                    .collect_by_prefix_with(prefix.as_slice(), PrefixIterOptions::new().limit(1));
-                iter.into_iter()
-                    .next()
-                    .map(|kv| deserialize_from(kv.value.as_ref(), "Watchtower Preimage"))
-            })
+            .or_else(|| self.get_watch_preimage(&NodeId::local(), payment_hash))
     }
 
     #[cfg(not(feature = "watchtower"))]
@@ -914,6 +1203,10 @@ impl NetworkGraphStateStore for Store {
         }
 
         batch.commit();
+        self.notify(StoreChange::PutAttempt {
+            payment_hash: attempt.payment_hash,
+            attempt_status: attempt.status,
+        });
     }
 
     fn get_attempts(&self, payment_hash: Hash256) -> Vec<Attempt> {
@@ -1075,11 +1368,15 @@ impl NetworkGraphStateStore for Store {
 
 #[cfg(feature = "watchtower")]
 impl WatchtowerStore for Store {
-    fn get_watch_channels(&self) -> Vec<ChannelData> {
+    fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.collect_by_prefix(&prefix)
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelData"))
+            .filter_map(|kv| {
+                let (node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
+                let channel_data = deserialize_from(kv.value.as_ref(), "ChannelData");
+                Some((node_id, channel_data))
+            })
             .collect()
     }
 
@@ -1121,13 +1418,35 @@ impl WatchtowerStore for Store {
     }
 
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+        // Only allow removing watchtower monitoring for closed channels.
+        // Prevents accidental or malicious disabling of active channel protection.
+        // Skipped in test builds to allow e2e tests to simulate stopping the watchtower.
+        #[cfg(not(test))]
+        if let Some(state) = self.get_channel_actor_state(&channel_id) {
+            if !state.is_closed() {
+                warn!(
+                    "Refusing to remove watchtower for live channel {} (state: {:?})",
+                    channel_id, state.state
+                );
+                return;
+            }
+        }
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
             channel_id.as_ref(),
         ]
         .concat();
+        let payment_hashes = self
+            .get(key.clone())
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
+            .unwrap_or_default();
         self.delete(key);
+        self.cleanup_unused_watch_preimages(
+            Some(&node_id),
+            WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
+        );
     }
 
     fn update_revocation(
@@ -1214,40 +1533,26 @@ impl WatchtowerStore for Store {
     }
 
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
-        let mut batch = self.batch();
-        batch.delete(
-            [
-                &[WATCHTOWER_PREIMAGE_PREFIX],
-                payment_hash.as_ref(),
-                node_id.as_ref(),
-            ]
-            .concat(),
+        self.cleanup_unused_watch_preimages(
+            Some(&node_id),
+            WatchtowerPreimageCleanupTarget::Exact(&payment_hash),
         );
-        batch.delete(
-            [
-                &[WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
-                node_id.as_ref(),
-                payment_hash.as_ref(),
-            ]
-            .concat(),
-        );
-        batch.commit();
     }
 
-    fn get_watch_preimage(&self, payment_hash: &Hash256) -> Option<Hash256> {
-        // The preimage is verified before insert_watch_preimage, so we can just pick one.
-        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash.as_ref()].concat();
-        self.collect_by_prefix_with(prefix.as_slice(), PrefixIterOptions::new().limit(1))
-            .into_iter()
-            .next()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
+    fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256> {
+        self.get(Self::watchtower_preimage_key(node_id, payment_hash))
+            .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
 
-    fn search_preimage(&self, payment_hash_prefix: &[u8]) -> Option<Hash256> {
+    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256> {
         let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        self.collect_by_prefix_with(prefix.as_slice(), PrefixIterOptions::new().limit(1))
+        self.collect_by_prefix(prefix.as_slice())
             .into_iter()
-            .next()
+            .find(|kv| {
+                let key = &kv.key;
+                let node_offset = 1 + 32;
+                key.len() >= node_offset && key[node_offset..] == node_id.as_ref()[..]
+            })
             .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
     }
 
@@ -1261,6 +1566,10 @@ impl WatchtowerStore for Store {
         .concat();
         batch.put(key, []);
         batch.commit();
+        self.cleanup_unused_watch_preimages(
+            None,
+            WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash),
+        );
     }
 }
 

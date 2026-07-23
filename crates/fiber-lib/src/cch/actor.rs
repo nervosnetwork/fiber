@@ -14,20 +14,26 @@ use tentacle::secio::SecioKeyPair;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::cch::actions::send_outgoing_payment::{
+    outgoing_fee_budget_from_fee_sats, outgoing_max_fee_rate,
+};
 use crate::cch::actions::{ActionDispatcher, CchOrderAction};
 use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentRef};
 use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
-    CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
+    CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
+    LndTrackerArgs, LndTrackerMessage, RedactedCchTrackingEvent, MAX_TRACKED_INVOICES,
 };
-use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
+use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::NetworkActorMessage;
-use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::StoreChange;
-use crate::time::{Duration, SystemTime, UNIX_EPOCH};
-use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
+use crate::time::Duration;
+use fiber_types::{AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, HashAlgorithm};
 use fiber_types::{Hash256, Privkey};
 
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
@@ -139,6 +145,9 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        // Validate generic config invariants (e.g. the outgoing fee budget percentage).
+        args.config.validate().map_err(|e| anyhow!(e))?;
+
         // Validate that we have either an in-process network actor or a fiber RPC URL
         if args.network_actor.is_none() {
             if args.config.fiber_rpc_url.is_none() {
@@ -249,10 +258,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let current_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time should always be after UNIX_EPOCH")
-            .as_secs();
+        let current_time = now_timestamp_as_millis_u64() / 1000;
 
         // Load all orders from the database
         for mut order in state
@@ -339,7 +345,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::TrackingEvent(event) => {
-                tracing::debug!("event {:?}", event);
+                tracing::debug!("tracking event {:?}", RedactedCchTrackingEvent(&event));
                 let payment_hash = *event.payment_hash();
                 match state.handle_tracking_event(event).await {
                     Ok(actions) => {
@@ -357,7 +363,13 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::StoreChangeEvent(change) => {
-                tracing::debug!("store change event {:?}", change);
+                let summary = redacted_store_change_summary(&change);
+                tracing::debug!(
+                    "store change event kind={} payment_hash={:x} has_payment_preimage={}",
+                    summary.kind,
+                    summary.payment_hash,
+                    summary.has_payment_preimage
+                );
                 let events = state.map_store_change_to_events(&change);
                 for event in events {
                     let payment_hash = *event.payment_hash();
@@ -529,7 +541,7 @@ impl<S: CchOrderStore> CchState<S> {
     }
 
     async fn send_btc(&self, send_btc: SendBTC) -> Result<CchOrder, CchError> {
-        let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let order_created_at = now_timestamp_as_millis_u64() / 1000;
 
         // Validate that the currency matches the configured CKB network (#981)
         if send_btc.currency != self.currency {
@@ -540,7 +552,12 @@ impl<S: CchOrderStore> CchState<S> {
         }
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
-        tracing::debug!("BTC invoice: {:?}", invoice);
+        tracing::debug!(
+            "BTC invoice parsed payment_hash={:x} currency={:?} has_amount={}",
+            Hash256::from(*invoice.payment_hash()),
+            invoice.currency(),
+            invoice.amount_milli_satoshis().is_some()
+        );
 
         // Validate that the BTC invoice network matches the expected BTC network (#978)
         let expected_ln_currency = expected_ln_currency(self.currency);
@@ -554,10 +571,21 @@ impl<S: CchOrderStore> CchState<S> {
 
         let payment_hash = Hash256::from(*invoice.payment_hash());
 
+        let invoice_created_at = invoice.duration_since_epoch().as_secs();
+        if invoice_created_at > order_created_at {
+            return Err(CchError::BTCInvoiceCreationTimeInFuture {
+                invoice_created_at,
+                order_created_at,
+            });
+        }
+
         // Validate that outgoing BTC invoice's final CLTV is less than half of incoming CKB invoice's final TLC expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // BTC uses blocks (~10 min each), CKB uses seconds.
-        let btc_final_cltv_seconds = invoice.min_final_cltv_expiry_delta() * 600;
+        let btc_final_cltv_seconds = invoice
+            .min_final_cltv_expiry_delta()
+            .checked_mul(600)
+            .ok_or(CchError::BTCInvoiceFinalTlcExpiryDeltaTooLarge)?;
         let ckb_final_tlc_seconds = self.config.ckb_final_tlc_expiry_delta_seconds;
         if btc_final_cltv_seconds >= ckb_final_tlc_seconds / 2 {
             return Err(CchError::BTCInvoiceFinalTlcExpiryDeltaTooLarge);
@@ -565,8 +593,7 @@ impl<S: CchOrderStore> CchState<S> {
 
         let outgoing_invoice_expiry_delta_seconds = invoice
             .expires_at()
-            .and_then(|expired_at| expired_at.checked_sub(duration_since_epoch))
-            .map(|duration| duration.as_secs())
+            .and_then(|expired_at| expired_at.as_secs().checked_sub(order_created_at))
             .ok_or(CchError::BTCInvoiceExpired)?;
         if outgoing_invoice_expiry_delta_seconds
             < self.config.min_outgoing_invoice_expiry_delta_seconds
@@ -578,9 +605,11 @@ impl<S: CchOrderStore> CchState<S> {
             .amount_milli_satoshis()
             .ok_or(CchError::BTCInvoiceMissingAmount)? as u128;
 
-        let fee_sats = amount_msat * (self.config.fee_rate_per_million_sats as u128)
-            / 1_000_000_000u128
-            + (self.config.base_fee_sats as u128);
+        let fee_sats = amount_msat
+            .checked_mul(self.config.fee_rate_per_million_sats as u128)
+            .and_then(|v| v.checked_div(1_000_000_000u128))
+            .and_then(|v| v.checked_add(self.config.base_fee_sats as u128))
+            .ok_or(CchError::SendBTCOrderAmountTooLarge)?;
 
         let wrapped_btc_type_script = self.resolve_wrapped_btc_type_script()?;
         let invoice_amount_sats = amount_msat
@@ -593,7 +622,17 @@ impl<S: CchOrderStore> CchState<S> {
             .payment_hash(payment_hash)
             .hash_algorithm(HashAlgorithm::Sha256)
             .expiry_time(Duration::from_secs(outgoing_invoice_expiry_delta_seconds))
-            .final_expiry_delta(self.config.ckb_final_tlc_expiry_delta_seconds * 1000)
+            .final_expiry_delta(
+                self.config
+                    .ckb_final_tlc_expiry_delta_seconds
+                    .checked_mul(1000)
+                    .ok_or_else(|| {
+                        CchError::ConfigError(format!(
+                            "ckb_final_tlc_expiry_delta_seconds ({}) is too large and causes overflow when converting to milliseconds",
+                            self.config.ckb_final_tlc_expiry_delta_seconds
+                        ))
+                    })?,
+            )
             .udt_type_script(wrapped_btc_type_script.clone().into());
 
         let invoice = if let Some((public_key, secret_key)) = &self.node_keypair {
@@ -608,7 +647,7 @@ impl<S: CchOrderStore> CchState<S> {
 
         let order = CchOrder {
             amount_sats: invoice_amount_sats,
-            created_at: duration_since_epoch.as_secs(),
+            created_at: order_created_at,
             expiry_delta_seconds: self.config.order_expiry_delta_seconds,
             failure_reason: None,
             incoming_invoice: CchInvoice::Fiber(invoice),
@@ -624,7 +663,40 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(order)
     }
 
+    fn remaining_outgoing_invoice_expiry_seconds(
+        &self,
+        invoice: &CkbInvoice,
+        current_time_seconds: u64,
+    ) -> Result<u64, CchError> {
+        let remaining_seconds = match invoice.expiry_time() {
+            Some(expiry) => invoice
+                .data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .and_then(|expiry_at| {
+                    u64::try_from(expiry_at / 1000)
+                        .unwrap_or(u64::MAX)
+                        .checked_sub(current_time_seconds)
+                })
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+            // CKB invoices have no default expiry, so use twice the configured minimum when the
+            // outgoing invoice does not set one explicitly.
+            None => self
+                .config
+                .min_outgoing_invoice_expiry_delta_seconds
+                .checked_mul(2)
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+        };
+
+        if remaining_seconds < self.config.min_outgoing_invoice_expiry_delta_seconds {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
+        Ok(remaining_seconds)
+    }
+
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
+        // `from_str` requires the invoice to carry a valid signature, so parsing
+        // here also guarantees the Fiber invoice is signed.
         let invoice = CkbInvoice::from_str(&receive_btc.fiber_pay_req)?;
 
         // Validate that the CKB invoice currency matches the configured network (#982)
@@ -673,27 +745,16 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge);
         }
 
-        let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
-        let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {
-            Some(expiry) => invoice
-                .data
-                .timestamp
-                .checked_add(expiry.as_millis())
-                .and_then(|expiry_at| {
-                    u64::try_from(expiry_at / 1000)
-                        .unwrap_or(u64::MAX)
-                        .checked_sub(duration_since_epoch.as_secs())
-                })
-                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
-            // CKB invoice has no default expiry, use minimal * 2 to create the invoice
-            None => self.config.min_outgoing_invoice_expiry_delta_seconds * 2,
-        };
-        if outgoing_invoice_expiry_delta_seconds
-            < self.config.min_outgoing_invoice_expiry_delta_seconds
-        {
-            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        let order_created_at_ms = now_timestamp_as_millis_u64();
+        let order_created_at = order_created_at_ms / 1000;
+        if invoice.data.timestamp > u128::from(order_created_at_ms) {
+            return Err(CchError::CKBInvoiceCreationTimeInFuture {
+                invoice_created_at_ms: invoice.data.timestamp,
+                order_created_at_ms: u128::from(order_created_at_ms),
+            });
         }
+
+        self.remaining_outgoing_invoice_expiry_seconds(&invoice, order_created_at)?;
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script = self.resolve_wrapped_btc_type_script()?;
@@ -717,37 +778,93 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
         }
 
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        let req = invoicesrpc::AddHoldInvoiceRequest {
-            hash: payment_hash.as_ref().to_vec(),
-            value_msat: total_msat,
-            expiry: outgoing_invoice_expiry_delta_seconds as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
-            ..Default::default()
-        };
-        let add_invoice_resp = client
-            .add_hold_invoice(req.clone())
-            .await
-            .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
-            .into_inner();
-        let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
+        // Do not create externally payable BTC-side state for an invoice Fiber cannot currently
+        // route. The actual payment is still attempted only after the hold invoice is accepted;
+        // this dry run is a side-effect-free snapshot that rejects already-invalid orders early.
+        let fee_budget_sats =
+            outgoing_fee_budget_from_fee_sats(fee_sats, self.config.max_outgoing_fee_percentage);
+        self.fiber_agent_ref
+            .call_payment_preflight(
+                receive_btc.fiber_pay_req.clone(),
+                (btc_final_cltv_millis / 2).min(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+                OutgoingFeeLimit {
+                    max_fee_amount: fee_budget_sats,
+                    max_fee_rate: outgoing_max_fee_rate(amount_sats, fee_budget_sats),
+                },
+            )
+            .await?;
 
-        let order = CchOrder {
-            created_at: duration_since_epoch.as_secs(),
-            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
-            failure_reason: None,
-            incoming_invoice: CchInvoice::Lightning(incoming_invoice),
-            outgoing_pay_req: receive_btc.fiber_pay_req,
-            payment_preimage: None,
-            status: CchOrderStatus::Pending,
-            amount_sats,
-            fee_sats,
-            payment_hash,
-            wrapped_btc_type_script,
-        };
+        let reservation = ractor::call!(self.lnd_tracker, |reply| {
+            LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply)
+        })
+        .map_err(|err| CchError::LndInvoiceTrackerError(err.to_string()))?;
+        match reservation {
+            InvoiceTrackingReservationResult::Reserved => {}
+            InvoiceTrackingReservationResult::AlreadyTracked => {
+                return Err(CchError::LndInvoiceAlreadyTracked(payment_hash));
+            }
+            InvoiceTrackingReservationResult::CapacityExceeded => {
+                return Err(CchError::LndInvoiceTrackerCapacityExceeded(
+                    MAX_TRACKED_INVOICES,
+                ));
+            }
+        }
 
-        self.store.insert_cch_order(order.clone())?;
-        Ok(order)
+        let result = async {
+            let mut client = self.lnd_connection.create_invoices_client().await?;
+
+            // Preflight and client setup may take long enough for the absolute Fiber invoice expiry
+            // to move materially closer. Refresh it immediately before creating the relative-expiry
+            // LND hold invoice so elapsed setup time is not added to the incoming invoice lifetime.
+            let refreshed_at = now_timestamp_as_millis_u64() / 1000;
+            let outgoing_invoice_expiry_delta_seconds =
+                self.remaining_outgoing_invoice_expiry_seconds(&invoice, refreshed_at)?;
+
+            let req = invoicesrpc::AddHoldInvoiceRequest {
+                hash: payment_hash.as_ref().to_vec(),
+                value_msat: total_msat,
+                expiry: outgoing_invoice_expiry_delta_seconds as i64,
+                cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
+                ..Default::default()
+            };
+            let add_invoice_resp = client
+                .add_hold_invoice(req.clone())
+                .await
+                .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
+                .into_inner();
+            let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
+
+            let order = CchOrder {
+                created_at: order_created_at,
+                expiry_delta_seconds: self.config.order_expiry_delta_seconds,
+                failure_reason: None,
+                incoming_invoice: CchInvoice::Lightning(incoming_invoice),
+                outgoing_pay_req: receive_btc.fiber_pay_req,
+                payment_preimage: None,
+                status: CchOrderStatus::Pending,
+                amount_sats,
+                fee_sats,
+                payment_hash,
+                wrapped_btc_type_script,
+            };
+
+            self.store.insert_cch_order(order.clone())?;
+            Ok(order)
+        };
+        let result = result.await;
+        if result.is_err() {
+            if let Err(err) = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTracking(payment_hash))
+            {
+                tracing::warn!(
+                    "Failed to release invoice tracker reservation for {:x}: {}",
+                    payment_hash,
+                    err
+                );
+            }
+        }
+        result
     }
 
     async fn handle_tracking_event(&self, event: CchTrackingEvent) -> Result<Vec<CchOrderAction>> {
@@ -755,6 +872,27 @@ impl<S: CchOrderStore> CchState<S> {
             None => return Ok(vec![]),
             Some(order) => order,
         };
+
+        if order.status == CchOrderStatus::Pending
+            && matches!(
+                &event,
+                CchTrackingEvent::InvoiceChanged {
+                    status: CkbInvoiceStatus::Received,
+                    ..
+                }
+            )
+        {
+            let current_time = now_timestamp_as_millis_u64() / 1000;
+            if order.update_if_expired_with_reason(current_time, "Order expired") {
+                self.store.update_cch_order(order.clone());
+                self.schedule_job_on_entering(&order);
+                tracing::info!(
+                    "Rejected incoming invoice event for expired pending order {:x}",
+                    order.payment_hash
+                );
+                return Ok(vec![]);
+            }
+        }
 
         if CchOrderStateMachine::apply(&mut order, event.into())?.is_some() {
             self.store.update_cch_order(order.clone());
@@ -797,6 +935,19 @@ impl<S: CchOrderStore> CchState<S> {
                     }]
                 }
             }
+            StoreChange::PutAttempt {
+                payment_hash,
+                attempt_status: AttemptStatus::Inflight,
+            } => {
+                use fiber_types::payment::PaymentStatus;
+                vec![CchTrackingEvent::PaymentChanged {
+                    payment_hash: *payment_hash,
+                    payment_preimage: None,
+                    status: PaymentStatus::Inflight,
+                    failure_reason: None,
+                }]
+            }
+            StoreChange::PutAttempt { .. } => vec![],
             StoreChange::PutPreimage {
                 payment_hash,
                 payment_preimage,
@@ -932,7 +1083,13 @@ async fn subscribe_store_changes_ws(
                 item = subscription.next() => {
                     match item {
                         Some(Ok(change)) => {
-                            tracing::debug!("Received store change via WebSocket: {:?}", change);
+                            let summary = redacted_store_change_summary(&change);
+                            tracing::debug!(
+                                "received store change via websocket kind={} payment_hash={:x} has_payment_preimage={}",
+                                summary.kind,
+                                summary.payment_hash,
+                                summary.has_payment_preimage
+                            );
                             if let Err(err) = actor.send_message(CchMessage::StoreChangeEvent(change)) {
                                 tracing::error!("Failed to forward store change to CCH actor: {}", err);
                                 return;
@@ -954,5 +1111,37 @@ async fn subscribe_store_changes_ws(
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RedactedStoreChangeSummary {
+    pub kind: &'static str,
+    pub payment_hash: Hash256,
+    pub has_payment_preimage: bool,
+}
+
+pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedStoreChangeSummary {
+    match change {
+        StoreChange::PutCkbInvoiceStatus { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutCkbInvoiceStatus",
+            payment_hash: *payment_hash,
+            has_payment_preimage: false,
+        },
+        StoreChange::PutPaymentSession { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutPaymentSession",
+            payment_hash: *payment_hash,
+            has_payment_preimage: false,
+        },
+        StoreChange::PutAttempt { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutAttempt",
+            payment_hash: *payment_hash,
+            has_payment_preimage: false,
+        },
+        StoreChange::PutPreimage { payment_hash, .. } => RedactedStoreChangeSummary {
+            kind: "PutPreimage",
+            payment_hash: *payment_hash,
+            has_payment_preimage: true,
+        },
     }
 }

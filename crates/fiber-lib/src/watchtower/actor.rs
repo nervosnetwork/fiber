@@ -1,13 +1,16 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use anyhow::anyhow;
 use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
-    rpc::ckb_indexer::{Cell, CellType, Order, ScriptType, SearchKey, SearchMode, Tx},
+    rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchKeyFilter, SearchMode},
     traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
@@ -15,7 +18,7 @@ use ckb_sdk::{
 };
 use ckb_types::{
     self,
-    core::{Capacity, EpochNumberWithFraction, HeaderView, TransactionView},
+    core::{Capacity, EpochNumberWithFraction, HeaderView, TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction, WitnessArgs},
     prelude::*,
 };
@@ -36,7 +39,13 @@ use crate::{
         settlement_data_to_witness, settlement_tlc_local_pubkey_hash, XUDT_COMPATIBLE_WITNESS,
     },
     now_timestamp_as_millis_u64,
-    utils::{actor::ActorHandleLogGuard, tx::compute_tx_message},
+    utils::{
+        actor::ActorHandleLogGuard,
+        arithmetic::{
+            checked_add_u64, checked_mul_u64, checked_sub_u64, checked_sub_usize, ArithmeticError,
+        },
+        tx::compute_tx_message,
+    },
     watchtower::{
         channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
         channel_data_x_only_aggregated_pubkey,
@@ -57,6 +66,21 @@ pub struct WatchtowerActor<S> {
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
+
+fn tx_size_with_extra_inputs(
+    tx_builder: &TransactionBuilder,
+    extra_inputs: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let tx_size = u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+        .map_err(|_| ArithmeticError::new("transaction size does not fit into u64"))?;
+    let extra_size = checked_mul_u64(
+        CellInput::TOTAL_SIZE as u64,
+        extra_inputs,
+        "extra input size",
+    )?;
+    checked_add_u64(tx_size, extra_size, "transaction size")
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+}
 
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
@@ -224,169 +248,159 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, node_id: NodeId, signer: LocalSigner, rpc_url: String)
+fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
 
-    for channel_data in store.get_watch_channels() {
+    for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
         let ckb_client =
             CkbRpcClient::with_builder(&rpc_url, |builder| builder.timeout(CKB_RPC_TIMEOUT))
                 .expect("create ckb rpc client should not fail");
-        let search_key = SearchKey {
-            script: channel_data_funding_tx_lock(&channel_data).into(),
-            script_type: ScriptType::Lock,
-            script_search_mode: Some(SearchMode::Exact),
-            with_data: None,
-            filter: None,
-            group_by_transaction: None,
+        let tx_hash = match crate::ckb::client::find_first_input_tx_hash(
+            &ckb_client,
+            &channel_data_funding_tx_lock(&channel_data),
+        ) {
+            Ok(Some(tx_hash)) => tx_hash,
+            Ok(None) => continue,
+            Err(err) => {
+                error!("Failed to get transactions: {:?}", err);
+                continue;
+            }
         };
-        // we need two parties' signatures to unlock the funding tx, so we can check the last one transaction only to see if it's an old version commitment tx
-        match ckb_client.get_transactions(search_key, Order::Desc, 1u32.into(), None) {
-            Ok(txs) => {
-                if let Some(Tx::Ungrouped(tx)) = txs.objects.first() {
-                    if matches!(tx.io_type, CellType::Input) {
-                        match ckb_client.get_transaction(tx.tx_hash.clone()) {
-                            Ok(Some(tx_with_status)) => {
-                                if tx_with_status.tx_status.status != Status::Committed {
-                                    error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash);
-                                } else if let Some(tx) = tx_with_status.transaction {
-                                    match tx.inner {
-                                        Either::Left(tx) => {
-                                            let tx: Transaction = tx.inner.into();
-                                            if tx.raw().outputs().len() == 1 {
-                                                let first_commitment_tx_out_point =
-                                                    OutPoint::new(tx.calc_tx_hash(), 0);
-                                                let output = tx
-                                                    .raw()
-                                                    .outputs()
-                                                    .get(0)
-                                                    .expect("get output 0 of tx");
-                                                let commitment_lock = output.lock();
-                                                let lock_args = commitment_lock.args().raw_data();
-                                                let pub_key_hash: [u8; 20] = lock_args[0..20]
-                                                    .try_into()
-                                                    .expect("checked length");
-                                                let commitment_number = u64::from_be_bytes(
-                                                    lock_args[28..36]
-                                                        .try_into()
-                                                        .expect("u64 from slice"),
-                                                );
+        match ckb_client.get_transaction(tx_hash.clone()) {
+            Ok(Some(tx_with_status)) => {
+                if tx_with_status.tx_status.status != Status::Committed {
+                    error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx_hash);
+                    continue;
+                }
 
-                                                let x_only_aggregated_pubkey =
-                                                    channel_data_x_only_aggregated_pubkey(
-                                                        &channel_data,
-                                                        false,
-                                                    );
-                                                if blake160(&x_only_aggregated_pubkey).0
-                                                    == pub_key_hash
-                                                {
-                                                    match channel_data.revocation_data.clone() {
-                                                        Some(revocation_data)
-                                                            if revocation_data
-                                                                .commitment_number
-                                                                >= commitment_number =>
-                                                        {
-                                                            match ckb_client.get_live_cell(
-                                                                first_commitment_tx_out_point
-                                                                    .clone()
-                                                                    .into(),
-                                                                false,
-                                                            ) {
-                                                                Ok(cell_with_status) => {
-                                                                    if cell_with_status.status
-                                                                        == "live"
-                                                                    {
-                                                                        warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
-                                                                        match build_revocation_tx(
-                                                                                    first_commitment_tx_out_point,
-                                                                                    revocation_data,
-                                                                                    x_only_aggregated_pubkey,
-                                                                                    &signer,
-                                                                                    &mut cell_collector,
-                                                                                ) {
-                                                                                    Ok(tx) => {
-                                                                                        match ckb_client
-                                                                                            .send_transaction(
-                                                                                                tx.data()
-                                                                                                    .into(),
-                                                                                                None,
-                                                                                            ) {
-                                                                                            Ok(tx_hash) => {
-                                                                                                info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                                                                                            }
-                                                                                            Err(err) => {
-                                                                                                error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                    Err(err) => {
-                                                                                        error!("Failed to build revocation tx: {:?}", err);
-                                                                                    }
-                                                                                }
+                let Some(first_commitment_block_number) = tx_with_status
+                    .tx_status
+                    .block_number
+                    .as_ref()
+                    .map(|block_number| block_number.value())
+                else {
+                    error!(
+                        "Cannot find the commitment tx block number: {:?}, maybe ckb indexer bug?",
+                        tx_hash
+                    );
+                    continue;
+                };
+
+                if let Some(tx) = tx_with_status.transaction {
+                    match tx.inner {
+                        Either::Left(tx) => {
+                            let tx: Transaction = tx.inner.into();
+                            if tx.raw().outputs().len() == 1 {
+                                let first_commitment_tx_out_point =
+                                    OutPoint::new(tx.calc_tx_hash(), 0);
+                                let output = tx.raw().outputs().get(0).expect("get output 0 of tx");
+                                let commitment_lock = output.lock();
+                                let lock_args = commitment_lock.args().raw_data();
+                                let pub_key_hash: [u8; 20] =
+                                    lock_args[0..20].try_into().expect("checked length");
+                                let commitment_number = u64::from_be_bytes(
+                                    lock_args[28..36].try_into().expect("u64 from slice"),
+                                );
+
+                                let x_only_aggregated_pubkey =
+                                    channel_data_x_only_aggregated_pubkey(&channel_data, false);
+                                if blake160(&x_only_aggregated_pubkey).0 == pub_key_hash {
+                                    match channel_data.revocation_data.clone() {
+                                        Some(revocation_data)
+                                            if revocation_data.commitment_number
+                                                >= commitment_number =>
+                                        {
+                                            match ckb_client.get_live_cell(
+                                                first_commitment_tx_out_point.clone().into(),
+                                                false,
+                                            ) {
+                                                Ok(cell_with_status) => {
+                                                    if cell_with_status.status == "live" {
+                                                        warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
+                                                        match build_revocation_tx(
+                                                            first_commitment_tx_out_point,
+                                                            revocation_data,
+                                                            x_only_aggregated_pubkey,
+                                                            &signer,
+                                                            &mut cell_collector,
+                                                        ) {
+                                                            Ok(tx) => {
+                                                                match ckb_client.send_transaction(
+                                                                    tx.data().into(),
+                                                                    None,
+                                                                ) {
+                                                                    Ok(tx_hash) => {
+                                                                        info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                    }
+                                                                    Err(err) => {
+                                                                        error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
                                                                     }
                                                                 }
-                                                                Err(err) => {
-                                                                    error!("Failed to get live cell: {:?}", err);
-                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                error!("Failed to build revocation tx: {:?}", err);
                                                             }
                                                         }
-                                                        _ => {
-                                                            try_settle_commitment_tx(
-                                                                commitment_lock,
-                                                                first_commitment_tx_out_point,
-                                                                ckb_client,
-                                                                channel_data,
-                                                                true,
-                                                                &signer,
-                                                                &mut cell_collector,
-                                                                &store,
-                                                                node_id.clone(),
-                                                            );
-                                                        }
                                                     }
-                                                } else {
-                                                    try_settle_commitment_tx(
-                                                        commitment_lock,
-                                                        first_commitment_tx_out_point,
-                                                        ckb_client,
-                                                        channel_data,
-                                                        false,
-                                                        &signer,
-                                                        &mut cell_collector,
-                                                        &store,
-                                                        node_id.clone(),
-                                                    );
                                                 }
-                                            } else {
-                                                // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
-                                                // it's a close channel tx, ignore
+                                                Err(err) => {
+                                                    error!("Failed to get live cell: {:?}", err);
+                                                }
                                             }
                                         }
-                                        Either::Right(_tx) => {
-                                            // unreachable, ignore
+                                        _ => {
+                                            try_settle_commitment_tx(
+                                                commitment_lock,
+                                                first_commitment_tx_out_point,
+                                                ckb_client,
+                                                channel_data,
+                                                true,
+                                                &signer,
+                                                &mut cell_collector,
+                                                &store,
+                                                channel_node_id.clone(),
+                                                first_commitment_block_number,
+                                            );
                                         }
                                     }
                                 } else {
-                                    error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx.tx_hash);
+                                    try_settle_commitment_tx(
+                                        commitment_lock,
+                                        first_commitment_tx_out_point,
+                                        ckb_client,
+                                        channel_data,
+                                        false,
+                                        &signer,
+                                        &mut cell_collector,
+                                        &store,
+                                        channel_node_id.clone(),
+                                        first_commitment_block_number,
+                                    );
                                 }
-                            }
-                            Ok(None) => {
-                                error!(
-                                    "Cannot find the commitment tx: {:?}, maybe ckb indexer bug?",
-                                    tx.tx_hash
-                                );
-                            }
-                            Err(err) => {
-                                error!("Failed to get funding tx: {:?}", err);
+                            } else {
+                                // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
+                                // it's a close channel tx, ignore
                             }
                         }
+                        Either::Right(_tx) => {
+                            // unreachable, ignore
+                        }
                     }
+                } else {
+                    error!("Cannot find the commitment tx: {:?}, transaction is none, maybe ckb indexer bug?", tx_hash);
                 }
             }
+            Ok(None) => {
+                error!(
+                    "Cannot find the commitment tx: {:?}, maybe ckb indexer bug?",
+                    tx_hash
+                );
+            }
             Err(err) => {
-                error!("Failed to get transactions: {:?}", err);
+                error!("Failed to get commitment tx: {:?}", err);
             }
         }
     }
@@ -443,11 +457,12 @@ fn build_revocation_tx(
     // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
     let fee_calculator = FeeCalculator::new(1000);
     // use two inputs as the maximum fee provider cell inputs
-    let fee = fee_calculator.fee(
-        tx_builder.clone().build().data().serialized_size_in_block() as u64
-            + CellInput::TOTAL_SIZE as u64 * 2,
-    );
-    let min_total_capacity = change_output_occupied_capacity + fee;
+    let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
+    let min_total_capacity = checked_add_u64(
+        change_output_occupied_capacity,
+        fee,
+        "revocation min capacity",
+    )?;
     let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
     query.script_search_mode = Some(SearchMode::Exact);
     query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -457,18 +472,34 @@ fn build_revocation_tx(
     let mut inputs_capacity = 0u64;
     for cell in cells {
         let input_capacity: u64 = cell.output.capacity().unpack();
-        inputs_capacity += input_capacity;
+        inputs_capacity = checked_add_u64(
+            inputs_capacity,
+            input_capacity,
+            "revocation inputs capacity",
+        )?;
         tx_builder = tx_builder.input(
             CellInput::new_builder()
                 .previous_output(cell.out_point)
                 .build(),
         );
-        let fee =
-            fee_calculator.fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-        if inputs_capacity >= change_output_occupied_capacity + fee {
+        let tx_size = u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+            .map_err(|_| {
+            ArithmeticError::new("transaction size does not fit into u64".to_string())
+        })?;
+        let fee = fee_calculator.fee(tx_size);
+        let required_capacity = checked_add_u64(
+            change_output_occupied_capacity,
+            fee,
+            "revocation required capacity",
+        )?;
+        if inputs_capacity >= required_capacity {
             let new_change_output = change_output
                 .as_builder()
-                .capacity(inputs_capacity - fee)
+                .capacity(checked_sub_u64(
+                    inputs_capacity,
+                    fee,
+                    "revocation change capacity",
+                )?)
                 .build();
             let tx = tx_builder
                 .set_outputs(vec![revocation_data.output, new_change_output])
@@ -493,53 +524,66 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     cell_collector: &mut DefaultCellCollector,
     store: &S,
     self_node_id: NodeId,
+    first_commitment_block_number: u64,
 ) {
     let lock_args = commitment_lock.args().raw_data();
     let script = commitment_lock
         .as_builder()
         .args(lock_args[0..36].to_vec().pack())
         .build();
-    let search_key = SearchKey {
-        script: script.into(),
-        script_type: ScriptType::Lock,
-        script_search_mode: Some(SearchMode::Prefix),
-        with_data: None,
-        filter: None,
-        group_by_transaction: Some(true),
-    };
-
-    find_preimages(
-        search_key.clone(),
-        &channel_data.channel_id,
-        &ckb_client,
-        store,
-        self_node_id,
-    );
-
-    let (current_epoch, current_time) = match ckb_client.get_tip_header() {
-        Ok(tip_header) => match ckb_client.get_block_median_time(tip_header.hash.clone()) {
-            Ok(Some(median_time)) => {
-                let tip_header: HeaderView = tip_header.into();
-                let epoch = tip_header.epoch();
-                (epoch, median_time.value())
+    let (current_epoch, current_time, tip_block_number) = match ckb_client.get_tip_header() {
+        Ok(tip_header) => {
+            let tip_block_number = tip_header.inner.number.value();
+            match ckb_client.get_block_median_time(tip_header.hash.clone()) {
+                Ok(Some(median_time)) => {
+                    let tip_header: HeaderView = tip_header.into();
+                    let epoch = tip_header.epoch();
+                    (epoch, median_time.value(), tip_block_number)
+                }
+                Ok(None) => {
+                    error!(
+                        "Cannot find median time: {:?}, ckb rpc bug?",
+                        tip_header.hash
+                    );
+                    return;
+                }
+                Err(err) => {
+                    error!("Failed to get median time: {:?}", err);
+                    return;
+                }
             }
-            Ok(None) => {
-                error!(
-                    "Cannot find median time: {:?}, ckb rpc bug?",
-                    tip_header.hash
-                );
-                return;
-            }
-            Err(err) => {
-                error!("Failed to get median time: {:?}", err);
-                return;
-            }
-        },
+        }
         Err(err) => {
             error!("Failed to get tip header: {:?}", err);
             return;
         }
     };
+
+    let search_key = SearchKey {
+        script: script.clone().into(),
+        script_type: ScriptType::Lock,
+        script_search_mode: Some(SearchMode::Prefix),
+        with_data: None,
+        filter: Some(SearchKeyFilter {
+            block_range: Some([
+                first_commitment_block_number.into(),
+                tip_block_number.saturating_add(1).into(),
+            ]),
+            ..Default::default()
+        }),
+        group_by_transaction: Some(true),
+    };
+
+    let settlement_witness_input_indices = scan_watched_settlement_txs(
+        search_key.clone(),
+        &ckb_client,
+        &script,
+        first_commitment_tx_out_point.clone(),
+        &channel_data.channel_id,
+        store,
+        &self_node_id,
+    );
+
     // the live cells number should be 1 or 0 for normal case.
     // however, an attacker may create a lot of cells to implement a tx pinning attack, we have to use loop to get all cells
     let mut after = None;
@@ -587,7 +631,15 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                     match tx.inner {
                                         Either::Left(tx) => {
                                             let tx: Transaction = tx.inner.into();
-                                            match tx.witnesses().get(0) {
+                                            let Some(witness_index) =
+                                                settlement_witness_input_indices
+                                                    .get(&commitment_tx_hash.pack())
+                                                    .copied()
+                                            else {
+                                                warn!("Found a commitment tx, but it does not spend a watched commitment outpoint: {:?}", commitment_tx_hash);
+                                                continue;
+                                            };
+                                            match tx.witnesses().get(witness_index) {
                                                 Some(witness) => {
                                                     let witness = witness.raw_data();
                                                     if witness.len() > 18
@@ -635,6 +687,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         cell_header_epoch,
                         current_epoch,
                         current_time,
+                        &self_node_id,
                         for_remote,
                         channel_data.clone(),
                         settlement_witness,
@@ -660,25 +713,32 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                 }
             }
             Err(err) => {
-                error!("Failed to get cells: {:?}", err);
+                error!("Failed to get cells: {:?}, aborting settlement scan", err);
+                break;
             }
         }
     }
 }
 
-// find all on-chain transactions with the preimage and store them
-fn find_preimages<S: WatchtowerStore>(
+#[allow(clippy::too_many_arguments)]
+fn scan_watched_settlement_txs<S: WatchtowerStore>(
     search_key: SearchKey,
-    channel_id: &Hash256,
     ckb_client: &CkbRpcClient,
+    commitment_lock_prefix: &Script,
+    first_commitment_tx_out_point: OutPoint,
+    channel_id: &Hash256,
     store: &S,
-    self_node_id: NodeId,
-) {
+    self_node_id: &NodeId,
+) -> HashMap<ckb_types::packed::Byte32, usize> {
+    let mut watched_outpoints = HashSet::from([first_commitment_tx_out_point]);
+    let mut settlement_witness_input_indices = HashMap::new();
+
+    let mut candidates: Vec<Transaction> = Vec::new();
     let mut after = None;
     loop {
         match ckb_client.get_transactions(
             search_key.clone(),
-            Order::Desc,
+            Order::Asc,
             100u32.into(),
             after.clone(),
         ) {
@@ -687,84 +747,16 @@ fn find_preimages<S: WatchtowerStore>(
                     break;
                 }
                 after = Some(txs.last_cursor.clone());
-                for tx in txs.objects {
-                    match ckb_client.get_transaction(tx.tx_hash()) {
+                for indexed_tx in txs.objects {
+                    match ckb_client.get_transaction(indexed_tx.tx_hash()) {
                         Ok(Some(tx_with_status)) => {
                             if tx_with_status.tx_status.status != Status::Committed {
-                                error!("Cannot find the tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash());
+                                error!("Cannot find the tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, indexed_tx.tx_hash());
                             } else if let Some(tx) = tx_with_status.transaction {
                                 match tx.inner {
                                     Either::Left(tx) => {
                                         let tx: Transaction = tx.inner.into();
-                                        match tx.witnesses().get(0) {
-                                            Some(witness) => {
-                                                let witness = witness.raw_data();
-                                                if witness.len() > 18
-                                                    && witness[0..16] == XUDT_COMPATIBLE_WITNESS
-                                                {
-                                                    if let Some(settlement_witness) =
-                                                        SettlementWitness::build_from_witness(
-                                                            &witness[16..],
-                                                        )
-                                                    {
-                                                        for unlock in settlement_witness.unlocks {
-                                                            if unlock.unlock_type < 0xFE {
-                                                                if let Some(tlc) =
-                                                                    settlement_witness
-                                                                        .pending_htlcs
-                                                                        .get(
-                                                                            unlock.unlock_type
-                                                                                as usize,
-                                                                        )
-                                                                {
-                                                                    if unlock.with_preimage {
-                                                                        let preimage = unlock
-                                                                            .preimage
-                                                                            .unwrap();
-                                                                        let payment_hash = tlc
-                                                                            .hash_algorithm()
-                                                                            .hash(
-                                                                                preimage.as_ref(),
-                                                                            );
-                                                                        if payment_hash.starts_with(
-                                                                            &tlc.payment_hash,
-                                                                        ) {
-                                                                            store
-                                                                            .insert_watch_preimage(
-                                                                                self_node_id
-                                                                                    .clone(),
-                                                                                payment_hash.into(),
-                                                                                preimage,
-                                                                            );
-                                                                        } else {
-                                                                            warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
-                                                                        }
-                                                                    } else {
-                                                                        store.update_tlc_settled(
-                                                                            channel_id,
-                                                                            tlc.payment_hash,
-                                                                        );
-                                                                    }
-                                                                }
-                                                            } else {
-                                                                settlement_witness
-                                                                    .pending_htlcs
-                                                                    .iter()
-                                                                    .for_each(|tlc| {
-                                                                        store.update_tlc_settled(
-                                                                            channel_id,
-                                                                            tlc.payment_hash,
-                                                                        );
-                                                                    })
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            None => {
-                                                warn!("Found a commitment tx, but the witnesses are empty: {:?}", tx.calc_tx_hash());
-                                            }
-                                        }
+                                        candidates.push(tx);
                                     }
                                     Either::Right(_) => {
                                         // unreachable, ignore
@@ -775,7 +767,7 @@ fn find_preimages<S: WatchtowerStore>(
                         Ok(None) => {
                             error!(
                                 "Cannot find the tx: {:?}, maybe ckb indexer bug?",
-                                tx.tx_hash()
+                                indexed_tx.tx_hash()
                             );
                         }
                         Err(err) => {
@@ -785,8 +777,140 @@ fn find_preimages<S: WatchtowerStore>(
                 }
             }
             Err(err) => {
-                error!("Failed to get transactions: {:?}", err);
+                error!(
+                    "Failed to get transactions: {:?}, aborting settlement scan",
+                    err
+                );
+                break;
             }
+        }
+    }
+
+    let mut processed_tx_hashes = HashSet::new();
+    loop {
+        let mut progress = false;
+        for tx in &candidates {
+            let tx_hash = tx.calc_tx_hash();
+            if processed_tx_hashes.contains(&tx_hash) {
+                continue;
+            }
+            if let Some(witness_index) = process_watched_settlement_tx(
+                tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                commitment_lock_prefix,
+                channel_id,
+                store,
+                self_node_id,
+            ) {
+                settlement_witness_input_indices.insert(tx_hash, witness_index);
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    settlement_witness_input_indices
+}
+
+fn lock_matches_commitment_prefix(lock: &Script, commitment_lock_prefix: &Script) -> bool {
+    let lock_args = lock.args().raw_data();
+    lock.code_hash() == commitment_lock_prefix.code_hash()
+        && lock.hash_type() == commitment_lock_prefix.hash_type()
+        && lock_args.starts_with(commitment_lock_prefix.args().raw_data().as_ref())
+}
+
+fn process_watched_settlement_tx<S: WatchtowerStore>(
+    tx: &Transaction,
+    watched_outpoints: &mut HashSet<OutPoint>,
+    processed_tx_hashes: &mut HashSet<ckb_types::packed::Byte32>,
+    commitment_lock_prefix: &Script,
+    channel_id: &Hash256,
+    store: &S,
+    self_node_id: &NodeId,
+) -> Option<usize> {
+    let tx_hash = tx.calc_tx_hash();
+    if processed_tx_hashes.contains(&tx_hash) {
+        return None;
+    }
+    // The commitment-lock contract reads `load_witness(0, Source::GroupInput)`.
+    // Since it enforces a single group input, that witness is stored at the
+    // global input index that spends the watched commitment/settlement cell,
+    // not necessarily at `witnesses[0]`.
+    let inputs = tx.raw().inputs();
+    let watched_input_index = (0..inputs.len()).find(|index| {
+        let previous_output = inputs
+            .get(*index)
+            .expect("input index checked")
+            .previous_output();
+        watched_outpoints.contains(&previous_output)
+    })?;
+
+    processed_tx_hashes.insert(tx_hash.clone());
+    find_preimages(tx, watched_input_index, channel_id, store, self_node_id);
+
+    let outputs = tx.raw().outputs();
+    if let Some(output) = outputs.get(0) {
+        if lock_matches_commitment_prefix(&output.lock(), commitment_lock_prefix) {
+            watched_outpoints.insert(OutPoint::new(tx_hash, 0));
+        }
+    }
+
+    Some(watched_input_index)
+}
+
+// find all on-chain transactions with the preimage and store them
+fn find_preimages<S: WatchtowerStore>(
+    tx: &Transaction,
+    witness_index: usize,
+    channel_id: &Hash256,
+    store: &S,
+    self_node_id: &NodeId,
+) {
+    match tx.witnesses().get(witness_index) {
+        Some(witness) => {
+            let witness = witness.raw_data();
+            if witness.len() > 18 && witness[0..16] == XUDT_COMPATIBLE_WITNESS {
+                if let Some(settlement_witness) =
+                    SettlementWitness::build_from_witness(&witness[16..])
+                {
+                    for unlock in settlement_witness.unlocks {
+                        if unlock.unlock_type < 0xFE {
+                            if let Some(tlc) = settlement_witness
+                                .pending_htlcs
+                                .get(unlock.unlock_type as usize)
+                            {
+                                if unlock.with_preimage {
+                                    let preimage = unlock.preimage.unwrap();
+                                    let payment_hash = tlc.hash_algorithm().hash(preimage.as_ref());
+                                    if payment_hash.starts_with(&tlc.payment_hash) {
+                                        store.insert_watch_preimage(
+                                            self_node_id.clone(),
+                                            payment_hash.into(),
+                                            preimage,
+                                        );
+                                    } else {
+                                        warn!("Found a preimage for payment hash: {:?}, but not match the tlc, tx hash: {:?}", payment_hash, tx.calc_tx_hash());
+                                    }
+                                } else {
+                                    store.update_tlc_settled(channel_id, tlc.payment_hash);
+                                }
+                            }
+                        } else {
+                            settlement_witness.pending_htlcs.iter().for_each(|tlc| {
+                                store.update_tlc_settled(channel_id, tlc.payment_hash);
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            warn!(
+                "Found a commitment tx, but the witnesses are empty: {:?}",
+                tx.calc_tx_hash()
+            );
         }
     }
 }
@@ -797,6 +921,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     cell_header_epoch: EpochNumberWithFraction,
     current_epoch: EpochNumberWithFraction,
     current_time: u64,
+    self_node_id: &NodeId,
     for_remote: bool,
     channel_data: ChannelData,
     settlement_witness: Option<SettlementWitness>,
@@ -838,9 +963,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
         if channel_data
             .revocation_data
             .as_ref()
-            .map(|r| r.commitment_number)
-            .unwrap_or_default()
-            == commitment_number - 1
+            .and_then(|r| {
+                commitment_number
+                    .checked_sub(1)
+                    .map(|prev| r.commitment_number == prev)
+            })
+            .unwrap_or(false)
         {
             channel_data.remote_settlement_data.clone()
         } else {
@@ -911,7 +1039,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 } else if let Some(private_key) =
                                     tlc.find_matched_private_key(&settlement_data, true)
                                 {
-                                    if let Some(preimage) = store.search_preimage(&tlc.payment_hash)
+                                    if let Some(preimage) =
+                                        store.search_preimage(self_node_id, &tlc.payment_hash)
                                     {
                                         unlock_option = Some((
                                             Unlock {
@@ -925,7 +1054,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         ));
                                         break;
                                     } else if current_time > expiry {
-                                        pending_tlcs_count -= 1;
+                                        pending_tlcs_count = checked_sub_usize(
+                                            pending_tlcs_count,
+                                            1,
+                                            "pending TLC count",
+                                        )?;
                                     }
                                 } else {
                                     warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
@@ -1003,7 +1136,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             } else if let Some(private_key) =
                                 tlc.find_matched_private_key(&settlement_data, true)
                             {
-                                if let Some(preimage) = store.search_preimage(&tlc.payment_hash) {
+                                if let Some(preimage) =
+                                    store.search_preimage(self_node_id, &tlc.payment_hash)
+                                {
                                     unlock_option = Some((
                                         Unlock {
                                             unlock_type: i as u8,
@@ -1016,7 +1151,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     ));
                                     break;
                                 } else if current_time > expiry {
-                                    pending_tlcs_count -= 1;
+                                    pending_tlcs_count = checked_sub_usize(
+                                        pending_tlcs_count,
+                                        1,
+                                        "pending TLC count",
+                                    )?;
                                 }
                             } else {
                                 warn!(
@@ -1063,7 +1202,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
             for (i, tlc) in settlement_data.tlcs.iter().enumerate() {
                 match (tlc.tlc_id.is_offered(), for_remote) {
                     (true, true) | (false, false) => {
-                        let delay = mul(delay_epoch, 2, 3);
+                        let delay = mul(delay_epoch, 2, 3).ok_or_else(|| {
+                            ArithmeticError::new("delay epoch calculation overflows".to_string())
+                        })?;
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                             && current_time > tlc.expiry
@@ -1083,11 +1224,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         }
                     }
                     _ => {
-                        let delay = mul(delay_epoch, 1, 3);
+                        let delay = mul(delay_epoch, 1, 3).ok_or_else(|| {
+                            ArithmeticError::new("delay epoch calculation overflows".to_string())
+                        })?;
                         if cell_header_epoch.to_rational() + delay.to_rational()
                             <= current_epoch.to_rational()
                         {
-                            if let Some(preimage) = store.get_watch_preimage(&tlc.payment_hash) {
+                            if let Some(preimage) =
+                                store.get_watch_preimage(self_node_id, &tlc.payment_hash)
+                            {
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: i as u8,
@@ -1104,7 +1249,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 <= current_epoch.to_rational()
                                 && current_time > tlc.expiry
                             {
-                                pending_tlcs_count -= 1;
+                                pending_tlcs_count =
+                                    checked_sub_usize(pending_tlcs_count, 1, "pending TLC count")?;
                             }
                         }
                     }
@@ -1238,16 +1384,31 @@ fn build_settlement_tx<S: WatchtowerStore>(
         // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
         let fee_calculator = FeeCalculator::new(1000);
         // use two inputs as the maximum fee provider cell inputs
-        let fee = fee_calculator.fee(
-            tx_builder.clone().build().data().serialized_size_in_block() as u64
-                + CellInput::TOTAL_SIZE as u64 * 2,
-        );
+        let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
         let settlement_output_occupied_capacity = settlement_output
             .occupied_capacity(Capacity::shannons(0))
-            .expect("capacity does not overflow")
+            .map_err(|err| {
+                ArithmeticError::new(format!(
+                    "settlement output occupied capacity calculation failed: {}",
+                    err
+                ))
+            })?
             .as_u64();
-        let min_total_capacity =
-            capacity.saturating_sub(new_capacity + settlement_output_occupied_capacity + fee);
+        let required_capacity = checked_add_u64(
+            new_capacity,
+            settlement_output_occupied_capacity,
+            "settlement required capacity",
+        )
+        .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+        let min_total_capacity = if capacity > required_capacity {
+            checked_sub_u64(
+                capacity,
+                required_capacity,
+                "settlement fee provider capacity",
+            )?
+        } else {
+            0
+        };
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -1264,19 +1425,42 @@ fn build_settlement_tx<S: WatchtowerStore>(
         };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
-            inputs_capacity += input_capacity;
+            inputs_capacity = checked_add_u64(
+                inputs_capacity,
+                input_capacity,
+                "settlement inputs capacity",
+            )?;
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
                     .since(since)
                     .build(),
             );
-            let fee = fee_calculator
-                .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-            if inputs_capacity >= new_capacity + settlement_output_occupied_capacity + fee {
+            let tx_size =
+                u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+                    .map_err(|_| {
+                        ArithmeticError::new("transaction size does not fit into u64".to_string())
+                    })?;
+            let fee = fee_calculator.fee(tx_size);
+            let required_capacity = checked_add_u64(
+                new_capacity,
+                settlement_output_occupied_capacity,
+                "settlement required capacity",
+            )
+            .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+            if inputs_capacity >= required_capacity {
                 let adjusted_settlement_output = change_output
                     .as_builder()
-                    .capacity(inputs_capacity - new_capacity - fee)
+                    .capacity(
+                        checked_sub_u64(
+                            inputs_capacity,
+                            new_capacity,
+                            "settlement output capacity",
+                        )
+                        .and_then(|amount| {
+                            checked_sub_u64(amount, fee, "settlement output capacity")
+                        })?,
+                    )
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![adjusted_settlement_output]
@@ -1374,7 +1558,12 @@ fn build_settlement_tx<S: WatchtowerStore>(
             } else {
                 let new_commitment_output_capacity = new_commitment_output
                     .occupied_capacity(Capacity::bytes(16).unwrap())
-                    .expect("capacity does not overflow")
+                    .map_err(|err| {
+                        ArithmeticError::new(format!(
+                            "commitment output occupied capacity calculation failed: {}",
+                            err
+                        ))
+                    })?
                     .as_u64();
                 new_commitment_output = new_commitment_output
                     .as_builder()
@@ -1382,18 +1571,35 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .build();
 
                 let settlement_output_capacity: u64 = settlement_output.capacity().unpack();
-                let new_settlement_output_capacity = settlement_output_capacity
-                    + commitment_cell.output.capacity.value()
-                    - new_commitment_output_capacity;
+                let new_settlement_output_capacity = checked_add_u64(
+                    settlement_output_capacity,
+                    commitment_cell.output.capacity.value(),
+                    "settlement output capacity",
+                )
+                .and_then(|amount| {
+                    checked_sub_u64(
+                        amount,
+                        new_commitment_output_capacity,
+                        "settlement output capacity",
+                    )
+                })?;
                 settlement_output = settlement_output
                     .as_builder()
                     .capacity(new_settlement_output_capacity)
                     .build();
 
-                new_settlement_output_capacity + new_commitment_output_capacity
+                checked_add_u64(
+                    new_settlement_output_capacity,
+                    new_commitment_output_capacity,
+                    "outputs capacity",
+                )?
             }
         } else {
-            settlement_output_occupied_capacity + commitment_cell.output.capacity.value()
+            checked_add_u64(
+                settlement_output_occupied_capacity,
+                commitment_cell.output.capacity.value(),
+                "outputs capacity",
+            )?
         };
 
         if !two_parties_all_settled {
@@ -1413,16 +1619,23 @@ fn build_settlement_tx<S: WatchtowerStore>(
         // TODO: move it to config or use https://github.com/nervosnetwork/ckb/pull/4477
         let fee_calculator = FeeCalculator::new(1000);
         // use two inputs as the maximum fee provider cell inputs
-        let fee = fee_calculator.fee(
-            tx_builder.clone().build().data().serialized_size_in_block() as u64
-                + CellInput::TOTAL_SIZE as u64 * 2,
-        );
+        let fee = fee_calculator.fee(tx_size_with_extra_inputs(&tx_builder, 2)?);
 
         let change_output_occupied_capacity = change_output
             .occupied_capacity(Capacity::shannons(0))
-            .expect("capacity does not overflow")
+            .map_err(|err| {
+                ArithmeticError::new(format!(
+                    "change output occupied capacity calculation failed: {}",
+                    err
+                ))
+            })?
             .as_u64();
-        let min_total_capacity = change_output_occupied_capacity + outputs_capacity + fee;
+        let min_total_capacity = checked_add_u64(
+            change_output_occupied_capacity,
+            outputs_capacity,
+            "settlement min capacity",
+        )
+        .and_then(|amount| checked_add_u64(amount, fee, "settlement min capacity"))?;
         let mut query = CellQueryOptions::new_lock(fee_provider_lock_script);
         query.script_search_mode = Some(SearchMode::Exact);
         query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
@@ -1437,19 +1650,36 @@ fn build_settlement_tx<S: WatchtowerStore>(
         };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
-            inputs_capacity += input_capacity;
+            inputs_capacity = checked_add_u64(
+                inputs_capacity,
+                input_capacity,
+                "settlement inputs capacity",
+            )?;
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
                     .since(since)
                     .build(),
             );
-            let fee = fee_calculator
-                .fee(tx_builder.clone().build().data().serialized_size_in_block() as u64);
-            if inputs_capacity >= change_output_occupied_capacity + outputs_capacity + fee {
+            let tx_size =
+                u64::try_from(tx_builder.clone().build().data().serialized_size_in_block())
+                    .map_err(|_| {
+                        ArithmeticError::new("transaction size does not fit into u64".to_string())
+                    })?;
+            let fee = fee_calculator.fee(tx_size);
+            let required_capacity = checked_add_u64(
+                change_output_occupied_capacity,
+                outputs_capacity,
+                "settlement required capacity",
+            )
+            .and_then(|amount| checked_add_u64(amount, fee, "settlement required capacity"))?;
+            if inputs_capacity >= required_capacity {
                 let new_change_output = change_output
                     .as_builder()
-                    .capacity(inputs_capacity - outputs_capacity - fee)
+                    .capacity(
+                        checked_sub_u64(inputs_capacity, outputs_capacity, "change capacity")
+                            .and_then(|amount| checked_sub_u64(amount, fee, "change capacity"))?,
+                    )
                     .build();
                 let outputs = if two_parties_all_settled {
                     vec![settlement_output, new_change_output]
@@ -1526,12 +1756,12 @@ fn sign_tx_with_settlement(
         .raw_data()
         .to_vec();
     if with_preimage {
-        settlement_witness.splice(
-            settlement_witness.len() - 97..settlement_witness.len() - 32,
-            signature_bytes,
-        );
+        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
+        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
+        settlement_witness.splice(start..end, signature_bytes);
     } else {
-        settlement_witness.splice(settlement_witness.len() - 65.., signature_bytes);
+        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
+        settlement_witness.splice(start.., signature_bytes);
     }
 
     let witness = tx.witnesses().get(1).expect("get witness at index 1");
@@ -1561,6 +1791,45 @@ struct SettlementWitness {
     settlement_local_pubkey_hash: [u8; 20],
     settlement_local_amount: u128,
     unlocks: Vec<Unlock>,
+}
+
+struct WitnessReader<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> WitnessReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { remaining: bytes }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    fn remaining(&self) -> &'a [u8] {
+        self.remaining
+    }
+
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        if self.remaining.len() < len {
+            return None;
+        }
+        let (value, remaining) = self.remaining.split_at(len);
+        self.remaining = remaining;
+        Some(value)
+    }
+
+    fn take_u8(&mut self) -> Option<u8> {
+        self.take(1).map(|bytes| bytes[0])
+    }
+
+    fn take_array<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.take(N)?.try_into().ok()
+    }
+
+    fn take_u128_le(&mut self) -> Option<u128> {
+        Some(u128::from_le_bytes(self.take_array()?))
+    }
 }
 
 #[derive(Debug)]
@@ -1618,7 +1887,9 @@ impl Htlc {
         let since = Since::from_raw_value(self.htlc_expiry);
         if since.is_absolute() {
             match since.extract_metric() {
-                Some((SinceType::Timestamp, expiry)) => Some(expiry * 1000),
+                Some((SinceType::Timestamp, expiry)) => {
+                    checked_mul_u64(expiry, 1000, "HTLC timestamp expiry").ok()
+                }
                 _ => None,
             }
         } else {
@@ -1692,57 +1963,37 @@ impl Unlock {
         }
         vec
     }
+
+    fn witness_len(&self) -> usize {
+        if self.with_preimage {
+            99
+        } else {
+            67
+        }
+    }
 }
 
 impl SettlementWitness {
     pub fn build_from_witness(witness: &[u8]) -> Option<Self> {
-        let pending_htlc_count = witness[1] as usize;
-        let pending_htlc_witness_len = 85 * pending_htlc_count;
-        // 1 byte for unlock_count, 1 byte for pending_htlc_count, 72 bytes for settlement script
-        if witness.len() < 1 + 1 + pending_htlc_witness_len + 72 {
-            return None;
+        let mut reader = WitnessReader::new(witness);
+        let _unlock_count = reader.take_u8()?;
+        let pending_htlc_count = reader.take_u8()? as usize;
+
+        let mut pending_htlcs = Vec::with_capacity(pending_htlc_count);
+        for _ in 0..pending_htlc_count {
+            pending_htlcs.push(Htlc::build_from_witness(reader.take(85)?));
         }
-        let pending_htlcs = (2..2 + pending_htlc_witness_len)
-            .step_by(85)
-            .map(|index| Htlc::build_from_witness(&witness[index..index + 85]))
-            .collect();
-        let settlement_remote_pubkey_hash = witness
-            [2 + pending_htlc_witness_len..22 + pending_htlc_witness_len]
-            .try_into()
-            .unwrap();
-        let settlement_remote_amount = u128::from_le_bytes(
-            witness[22 + pending_htlc_witness_len..38 + pending_htlc_witness_len]
-                .try_into()
-                .unwrap(),
-        );
-        let settlement_local_pubkey_hash = witness
-            [38 + pending_htlc_witness_len..58 + pending_htlc_witness_len]
-            .try_into()
-            .unwrap();
-        let settlement_local_amount = u128::from_le_bytes(
-            witness[58 + pending_htlc_witness_len..74 + pending_htlc_witness_len]
-                .try_into()
-                .unwrap(),
-        );
+
+        let settlement_remote_pubkey_hash = reader.take_array::<20>()?;
+        let settlement_remote_amount = reader.take_u128_le()?;
+        let settlement_local_pubkey_hash = reader.take_array::<20>()?;
+        let settlement_local_amount = reader.take_u128_le()?;
+
         let mut unlocks = Vec::new();
-        let mut unlock_type_index = 74 + pending_htlc_witness_len;
-        while unlock_type_index < witness.len() {
-            match Unlock::build_from_witness(&witness[unlock_type_index..]) {
-                Some(unlock) => {
-                    if unlock.with_preimage {
-                        unlock_type_index += 99;
-                    } else {
-                        unlock_type_index += 67;
-                    }
-                    unlocks.push(unlock);
-                    if unlock_type_index == witness.len() {
-                        break;
-                    }
-                }
-                None => {
-                    return None;
-                }
-            }
+        while !reader.is_empty() {
+            let unlock = Unlock::build_from_witness(reader.remaining())?;
+            reader.take(unlock.witness_len())?;
+            unlocks.push(unlock);
         }
 
         Some(Self {
@@ -1806,22 +2057,466 @@ fn mul(
     delay: EpochNumberWithFraction,
     numerator: u64,
     denominator: u64,
-) -> EpochNumberWithFraction {
-    let full_numerator = numerator * (delay.number() * delay.length() + delay.index());
-    let new_denominator = denominator * delay.length();
+) -> Option<EpochNumberWithFraction> {
+    let delay_units = checked_mul_u64(delay.number(), delay.length(), "delay epoch units")
+        .and_then(|amount| checked_add_u64(amount, delay.index(), "delay epoch units"))
+        .ok()?;
+    let full_numerator = checked_mul_u64(numerator, delay_units, "delay epoch numerator").ok()?;
+    let new_denominator =
+        checked_mul_u64(denominator, delay.length(), "delay epoch denominator").ok()?;
+    if new_denominator == 0 {
+        return None;
+    }
     let new_integer = full_numerator / new_denominator;
     let new_numerator = full_numerator % new_denominator;
 
     // normalize the fraction (max epoch length is 1800)
     let scale_factor = if new_denominator > 1800 {
-        new_denominator / 1800 + 1
+        checked_add_u64(new_denominator / 1800, 1, "delay epoch scale factor").ok()?
     } else {
         1
     };
 
-    EpochNumberWithFraction::new(
+    Some(EpochNumberWithFraction::new(
         new_integer,
         new_numerator / scale_factor,
         new_denominator / scale_factor,
-    )
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct TestWatchtowerStore {
+        settled_tlcs: Mutex<Vec<(Hash256, [u8; 20])>>,
+    }
+
+    impl TestWatchtowerStore {
+        fn settled_tlcs(&self) -> Vec<(Hash256, [u8; 20])> {
+            self.settled_tlcs.lock().expect("lock poisoned").clone()
+        }
+    }
+
+    impl WatchtowerStore for TestWatchtowerStore {
+        fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
+            vec![]
+        }
+
+        fn insert_watch_channel(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _funding_udt_type_script: Option<Script>,
+            _local_settlement_key: Privkey,
+            _remote_settlement_key: Pubkey,
+            _local_funding_pubkey: Pubkey,
+            _remote_funding_pubkey: Pubkey,
+            _settlement_data: SettlementData,
+        ) {
+        }
+
+        fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) {}
+
+        fn update_revocation(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _revocation_data: RevocationData,
+            _remote_settlement_data: SettlementData,
+        ) {
+        }
+
+        fn update_pending_remote_settlement(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _pending_remote_settlement_data: SettlementData,
+        ) {
+        }
+
+        fn update_local_settlement(
+            &self,
+            _node_id: NodeId,
+            _channel_id: Hash256,
+            _local_settlement_data: SettlementData,
+        ) {
+        }
+
+        fn insert_watch_preimage(
+            &self,
+            _node_id: NodeId,
+            _payment_hash: Hash256,
+            _preimage: Hash256,
+        ) {
+        }
+
+        fn remove_watch_preimage(&self, _node_id: NodeId, _payment_hash: Hash256) {}
+
+        fn get_watch_preimage(
+            &self,
+            _node_id: &NodeId,
+            _payment_hash: &Hash256,
+        ) -> Option<Hash256> {
+            None
+        }
+
+        fn search_preimage(
+            &self,
+            _node_id: &NodeId,
+            _payment_hash_prefix: &[u8],
+        ) -> Option<Hash256> {
+            None
+        }
+
+        fn update_tlc_settled(&self, channel_id: &Hash256, payment_hash: [u8; 20]) {
+            self.settled_tlcs
+                .lock()
+                .expect("lock poisoned")
+                .push((*channel_id, payment_hash));
+        }
+    }
+
+    fn commitment_lock_prefix() -> Script {
+        Script::new_builder()
+            .code_hash(Byte32::from([1u8; 32]))
+            .hash_type(ScriptHashType::Type)
+            .args([2u8; 36].to_vec().pack())
+            .build()
+    }
+
+    fn settlement_lock(prefix: &Script) -> Script {
+        let mut args = prefix.args().raw_data().to_vec();
+        args.extend_from_slice(&[3u8; 20]);
+        args.push(1);
+        prefix.clone().as_builder().args(args.pack()).build()
+    }
+
+    fn settlement_witness(payment_hash: [u8; 20]) -> Vec<u8> {
+        let settlement_witness = SettlementWitness {
+            pending_htlc_count: 1,
+            pending_htlcs: vec![Htlc {
+                htlc_type: 0,
+                payment_amount: 1_000,
+                payment_hash,
+                remote_htlc_pubkey_hash: [4u8; 20],
+                local_htlc_pubkey_hash: [5u8; 20],
+                htlc_expiry: 0,
+            }],
+            settlement_remote_pubkey_hash: [6u8; 20],
+            settlement_remote_amount: 2_000,
+            settlement_local_pubkey_hash: [7u8; 20],
+            settlement_local_amount: 3_000,
+            unlocks: vec![],
+        };
+        let unlock = Unlock {
+            unlock_type: 0,
+            with_preimage: false,
+            signature: [0u8; 65],
+            preimage: None,
+        };
+
+        [
+            XUDT_COMPATIBLE_WITNESS.as_slice(),
+            &[0x01],
+            settlement_witness.to_witness().as_slice(),
+            unlock.to_witness().as_slice(),
+        ]
+        .concat()
+    }
+
+    fn tx_with_input_output_and_witness(
+        input_out_point: OutPoint,
+        output_lock: Script,
+        witness: Option<Vec<u8>>,
+    ) -> Transaction {
+        tx_with_inputs_outputs_and_witnesses(
+            vec![input_out_point],
+            vec![output_lock],
+            witness.into_iter().collect(),
+        )
+    }
+
+    fn tx_with_inputs_outputs_and_witnesses(
+        input_out_points: Vec<OutPoint>,
+        output_locks: Vec<Script>,
+        witnesses: Vec<Vec<u8>>,
+    ) -> Transaction {
+        let mut tx_builder = Transaction::default().as_advanced_builder();
+        for input_out_point in input_out_points {
+            tx_builder = tx_builder.input(
+                CellInput::new_builder()
+                    .previous_output(input_out_point)
+                    .build(),
+            );
+        }
+        for output_lock in output_locks {
+            tx_builder = tx_builder
+                .output(CellOutput::new_builder().lock(output_lock).build())
+                .output_data(Bytes::default());
+        }
+        for witness in witnesses {
+            tx_builder = tx_builder.witness(witness.pack());
+        }
+        tx_builder.build().data()
+    }
+
+    #[test]
+    fn unrelated_same_prefix_tx_does_not_pollute_store() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hash = [42u8; 20];
+        let attacker_tx = tx_with_input_output_and_witness(
+            OutPoint::new([8u8; 32].pack(), 0),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([OutPoint::new([7u8; 32].pack(), 0)]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &attacker_tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert!(processed.is_none());
+        assert!(store.settled_tlcs().is_empty());
+        assert_eq!(watched_outpoints.len(), 1);
+    }
+
+    #[test]
+    fn watched_non_first_input_does_not_parse_unrelated_witness_zero() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let malicious_payment_hash = [42u8; 20];
+        let watched_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let fee_out_point = OutPoint::new([8u8; 32].pack(), 0);
+        let tx = tx_with_inputs_outputs_and_witnesses(
+            vec![fee_out_point, watched_out_point.clone()],
+            vec![settlement_lock(&lock_prefix)],
+            vec![settlement_witness(malicious_payment_hash), vec![]],
+        );
+        let mut watched_outpoints = HashSet::from([watched_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert_eq!(processed, Some(1));
+        assert!(store.settled_tlcs().is_empty());
+    }
+
+    #[test]
+    fn watched_settlement_tx_updates_store_and_tracks_next_outpoint() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hash = [42u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert_eq!(processed, Some(0));
+        assert_eq!(store.settled_tlcs(), vec![(channel_id, payment_hash)]);
+        assert!(watched_outpoints.contains(&OutPoint::new(tx.calc_tx_hash(), 0)));
+    }
+
+    #[test]
+    fn watched_tx_does_not_track_extra_same_prefix_output() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hash = [42u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let tx = tx_with_inputs_outputs_and_witnesses(
+            vec![first_commitment_out_point.clone()],
+            vec![settlement_lock(&lock_prefix), settlement_lock(&lock_prefix)],
+            vec![settlement_witness(payment_hash)],
+        );
+        let extra_same_prefix_out_point = OutPoint::new(tx.calc_tx_hash(), 1);
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &self_node_id,
+        );
+
+        assert_eq!(processed, Some(0));
+        assert!(!watched_outpoints.contains(&extra_same_prefix_out_point));
+    }
+
+    #[test]
+    fn asc_processing_handles_parent_before_child_without_candidate_cache() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let parent_payment_hash = [42u8; 20];
+        let child_payment_hash = [43u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let parent_tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(parent_payment_hash)),
+        );
+        let child_tx = tx_with_input_output_and_witness(
+            OutPoint::new(parent_tx.calc_tx_hash(), 0),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(child_payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        assert_eq!(
+            process_watched_settlement_tx(
+                &parent_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            process_watched_settlement_tx(
+                &child_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0)
+        );
+
+        assert_eq!(
+            store.settled_tlcs(),
+            vec![
+                (channel_id, parent_payment_hash),
+                (channel_id, child_payment_hash)
+            ]
+        );
+    }
+
+    #[test]
+    fn one_pass_processing_misses_child_when_indexer_returns_child_before_parent() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let parent_payment_hash = [42u8; 20];
+        let child_payment_hash = [43u8; 20];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let parent_tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(parent_payment_hash)),
+        );
+        let child_tx = tx_with_input_output_and_witness(
+            OutPoint::new(parent_tx.calc_tx_hash(), 0),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness(child_payment_hash)),
+        );
+        let mut watched_outpoints = HashSet::from([first_commitment_out_point]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+        let self_node_id = NodeId::local();
+
+        // Simulate child-before-parent order: child is skipped on first pass
+        assert_eq!(
+            process_watched_settlement_tx(
+                &child_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            None,
+            "child processed before parent should return None"
+        );
+
+        // Parent is processed, adding its output to watched_outpoints
+        assert_eq!(
+            process_watched_settlement_tx(
+                &parent_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0)
+        );
+
+        // With multi-pass retry, child is retried and now succeeds
+        assert_eq!(
+            process_watched_settlement_tx(
+                &child_tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            ),
+            Some(0),
+            "child should succeed on retry after parent is processed"
+        );
+
+        assert_eq!(
+            store.settled_tlcs(),
+            vec![
+                (channel_id, parent_payment_hash),
+                (channel_id, child_payment_hash)
+            ]
+        );
+    }
 }

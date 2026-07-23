@@ -1,56 +1,76 @@
-use crate::ckb::tests::test_utils::complete_commitment_tx;
+use crate::ckb::tests::test_utils::{
+    complete_commitment_tx, MockChainActorMiddleware, MockChainActorState,
+};
+use crate::ckb::{CkbChainMessage, FundingContext, FundingTx};
 use crate::fiber::channel::{
-    AddTlcResponse, ChannelActorStateStore, ChannelOpenRecordStore, ReloadParams, ReplayOrderHint,
-    UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-    MAX_COMMITMENT_DELAY_EPOCHS, MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse,
+    ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore, ProcessingChannelResult,
+    ReloadParams, ReplayOrderHint, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 
+use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
-    DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerDisconnectReason,
+    DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
+    PeerDisconnectReason, CHECK_CHANNELS_INTERVAL,
 };
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel,
-    TlcErr,
+    AddTlc, CommitmentSigned, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey,
+    ReestablishChannel, TlcErr, TxSignatures,
 };
-use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::fiber::ChannelConnectivityState;
+use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
+use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStore;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
-        channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, ShutdownCommand},
+        channel::{
+            ChannelCommand, ChannelCommandWithId, ChannelEvent, RemoveTlcCommand, ShutdownCommand,
+            StopReason,
+        },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
-        network::{AcceptChannelCommand, OpenChannelCommand},
+        network::{AcceptChannelCommand, NetworkActorEvent, OpenChannelCommand},
         NetworkActorCommand, NetworkActorMessage,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
+use ckb_types::bytes::BufMut;
 use ckb_types::core::EpochNumberWithFraction;
 use ckb_types::{
-    core::{tx_pool::TxStatus, FeeRate},
-    packed::{CellDep, CellInput, Script, Transaction},
+    core::{tx_pool::TxStatus, Capacity, FeeRate},
+    packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use fiber_types::{
-    derive_private_key, derive_tlc_pubkey, AddTlcCommand, AwaitingChannelReadyFlags,
-    AwaitingTxSignaturesFlags, ChannelConstraints, ChannelOpeningStatus, ChannelState,
-    CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner, NegotiatingFundingFlags,
-    OutboundTlcStatus, PaymentHopData, PaymentStatus, Privkey, RemoveTlcFulfill, RemoveTlcReason,
-    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrorCode, TlcStatus, NO_SHARED_SECRET,
+    derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
+    AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
+    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
+    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
+    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
+    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
+    TlcStatus, NO_SHARED_SECRET,
 };
+
 use fiber_types::{CloseFlags, FeatureVector};
-use musig2::secp::Point;
+use molecule::bytes::BytesMut;
+use musig2::secp::{Point, Scalar};
 use musig2::KeyAggContext;
-use ractor::call;
+use ractor::{call, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, error};
 
@@ -64,6 +84,94 @@ fn create_deferred_replay_test_add_tlc(channel_id: Hash256, tlc_id: u64) -> AddT
         hash_algorithm: HashAlgorithm::CkbHash,
         onion_packet: None,
     }
+}
+
+fn create_mock_pending_add_tlc_command(
+    source: &NetworkNode,
+    target: &NetworkNode,
+    amount: u128,
+    hash_algorithm: HashAlgorithm,
+    payment_hash: Hash256,
+    expiry: u64,
+) -> AddTlcCommand {
+    if target.store.get_invoice(&payment_hash).is_none() {
+        let invoice = InvoiceBuilder::new(Currency::Fibd)
+            .amount(Some(amount))
+            .payment_hash(payment_hash)
+            .hash_algorithm(hash_algorithm)
+            .payee_pub_key(target.pubkey.into())
+            .build()
+            .expect("build mock pending invoice");
+        target.insert_invoice(invoice, None);
+    }
+
+    let hops_infos = vec![
+        PaymentHopData {
+            amount,
+            expiry,
+            next_hop: Some(target.pubkey),
+            hash_algorithm,
+            ..Default::default()
+        },
+        PaymentHopData {
+            amount,
+            expiry,
+            hash_algorithm,
+            ..Default::default()
+        },
+    ];
+    let packet = PeeledPaymentOnionPacket::create(
+        source.get_private_key().clone(),
+        hops_infos,
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create mock pending onion packet");
+
+    AddTlcCommand {
+        amount,
+        payment_hash,
+        attempt_id: None,
+        expiry,
+        hash_algorithm,
+        onion_packet: packet.next,
+        shared_secret: packet.shared_secret,
+        is_trampoline_hop: false,
+        previous_tlc: None,
+    }
+}
+
+fn notify_check_active_channel(node: &NetworkNode, channel_id: Hash256) {
+    node.network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::NotifyEvent(ChannelEvent::CheckActiveChannel),
+            }),
+        ))
+        .expect("channel actor alive");
+}
+
+fn notify_maintain_channel_tlcs(node: &NetworkNode, channel_id: Hash256) {
+    node.network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("channel actor alive");
+}
+
+fn stop_channel_actor(node: &NetworkNode, channel_id: Hash256) {
+    node.network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::NotifyEvent(ChannelEvent::Stop(StopReason::Closed)),
+            }),
+        ))
+        .expect("channel actor alive");
 }
 
 #[tokio::test]
@@ -129,9 +237,30 @@ fn test_channel_state_bincode_compatibility() {
         ChannelState::Closed(CloseFlags::empty()),
         &[7, 0, 0, 0, 0, 0, 0, 0],
     );
+    assert_channel_state_encoding(ChannelState::Stale, &[8, 0, 0, 0]);
     assert_channel_state_encoding(
         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING),
         &[0, 0, 0, 0, 4, 0, 0, 0],
+    );
+}
+
+#[test]
+fn test_funding_timeout_check_delay_survives_hydrated_time_truncation() {
+    // Reproduces #1358: after persisting external_funding.started_at as millis,
+    // hydration can leave the timeout check a few hundred microseconds short of
+    // the threshold. Scheduling exactly that remainder may make the check fire
+    // as stale with no follow-up timeout.
+    assert_eq!(
+        funding_timeout_check_delay(Duration::from_micros(999_500), 1),
+        Some(Duration::from_micros(1_500))
+    );
+}
+
+#[test]
+fn test_funding_timeout_check_delay_is_immediate_after_timeout() {
+    assert_eq!(
+        funding_timeout_check_delay(Duration::from_micros(1_000_001), 1),
+        None
     );
 }
 
@@ -141,8 +270,165 @@ fn test_derive_private_and_public_tlc_keys() {
     let privkey = Privkey::from(&[1; 32]);
     let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
     let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
-    let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
+    let derived_pubkey =
+        try_derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point).expect("honest keys");
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
+}
+
+/// Generates a malicious (tlc_basepoint, commitment_point) pair where the TLC
+/// key derivation would produce the point at infinity.
+fn malicious_tlc_basepoint_and_commitment_point() -> (Pubkey, Pubkey) {
+    for i in 0..1024u64 {
+        let seed = format!("byzantine-ptlc-poc-{i}");
+        let signer = InMemorySigner::generate_from_seed(seed.as_bytes());
+        let commitment_point = signer.get_commitment_point(1);
+        let tweak = fiber_types::get_tweak_by_commitment_point(&commitment_point);
+
+        if let Ok(scalar) = Scalar::from_slice(&tweak) {
+            let tlc_basepoint: Pubkey = (-scalar).base_point_mul().into();
+            return (tlc_basepoint, commitment_point);
+        }
+    }
+
+    panic!("failed to find a commitment point with a valid tweak scalar");
+}
+
+#[test]
+fn test_is_tlc_key_derivation_safe_rejects_malicious_keys() {
+    let (tlc_basepoint, commitment_point) = malicious_tlc_basepoint_and_commitment_point();
+
+    // Verify the malicious pair is NOT considered safe
+    assert!(
+        !is_tlc_key_derivation_safe(&tlc_basepoint, &commitment_point),
+        "malicious TLC basepoint and commitment point should be rejected"
+    );
+}
+
+#[test]
+fn test_is_tlc_key_derivation_safe_accepts_honest_keys() {
+    let signer = InMemorySigner::generate_from_seed(b"honest-seed");
+    let tlc_basepoint = signer.tlc_base_key.pubkey();
+    let commitment_point = signer.get_commitment_point(1);
+
+    assert!(
+        is_tlc_key_derivation_safe(&tlc_basepoint, &commitment_point),
+        "honest TLC basepoint and commitment point should be accepted"
+    );
+}
+
+#[test]
+fn test_try_derive_tlc_pubkey_rejects_malicious_keys() {
+    use fiber_types::try_derive_tlc_pubkey;
+    let (tlc_basepoint, commitment_point) = malicious_tlc_basepoint_and_commitment_point();
+
+    assert!(
+        try_derive_tlc_pubkey(&tlc_basepoint, &commitment_point).is_err(),
+        "malicious TLC basepoint and commitment point should be rejected"
+    );
+}
+
+#[test]
+fn test_revoke_and_ack_bypass_safe_initial_keys_with_malicious_later_key() {
+    use fiber_types::try_derive_tlc_pubkey;
+    let (malicious_tlc_basepoint, bad_commitment_point) =
+        malicious_tlc_basepoint_and_commitment_point();
+
+    let signer = InMemorySigner::generate_from_seed(b"safe-commitment-for-open-channel");
+    let safe_first_commitment_point = signer.get_commitment_point(1);
+    let safe_second_commitment_point = signer.get_commitment_point(2);
+
+    assert!(
+        is_tlc_key_derivation_safe(&malicious_tlc_basepoint, &safe_first_commitment_point),
+        "first_per_commitment_point should pass validation at OpenChannel"
+    );
+    assert!(
+        is_tlc_key_derivation_safe(&malicious_tlc_basepoint, &safe_second_commitment_point),
+        "second_per_commitment_point should pass validation at OpenChannel"
+    );
+
+    assert!(
+        !is_tlc_key_derivation_safe(&malicious_tlc_basepoint, &bad_commitment_point),
+        "malicious next_per_commitment_point in RevokeAndAck should be rejected by the fix"
+    );
+
+    assert!(
+        try_derive_tlc_pubkey(&malicious_tlc_basepoint, &bad_commitment_point).is_err(),
+        "without validation, the malicious next_per_commitment_point should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_revoke_and_ack_rejects_malicious_next_per_commitment_point() {
+    init_tracing();
+    let (mut node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let (malicious_tlc_basepoint, bad_commitment_point) =
+        malicious_tlc_basepoint_and_commitment_point();
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    let initial_commitment_points_len = state.remote_commitment_points.len();
+    state
+        .remote_channel_public_keys
+        .as_mut()
+        .unwrap()
+        .tlc_base_key = malicious_tlc_basepoint;
+    state.tlc_state.set_waiting_ack(true);
+    node_a.update_channel_actor_state(state, None).await;
+
+    while tokio::time::timeout(Duration::from_millis(25), node_a.event_emitter.recv())
+        .await
+        .is_ok()
+    {}
+
+    let dummy_partial_sig =
+        musig2::PartialSignature::from_slice(&[1u8; 32]).expect("valid partial signature bytes");
+    let dummy_nonce = musig2::SecNonceBuilder::new([1u8; 32])
+        .build()
+        .public_nonce();
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::revoke_and_ack(RevokeAndAck {
+                    channel_id,
+                    revocation_partial_signature: dummy_partial_sig,
+                    next_per_commitment_point: bad_commitment_point,
+                    next_revocation_nonce: dummy_nonce,
+                }),
+            )),
+        ))
+        .expect("send malicious RevokeAndAck");
+
+    let mut saw_rejection = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(Some(event)) = tokio::time::timeout(remaining, node_a.event_emitter.recv()).await
+        else {
+            break;
+        };
+        if let NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg)) = &event {
+            if msg.contains("next_per_commitment_point in RevokeAndAck derive to invalid key") {
+                saw_rejection = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        saw_rejection,
+        "node_a should reject the malicious next_per_commitment_point in RevokeAndAck"
+    );
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state.remote_commitment_points.len(),
+        initial_commitment_points_len,
+        "remote_commitment_points should not include the malicious point"
+    );
 }
 
 #[tokio::test]
@@ -245,6 +531,230 @@ async fn test_open_and_accept_channel() {
     let _accept_channel_result = call!(node_b.network_actor, message)
         .expect("node_b alive")
         .expect("accept channel success");
+}
+
+#[derive(Clone, Debug)]
+enum InitialFundingUnderfunding {
+    CkbCapacity,
+    UdtAmount,
+    Inputs,
+}
+
+#[derive(Clone, Debug)]
+struct UnderfundInitialFundingTx {
+    kind: InitialFundingUnderfunding,
+    funded: Arc<Mutex<bool>>,
+    verify_with_real_funding_tx: bool,
+}
+
+#[async_trait::async_trait]
+impl MockChainActorMiddleware for UnderfundInitialFundingTx {
+    async fn handle(
+        &mut self,
+        _inner_self: ActorRef<CkbChainMessage>,
+        message: CkbChainMessage,
+        _state: &mut MockChainActorState,
+    ) -> Result<Option<CkbChainMessage>, ActorProcessingErr> {
+        let CkbChainMessage::Fund(mut tx, request, reply) = message else {
+            if !self.verify_with_real_funding_tx {
+                return Ok(Some(message));
+            }
+            let CkbChainMessage::VerifyFundingTx {
+                local_tx,
+                remote_tx,
+                funding_cell_lock_script,
+                funding_udt_type_script,
+                funding_source_lock_script,
+                reply,
+            } = message
+            else {
+                return Ok(Some(message));
+            };
+            let context = FundingContext {
+                rpc_url: "http://127.0.0.1:8114".to_string(),
+                funding_source_lock_script: funding_source_lock_script
+                    .unwrap_or_else(Script::default),
+                funding_source_lock_script_cell_deps: Vec::new(),
+                funding_cell_lock_script,
+                funding_udt_type_script,
+            };
+            let mut funding_tx: FundingTx = local_tx.into();
+            let result = funding_tx
+                .update_for_peer(remote_tx.into_view(), context)
+                .await;
+            let _ = reply.send(result);
+            return Ok(None);
+        };
+
+        let mut funded = self.funded.lock().expect("funding flag");
+        if *funded {
+            return Ok(Some(CkbChainMessage::Fund(tx, request, reply)));
+        }
+        *funded = true;
+
+        let (capacity, output_data) = match self.kind {
+            InitialFundingUnderfunding::CkbCapacity => {
+                let required = request
+                    .local_amount
+                    .checked_add(request.local_reserved_ckb_amount as u128)
+                    .expect("valid requested CKB capacity");
+                (required - 1, Default::default())
+            }
+            InitialFundingUnderfunding::UdtAmount => {
+                let mut data = BytesMut::with_capacity(16);
+                data.put(&(request.local_amount - 1).to_le_bytes()[..]);
+                (
+                    request.local_reserved_ckb_amount as u128,
+                    data.freeze().pack(),
+                )
+            }
+            InitialFundingUnderfunding::Inputs => {
+                let required = request
+                    .local_amount
+                    .checked_add(request.local_reserved_ckb_amount as u128)
+                    .expect("valid requested CKB capacity");
+                (required, Default::default())
+            }
+        };
+
+        let mut output_builder = ckb_types::packed::CellOutput::new_builder()
+            .capacity(Capacity::shannons(capacity as u64).pack())
+            .lock(request.script.clone());
+        if let Some(udt_type_script) = request.udt_type_script.clone() {
+            output_builder = output_builder.type_(Some(udt_type_script).pack());
+        }
+
+        let tx_builder = tx
+            .take()
+            .map(|tx| tx.as_advanced_builder())
+            .unwrap_or_default();
+        tx.update_for_self(
+            tx_builder
+                .set_inputs(vec![])
+                .set_outputs(vec![output_builder.build()])
+                .set_outputs_data(vec![output_data])
+                .build(),
+        );
+
+        let _ = reply.send(Ok(tx));
+        Ok(None)
+    }
+
+    fn clone_box(&self) -> Box<dyn MockChainActorMiddleware> {
+        Box::new(self.clone())
+    }
+}
+
+async fn open_channel_with_underfunded_initial_tx(
+    underfunding: InitialFundingUnderfunding,
+    funding_udt_type_script: Option<Script>,
+    verify_with_real_funding_tx: bool,
+) {
+    let funded = Arc::new(Mutex::new(false));
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", i));
+        if i == 0 {
+            builder = builder.mock_chain_actor_middleware(Box::new(UnderfundInitialFundingTx {
+                kind: underfunding.clone(),
+                funded: funded.clone(),
+                verify_with_real_funding_tx,
+            }));
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, mut node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let params = ChannelParameters {
+        node_a_funding_amount: 100_000_000_000,
+        node_b_funding_amount: MIN_RESERVED_CKB,
+        public: false,
+        funding_udt_type_script,
+        ..Default::default()
+    };
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: node_b.pubkey,
+                public: params.public,
+                one_way: params.one_way,
+                shutdown_script: None,
+                funding_amount: params.node_a_funding_amount,
+                funding_udt_type_script: params.funding_udt_type_script.clone(),
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, _) => pubkey == &node_a.pubkey,
+            _ => false,
+        })
+        .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: params.node_b_funding_amount,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+
+    let new_channel_id = accept_channel_result.new_channel_id;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if id == &new_channel_id))
+        .await;
+    assert!(*funded.lock().expect("funding flag"));
+    assert!(node_b
+        .get_channel_actor_state_unchecked(new_channel_id)
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_acceptor_rejects_initial_funding_tx_with_insufficient_ckb_capacity() {
+    open_channel_with_underfunded_initial_tx(InitialFundingUnderfunding::CkbCapacity, None, false)
+        .await;
+}
+
+#[tokio::test]
+async fn test_acceptor_rejects_initial_funding_tx_with_insufficient_udt_balance() {
+    open_channel_with_underfunded_initial_tx(
+        InitialFundingUnderfunding::UdtAmount,
+        Some(Script::default()),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_acceptor_rejects_initial_funding_tx_with_no_inputs() {
+    open_channel_with_underfunded_initial_tx(InitialFundingUnderfunding::Inputs, None, true).await;
 }
 
 #[tokio::test]
@@ -512,7 +1022,7 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     let node1_funding_amount = 100000000000;
     let node2_funding_amount = 11800000000;
 
-    let (mut node1, mut node2, _new_channel_id, _) =
+    let (mut node1, mut node2, new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
             node1_funding_amount,
             node2_funding_amount,
@@ -556,43 +1066,70 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
         })
         .await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    node1
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node2.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    node2
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node1.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    wait_until_async_timeout(|| async {
+        node1.get_network_graph_channels().await.is_empty()
+            && node2.get_network_graph_channels().await.is_empty()
+    })
+    .await;
+
     let node1_channels = node1.get_network_graph_channels().await;
     assert_eq!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
     assert_eq!(node2_channels, vec![]);
 
-    // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
-    // This is due to tentacle connection is async. We may actually send
-    // the `ChannelCreated` event before the `PeerConnected` event.
     node1.connect_to_nonblocking(&node2).await;
 
     node1
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
                 assert_eq!(pubkey, &node2.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
         })
         .await;
-
     node2
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
                 assert_eq!(pubkey, &node1.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
         })
         .await;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    wait_until_async_timeout(|| async {
+        !node1.get_network_graph_channels().await.is_empty()
+            && !node2.get_network_graph_channels().await.is_empty()
+    })
+    .await;
+
     let node1_channels = node1.get_network_graph_channels().await;
-    assert_ne!(node1_channels, vec![]);
     let node2_channels = node2.get_network_graph_channels().await;
+    assert_ne!(node1_channels, vec![]);
     assert_ne!(node2_channels, vec![]);
 }
 
@@ -1900,23 +2437,21 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let preimage = [1; 32];
     let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2021,23 +2556,21 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let preimage = [1; 32];
     let digest = correct_algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: correct_algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        correct_algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2076,22 +2609,20 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let preimage = [2; 32];
     // create a new payment hash
     let digest = correct_algorithm.hash(preimage);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: wrong_algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        wrong_algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2152,76 +2683,83 @@ async fn do_test_channel_remote_commitment_error() {
     )
     .await;
 
-    let mut all_sent = vec![];
-    let mut batch_remove_count = 0;
-    while batch_remove_count <= 3 {
-        let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+    async fn wait_for_tlc_count(
+        node_a: &NetworkNode,
+        node_b: &NetworkNode,
+        channel_id: Hash256,
+        expected_tlcs: usize,
+    ) {
+        wait_until(|| {
+            let node_a_state = node_a.get_channel_actor_state(channel_id);
+            let node_b_state = node_b.get_channel_actor_state(channel_id);
 
-        // create a new payment hash
-        let hash_algorithm = HashAlgorithm::Sha256;
-        let digest = hash_algorithm.hash(preimage);
-        if let Ok(res) = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                ChannelCommandWithId {
-                    channel_id: new_channel_id,
-                    command: ChannelCommand::AddTlc(
-                        AddTlcCommand {
-                            amount: 1000,
-                            hash_algorithm,
-                            payment_hash: digest.into(),
-                            attempt_id: None,
-                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                            onion_packet: None,
-                            shared_secret: NO_SHARED_SECRET,
-                            is_trampoline_hop: false,
-                            previous_tlc: None,
-                        },
-                        rpc_reply,
-                    ),
-                },
-            ))
+            !node_a_state.tlc_state.waiting_ack
+                && !node_b_state.tlc_state.waiting_ack
+                && node_a_state.tlc_state.offered_tlcs.tlcs.len() == expected_tlcs
+                && node_b_state.tlc_state.received_tlcs.tlcs.len() == expected_tlcs
         })
-        .expect("node_b alive")
-        {
-            all_sent.push((preimage, res.tlc_id));
+        .await;
+    }
+
+    let mut all_sent = vec![];
+    for _ in 0..4 {
+        while all_sent.len() < tlc_number_in_flight_limit {
+            let preimage: [u8; 32] = gen_rand_sha256_hash().as_ref().try_into().unwrap();
+            let hash_algorithm = HashAlgorithm::Sha256;
+            let payment_hash = hash_algorithm.hash(preimage);
+            let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+            let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                    ChannelCommandWithId {
+                        channel_id: new_channel_id,
+                        command: ChannelCommand::AddTlc(
+                            create_mock_pending_add_tlc_command(
+                                &node_a,
+                                &node_b,
+                                1000,
+                                hash_algorithm,
+                                payment_hash.into(),
+                                expiry,
+                            ),
+                            rpc_reply,
+                        ),
+                    },
+                ))
+            })
+            .expect("node_a alive")
+            .expect("successfully added tlc");
+            all_sent.push((preimage, add_tlc_result.tlc_id));
+            wait_for_tlc_count(&node_a, &node_b, new_channel_id, all_sent.len()).await;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        if all_sent.len() >= tlc_number_in_flight_limit {
-            while all_sent.len() > tlc_number_in_flight_limit - 2 {
-                if let Some((preimage, tlc_id)) = all_sent.first().cloned() {
-                    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                            ChannelCommandWithId {
-                                channel_id: new_channel_id,
-                                command: ChannelCommand::RemoveTlc(
-                                    RemoveTlcCommand {
-                                        id: tlc_id,
-                                        reason: RemoveTlcReason::RemoveTlcFulfill(
-                                            RemoveTlcFulfill {
-                                                payment_preimage: Hash256::from(preimage),
-                                            },
-                                        ),
-                                    },
-                                    rpc_reply,
-                                ),
+        while all_sent.len() > tlc_number_in_flight_limit - 2 {
+            let (preimage, tlc_id) = all_sent.remove(0);
+            let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                    ChannelCommandWithId {
+                        channel_id: new_channel_id,
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                    payment_preimage: Hash256::from(preimage),
+                                }),
                             },
-                        ))
-                    })
-                    .expect("node_b alive");
-                    dbg!(&remove_tlc_result);
+                            rpc_reply,
+                        ),
+                    },
+                ))
+            })
+            .expect("node_b alive");
 
-                    if remove_tlc_result.is_ok()
-                        || remove_tlc_result
-                            .unwrap_err()
-                            .to_string()
-                            .contains("Trying to remove non-existing tlc")
-                    {
-                        all_sent.remove(0);
-                    }
-                }
-            }
-            batch_remove_count += 1;
+            assert!(
+                remove_tlc_result.is_ok()
+                    || remove_tlc_result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Trying to remove non-existing tlc")
+            );
+            wait_for_tlc_count(&node_a, &node_b, new_channel_id, all_sent.len()).await;
         }
     }
 }
@@ -2372,23 +2910,21 @@ async fn test_network_add_two_tlcs_remove_one() {
     let preimage_a = [1; 32];
     let algorithm = HashAlgorithm::Sha256;
     let digest = algorithm.hash(preimage_a);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result_a = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2398,25 +2934,23 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("successfully added tlc");
 
     // if we don't wait for a while, the next add_tlc will fail with temporary failure
-    let preimage_b = [2; 32];
+    let failed_preimage_b = [2; 32];
     let algorithm = HashAlgorithm::Sha256;
-    let digest = algorithm.hash(preimage_b);
+    let digest = algorithm.hash(failed_preimage_b);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 2000,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        2000,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -2425,37 +2959,43 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive");
     assert!(add_tlc_result.is_err());
 
-    // now wait for a while, then add a tlc again, it will success
-    loop {
+    // now wait for the failed add_tlc to settle, then add a tlc again, it will success
+    wait_until(|| {
         let node_a_state = node_a.get_channel_actor_state(channel_id);
-        if !node_a_state.is_waiting_tlc_ack() {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
+        let node_b_state = node_b.get_channel_actor_state(channel_id);
+        node_a_state.is_ready()
+            && node_b_state.is_ready()
+            && !node_a_state.reestablishing
+            && !node_b_state.reestablishing
+            && !node_a_state.is_waiting_tlc_ack()
+            && !node_b_state.is_waiting_tlc_ack()
+            && !node_a_state.has_pending_operations()
+            && !node_b_state.has_pending_operations()
+    })
+    .await;
+    let preimage_b = [3; 32];
+    let digest = algorithm.hash(preimage_b);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result_b = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 2000,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        2000,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
         ))
     })
     .expect("node_b alive");
-    assert!(add_tlc_result_b.is_ok());
+    assert!(add_tlc_result_b.is_ok(), "{:?}", add_tlc_result_b);
 
     eprintln!("add_tlc_result: {:?}", add_tlc_result_b);
 
@@ -2770,6 +3310,603 @@ async fn test_remove_expired_tlc_in_background() {
 }
 
 #[tokio::test]
+async fn test_check_active_channel_event_does_not_remove_expired_received_tlc() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, false).await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut node_b_channel_state = node_b.get_channel_actor_state(channel_id);
+    node_b_channel_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_result.tlc_id))
+        .expect("received tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_b
+        .update_channel_actor_state(
+            node_b_channel_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    notify_check_active_channel(&node_b, channel_id);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let node_a_channel_state = node_a.get_channel_actor_state(channel_id);
+    let tlc = node_a_channel_state
+        .tlc_state
+        .get(&TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc exists");
+    assert_eq!(
+        tlc.status,
+        TlcStatus::Outbound(OutboundTlcStatus::Committed)
+    );
+}
+
+#[tokio::test]
+async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
+    init_tracing();
+
+    let (node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, false).await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    stop_channel_actor(&node_b, channel_id);
+    node_b.expect_debug_event("ChannelActorStopped").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Keep the expired TLC only in persisted state. Reloading it into the live
+    // channel actor lets periodic TLC maintenance race this CheckChannels test.
+    let mut node_b_channel_state = node_b.get_channel_actor_state(channel_id);
+    node_b_channel_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_result.tlc_id))
+        .expect("received tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_b
+        .store
+        .insert_channel_actor_state(node_b_channel_state);
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .expect("node_b alive");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let node_a_channel_state = node_a.get_channel_actor_state(channel_id);
+    let tlc = node_a_channel_state
+        .tlc_state
+        .get(&TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc exists");
+    assert_eq!(
+        tlc.status,
+        TlcStatus::Outbound(OutboundTlcStatus::Committed)
+    );
+}
+
+#[tokio::test]
+async fn test_restart_restores_ready_channel_actor_offline() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    node_b.stop().await;
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state.reestablishing,
+        "restarted ready channel should stay in reestablishing until peer reconnects"
+    );
+    assert_eq!(
+        state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "restarted ready channel should be restored as offline"
+    );
+
+    let update_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(false),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        update_result.is_ok(),
+        "restored offline channel actor should accept control commands"
+    );
+}
+
+#[tokio::test]
+async fn test_restart_restores_shutting_down_channel_actor_for_reestablish() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    state.update_state(ChannelState::ShuttingDown(
+        ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+    ));
+    node_a
+        .update_channel_actor_state(
+            state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_b.stop().await;
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state.reestablishing,
+        "restarted shutting-down channel should reestablish with the peer"
+    );
+    assert_eq!(
+        state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "restarted shutting-down channel should be restored as offline"
+    );
+
+    let update_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(false),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        update_result.is_ok(),
+        "restored shutting-down channel actor should accept control commands"
+    );
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_closed_channel_restores_after_restart_mid_settlement() {
+    init_tracing();
+
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, mut node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1000))
+        .payment_preimage(hold_preimage)
+        .payee_pub_key(node_2.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_2.private_key.0))
+        .expect("build hold invoice");
+    node_2.insert_invoice(hold_invoice.clone(), None);
+
+    let payment_hash = *hold_invoice.payment_hash();
+    let payment = node_0
+        .send_payment(SendPaymentCommand {
+            amount: Some(1000),
+            max_fee_rate: Some(1000),
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to hold invoice");
+    assert_eq!(payment.payment_hash, payment_hash);
+    node_0.wait_until_inflight(payment_hash).await;
+
+    wait_until(|| {
+        node_1
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .iter()
+            .any(|tlc| tlc.payment_hash == payment_hash)
+    })
+    .await;
+
+    node_1
+        .send_shutdown(channels[1], true)
+        .await
+        .expect("force shutdown downstream channel");
+
+    wait_until(|| {
+        matches!(
+            node_1.get_channel_actor_state(channels[1]).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let mut closed_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    let downstream_tlc = closed_downstream_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("downstream tlc exists");
+    closed_downstream_state
+        .tlc_state
+        .get_mut(&TLCId::Offered(downstream_tlc.id()))
+        .expect("closed downstream tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_1
+        .update_channel_actor_state(
+            closed_downstream_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+        .try_into()
+        .expect("20-byte payment hash prefix");
+    node_1
+        .store
+        .update_tlc_settled(&channels[1], payment_hash_prefix);
+
+    node_1.restart().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let restored_downstream_state = node_1.get_channel_actor_state(channels[1]);
+    assert!(
+        !restored_downstream_state.reestablishing,
+        "restarted on-chain-settlement channel should not reenter reestablishing"
+    );
+    assert_eq!(
+        restored_downstream_state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "restarted on-chain-settlement channel should stay offline"
+    );
+
+    let restored_control_result = call!(node_1.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channels[1],
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_1 alive");
+    assert!(
+        restored_control_result.is_ok(),
+        "restarted on-chain-settlement channel actor should be restored"
+    );
+
+    node_0.wait_until_failed(payment_hash).await;
+    assert_eq!(
+        node_0.get_payment_status(payment_hash).await,
+        PaymentStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn test_restarted_offline_channel_registers_expired_received_tlc_remove() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_b,
+                        &node_a,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut node_a_channel_state = node_a.get_channel_actor_state(channel_id);
+    node_a_channel_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_result.tlc_id))
+        .expect("received tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    let shared_secret = node_a_channel_state
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_result.tlc_id))
+        .expect("received tlc exists")
+        .shared_secret;
+    node_a
+        .update_channel_actor_state(
+            node_a_channel_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_b.stop().await;
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let state_after_restart = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state_after_restart
+            .retryable_tlc_operations
+            .contains(&RetryableTlcOperation::RemoveTlc(
+                TLCId::Received(add_tlc_result.tlc_id),
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                    &shared_secret,
+                )),
+            )),
+        "offline restored channel should register retryable remove for expired received tlc"
+    );
+}
+
+#[tokio::test]
+async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    node_b.stop().await;
+    node_a.stop().await;
+
+    let mut node_a_channel_state = node_a.get_channel_actor_state(channel_id);
+    node_a_channel_state
+        .tlc_state
+        .get_mut(&TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_a
+        .store
+        .insert_channel_actor_state(node_a_channel_state);
+
+    node_a.start().await;
+
+    let mut state_after_restart = node_a.get_channel_actor_state(channel_id);
+    for _ in 0..20 {
+        if !matches!(state_after_restart.state, ChannelState::ChannelReady) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        state_after_restart = node_a.get_channel_actor_state(channel_id);
+    }
+
+    match state_after_restart.state {
+        ChannelState::ShuttingDown(_) => {}
+        ChannelState::Closed(flags) => {
+            assert!(
+                flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL),
+                "expired offered tlc should force close locally, got flags: {:?}",
+                flags
+            );
+        }
+        state => panic!(
+            "offline restored channel should force close expired offered tlc, got {:?}",
+            state
+        ),
+    }
+}
+
+#[tokio::test]
+async fn test_offered_tlc_survives_force_close_transition() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    let preimage: [u8; 32] = [211u8; 32];
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        3_000_000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added offered tlc");
+    let tlc_id = TLCId::Offered(add_tlc_result.tlc_id);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let state_before = node_a.get_channel_actor_state(channel_id);
+    let tlc_before = state_before
+        .tlc_state
+        .get(&tlc_id)
+        .expect("offered tlc exists");
+    assert_eq!(tlc_before.payment_hash, payment_hash);
+    assert_eq!(tlc_before.outbound_status(), OutboundTlcStatus::Committed);
+
+    node_b.stop().await;
+    node_a.stop().await;
+    let mut saved_state = node_a.get_channel_actor_state(channel_id);
+    saved_state
+        .tlc_state
+        .get_mut(&tlc_id)
+        .expect("offered tlc exists")
+        .expiry = now_timestamp_as_millis_u64().saturating_sub(1);
+    node_a.store.insert_channel_actor_state(saved_state);
+    node_a.start().await;
+
+    let mut state_after = node_a.get_channel_actor_state(channel_id);
+    for _ in 0..20 {
+        if !matches!(state_after.state, ChannelState::ChannelReady) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        state_after = node_a.get_channel_actor_state(channel_id);
+    }
+
+    match &state_after.state {
+        ChannelState::ShuttingDown(_) => {}
+        ChannelState::Closed(flags) => {
+            assert!(flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL))
+        }
+        _ => panic!(
+            "Channel did NOT force-close. State: {:?}",
+            state_after.state
+        ),
+    }
+
+    let tlc_after = state_after
+        .tlc_state
+        .get(&tlc_id)
+        .expect("offered TLC must persist after force-close");
+    assert_eq!(
+        tlc_after.payment_hash, payment_hash,
+        "TLC payment_hash preserved after force-close transition"
+    );
+}
+
+#[tokio::test]
 async fn do_test_add_tlc_duplicated() {
     init_tracing();
     let node_a_funding_amount = 100000000000;
@@ -2892,6 +4029,89 @@ async fn do_test_add_tlc_waiting_ack() {
 }
 
 #[tokio::test]
+async fn test_open_channel_constraints_limit_incoming_tlcs() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let node_a_max_accepted_tlc_number = 2;
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_number_in_flight: Some(node_a_max_accepted_tlc_number),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let tlc_amount = 1000000000;
+
+    // A's advertised max is A's incoming/accepted TLC limit, so it should not
+    // limit TLCs A offers to B.
+    for i in 1..=node_a_max_accepted_tlc_number + 1 {
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+    }
+
+    // B offering TLCs to A consumes A's advertised incoming/accepted TLC limit.
+    for i in 1..=node_a_max_accepted_tlc_number + 1 {
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+
+        if i == node_a_max_accepted_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result.unwrap_err();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn do_test_add_tlc_with_number_limit() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
@@ -2914,20 +4134,45 @@ async fn do_test_add_tlc_with_number_limit() {
 
     let tlc_amount = 1000000000;
 
-    // A -> B will have tlc number limit 2
+    // A's max applies to incoming TLCs, so it should not limit A -> B.
     for i in 1..=node_a_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+    }
+
+    // B -> A consumes A's advertised incoming TLC limit.
+    for i in 1..=node_a_max_tlc_number + 1 {
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -2943,35 +4188,8 @@ async fn do_test_add_tlc_with_number_limit() {
         } else {
             dbg!(&add_tlc_result);
             assert!(add_tlc_result.is_ok());
-            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
         }
-    }
-
-    // B -> A can still add tlc
-    for i in 1..=node_a_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
-        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                ChannelCommandWithId {
-                    channel_id: new_channel_id,
-                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
-                },
-            ))
-        })
-        .expect("source node alive");
-        dbg!(&add_tlc_result);
-        assert!(add_tlc_result.is_ok());
-        wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
     }
 }
 
@@ -2997,20 +4215,45 @@ async fn do_test_add_tlc_number_limit_reverse() {
     .await;
 
     let tlc_amount = 1000000000;
-    // B -> A will have tlc number limit 2
+    // B's max applies to incoming TLCs, so it should not limit B -> A.
     for i in 1..=node_b_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
+    }
+
+    // A -> B consumes B's advertised incoming TLC limit.
+    for i in 1..=node_b_max_tlc_number + 1 {
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -3026,35 +4269,8 @@ async fn do_test_add_tlc_number_limit_reverse() {
         } else {
             dbg!(&add_tlc_result);
             assert!(add_tlc_result.is_ok());
-            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
+            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
         }
-    }
-
-    // A -> B can still add tlc
-    for i in 1..=node_b_max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
-        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                ChannelCommandWithId {
-                    channel_id: new_channel_id,
-                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
-                },
-            ))
-        })
-        .expect("source node alive");
-        dbg!(&add_tlc_result);
-        assert!(add_tlc_result.is_ok());
-        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
     }
 }
 
@@ -3081,20 +4297,44 @@ async fn do_test_add_tlc_value_limit() {
 
     let tlc_amount = 1000000000;
 
-    // A -> B have tlc value limit 3_000_000_000
+    // A's max applies to incoming TLCs, so it should not limit A -> B.
     for i in 1..=max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_b alive");
+        assert!(add_tlc_result.is_ok());
+        wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+    }
+
+    // B -> A consumes A's advertised incoming TLC value limit.
+    for i in 1..=max_tlc_number + 1 {
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -3110,23 +4350,46 @@ async fn do_test_add_tlc_value_limit() {
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
-            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+            wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
         }
     }
+}
 
-    // B -> A can still add tlc
+#[tokio::test]
+async fn do_test_add_tlc_value_limit_reverse() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let max_tlc_number = 3;
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            b_max_tlc_value_in_flight: Some(3000000000),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let tlc_amount = 1000000000;
+
+    // B's max applies to incoming TLCs, so it should not limit B -> A.
     for i in 1..=max_tlc_number + 1 {
-        let add_tlc_command = AddTlcCommand {
-            amount: tlc_amount,
-            hash_algorithm: HashAlgorithm::CkbHash,
-            payment_hash: gen_rand_sha256_hash(),
-            attempt_id: None,
-            expiry: now_timestamp_as_millis_u64() + 100000000,
-            onion_packet: None,
-            shared_secret: NO_SHARED_SECRET,
-            is_trampoline_hop: false,
-            previous_tlc: None,
-        };
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_b,
+            &node_a,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -3139,6 +4402,154 @@ async fn do_test_add_tlc_value_limit() {
         assert!(add_tlc_result.is_ok());
         wait_for_tlc_sync(&node_b, &node_a, new_channel_id, i as usize).await;
     }
+
+    // A -> B consumes B's advertised incoming TLC value limit.
+    for i in 1..=max_tlc_number + 1 {
+        let payment_hash = gen_rand_sha256_hash();
+        let expiry = now_timestamp_as_millis_u64() + 100000000;
+        let add_tlc_command = create_mock_pending_add_tlc_command(
+            &node_a,
+            &node_b,
+            tlc_amount,
+            HashAlgorithm::CkbHash,
+            payment_hash,
+            expiry,
+        );
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_a alive");
+        if i == max_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result.unwrap_err();
+
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            assert!(add_tlc_result.is_ok());
+            wait_for_tlc_sync(&node_a, &node_b, new_channel_id, i as usize).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_peer_add_tlc_checks_local_incoming_constraints() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (new_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            a_max_tlc_value_in_flight: Some(1000),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::add_tlc(AddTlc {
+                    channel_id: new_channel_id,
+                    tlc_id: 0,
+                    amount: 1001,
+                    payment_hash: gen_rand_sha256_hash(),
+                    expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    onion_packet: None,
+                }),
+            )),
+        ))
+        .expect("send add_tlc peer message");
+
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(message))
+                    if message.contains("TlcValueInflightExceedLimit")
+            )
+        })
+        .await;
+
+    let node_a_state = node_a.get_channel_actor_state(new_channel_id);
+    assert_eq!(node_a_state.tlc_state.received_tlcs.tlcs.len(), 0);
+}
+
+#[tokio::test]
+async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash,
+                        expiry,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("add tlc succeeds");
+
+    wait_for_tlc_sync(&node_a, &node_b, channel_id, 1).await;
+
+    let mut plaintext_error = vec![0; 32];
+    plaintext_error.extend(TlcErr::new(TlcErrorCode::TemporaryNodeFailure).serialize());
+    let plaintext_packet = TlcErrPacket {
+        onion_packet: plaintext_error,
+    };
+    assert!(plaintext_packet.is_plaintext());
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::remove_tlc(RemoveTlc {
+                    channel_id,
+                    tlc_id: add_tlc_result.tlc_id,
+                    reason: RemoveTlcReason::RemoveTlcFail(plaintext_packet),
+                }),
+            )),
+        ))
+        .expect("send malicious remove_tlc peer message");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    let offered_tlc = state
+        .tlc_state
+        .get(&TLCId::Offered(add_tlc_result.tlc_id))
+        .expect("offered tlc should remain present");
+    assert_eq!(offered_tlc.outbound_status(), OutboundTlcStatus::Committed);
+    assert!(offered_tlc.removed_reason.is_none());
 }
 
 #[tokio::test]
@@ -3649,23 +5060,21 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     let preimage = [1; 32];
     let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -4193,9 +5602,10 @@ async fn test_reestablish_channel() {
             rpc_reply,
         ))
     };
-    let _accept_channel_result = call!(node_b.network_actor, message)
+    let accept_channel_result = call!(node_b.network_actor, message)
         .expect("node_b alive")
         .expect("accept channel success");
+    let new_channel_id = accept_channel_result.new_channel_id;
 
     node_a
         .expect_event(|event| match event {
@@ -4213,6 +5623,28 @@ async fn test_reestablish_channel() {
             NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
                 println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
                 assert_eq!(pubkey, &node_a.pubkey);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_b.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_a.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
@@ -4250,16 +5682,11 @@ async fn test_reestablish_channel() {
         })
         .await;
 
-    // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
-    // This is due to tentacle connection is async. We may actually send
-    // the `ChannelCreated` event before the `PeerConnected` event.
-    node_a.connect_to_nonblocking(&node_b).await;
-
     node_a
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
                 assert_eq!(pubkey, &node_b.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
@@ -4268,9 +5695,36 @@ async fn test_reestablish_channel() {
 
     node_b
         .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelCreated(pubkey, channel_id) => {
-                println!("A channel ({:?}) to {:?} create", channel_id, pubkey);
+            NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) => {
                 assert_eq!(pubkey, &node_a.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    // Don't use `connect_to` here as that may consume the `ChannelOnline` event.
+    // This is due to tentacle connection is async. We may actually send
+    // the `ChannelOnline` event before the `PeerConnected` event.
+    node_a.connect_to_nonblocking(&node_b).await;
+
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_b.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) => {
+                assert_eq!(pubkey, &node_a.pubkey);
+                assert_eq!(channel_id, &new_channel_id);
                 true
             }
             _ => false,
@@ -4321,6 +5775,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
     let algorithm = HashAlgorithm::CkbHash;
     let digest = algorithm.hash(preimage);
     let tlc_amount = 1000000000;
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let node_a_state = node_a.get_channel_actor_state(channel_id);
     let node_b_state = node_b.get_channel_actor_state(channel_id);
@@ -4332,17 +5787,14 @@ async fn test_normal_shutdown_with_remove_tlc() {
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: tlc_amount,
-                        hash_algorithm: algorithm,
-                        payment_hash: digest.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        tlc_amount,
+                        algorithm,
+                        digest.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -4563,6 +6015,273 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
 }
 
 #[tokio::test]
+async fn test_peer_disconnect_with_active_channel_enters_backoff_reconnect() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let saw_seeded = std::cell::Cell::new(false);
+    let saw_scheduled = std::cell::Cell::new(false);
+    let saw_disconnect = std::cell::Cell::new(false);
+
+    node_b.stop().await;
+
+    node_a
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSeededByDisconnect" =>
+                {
+                    saw_seeded.set(true);
+                }
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffScheduled" =>
+                {
+                    saw_scheduled.set(true);
+                }
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                _ => {}
+            }
+            (saw_seeded.get() && saw_scheduled.get() && saw_disconnect.get()).then_some(())
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_peer_disconnect_with_active_channel_disabled_backoff_skips_reconnect() {
+    init_tracing();
+
+    let mut node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| config.enable_peer_reconnect_backoff = Some(false))
+            .build(),
+    )
+    .await;
+    let mut node_b = NetworkNode::new().await;
+
+    node_a.connect_to(&mut node_b).await;
+
+    let (_channel_id, _funding_tx_hash) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: 100000000000,
+            node_b_funding_amount: 100000000000,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let saw_seeded = std::cell::Cell::new(false);
+    let saw_scheduled = std::cell::Cell::new(false);
+    let saw_disconnect = std::cell::Cell::new(false);
+
+    node_b.stop().await;
+
+    node_a
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSeededByDisconnect" =>
+                {
+                    saw_seeded.set(true);
+                }
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffScheduled" =>
+                {
+                    saw_scheduled.set(true);
+                }
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                _ => {}
+            }
+            saw_disconnect.get().then_some(())
+        })
+        .await;
+
+    assert!(
+        !saw_seeded.get(),
+        "disabled reconnect backoff should not seed reconnect attempts"
+    );
+    assert!(
+        !saw_scheduled.get(),
+        "disabled reconnect backoff should not schedule reconnect attempts"
+    );
+}
+
+#[tokio::test]
+async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        disconnect_result.is_ok(),
+        "manual disconnect should succeed: {:?}",
+        disconnect_result
+    );
+
+    let saw_disconnect = std::cell::Cell::new(false);
+    let saw_skipped = std::cell::Cell::new(false);
+    node_a
+        .expect_to_process_event(|event| {
+            match event {
+                NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey => {
+                    saw_disconnect.set(true);
+                }
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(msg))
+                    if msg == "PeerReconnectBackoffSkippedRequested" =>
+                {
+                    saw_skipped.set(true);
+                }
+                _ => {}
+            }
+            (saw_disconnect.get() && saw_skipped.get()).then_some(())
+        })
+        .await;
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::MaintainConnections,
+        ))
+        .expect("node_a alive");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node_a.expect_event(
+                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+            ),
+        )
+        .await
+        .is_err(),
+        "manual disconnect should suppress automatic reconnect attempts"
+    );
+
+    node_b.stop().await;
+
+    let connect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
+            node_b.pubkey,
+            None,
+            PeerConnectSource::Manual,
+            rpc_reply,
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        connect_result.is_ok(),
+        "manual connect should enqueue a dial attempt: {:?}",
+        connect_result
+    );
+
+    node_a
+        .expect_debug_event("PeerReconnectBackoffSeededByDialError")
+        .await;
+    node_a
+        .expect_debug_event("PeerReconnectBackoffScheduled")
+        .await;
+}
+
+#[tokio::test]
+async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    let first_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        first_disconnect_result.is_ok(),
+        "first manual disconnect should succeed: {:?}",
+        first_disconnect_result
+    );
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey),
+        )
+        .await;
+
+    let second_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+            node_b.pubkey,
+            PeerDisconnectReason::Requested,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node_a alive");
+    let err = second_disconnect_result
+        .expect_err("second manual disconnect should report the already-disconnected peer");
+    assert!(
+        err.contains("is not connected"),
+        "expected already-disconnected error, got: {err}"
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::MaintainConnections,
+        ))
+        .expect("node_a alive");
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            node_a.expect_event(
+                |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.pubkey),
+            ),
+        )
+        .await
+        .is_err(),
+        "repeated manual disconnect should keep automatic reconnect suppressed"
+    );
+
+    node_b.stop().await;
+}
+
+#[tokio::test]
+async fn test_startup_dial_error_with_active_channel_enters_backoff_reconnect() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    node_a.stop().await;
+    node_b.stop().await;
+
+    node_a.start().await;
+
+    node_a
+        .expect_debug_event("PeerReconnectBackoffSeededByDialError")
+        .await;
+    node_a
+        .expect_debug_event("PeerReconnectBackoffScheduled")
+        .await;
+}
+
+#[tokio::test]
 async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
     init_tracing();
 
@@ -4626,23 +6345,21 @@ async fn test_node_reestablish_resend_remove_tlc() {
     let preimage = [2; 32];
     // create a new payment hash
     let payment_hash = HashAlgorithm::CkbHash.hash(preimage);
+    let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: 1000,
-                        hash_algorithm: HashAlgorithm::CkbHash,
-                        payment_hash: payment_hash.into(),
-                        attempt_id: None,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
-                        onion_packet: None,
-                        shared_secret: NO_SHARED_SECRET,
-                        is_trampoline_hop: false,
-                        previous_tlc: None,
-                    },
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        1000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash.into(),
+                        expiry,
+                    ),
                     rpc_reply,
                 ),
             },
@@ -4706,6 +6423,295 @@ async fn test_node_reestablish_resend_remove_tlc() {
     );
     assert!(node_a.get_triggered_unexpected_events().await.is_empty());
     assert!(node_b.get_triggered_unexpected_events().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
+    init_tracing();
+
+    let (node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 11800000000, true).await;
+
+    let preimage = [9; 32];
+    let expected_preimage: Hash256 = preimage.into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 1000,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        payment_hash,
+                        attempt_id: None,
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET,
+                        is_trampoline_hop: false,
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added tlc");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let mut state = node_b.get_channel_actor_state(channel_id);
+    state.reestablishing = true;
+    node_b.update_channel_actor_state(state, None).await;
+
+    let reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage.into(),
+    });
+    let result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.tlc_id,
+                        reason: reason.clone(),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive");
+
+    assert!(
+        result.is_err(),
+        "remove_tlc should be deferred while reestablishing"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        node_b.get_payment_preimage(&payment_hash),
+        Some(expected_preimage),
+        "payment preimage should be persisted even when remove_tlc is deferred"
+    );
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PreimageCreated(hash, observed_preimage)
+                    if hash == &payment_hash && observed_preimage == &expected_preimage
+            )
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_before_delayed_fulfill()
+{
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 11800000000, true).await;
+
+    let preimage_0 = [1; 32];
+    let payment_hash_0: Hash256 = HashAlgorithm::CkbHash.hash(preimage_0).into();
+    let preimage_1 = [2; 32];
+    let payment_hash_1: Hash256 = HashAlgorithm::CkbHash.hash(preimage_1).into();
+    let expiry_0 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+
+    let add_tlc_0 = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        3_000_000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash_0,
+                        expiry_0,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added first tlc");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let expiry_1 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    let add_tlc_1 = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(
+                    create_mock_pending_add_tlc_command(
+                        &node_a,
+                        &node_b,
+                        6_000_000,
+                        HashAlgorithm::CkbHash,
+                        payment_hash_1,
+                        expiry_1,
+                    ),
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive")
+    .expect("successfully added second tlc");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Mirror the E2E shape: tlc0 should cross the auto-expiry window only
+    // after the peer is disconnected and the channel is already offline.
+    let epoch_delay_milliseconds =
+        (DEFAULT_COMMITMENT_DELAY_EPOCHS as f64 * MILLI_SECONDS_PER_EPOCH as f64 * 2.0 / 3.0)
+            as u64;
+    let disconnect_expiry_grace = Duration::from_secs(4);
+    let short_expiry = now_timestamp_as_millis_u64()
+        + epoch_delay_milliseconds
+        + CHECK_CHANNELS_INTERVAL.as_millis() as u64
+        + disconnect_expiry_grace.as_millis() as u64;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    node_b_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_0.tlc_id))
+        .expect("first received tlc exists")
+        .expiry = short_expiry;
+    node_b_state
+        .tlc_state
+        .get_mut(&TLCId::Received(add_tlc_1.tlc_id))
+        .expect("second received tlc exists")
+        .expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    eprintln!(
+        "offline expiry setup: short_expiry={} epoch_delay_ms={} check_interval_ms={} grace_ms={}",
+        short_expiry,
+        epoch_delay_milliseconds,
+        CHECK_CHANNELS_INTERVAL.as_millis(),
+        disconnect_expiry_grace.as_millis()
+    );
+
+    node_a
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("force close locally");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("node_a alive");
+
+    node_a
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_b.pubkey),
+        )
+        .await;
+    node_b
+        .expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &node_a.pubkey),
+        )
+        .await;
+
+    let mut offline_state = node_b.get_channel_actor_state(channel_id);
+    for _ in 0..20 {
+        if offline_state.connectivity_state == ChannelConnectivityState::Offline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        offline_state = node_b.get_channel_actor_state(channel_id);
+    }
+    assert_eq!(
+        offline_state.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "channel should be offline before the short-expiry tlc crosses its auto-expiry window"
+    );
+
+    let first_tlc_before_expiry = offline_state
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_0.tlc_id))
+        .expect("first received tlc exists before expiry");
+    let second_tlc_before_expiry = offline_state
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_1.tlc_id))
+        .expect("second received tlc exists before expiry");
+
+    eprintln!(
+        "offline pre-expiry snapshot: channel_state={:?} connectivity={:?} reestablishing={} first_removed_reason={:?} second_removed_reason={:?} retryable_ops={:?}",
+        offline_state.state,
+        offline_state.connectivity_state,
+        offline_state.reestablishing,
+        first_tlc_before_expiry.removed_reason,
+        second_tlc_before_expiry.removed_reason,
+        offline_state.retryable_tlc_operations
+    );
+
+    assert!(
+        first_tlc_before_expiry.removed_reason.is_none(),
+        "short-expiry tlc should still be pending immediately after disconnect, got {:?}",
+        first_tlc_before_expiry.removed_reason
+    );
+    assert!(
+        second_tlc_before_expiry.removed_reason.is_none(),
+        "longer-expiry tlc should still be pending immediately after disconnect, got {:?}",
+        second_tlc_before_expiry.removed_reason
+    );
+
+    tokio::time::sleep(disconnect_expiry_grace + Duration::from_secs(1)).await;
+
+    notify_maintain_channel_tlcs(&node_b, channel_id);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state_after = node_b.get_channel_actor_state(channel_id);
+    let first_tlc = state_after
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_0.tlc_id))
+        .expect("first received tlc still exists");
+    let second_tlc = state_after
+        .tlc_state
+        .get(&TLCId::Received(add_tlc_1.tlc_id))
+        .expect("second received tlc still exists");
+
+    eprintln!(
+        "offline post-expiry snapshot: channel_state={:?} connectivity={:?} reestablishing={} first_removed_reason={:?} second_removed_reason={:?} retryable_ops={:?}",
+        state_after.state,
+        state_after.connectivity_state,
+        state_after.reestablishing,
+        first_tlc.removed_reason,
+        second_tlc.removed_reason,
+        state_after.retryable_tlc_operations
+    );
+
+    assert!(
+        first_tlc.removed_reason.is_none(),
+        "short-expiry tlc should stay pending until the delayed fulfill is replayed, got {:?}",
+        first_tlc.removed_reason
+    );
+    assert!(
+        second_tlc.removed_reason.is_none(),
+        "longer-expiry tlc should remain pending before the delayed fulfill arrives, got {:?}",
+        second_tlc.removed_reason
+    );
 }
 
 #[tokio::test]
@@ -4854,7 +6860,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 21].pack()).build()),
+                        close_script: Some(script_with_large_args()),
                         fee_rate: Some(FeeRate::from_u64(u64::MAX)),
                         force: false,
                     },
@@ -4868,7 +6874,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     assert!(shutdown_channel_result
         .err()
         .unwrap()
-        .contains("Local balance is not enough to pay the fee"));
+        .contains("overflows shutdown fee"));
 }
 
 #[tokio::test]
@@ -5634,7 +7640,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         .payment_preimage(gen_rand_sha256_hash())
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success")
         .to_string();
 
@@ -5683,7 +7689,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success");
 
     node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -5751,7 +7757,7 @@ async fn test_received_invoice_without_preimage_keeps_payment_pending() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(invoice_expiry_seconds))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success");
 
     // Insert invoice WITHOUT preimage - this simulates a hold invoice scenario
@@ -5815,7 +7821,7 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         .payment_preimage(preimage)
         .payee_pub_key(target_pubkey.into())
         .expiry_time(Duration::from_secs(100))
-        .build()
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_3.private_key.0))
         .expect("build invoice success");
 
     node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -5871,14 +7877,14 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
 
-    let expected_minimal_tlc_expiry_limit =
-        DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let base_route_tlc_expiry_limit = DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let expected_minimal_tlc_expiry_limit = base_route_tlc_expiry_limit + DEFAULT_TLC_EXPIRY_DELTA;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
+            tlc_expiry_limit: Some(base_route_tlc_expiry_limit - 1),
             keysend: Some(true),
             ..Default::default()
         })
@@ -6219,6 +8225,41 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
 }
 
 #[tokio::test]
+async fn test_inbound_add_tlc_rejects_expiry_too_soon() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true).await;
+
+    let preimage = [1; 32];
+    let algorithm = HashAlgorithm::Sha256;
+    let payment_hash = algorithm.hash(preimage).into();
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                target: node_b.pubkey,
+                message: FiberMessage::add_tlc(AddTlc {
+                    channel_id,
+                    tlc_id: 0,
+                    amount: 1000,
+                    payment_hash,
+                    expiry: 0,
+                    hash_algorithm: algorithm,
+                    onion_packet: None,
+                }),
+            }),
+        ))
+        .expect("send add tlc message");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let state = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(state.tlc_state.all_tlcs().count(), 0);
+}
+
+#[tokio::test]
 async fn test_funding_timeout() {
     let funding_amount: u128 = 100000000000;
     let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
@@ -6356,6 +8397,173 @@ async fn test_channel_one_peer_check_active_fail() {
     if wait_time >= 50 {
         panic!("node_1 channel did not reach ChannelReady state in time");
     }
+}
+
+#[tokio::test]
+async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
+    init_tracing();
+
+    let (node_a, _node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    node_a
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("force shutdown channel");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let state_after_close_confirmation = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        state_after_close_confirmation.state,
+        ChannelState::Closed(flags)
+            if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+    ));
+
+    let control_result_before_final_settlement = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        control_result_before_final_settlement.is_ok(),
+        "closing channel actor should remain controllable before final settlement"
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .expect("network actor alive");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        )
+    })
+    .await;
+
+    let control_result_after_final_settlement = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    assert!(
+        control_result_after_final_settlement.is_err(),
+        "channel actor should stop once final settlement completes"
+    );
+}
+
+#[tokio::test]
+async fn test_cooperative_close_stops_channel_actor_immediately() {
+    init_tracing();
+
+    let (node_a, _node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
+            .await;
+
+    node_a
+        .send_shutdown(channel_id, false)
+        .await
+        .expect("cooperatively shutdown channel");
+
+    wait_until(|| {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::Closed(CloseFlags::COOPERATIVE)
+        )
+    })
+    .await;
+
+    wait_until_async_timeout(|| async {
+        let control_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::Update(
+                        UpdateCommand {
+                            enabled: None,
+                            tlc_expiry_delta: None,
+                            tlc_minimum_value: None,
+                            tlc_fee_proportional_millionths: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_a alive");
+
+        control_result.is_err()
+            && matches!(
+                node_a
+                    .get_channel_actor_state_unchecked(channel_id)
+                    .map(|state| state.state),
+                Some(ChannelState::Closed(CloseFlags::COOPERATIVE))
+            )
+    })
+    .await;
+
+    let control_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: None,
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_a alive");
+    let err = control_result.expect_err("cooperative close should stop the channel actor");
+    assert!(
+        err.contains("Channel not found error"),
+        "expected cooperative close to remove the live actor, got: {err}"
+    );
 }
 
 /// Test for issue #938: Channel funding is aborted after restart when stuck in NegotiatingFunding
@@ -6517,52 +8725,26 @@ async fn test_reestablish_restores_send_nonce() {
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
-    // Trigger payment A -> B and restart one peer while the payment is still
-    // inflight. This test focuses on restoring the missing send nonce during
-    // reestablish; payment completion is covered by broader reestablish tests.
-    let _payment_hash = node_a
-        .send_payment_keysend(&node_b, 1000, false)
-        .await
-        .unwrap()
-        .payment_hash;
+    node_a.stop().await;
 
-    let start = std::time::Instant::now();
-    let restart_node_a = loop {
-        let state_a_before_restart = node_a.get_channel_actor_state(channel_id);
-        let state_b_before_restart = node_b.get_channel_actor_state(channel_id);
-        if node_a.get_inflight_payment_count().await == 1 {
-            if state_a_before_restart
-                .remote_revocation_nonce_for_send
-                .is_none()
-                && state_a_before_restart.last_revoke_ack_msg.is_some()
-            {
-                break true;
-            }
-            if state_b_before_restart
-                .remote_revocation_nonce_for_send
-                .is_none()
-                && state_b_before_restart.last_revoke_ack_msg.is_some()
-            {
-                break false;
-            }
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "Payment did not reach the pre-restart reestablish state in time"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    assert_eq!(node_a.get_inflight_payment_count().await, 1);
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state.remote_revocation_nonce_for_send.is_some(),
+        "established channel should start with a send nonce"
+    );
+    assert!(
+        state.remote_revocation_nonce_for_verify.is_some()
+            || state.remote_revocation_nonce_for_next.is_some(),
+        "established channel should have a nonce source for reestablish recovery"
+    );
 
-    // Restart the peer that actually lost the send nonce to make the
-    // reestablish scenario deterministic across scheduler interleavings.
-    if restart_node_a {
-        node_a.restart().await;
-        node_a.connect_to(&mut node_b).await;
-    } else {
-        node_b.restart().await;
-        node_b.connect_to(&mut node_a).await;
-    }
+    state.remote_revocation_nonce_for_send = None;
+    state.last_revoke_ack_msg = None;
+    node_a.store.insert_channel_actor_state(state);
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node_a.start().await;
+    node_a.connect_to(&mut node_b).await;
 
     node_a
         .expect_debug_event("Reestablished channel in ChannelReady")
@@ -6572,7 +8754,7 @@ async fn test_reestablish_restores_send_nonce() {
         .await;
 
     // Wait until both peers persist the recovered send nonce after reestablish.
-    let now = std::time::Instant::now();
+    let start = std::time::Instant::now();
     loop {
         let node_b_state = node_b.get_channel_actor_state(channel_id);
         let node_a_state = node_a.get_channel_actor_state(channel_id);
@@ -6582,7 +8764,7 @@ async fn test_reestablish_restores_send_nonce() {
             break;
         }
         assert!(
-            now.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(5),
             "reestablish did not restore send nonce in time"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -6592,10 +8774,6 @@ async fn test_reestablish_restores_send_nonce() {
     assert!(
         state.remote_revocation_nonce_for_send.is_some(),
         "Node B should restore remote_revocation_nonce_for_send after reestablish"
-    );
-    assert!(
-        state.remote_revocation_nonce_for_send.is_some(),
-        "node_b should restore send nonce after reestablish"
     );
     assert!(
         state.remote_revocation_nonce_for_verify.is_some(),
@@ -6666,7 +8844,14 @@ async fn test_reestablish_bidirectional_pending() {
     );
 
     node_a.restart().await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    wait_until(|| {
+        let state_a = node_a.get_channel_actor_state(channel_id);
+        let state_b = node_b.get_channel_actor_state(channel_id);
+        !state_a.reestablishing
+            && state_a.get_local_commitment_number() == state_b.get_remote_commitment_number()
+            && state_a.get_remote_commitment_number() == state_b.get_local_commitment_number()
+    })
+    .await;
 
     let state_a_after = node_a.get_channel_actor_state(channel_id);
     let state_b_after = node_b.get_channel_actor_state(channel_id);
@@ -6883,89 +9068,6 @@ async fn test_restart_stress_multiple_restarts() {
     );
 }
 
-/// Restart stress reproducer.
-/// Runs repeated payment bursts with node restart and checks unexpected events.
-#[tokio::test]
-#[ignore] // Long-running restart stress test. Run explicitly when validating restart regressions.
-async fn test_node_restart() {
-    init_tracing();
-    let (mut node_a, node_b, channel_id) =
-        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
-    let panic_unexpected_events = vec!["panic".to_string(), "panicked".to_string()];
-    node_a
-        .add_unexpected_events(panic_unexpected_events.clone())
-        .await;
-    node_b
-        .add_unexpected_events(panic_unexpected_events.clone())
-        .await;
-
-    for cycle in 0..10 {
-        debug!("=== Restart cycle {} ===", cycle);
-
-        for _i in 0..10 {
-            let _payment1 = node_a.send_payment_keysend(&node_b, 1, false).await;
-            let _payment2 = node_b.send_payment_keysend(&node_a, 1, false).await;
-        }
-
-        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
-        assert!(
-            node_a_unexpected_events.is_empty(),
-            "node_a got unexpected events before restart cycle {}: {:?}",
-            cycle,
-            node_a_unexpected_events
-        );
-        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
-        assert!(
-            node_b_unexpected_events.is_empty(),
-            "node_b got unexpected events before restart cycle {}: {:?}",
-            cycle,
-            node_b_unexpected_events
-        );
-
-        debug!("Stopping node_a for restart cycle {}", cycle);
-        node_a.restart().await;
-        debug!("Starting node_a after restart cycle {}", cycle);
-        node_a
-            .add_unexpected_events(panic_unexpected_events.clone())
-            .await;
-
-        tokio::time::sleep(Duration::from_secs(10)).await;
-
-        let node_a_unexpected_events = node_a.get_triggered_unexpected_events().await;
-        assert!(
-            node_a_unexpected_events.is_empty(),
-            "node_a got unexpected events after restart cycle {}: {:?}",
-            cycle,
-            node_a_unexpected_events
-        );
-        let node_b_unexpected_events = node_b.get_triggered_unexpected_events().await;
-        assert!(
-            node_b_unexpected_events.is_empty(),
-            "node_b got unexpected events after restart cycle {}: {:?}",
-            cycle,
-            node_b_unexpected_events
-        );
-    }
-
-    // Verify no stuck TLCs after all restart cycles.
-    let state_a = node_a.get_channel_actor_state(channel_id);
-    let state_b = node_b.get_channel_actor_state(channel_id);
-    let tlc_count_a = state_a.tlc_state.all_tlcs().count();
-    let tlc_count_b = state_b.tlc_state.all_tlcs().count();
-    assert_eq!(
-        tlc_count_a, 0,
-        "node_a channel {:?} still has {} stuck TLCs",
-        channel_id, tlc_count_a
-    );
-    assert_eq!(
-        tlc_count_b, 0,
-        "node_b channel {:?} still has {} stuck TLCs",
-        channel_id, tlc_count_b
-    );
-
-    debug!("test_node_restart completed successfully with no unexpected events");
-}
-
 /// Test that commitment numbers remain consistent after reestablish.
 #[tokio::test]
 async fn test_reestablish_commitment_number_consistency() {
@@ -7041,6 +9143,11 @@ async fn test_reestablish_dual_owed_ordering() {
         state_a_after.get_local_commitment_number(),
         state_b_after.get_remote_commitment_number(),
         "Commitment numbers should remain symmetric after dual-owed replay"
+    );
+    assert_eq!(
+        state_a_after.get_remote_commitment_number(),
+        state_b_after.get_local_commitment_number(),
+        "Remote commitment numbers should remain symmetric after dual-owed replay"
     );
 }
 
@@ -7171,194 +9278,35 @@ async fn test_legacy_fallback_single_owed_no_commit_diff() {
         "Payment should succeed after legacy single-owed reestablish"
     );
 }
-
-/// Reproducer: 4-node ring (A-B-C-D-A), all nodes send 100 self-payments
-/// through the ring, then restart A and D.
-/// Expected: all TLCs settle, channel balances conserved (only routing fees change).
+/// Stopping a local ready channel should persist it as offline so restart can reestablish it.
 #[tokio::test]
-#[ignore] // Long-running stress test. Run explicitly to reproduce stuck-TLC bug.
-async fn test_ring_self_payments_then_restart_two_nodes() {
+async fn test_stop_marks_local_ready_channel_offline_before_restart() {
     init_tracing();
 
-    // Build ring topology: A(0)-B(1)-C(2)-D(3)-A(0)
-    let funding = HUGE_CKB_AMOUNT;
-    let (nodes, channels) = create_n_nodes_network(
-        &[
-            ((0, 1), (funding, funding)), // A-B
-            ((1, 2), (funding, funding)), // B-C
-            ((2, 3), (funding, funding)), // C-D
-            ((3, 0), (funding, funding)), // D-A  (closes the ring)
-        ],
-        4,
-    )
-    .await;
-    let [mut node_a, node_b, node_c, mut node_d] = nodes.try_into().expect("4 nodes");
-
-    let panic_events = vec!["panic".to_string(), "panicked".to_string()];
-    node_a.add_unexpected_events(panic_events.clone()).await;
-    node_b.add_unexpected_events(panic_events.clone()).await;
-    node_c.add_unexpected_events(panic_events.clone()).await;
-    node_d.add_unexpected_events(panic_events.clone()).await;
-
-    // Channel layout:
-    //   channels[0]: A-B  (node_a, node_b)
-    //   channels[1]: B-C  (node_b, node_c)
-    //   channels[2]: C-D  (node_c, node_d)
-    //   channels[3]: D-A  (node_d, node_a)
-    //
-    // Each node participates in exactly 2 channels.
-    // Record initial balances from each node's perspective on its channels.
-    let initial_a_ch0 = node_a.get_local_balance_from_channel(channels[0]);
-    let initial_a_ch3 = node_a.get_local_balance_from_channel(channels[3]);
-    let initial_b_ch0 = node_b.get_local_balance_from_channel(channels[0]);
-    let initial_b_ch1 = node_b.get_local_balance_from_channel(channels[1]);
-    let initial_c_ch1 = node_c.get_local_balance_from_channel(channels[1]);
-    let initial_c_ch2 = node_c.get_local_balance_from_channel(channels[2]);
-    let initial_d_ch2 = node_d.get_local_balance_from_channel(channels[2]);
-    let initial_d_ch3 = node_d.get_local_balance_from_channel(channels[3]);
-
-    // For self-payments the sender == receiver, so net balance across each node's
-    // two channels should stay the same (minus routing fees paid to intermediaries).
-    // Total across all channels should be strictly conserved.
-    let initial_total = initial_a_ch0
-        + initial_a_ch3
-        + initial_b_ch0
-        + initial_b_ch1
-        + initial_c_ch1
-        + initial_c_ch2
-        + initial_d_ch2
-        + initial_d_ch3;
-
-    // Fire off 100 self-payments from each node (fire-and-forget, don't wait)
-    let payment_amount = 1000; // small amount so routing has enough capacity
-    let num_payments = 100u32;
-
-    debug!(
-        "=== Sending {} self-payments from each of 4 nodes ===",
-        num_payments
-    );
-    for i in 0..num_payments {
-        let _ = node_a
-            .send_payment_keysend_to_self(payment_amount, false)
+    let (mut node_a, _node_b, channel_id, _funding_tx) =
+        NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
             .await;
-        let _ = node_b
-            .send_payment_keysend_to_self(payment_amount, false)
-            .await;
-        let _ = node_c
-            .send_payment_keysend_to_self(payment_amount, false)
-            .await;
-        let _ = node_d
-            .send_payment_keysend_to_self(payment_amount, false)
-            .await;
-        if i % 20 == 0 {
-            debug!("Sent batch {}/{}", i, num_payments);
-        }
-    }
 
-    // Brief pause to let some TLCs start processing
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Check no unexpected events before restart
-    for (name, node) in [
-        ("A", &node_a),
-        ("B", &node_b),
-        ("C", &node_c),
-        ("D", &node_d),
-    ] {
-        let events = node.get_triggered_unexpected_events().await;
-        assert!(
-            events.is_empty(),
-            "node {} got unexpected events before restart: {:?}",
-            name,
-            events
-        );
-    }
-
-    // Restart A and D simultaneously
-    debug!("=== Restarting node A and D ===");
-    node_a.restart().await;
-    node_d.restart().await;
-    node_a.add_unexpected_events(panic_events.clone()).await;
-    node_d.add_unexpected_events(panic_events.clone()).await;
-
-    // Wait for reestablish and TLC settlement
-    debug!("=== Waiting for reestablish and TLC settlement ===");
-    tokio::time::sleep(Duration::from_secs(30)).await;
-
-    // Verify: no unexpected events after restart
-    for (name, node) in [
-        ("A", &node_a),
-        ("B", &node_b),
-        ("C", &node_c),
-        ("D", &node_d),
-    ] {
-        let events = node.get_triggered_unexpected_events().await;
-        assert!(
-            events.is_empty(),
-            "node {} got unexpected events after restart: {:?}",
-            name,
-            events
-        );
-    }
-
-    // Verify: reestablish completed on restarted node channels
-    for ch in [channels[0], channels[3]] {
-        let state = node_a.get_channel_actor_state(ch);
-        assert!(
-            !state.reestablishing,
-            "Node A channel {:?} still reestablishing",
-            ch
-        );
-    }
-    for ch in [channels[2], channels[3]] {
-        let state = node_d.get_channel_actor_state(ch);
-        assert!(
-            !state.reestablishing,
-            "Node D channel {:?} still reestablishing",
-            ch
-        );
-    }
-
-    // Verify: all TLCs should be settled (none stuck inflight)
-    // Each node checks its own channels.
-    let chs_a = [channels[0], channels[3]];
-    let chs_b = [channels[0], channels[1]];
-    let chs_c = [channels[1], channels[2]];
-    let chs_d = [channels[2], channels[3]];
-    let checks: Vec<(&str, &NetworkNode, &[Hash256])> = vec![
-        ("A", &node_a, &chs_a),
-        ("B", &node_b, &chs_b),
-        ("C", &node_c, &chs_c),
-        ("D", &node_d, &chs_d),
-    ];
-    for (name, node, chs) in &checks {
-        for ch in *chs {
-            let state = node.get_channel_actor_state(*ch);
-            let tlc_count = state.tlc_state.all_tlcs().count();
-            assert_eq!(
-                tlc_count, 0,
-                "Node {} channel {:?} still has {} stuck TLCs",
-                name, ch, tlc_count
-            );
-        }
-    }
-
-    // Verify: total balance across all channels is conserved
-    let final_total = node_a.get_local_balance_from_channel(channels[0])
-        + node_a.get_local_balance_from_channel(channels[3])
-        + node_b.get_local_balance_from_channel(channels[0])
-        + node_b.get_local_balance_from_channel(channels[1])
-        + node_c.get_local_balance_from_channel(channels[1])
-        + node_c.get_local_balance_from_channel(channels[2])
-        + node_d.get_local_balance_from_channel(channels[2])
-        + node_d.get_local_balance_from_channel(channels[3]);
+    let state_before_stop = node_a.get_channel_actor_state(channel_id);
+    assert!(!state_before_stop.reestablishing);
     assert_eq!(
-        initial_total, final_total,
-        "Total balance across all channels should be conserved.\n  initial: {}\n  final:   {}",
-        initial_total, final_total
+        state_before_stop.connectivity_state,
+        ChannelConnectivityState::Online
     );
 
-    debug!("test_ring_self_payments_then_restart_two_nodes completed successfully");
+    node_a.stop().await;
+
+    let state_after_stop = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        state_after_stop.reestablishing,
+        "stopped local channel should enter reestablishing state, got connectivity={:?}",
+        state_after_stop.connectivity_state
+    );
+    assert_eq!(
+        state_after_stop.connectivity_state,
+        ChannelConnectivityState::Offline,
+        "stopped local ready channel should be persisted as Offline"
+    );
 }
 
 // ============================================================================
@@ -7423,6 +9371,123 @@ async fn open_external_funding_channel(
     (result.channel_id, result.unsigned_funding_tx)
 }
 
+fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
+    unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data()
+}
+
+fn mock_sign_external_funding_tx_with_witness(
+    unsigned_tx: &Transaction,
+    witness: Bytes,
+) -> Transaction {
+    unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![witness])
+        .build()
+        .data()
+}
+
+#[test]
+fn test_external_funding_witness_merge_preserves_existing_signatures() {
+    let external_signature: Bytes = [1u8; 65].pack();
+    let local_placeholder = Bytes::default();
+    let remote_placeholder = Bytes::default();
+    let remote_signature: Bytes = [2u8; 65].pack();
+    let remote_extra_signature: Bytes = [3u8; 65].pack();
+    let local_tx = Transaction::default()
+        .as_advanced_builder()
+        .set_witnesses(vec![external_signature.clone(), local_placeholder])
+        .build();
+
+    let merged = merge_external_funding_witnesses(
+        local_tx.witnesses(),
+        vec![
+            remote_placeholder,
+            remote_signature.clone(),
+            remote_extra_signature.clone(),
+        ],
+    );
+
+    assert_eq!(merged[0], external_signature);
+    assert_eq!(merged[1], remote_signature);
+    assert_eq!(merged[2], remote_extra_signature);
+}
+
+async fn wait_for_external_funding_post_submit_progress(
+    node: &NetworkNode,
+    channel_id: Hash256,
+) -> ChannelActorState {
+    for _ in 0..50 {
+        if let Some(state) = node.get_channel_actor_state_unchecked(channel_id) {
+            if matches!(
+                state.state,
+                ChannelState::AwaitingTxSignatures(_)
+                    | ChannelState::AwaitingChannelReady(_)
+                    | ChannelState::ChannelReady
+            ) {
+                return state;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = node
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("channel state should still exist after restart");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should progress beyond commitment signing after restart, got {:?}",
+        state.state
+    );
+    state
+}
+
+async fn wait_for_external_funding_submitted_in_flight(
+    node: &NetworkNode,
+    channel_id: Hash256,
+) -> ChannelActorState {
+    for _ in 0..50 {
+        if let Some(state) = node.get_channel_actor_state_unchecked(channel_id) {
+            if matches!(
+                state.state,
+                ChannelState::CollaboratingFundingTx(_)
+                    | ChannelState::SigningCommitment(_)
+                    | ChannelState::AwaitingTxSignatures(_)
+                    | ChannelState::AwaitingChannelReady(_)
+                    | ChannelState::ChannelReady
+            ) {
+                return state;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = node
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("channel state should still exist before restart");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should enter submitted external funding flow before restart, got {:?}",
+        state.state
+    );
+    state
+}
+
 #[tokio::test]
 async fn test_open_channel_with_external_funding() {
     init_tracing();
@@ -7445,13 +9510,26 @@ async fn test_open_channel_with_external_funding() {
         "unsigned funding tx should have at least one output"
     );
 
-    // Between open and submit for external funding, channel state is runtime-only and should
-    // not be persisted in local store.
+    let persisted_state = node_a
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("channel state should persist minimal external funding recovery state");
     assert!(
-        node_a
-            .get_channel_actor_state_unchecked(channel_id)
-            .is_none(),
-        "channel state should not be persisted before signed external funding tx submission"
+        persisted_state.state.is_awaiting_external_funding(),
+        "channel should wait for external funding submit, got {:?}",
+        persisted_state.state
+    );
+    let external_funding_state = persisted_state
+        .external_funding
+        .as_ref()
+        .expect("persisted external funding state should exist");
+    assert_eq!(
+        external_funding_state.unsigned_funding_tx.raw().as_slice(),
+        unsigned_tx.raw().as_slice(),
+        "persisted unsigned tx should match returned unsigned tx"
+    );
+    assert!(
+        !external_funding_state.signed_submitted,
+        "persisted state should still wait for signed submit"
     );
 }
 
@@ -7647,6 +9725,69 @@ async fn test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake() 
             .into_iter()
             .map(|(_, _, state)| state)
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_ignored() {
+    init_tracing();
+
+    let [node_a, node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let progressed = wait_for_external_funding_post_submit_progress(&node_a, channel_id).await;
+    assert!(
+        matches!(
+            progressed.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should progress beyond tx collaboration after signed submit, got {:?}",
+        progressed.state
+    );
+
+    let duplicate_tx_complete = FiberMessage::tx_complete(crate::fiber::types::TxComplete {
+        channel_id,
+        next_commitment_nonce: musig2::SecNonceBuilder::new([3u8; 32])
+            .build()
+            .public_nonce(),
+    });
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                duplicate_tx_complete,
+            )),
+        ))
+        .expect("send duplicate tx_complete");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let state_after_duplicate = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            state_after_duplicate.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "duplicate tx_complete should be ignored after signed submit, got {:?}",
+        state_after_duplicate.state
     );
 }
 
@@ -8094,4 +10235,1202 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
         state.is_some(),
         "channel should not be aborted by stale external funding timeout"
     );
+}
+
+#[tokio::test]
+async fn test_channel_stale_passive_wait_no_proactive_send() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+    let state_b = node_a.get_channel_actor_state(channel_id);
+    let peer_commitment_number = state_b.get_local_commitment_number();
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: peer_commitment_number,
+                    remote_commitment_number: peer_commitment_number,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(current_state.state, ChannelState::Stale);
+}
+
+#[tokio::test]
+async fn test_channel_stale_audit_success_resumes_ready() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+    state_a.state = ChannelState::Stale;
+    state_a.reestablishing = true;
+    node_a.store.insert_channel_actor_state(state_a);
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("disconnect sent");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        current_state.state,
+        ChannelState::ChannelReady,
+        "Should resume to ChannelReady"
+    );
+    assert!(
+        !current_state.reestablishing,
+        "Reestablishing should be finished"
+    );
+}
+
+#[tokio::test]
+async fn test_channel_stale_audit_failure_blocks_channel() {
+    init_tracing();
+
+    let (mut node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    let original_cn = state_a.commitment_numbers.local;
+
+    let mut state_a_stale = state_a.clone();
+    state_a_stale.state = ChannelState::Stale;
+    state_a_stale.reestablishing = true;
+    state_b.commitment_numbers.remote = original_cn + 5;
+
+    node_a.store.insert_channel_actor_state(state_a_stale);
+    node_b.store.insert_channel_actor_state(state_b);
+
+    node_a.restart().await;
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_a.pubkey,
+                FiberMessage::reestablish_channel(ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: original_cn + 5,
+                    remote_commitment_number: original_cn,
+                }),
+            )),
+        ))
+        .expect("send reestablish message");
+
+    let current_state = node_a.get_channel_actor_state(channel_id);
+
+    assert_eq!(
+        current_state.state,
+        ChannelState::Stale,
+        "Audit should fail and stay in Stale"
+    );
+    assert!(
+        current_state.reestablishing,
+        "Should still be in reestablishing phase"
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx after restart success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "channel should continue after restart submit, got {:?}",
+        state.state
+    );
+}
+
+#[tokio::test]
+async fn test_submit_signed_funding_tx_after_acceptor_restart_for_external_funding() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    node_b.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx after acceptor restart success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    for _ in 0..40 {
+        let maybe_state = node_b.get_channel_actor_state_unchecked(channel_id);
+        if let Some(state) = maybe_state {
+            if matches!(
+                state.state,
+                ChannelState::CollaboratingFundingTx(_)
+                    | ChannelState::SigningCommitment(_)
+                    | ChannelState::AwaitingTxSignatures(_)
+                    | ChannelState::AwaitingChannelReady(_)
+                    | ChannelState::ChannelReady
+            ) {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = node_b
+        .get_channel_actor_state_unchecked(channel_id)
+        .expect("acceptor channel state should be restorable after restart");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "acceptor should continue after restart submit, got {:?}",
+        state.state
+    );
+}
+
+#[test]
+fn test_external_funding_hydrate_restores_early_peer_commitment_signed_state() {
+    let mut persisted_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state should exist");
+    persisted_state.state =
+        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING);
+    persisted_state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: Transaction::default(),
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: false,
+        peer_commitment_signed_received: true,
+    });
+    persisted_state.hydrate_external_funding_runtime();
+
+    assert!(
+        matches!(
+            persisted_state.state,
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
+                    && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
+        ),
+        "hydrate should restore early peer commitment_signed, got {:?}",
+        persisted_state.state
+    );
+    assert!(
+        persisted_state.is_waiting_for_external_funding_submission(),
+        "pre-submit external funding should still use the external funding timeout after hydrate"
+    );
+}
+
+#[test]
+fn test_external_funding_duplicate_commitment_signed_detection_requires_matching_nonce() {
+    let mut persisted_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state should exist");
+    let duplicate_nonce = musig2::SecNonceBuilder::new([1u8; 32])
+        .build()
+        .public_nonce();
+    let different_nonce = musig2::SecNonceBuilder::new([2u8; 32])
+        .build()
+        .public_nonce();
+    persisted_state.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+    persisted_state.last_committed_remote_nonce = Some(duplicate_nonce.clone());
+    persisted_state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: Transaction::default(),
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: true,
+        peer_commitment_signed_received: true,
+    });
+    persisted_state.hydrate_external_funding_runtime();
+
+    let duplicate_commitment_signed = CommitmentSigned {
+        channel_id: persisted_state.get_id(),
+        funding_tx_partial_signature: musig2::PartialSignature::from_slice(&[1u8; 32])
+            .expect("valid partial signature bytes"),
+        next_commitment_nonce: duplicate_nonce,
+    };
+    assert!(
+        persisted_state
+            .is_duplicate_external_funding_commitment_signed_for_test(&duplicate_commitment_signed),
+        "matching committed remote nonce in external funding AwaitingTxSignatures should be duplicate"
+    );
+
+    let different_commitment_signed = CommitmentSigned {
+        channel_id: persisted_state.get_id(),
+        funding_tx_partial_signature: musig2::PartialSignature::from_slice(&[1u8; 32])
+            .expect("valid partial signature bytes"),
+        next_commitment_nonce: different_nonce,
+    };
+    assert!(
+        !persisted_state
+            .is_duplicate_external_funding_commitment_signed_for_test(&different_commitment_signed),
+        "different next commitment nonce should not be treated as duplicate"
+    );
+
+    persisted_state.clear_external_funding_runtime();
+    assert!(
+        !persisted_state
+            .is_duplicate_external_funding_commitment_signed_for_test(&duplicate_commitment_signed),
+        "non-external-funding state should not use external funding duplicate handling"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_initiator_restart_after_signed_submit_resumes_handshake() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    node_a.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    let state = wait_for_external_funding_post_submit_progress(&node_a, channel_id).await;
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "initiator should resume external funding handshake after restart, got {:?}",
+        state.state
+    );
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed after initiator restart"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_initiator_send_tx_signatures_first_preserves_external_witness() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("ext-fund-send-first-node-{}", i)))
+            .base_dir_prefix(&format!("test-ext-fund-send-first-node-{}-", i));
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount = Some(150_000_000_000);
+            });
+        }
+        builder.build()
+    })
+    .await
+    .try_into()
+    .expect("2 nodes");
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let external_witness: Bytes = [9u8; 65].pack();
+    let signed_tx =
+        mock_sign_external_funding_tx_with_witness(&unsigned_tx, external_witness.clone());
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let mut last_state = None;
+    for _ in 0..50 {
+        let state = node_a.get_channel_actor_state(channel_id);
+        if matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ) {
+            last_state = Some(state);
+            break;
+        }
+        last_state = Some(state);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state = last_state.expect("channel state should exist after submit");
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ),
+        "initiator should complete tx_signatures handshake without re-signing, got {:?}",
+        state.state
+    );
+
+    let funding_tx = state
+        .funding_tx
+        .clone()
+        .expect("funding tx should remain available after tx_signatures");
+    assert_eq!(
+        funding_tx
+            .witnesses()
+            .get(0)
+            .expect("first witness exists")
+            .raw_data(),
+        external_witness.raw_data(),
+        "initiator should preserve the external witness when it sends tx_signatures first"
+    );
+    assert!(
+        funding_tx.witnesses().len() >= signed_tx.witnesses().len(),
+        "initiator should keep submitted witnesses and merge peer witnesses"
+    );
+}
+
+/// Regression test for GHSA-x6rw-txsignatures-verification: a stale `TxSignatures`
+/// from the peer against an established channel must be rejected by the state guard.
+/// Exercises branch #3 of the `FiberChannelMessage::TxSignatures` handler (the
+/// `should_local_send_tx_signatures_first()` variant) by configuring the funding
+/// split so node_a's `to_local_amount` is below `to_remote_amount`.
+///
+/// Before the fix, branch #3 unconditionally installed the peer-supplied witnesses
+/// into `funding_tx`, broadcast `FundingTransactionPending`, and transitioned to
+/// `AwaitingChannelReady` regardless of the channel's actual state. With the guard
+/// in place, the message is rejected because the channel is in `ChannelReady`, not
+/// `AwaitingTxSignatures(_)`. (Branch #4, the `should_local_send_tx_signatures_first()
+/// == false` variant for non-external-funding channels, was already protected by an
+/// inner state check in `handle_tx_signatures`; branches #1 and #2 cover the
+/// external-funding fast paths and are protected by the same outer guard.)
+#[tokio::test]
+async fn test_tx_signatures_after_channel_ready_rejected() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 200_000_000_000, false).await;
+
+    let state_before = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(state_before.state, ChannelState::ChannelReady),
+        "channel should be ready before attack, got {:?}",
+        state_before.state
+    );
+    assert!(
+        state_before.to_local_amount < state_before.to_remote_amount,
+        "this regression test relies on node_a's to_local_amount being below to_remote_amount so should_local_send_tx_signatures_first() is true (branch #3 fires); got to_local={} to_remote={}",
+        state_before.to_local_amount,
+        state_before.to_remote_amount,
+    );
+    let funding_tx_bytes_before = state_before
+        .funding_tx
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+    let latest_commitment_bytes_before = state_before
+        .latest_commitment_transaction
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            node_b.pubkey,
+            FiberMessage::tx_signatures(TxSignatures {
+                channel_id,
+                witnesses: vec![vec![0u8; 65]],
+            }),
+        )))
+        .expect("network actor alive");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let state_after = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(state_after.state, ChannelState::ChannelReady),
+        "channel state must remain ChannelReady after a stale peer TxSignatures, got {:?}",
+        state_after.state
+    );
+    let funding_tx_bytes_after = state_after
+        .funding_tx
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+    assert_eq!(
+        funding_tx_bytes_after, funding_tx_bytes_before,
+        "funding_tx must not be mutated by a stale peer TxSignatures"
+    );
+    let latest_commitment_bytes_after = state_after
+        .latest_commitment_transaction
+        .as_ref()
+        .map(|tx| tx.as_slice().to_vec());
+    assert_eq!(
+        latest_commitment_bytes_after, latest_commitment_bytes_before,
+        "latest_commitment_transaction must be unchanged by a stale peer TxSignatures"
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_acceptor_restart_after_signed_submit_resumes_handshake() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    let expected_tx_hash: Hash256 = signed_tx.clone().into_view().hash().into();
+    assert_eq!(submit_result, expected_tx_hash);
+
+    let pre_restart_state =
+        wait_for_external_funding_submitted_in_flight(&node_b, channel_id).await;
+    assert!(
+        matches!(
+            pre_restart_state.state,
+            ChannelState::CollaboratingFundingTx(_)
+                | ChannelState::SigningCommitment(_)
+                | ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "acceptor should persist submitted external funding state before restart, got {:?}",
+        pre_restart_state.state
+    );
+
+    node_b.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    let state = wait_for_external_funding_post_submit_progress(&node_b, channel_id).await;
+    assert!(
+        matches!(
+            state.state,
+            ChannelState::AwaitingTxSignatures(_)
+                | ChannelState::AwaitingChannelReady(_)
+                | ChannelState::ChannelReady
+        ),
+        "acceptor should resume external funding handshake after restart, got {:?}",
+        state.state
+    );
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed after acceptor restart"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+}
+
+/// Covers acceptor restart after it has sent its external-funding
+/// CommitmentSigned. Depending on scheduler timing, the initiator's
+/// CommitmentSigned may or may not have reached the acceptor before restart.
+#[tokio::test]
+async fn test_reproduce_acceptor_restart_race_in_external_funding() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::LocalCommitmentSigned(id, _) if *id == channel_id
+            )
+        })
+        .await;
+
+    node_b.restart().await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    node_a.connect_to(&mut node_b).await;
+
+    let _state = wait_for_external_funding_post_submit_progress(&node_b, channel_id).await;
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed after acceptor restarts after local commitment signing"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_timeout_still_applies_after_restart() {
+    init_tracing();
+
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("restart-timeout-node-{}", i)))
+            .base_dir_prefix(&format!("test-restart-timeout-node-{}-", i));
+        if i == 0 {
+            builder = builder.fiber_config_updater(|config| {
+                config.external_funding_timeout_seconds = 1;
+            });
+        }
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+
+    let (channel_id, _unsigned_tx) =
+        open_external_funding_channel(&nodes[0], &nodes[1], 100_000_000_000).await;
+
+    nodes[0].restart().await;
+
+    nodes[0]
+        .expect_event(
+            move |event| matches!(event, NetworkServiceEvent::ChannelFundingAborted(id) if *id == channel_id),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn test_external_funding_state_cleared_after_terminal_path() {
+    init_tracing();
+
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![ckb_types::packed::Bytes::default()])
+        .build()
+        .data();
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    let submit_result = call!(node_a.network_actor, submit_message).expect("node_a alive");
+    assert!(
+        submit_result.is_ok(),
+        "submit signed funding tx should succeed"
+    );
+
+    assert!(
+        matches!(
+            node_a.submit_tx(signed_tx.clone().into_view()).await,
+            TxStatus::Committed(..)
+        ),
+        "funding tx should be committed"
+    );
+
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+    node_b
+        .expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id))
+        .await;
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(state.state, ChannelState::ChannelReady));
+    assert!(
+        state.external_funding.is_none(),
+        "persisted external funding state should be cleared after channel ready"
+    );
+}
+
+fn expect_invalid_parameter(result: ProcessingChannelResult, expected: &str) {
+    let err = result.expect_err("parameters must be rejected");
+    assert!(
+        err.to_string().contains(expected),
+        "expected error containing {expected:?}, got {err}"
+    );
+}
+
+fn script_with_large_args() -> Script {
+    Script::new_builder().args([0u8; 2_000].pack()).build()
+}
+
+#[test]
+fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
+    expect_invalid_parameter(
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            0,
+            0,
+            u64::MAX,
+            1,
+            DEFAULT_COMMITMENT_FEE_RATE,
+            &None,
+            &Script::default(),
+            MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
+        ),
+        "Total reserved CKB amount overflows",
+    );
+}
+
+#[test]
+fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
+    let udt_type_script = Some(script_with_large_args());
+    expect_invalid_parameter(
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            0,
+            0,
+            0,
+            u64::MAX,
+            u64::MAX,
+            &udt_type_script,
+            &Script::default(),
+            MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
+        ),
+        "overflows commitment fee",
+    );
+}
+
+#[test]
+fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
+    expect_invalid_parameter(
+        ChannelActorState::check_accept_channel_parameters_for_values(
+            u64::MAX as u128,
+            1,
+            0,
+            0,
+            DEFAULT_COMMITMENT_FEE_RATE,
+            &None,
+            &Script::default(),
+            MAX_TLC_NUMBER_IN_FLIGHT,
+            MAX_TLC_NUMBER_IN_FLIGHT,
+        ),
+        "The total funding amount",
+    );
+}
+
+#[test]
+fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
+    let udt_type_script = Some(script_with_large_args());
+    let err = check_open_channel_parameters(
+        &udt_type_script,
+        &Script::default(),
+        u64::MAX - 1_000_000_000_000,
+        DEFAULT_FEE_RATE,
+        u64::MAX,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect_err("fee-rate overflow must be rejected");
+
+    assert!(
+        err.to_string().contains("overflows commitment fee"),
+        "expected commitment fee overflow, got {err}"
+    );
+}
+
+#[test]
+fn check_open_channel_parameters_rejects_total_reserved_overflow() {
+    let err = check_open_channel_parameters(
+        &None,
+        &Script::default(),
+        u64::MAX,
+        DEFAULT_FEE_RATE,
+        DEFAULT_COMMITMENT_FEE_RATE,
+        EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
+        MAX_TLC_NUMBER_IN_FLIGHT,
+    )
+    .expect_err("reserved amount that no acceptor can add to must be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("Total reserved CKB amount overflows"),
+        "expected total reserved overflow, got {err}"
+    );
+}
+
+/// UDT collaborative funding: peer-supplied funding cell CKB capacity must match negotiated totals.
+/// Reproduces the under-funded `output[0]` case (`local_reserved + 1` shannons) vs `is_tx_final` UDT branch.
+mod udt_funding_cell_capacity_tests {
+    use super::*;
+    use crate::fiber::channel::ChannelActorState;
+    use crate::time::SystemTime;
+    use ckb_types::core::{Capacity, TransactionBuilder};
+    use ckb_types::packed::CellOutput;
+    use fiber_types::{
+        ChannelActorData, ChannelBasePublicKeys, ChannelConnectivityState, ChannelTlcInfo,
+        CollaboratingFundingTxFlags, CommitmentNumbers, InMemorySigner, TlcState,
+    };
+    use std::collections::{HashMap, VecDeque};
+
+    const LOCAL_RESERVED_SHANNONS: u64 = 6_200_000_000;
+    const REMOTE_RESERVED_SHANNONS: u64 = 6_200_000_000;
+    const LIQUID_UDT_AMOUNT: u128 = 1_000_000;
+
+    fn udt_type_script() -> Script {
+        Script::default()
+    }
+
+    fn minimal_udt_channel_state() -> ChannelActorState {
+        let seed = [7u8; 32];
+        let signer = InMemorySigner::generate_from_seed(&seed);
+        let local_funding = signer.get_base_public_keys().funding_pubkey;
+        let remote_funding = gen_rand_fiber_public_key();
+
+        ChannelActorState {
+            core: ChannelActorData {
+                state: ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty()),
+                public_channel_info: None,
+                local_tlc_info: ChannelTlcInfo::default(),
+                remote_tlc_info: None,
+                local_pubkey: gen_rand_fiber_public_key(),
+                remote_pubkey: gen_rand_fiber_public_key(),
+                id: gen_rand_sha256_hash(),
+                funding_tx: None,
+                funding_tx_confirmed_at: None,
+                funding_udt_type_script: Some(udt_type_script()),
+                is_acceptor: false,
+                is_one_way: false,
+                to_local_amount: LIQUID_UDT_AMOUNT / 2,
+                to_remote_amount: LIQUID_UDT_AMOUNT / 2,
+                local_reserved_ckb_amount: LOCAL_RESERVED_SHANNONS,
+                remote_reserved_ckb_amount: REMOTE_RESERVED_SHANNONS,
+                commitment_fee_rate: 0,
+                commitment_delay_epoch: 0,
+                funding_fee_rate: 0,
+                signer,
+                local_channel_public_keys: ChannelBasePublicKeys {
+                    funding_pubkey: local_funding,
+                    tlc_base_key: gen_rand_fiber_public_key(),
+                },
+                commitment_numbers: CommitmentNumbers::default(),
+                local_constraints: ChannelConstraints::default(),
+                remote_constraints: ChannelConstraints::default(),
+                tlc_state: TlcState::default(),
+                retryable_tlc_operations: VecDeque::new(),
+                waiting_forward_tlc_tasks: HashMap::new(),
+                remote_shutdown_script: None,
+                local_shutdown_script: Script::default(),
+                last_committed_remote_nonce: None,
+                remote_revocation_nonce_for_verify: None,
+                remote_revocation_nonce_for_send: None,
+                remote_revocation_nonce_for_next: None,
+                remote_commitment_points: vec![],
+                remote_channel_public_keys: Some(ChannelBasePublicKeys {
+                    funding_pubkey: remote_funding,
+                    tlc_base_key: gen_rand_fiber_public_key(),
+                }),
+                local_shutdown_info: None,
+                remote_shutdown_info: None,
+                shutdown_transaction_hash: None,
+                latest_commitment_transaction: None,
+                reestablishing: false,
+                connectivity_state: ChannelConnectivityState::Online,
+                last_revoke_ack_msg: None,
+                pending_replay_updates: vec![],
+                last_was_revoke: false,
+                created_at: SystemTime::now(),
+                external_funding: None,
+            },
+            waiting_peer_response: None,
+            reestablish_started_at: None,
+            network: None,
+            scheduled_channel_update_handle: None,
+            pending_notify_settle_tlcs: vec![],
+            pending_reestablish_channel_ready: false,
+            defer_peer_tlc_updates: false,
+            deferred_peer_tlc_updates: VecDeque::new(),
+            ephemeral_config: Default::default(),
+            private_key: None,
+            funding_abort_detail: None,
+            needs_backup: false,
+        }
+    }
+
+    fn funding_tx_with_capacity(state: &ChannelActorState, capacity_shannons: u64) -> Transaction {
+        let output = CellOutput::new_builder()
+            .lock(state.get_funding_lock_script())
+            .type_(Some(udt_type_script()).pack())
+            .capacity(Capacity::shannons(capacity_shannons).pack())
+            .build();
+        TransactionBuilder::default()
+            .output(output)
+            .output_data(LIQUID_UDT_AMOUNT.to_le_bytes().pack())
+            .build()
+            .data()
+    }
+
+    #[test]
+    fn test_clean_up_failed_tlcs_prunes_commitment_points() {
+        init_tracing();
+
+        let mut state = minimal_udt_channel_state();
+
+        // Set up remote_commitment_points at numbers 1, 3, 5.
+        // They will be pruned down based on remaining TLC references after cleanup.
+        state.remote_commitment_points = vec![
+            (1, gen_rand_fiber_public_key()),
+            (3, gen_rand_fiber_public_key()),
+            (5, gen_rand_fiber_public_key()),
+        ];
+
+        // Set commitment numbers so point 1 is always retained.
+        state.commitment_numbers = CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+
+        // TLC 1: confirmed and flagged for removal → clean_up_failed_tlcs will remove it.
+        // It references commitment number 3 which should be pruned after removal.
+        let tlc_to_remove = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed),
+            tlc_id: TLCId::Received(1),
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 3,
+                remote: 3,
+            },
+            removed_reason: Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: gen_rand_sha256_hash(),
+            })),
+            forwarding_tlc: None,
+            removed_confirmed_at: Some(1),
+            applied_flags: AppliedFlags::REMOVE,
+        };
+        state.tlc_state.received_tlcs.tlcs.push(tlc_to_remove);
+
+        // TLC 2: NOT confirmed, NOT flagged → NOT removed.
+        // It references commitment number 5 which should be retained.
+        let tlc_to_keep = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed),
+            tlc_id: TLCId::Received(2),
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET,
+            is_trampoline_hop: false,
+            created_at: CommitmentNumbers {
+                local: 5,
+                remote: 5,
+            },
+            removed_reason: Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: gen_rand_sha256_hash(),
+            })),
+            forwarding_tlc: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
+        };
+        state.tlc_state.received_tlcs.tlcs.push(tlc_to_keep);
+
+        assert_eq!(
+            state.remote_commitment_points.len(),
+            3,
+            "should start with 3 commitment points"
+        );
+
+        state.clean_up_failed_tlcs();
+
+        // After cleanup:
+        // - TLC 1 (refs commit 3) removed → commit point 3 should be pruned
+        // - TLC 2 (refs commit 5) still present → commit point 5 retained
+        // - Commitment numbers (1, 1) → commit point 1 retained
+        let remaining_numbers: Vec<u64> = state
+            .remote_commitment_points
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+        remaining_numbers,
+        vec![1, 5],
+        "commitment point 3 should be pruned; only 1 (commitment number) and 5 (remaining TLC) should stay"
+    );
+        assert_eq!(
+            state.tlc_state.received_tlcs.tlcs.len(),
+            1,
+            "only the non-removable TLC should remain"
+        );
+    }
+
+    /// Regression test: timeout-based Stop(AbortFunding) is blocked when
+    /// OUR_TX_SIGNATURES_SENT is set (channel can no longer be aborted on timeout).
+    /// Stop(FundingFailed) always proceeds unconditionally.
+    #[test]
+    fn test_stale_abort_stop_does_not_close_signed_channel() {
+        init_tracing();
+
+        let mut state = minimal_udt_channel_state();
+
+        // Channel is in pre-signing state — timeout abort IS allowed.
+        state.core.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+        assert!(
+            state.can_abort_funding_on_timeout(),
+            "should be abortable before signing"
+        );
+
+        // Simulate peer TxSignatures arriving — our signature is now committed.
+        // Timeout abort should be blocked even before on-chain confirmation.
+        state.core.state = ChannelState::AwaitingTxSignatures(
+            AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
+                | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT,
+        );
+        assert!(
+            !state.can_abort_funding_on_timeout(),
+            "should NOT be abortable by timeout after OUR_TX_SIGNATURES_SENT"
+        );
+
+        // Ensure the channel is not closed after stale timeout abort is skipped.
+        assert!(!state.is_closed());
+
+        // FundingFailed should always be treated as an abort regardless of state.
+        assert!(StopReason::FundingFailed.is_abort_funding());
+        assert!(!StopReason::FundingFailed.is_timeout_abort());
+    }
+
+    #[test]
+    fn funding_tx_signed_rejects_invalid_state() {
+        let mut state = minimal_udt_channel_state();
+        state.core.state = ChannelState::Closed(CloseFlags::FUNDING_ABORTED);
+
+        let result = state.apply_funding_tx_signed(Transaction::default());
+
+        assert!(result.is_err());
+        assert!(state.funding_tx.is_none());
+    }
+
+    #[test]
+    fn udt_funding_tx_is_final_when_capacity_matches_total_reserved() {
+        let state = minimal_udt_channel_state();
+        let total = LOCAL_RESERVED_SHANNONS + REMOTE_RESERVED_SHANNONS;
+        let tx = funding_tx_with_capacity(&state, total);
+        assert!(
+            state.is_tx_final(&tx).expect("tx shape"),
+            "fully funded cell should be treated as final"
+        );
+    }
+
+    /// Malicious acceptor sets `output[0].capacity` to `local_reserved + 1` shannons while UDT
+    /// amount is correct; the initiator must not treat this as a completed funding tx.
+    #[test]
+    fn udt_funding_tx_must_not_be_final_when_ckb_capacity_below_total_reserved() {
+        let state = minimal_udt_channel_state();
+        let malicious_capacity = LOCAL_RESERVED_SHANNONS + 1;
+        let tx = funding_tx_with_capacity(&state, malicious_capacity);
+        assert!(
+            !state.is_tx_final(&tx).expect("tx shape"),
+            "under-filled funding cell must not be considered final (UDT capacity bypass)"
+        );
+    }
+
+    #[test]
+    fn waiting_forward_result_excludes_received_tlc_from_expiry_sweep() {
+        let mut state = minimal_udt_channel_state();
+        state.core.state = ChannelState::ChannelReady;
+        let tlc_id = TLCId::Received(0);
+        let expired_tlc = TlcInfo {
+            status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+            tlc_id,
+            amount: 1000,
+            payment_hash: gen_rand_sha256_hash(),
+            expiry: 0,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            shared_secret: NO_SHARED_SECRET,
+            created_at: CommitmentNumbers {
+                local: 1,
+                remote: 1,
+            },
+            forwarding_tlc: None,
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: None,
+            onion_packet: None,
+            is_trampoline_hop: false,
+            removed_reason: None,
+            removed_confirmed_at: None,
+            applied_flags: AppliedFlags::empty(),
+        };
+        state.tlc_state.received_tlcs.tlcs.push(expired_tlc);
+        state
+            .waiting_forward_tlc_tasks
+            .insert(tlc_id, NO_SHARED_SECRET);
+
+        assert!(state.is_waiting_forward_result_for_received_tlc(tlc_id));
+        let expired: Vec<_> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .filter(|tlc| {
+                tlc.forwarding_tlc.is_none()
+                    && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                    && tlc.expiry < now_timestamp_as_millis_u64()
+            })
+            .collect();
+
+        assert!(expired.is_empty());
+    }
 }

@@ -25,17 +25,18 @@ impl ExitMessage {
     }
 }
 
-const ASSUME_WATCHTOWER_CLIENT_CALL_OK: &str = "watchtower client call should be ok";
-
 /// Forward a [`NetworkServiceEvent`] to a remote watchtower via its RPC client.
 ///
 /// This is the shared implementation used by both native and WASM entry points.
 /// The concrete client type differs per platform (HTTP client vs WASM client),
 /// but both implement the generated [`WatchtowerRpcClient`] trait.
+///
+/// Returns an error string if the RPC call fails, allowing the caller to log the
+/// failure without panicking and killing the event-processing task.
 pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
     event: NetworkServiceEvent,
     watchtower_client: &T,
-) {
+) -> Result<(), String> {
     match event {
         NetworkServiceEvent::RemoteTxComplete(
             _peer_id,
@@ -58,16 +59,17 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     settlement_data: settlement_data.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to create watch channel: {e}"))?;
         }
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
-        | NetworkServiceEvent::ChannelAbandon(channel_id) => {
+        | NetworkServiceEvent::ChannelAbandon(channel_id)
+        | NetworkServiceEvent::ChannelFundingAborted(channel_id) => {
             watchtower_client
                 .remove_watch_channel(RemoveWatchChannelParams {
                     channel_id: channel_id.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to remove watch channel: {e}"))?;
         }
         NetworkServiceEvent::RevokeAndAckReceived(
             _peer_id,
@@ -82,7 +84,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     settlement_data: settlement_data.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to update revocation: {e}"))?;
         }
         NetworkServiceEvent::RemoteCommitmentSigned(
             _peer_id,
@@ -96,7 +98,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     settlement_data: settlement_data.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to update local settlement: {e}"))?;
         }
         NetworkServiceEvent::LocalCommitmentSigned(channel_id, settlement_data) => {
             watchtower_client
@@ -105,7 +107,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     settlement_data: settlement_data.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to update pending remote settlement: {e}"))?;
         }
         NetworkServiceEvent::PreimageCreated(payment_hash, preimage) => {
             watchtower_client
@@ -114,7 +116,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     preimage: preimage.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to create preimage: {e}"))?;
         }
         NetworkServiceEvent::PreimageRemoved(payment_hash) => {
             watchtower_client
@@ -122,10 +124,11 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     payment_hash: payment_hash.into(),
                 })
                 .await
-                .expect(ASSUME_WATCHTOWER_CLIENT_CALL_OK);
+                .map_err(|e| format!("Failed to remove preimage: {e}"))?;
         }
         _ => {
             // ignore other non-watchtower related events
         }
     }
+    Ok(())
 }

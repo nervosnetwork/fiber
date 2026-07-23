@@ -13,7 +13,7 @@
 /// let samples = ChannelActorData::samples(42);
 /// for (i, sample) in samples.iter().enumerate() {
 ///     let bytes = bincode::serialize(sample).unwrap();
-///     std::fs::write(format!("fixtures/v0.7.0/channel_state_{}.bin", i), bytes).unwrap();
+///     std::fs::write(format!("fixtures/v0.8.0/channel_state_{}.bin", i), bytes).unwrap();
 /// }
 ///
 /// // Verify fixtures from a previous version still deserialize
@@ -108,7 +108,7 @@ pub fn deterministic_seckey(seed: u64, index: u32) -> secp256k1::SecretKey {
     let mut hash = deterministic_hash(seed, index);
     // Ensure the hash is a valid secp256k1 secret key (non-zero, less than curve order).
     // Setting the first byte to a small nonzero value practically guarantees validity.
-    hash[0] = ((hash[0] % 254) + 1) as u8;
+    hash[0] = (hash[0] % 254) + 1;
     secp256k1::SecretKey::from_slice(&hash).expect("deterministic_seckey should always be valid")
 }
 

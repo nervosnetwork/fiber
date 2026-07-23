@@ -4,11 +4,10 @@ use anyhow::anyhow;
 use ckb_jsonrpc_types::CellOutput;
 use ckb_types::{
     core::FeeRate,
-    packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
+    packed::{Byte32 as MByte32, Bytes, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
-use fiber_sphinx::SphinxError;
 use fiber_types::molecule_table_data_len;
 pub use fiber_types::{
     gen::fiber::{self as molecule_fiber, CustomRecordsOpt, PaymentPreimageOpt, PubNonceOpt},
@@ -19,13 +18,13 @@ pub use fiber_types::{
     NodeAnnouncement, OnionPacketError, PartialSignatureAsBytes, PaymentCustomRecords,
     PaymentOnionPacket, PeeledPaymentOnionPacket, Privkey, PubNonceAsBytes, Pubkey, RemoveTlc,
     RemoveTlcReason, RevokeAndAck, TlcErr, UnknownHashAlgorithmError, CURSOR_SIZE,
-    ONION_PACKET_VERSION_V1,
+    ONION_PACKET_VERSION_V1, ONION_SESSION_KEY_MAX_ATTEMPTS,
 };
 
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::{PartialSignature, PubNonce};
 use secp256k1::Verification;
-use secp256k1::{PublicKey, Secp256k1, Signing};
+use secp256k1::{Secp256k1, Signing};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::convert::TryFrom;
@@ -33,6 +32,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use thiserror::Error;
 
+pub(crate) const MAX_NUM_OF_BROADCAST_MESSAGES: u16 = 1000;
 /// Convert a `tentacle::secio::PublicKey` to a `Pubkey`.
 pub fn pubkey_from_tentacle(pk: tentacle::secio::PublicKey) -> Pubkey {
     secp256k1::PublicKey::from_slice(pk.inner_ref())
@@ -73,6 +73,32 @@ impl From<std::convert::Infallible> for Error {
     fn from(e: std::convert::Infallible) -> Self {
         match e {}
     }
+}
+
+fn check_broadcast_message_vec_len(len: usize, field: &str) -> Result<(), Error> {
+    let limit = MAX_NUM_OF_BROADCAST_MESSAGES as usize;
+    if len > limit {
+        return Err(Error::AnyHow(anyhow!(
+            "{field} length {len} exceeds gossip limit {limit}"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_payment_custom_records_size(
+    custom_records: &PaymentCustomRecords,
+) -> Result<(), String> {
+    let molecule_custom_records: molecule_fiber::CustomRecords = custom_records.clone().into();
+    let encoded_size = molecule_custom_records.as_slice().len();
+
+    if encoded_size > super::network::MAX_CUSTOM_RECORDS_SIZE {
+        return Err(format!(
+            "custom_records encoded size {encoded_size} exceeds limit {} bytes",
+            super::network::MAX_CUSTOM_RECORDS_SIZE
+        ));
+    }
+
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -124,11 +150,24 @@ pub struct OpenChannel {
 }
 
 impl OpenChannel {
-    pub fn all_ckb_amount(&self) -> u64 {
+    pub fn all_ckb_amount(&self) -> Result<u64, ProcessingChannelError> {
         if self.funding_udt_type_script.is_none() {
-            self.funding_amount as u64 + self.reserved_ckb_amount
+            let funding_amount = u64::try_from(self.funding_amount).map_err(|_| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "funding amount {} does not fit into u64",
+                    self.funding_amount
+                ))
+            })?;
+            funding_amount
+                .checked_add(self.reserved_ckb_amount)
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidParameter(format!(
+                        "total CKB amount overflows: funding {}, reserved {}",
+                        funding_amount, self.reserved_ckb_amount
+                    ))
+                })
         } else {
-            self.reserved_ckb_amount
+            Ok(self.reserved_ckb_amount)
         }
     }
 
@@ -1038,6 +1077,7 @@ pub fn broadcast_message_to_gossip(msg: &BroadcastMessage) -> GossipMessage {
 pub struct ChannelOnchainInfo {
     pub timestamp: u64,
     pub first_output: CellOutput,
+    pub first_output_data: Bytes,
 }
 
 // Augment the broadcast message with timestamp so that we can easily obtain the cursor of the message.
@@ -1307,9 +1347,13 @@ impl TryFrom<molecule_gossip::BroadcastMessagesFilterResult> for BroadcastMessag
     fn try_from(
         broadcast_messages_filter_result: molecule_gossip::BroadcastMessagesFilterResult,
     ) -> Result<Self, Self::Error> {
+        let messages = broadcast_messages_filter_result.messages();
+        check_broadcast_message_vec_len(
+            messages.len(),
+            "broadcast_messages_filter_result.messages",
+        )?;
         Ok(BroadcastMessagesFilterResult {
-            messages: broadcast_messages_filter_result
-                .messages()
+            messages: messages
                 .into_iter()
                 .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
@@ -1382,10 +1426,11 @@ impl TryFrom<molecule_gossip::GetBroadcastMessagesResult> for GetBroadcastMessag
     fn try_from(
         get_broadcast_messages_result: molecule_gossip::GetBroadcastMessagesResult,
     ) -> Result<Self, Self::Error> {
+        let messages = get_broadcast_messages_result.messages();
+        check_broadcast_message_vec_len(messages.len(), "get_broadcast_messages_result.messages")?;
         Ok(GetBroadcastMessagesResult {
             id: get_broadcast_messages_result.id().unpack(),
-            messages: get_broadcast_messages_result
-                .messages()
+            messages: messages
                 .into_iter()
                 .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
@@ -1426,11 +1471,12 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessages> for QueryBroadcastMessages
     fn try_from(
         query_broadcast_messages: molecule_gossip::QueryBroadcastMessages,
     ) -> Result<Self, Self::Error> {
+        let queries = query_broadcast_messages.queries();
+        check_broadcast_message_vec_len(queries.len(), "query_broadcast_messages.queries")?;
         Ok(QueryBroadcastMessages {
             id: query_broadcast_messages.id().unpack(),
             chain_hash: query_broadcast_messages.chain_hash().into(),
-            queries: query_broadcast_messages
-                .queries()
+            queries: queries
                 .into_iter()
                 .map(|query| query.try_into())
                 .collect::<Result<Vec<_>, Error>>()?,
@@ -1477,18 +1523,27 @@ impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMe
     fn try_from(
         query_broadcast_messages_result: molecule_gossip::QueryBroadcastMessagesResult,
     ) -> Result<Self, Self::Error> {
+        let messages = query_broadcast_messages_result.messages();
+        let missing_queries = query_broadcast_messages_result.missing_queries();
+        check_broadcast_message_vec_len(
+            messages.len(),
+            "query_broadcast_messages_result.messages",
+        )?;
+        check_broadcast_message_vec_len(
+            missing_queries.len(),
+            "query_broadcast_messages_result.missing_queries",
+        )?;
+        check_broadcast_message_vec_len(
+            messages.len().saturating_add(missing_queries.len()),
+            "query_broadcast_messages_result.total",
+        )?;
         Ok(QueryBroadcastMessagesResult {
             id: query_broadcast_messages_result.id().unpack(),
-            messages: query_broadcast_messages_result
-                .messages()
+            messages: messages
                 .into_iter()
                 .map(|message| BroadcastMessage::try_from(message).map_err(Error::from))
                 .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
-            missing_queries: query_broadcast_messages_result
-                .missing_queries()
-                .into_iter()
-                .map(u16::from)
-                .collect(),
+            missing_queries: missing_queries.into_iter().map(u16::from).collect(),
         })
     }
 }
@@ -1822,7 +1877,10 @@ impl TryFrom<molecule_fiber::TrampolineHopPayload> for TrampolineHopPayload {
                 Ok(TrampolineHopPayload::Forward {
                     next_node_id: forward.next_node_id().try_into()?,
                     amount_to_forward: forward.amount_to_forward().unpack(),
-                    hash_algorithm: forward.hash_algorithm().try_into().unwrap_or_default(),
+                    hash_algorithm: forward
+                        .hash_algorithm()
+                        .try_into()
+                        .map_err(|_| Error::OnionPacket(OnionPacketError::InvalidHopData))?,
                     build_max_fee_amount: forward.build_max_fee_amount().unpack(),
                     tlc_expiry_delta: forward.tlc_expiry_delta().unpack(),
                     tlc_expiry_limit: forward.tlc_expiry_limit().unpack(),
@@ -1859,105 +1917,9 @@ pub struct PeeledTrampolineOnionPacket {
 
 const TRAMPOLINE_PACKET_DATA_LEN: usize = 1300;
 
-trait SphinxOnionCodec {
-    type Decoded;
-    type Current;
-
-    const PACKET_DATA_LEN: usize;
-    /// The onion packet version used when creating new packets.
-    const CURRENT_VERSION: u8;
-
-    /// Packs the decoded data for transmission. Must use `CURRENT_VERSION` format.
-    fn pack(decoded: &Self::Decoded) -> Vec<u8>;
-    /// Unpacks data received from the network. Must handle all versions allowed by `is_version_allowed`.
-    fn unpack(version: u8, buf: &[u8]) -> Option<Self::Decoded>;
-    fn to_current(decoded: Self::Decoded) -> Self::Current;
-    /// Returns true if the given version is allowed for this codec.
-    fn is_version_allowed(version: u8) -> bool;
-    /// Returns the total length of hop data (including any headers) for the specified version.
-    fn hop_data_len(version: u8, buf: &[u8]) -> Option<usize>;
-}
-
-struct SphinxPeeled<Current> {
-    current: Current,
-    shared_secret: [u8; 32],
-    next: Option<Vec<u8>>,
-}
-
-fn peel_sphinx_onion<C: Verification, Codec: SphinxOnionCodec>(
-    packet_bytes: Vec<u8>,
-    peeler: &Privkey,
-    assoc_data: Option<&[u8]>,
-    secp_ctx: &Secp256k1<C>,
-) -> Result<SphinxPeeled<Codec::Current>, Error> {
-    let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(packet_bytes)
-        .map_err(|err| Error::OnionPacket(err.into()))?;
-    let version = sphinx_packet.version;
-    if !Codec::is_version_allowed(version) {
-        return Err(Error::OnionPacket(OnionPacketError::UnknownVersion(
-            version,
-        )));
-    }
-    let shared_secret = sphinx_packet.shared_secret(&peeler.0);
-
-    let (new_current, new_next) = sphinx_packet
-        .peel(&peeler.0, assoc_data, secp_ctx, |buf| {
-            Codec::hop_data_len(version, buf)
-        })
-        .map_err(|err| Error::OnionPacket(err.into()))?;
-
-    let decoded = Codec::unpack(version, &new_current)
-        .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-    let current = Codec::to_current(decoded);
-
-    // All zeros hmac indicates the last hop.
-    let next = new_next
-        .hmac
-        .iter()
-        .any(|b| *b != 0)
-        .then(|| new_next.into_bytes());
-
-    Ok(SphinxPeeled {
-        current,
-        shared_secret,
-        next,
-    })
-}
-
-fn create_sphinx_onion<C: Signing, Codec: SphinxOnionCodec>(
-    session_key: Privkey,
-    hops_path: Vec<Pubkey>,
-    payloads: Vec<Codec::Decoded>,
-    assoc_data: Option<Vec<u8>>,
-    secp_ctx: &Secp256k1<C>,
-) -> Result<Vec<u8>, Error> {
-    if hops_path.is_empty() {
-        return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
-    }
-    if hops_path.len() != payloads.len() {
-        return Err(Error::OnionPacket(OnionPacketError::InvalidHopData));
-    }
-
-    let hops_path: Vec<PublicKey> = hops_path.into_iter().map(Into::into).collect();
-    let hops_data = payloads.iter().map(Codec::pack).collect();
-
-    let mut sphinx_packet = fiber_sphinx::OnionPacket::create(
-        session_key.into(),
-        hops_path,
-        hops_data,
-        assoc_data,
-        Codec::PACKET_DATA_LEN,
-        secp_ctx,
-    )
-    .map_err(|err| Error::OnionPacket(err.into()))?;
-    // Set the version to indicate which hop data format is used
-    sphinx_packet.version = Codec::CURRENT_VERSION;
-    Ok(sphinx_packet.into_bytes())
-}
-
 struct TrampolineSphinxCodec;
 
-impl SphinxOnionCodec for TrampolineSphinxCodec {
+impl fiber_types::onion::SphinxOnionCodec for TrampolineSphinxCodec {
     type Decoded = TrampolineHopPayload;
     type Current = TrampolineHopPayload;
 
@@ -2011,9 +1973,12 @@ impl TrampolineOnionPacket {
         self.data
     }
 
-    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
-        fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, OnionPacketError> {
+        fiber_sphinx::OnionPacket::from_bytes_with_packet_data_len(
+            self.data,
+            TRAMPOLINE_PACKET_DATA_LEN,
+        )
+        .map_err(OnionPacketError::Sphinx)
     }
 
     pub fn peel<C: Verification>(
@@ -2021,9 +1986,10 @@ impl TrampolineOnionPacket {
         peeler: &Privkey,
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
-    ) -> Result<PeeledTrampolineOnionPacket, Error> {
-        let peeled =
-            peel_sphinx_onion::<C, TrampolineSphinxCodec>(self.data, peeler, assoc_data, secp_ctx)?;
+    ) -> Result<PeeledTrampolineOnionPacket, OnionPacketError> {
+        let peeled = fiber_types::onion::peel_sphinx_onion::<C, TrampolineSphinxCodec>(
+            self.data, peeler, assoc_data, secp_ctx,
+        )?;
         Ok(PeeledTrampolineOnionPacket {
             current: peeled.current,
             next: peeled.next.map(TrampolineOnionPacket::new),
@@ -2040,17 +2006,41 @@ impl TrampolineOnionPacket {
         payloads: Vec<TrampolineHopPayload>,
         assoc_data: Option<Vec<u8>>,
         secp_ctx: &Secp256k1<C>,
-    ) -> Result<Self, Error> {
-        Ok(TrampolineOnionPacket::new(create_sphinx_onion::<
-            C,
-            TrampolineSphinxCodec,
-        >(
+    ) -> Result<Self, OnionPacketError> {
+        let bytes = fiber_types::onion::create_sphinx_onion::<C, TrampolineSphinxCodec>(
             session_key,
             hops_path,
             payloads,
             assoc_data,
             secp_ctx,
-        )?))
+        )?;
+        Ok(TrampolineOnionPacket::new(bytes))
+    }
+
+    /// Like [`Self::create`], but obtains the session key from `gen_session_key`.
+    ///
+    /// Retries on the cryptographically improbable
+    /// [`fiber_sphinx::SphinxError::InvalidBlindingFactor`] event up to
+    /// [`ONION_SESSION_KEY_MAX_ATTEMPTS`] times. Returns the chosen session key
+    /// alongside the packet on success.
+    pub fn create_with_session_key_fn<C, F>(
+        gen_session_key: F,
+        hops_path: Vec<Pubkey>,
+        payloads: Vec<TrampolineHopPayload>,
+        assoc_data: Option<Vec<u8>>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<(Self, Privkey), OnionPacketError>
+    where
+        C: Signing,
+        F: FnMut() -> Privkey,
+    {
+        let (bytes, session_key) =
+            fiber_types::onion::create_sphinx_onion_with_session_key_fn::<
+                C,
+                TrampolineSphinxCodec,
+                _,
+            >(gen_session_key, hops_path, payloads, assoc_data, secp_ctx)?;
+        Ok((TrampolineOnionPacket::new(bytes), session_key))
     }
 }
 

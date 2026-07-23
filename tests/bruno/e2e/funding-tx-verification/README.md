@@ -12,3 +12,5 @@ export REMOVE_OLD_STATE=y
 
 ./tests/nodes/start.sh e2e/funding-tx-verification
 ```
+
+Available cases: `remove_change`, `modify_change`, `fund_from_peer`, `missing_inputs`.

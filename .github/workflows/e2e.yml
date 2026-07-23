@@ -22,6 +22,7 @@ jobs:
           - reestablish
           - cross-chain-hub
           - cross-chain-hub-separate
+          - hold-invoice-cancel-failure
           - router-pay
           - udt-router-pay
           - watchtower/force-close
@@ -67,6 +68,10 @@ jobs:
             test_env: "test"
             release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=fund_from_peer"
+          - workflow: "funding-tx-verification"
+            test_env: "test"
+            release: "0.202.0"
+            extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=missing_inputs"
 
     runs-on: ubuntu-latest
     steps:
@@ -124,4 +129,3 @@ jobs:
         with:
           name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
-

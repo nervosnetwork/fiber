@@ -174,7 +174,7 @@ where
             .target_pubkey
             .map(fiber_types::Pubkey::try_from)
             .transpose()
-            .rpc_err(&params)?;
+            .rpc_err()?;
         let payment_hash = params.payment_hash.map(fiber_types::Hash256::from);
         let trampoline_hops = params
             .trampoline_hops
@@ -186,7 +186,7 @@ where
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()
-            .rpc_err(&params)?;
+            .rpc_err()?;
         let custom_records = params
             .custom_records
             .clone()
@@ -202,7 +202,7 @@ where
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()
-            .rpc_err(&params)?;
+            .rpc_err()?;
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -254,7 +254,7 @@ where
             .cloned()
             .map(fiber_types::HopRequire::try_from)
             .collect::<Result<Vec<_>, _>>()
-            .rpc_err(&params)?;
+            .rpc_err()?;
 
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
@@ -288,7 +288,7 @@ where
             .cloned()
             .map(fiber_types::RouterHop::try_from)
             .collect::<Result<Vec<_>, _>>()
-            .rpc_err(&params)?;
+            .rpc_err()?;
         let custom_records = params
             .custom_records
             .clone()
@@ -316,8 +316,12 @@ where
         &self,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        const MAX_LIST_PAYMENTS_LIMIT: u64 = 500;
         let default_limit: u64 = 15;
-        let limit = params.limit.unwrap_or(default_limit) as usize;
+        let limit = std::cmp::min(
+            params.limit.unwrap_or(default_limit),
+            MAX_LIST_PAYMENTS_LIMIT,
+        ) as usize;
 
         let after = params.after.map(fiber_types::Hash256::from);
         let status = params.status.map(fiber_types::PaymentStatus::from);

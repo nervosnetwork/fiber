@@ -273,7 +273,8 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: MockCkbChainClient,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
-    pub gossip_actor: Option<ActorRef<GossipActorMessage>>,
+    #[allow(dead_code)]
+    pub(crate) gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
@@ -805,7 +806,7 @@ impl NetworkNode {
             .amount(Some(amount))
             .payment_preimage(preimage)
             .payee_pub_key(self.get_public_key().into())
-            .build()
+            .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &self.private_key.0))
             .expect("build invoice")
     }
 
@@ -915,7 +916,9 @@ impl NetworkNode {
             .payee_pub_key(target_pubkey.into())
             .allow_mpp(true)
             .payment_secret(gen_rand_sha256_hash())
-            .build()
+            .build_with_sign(|hash| {
+                SECP256K1.sign_ecdsa_recoverable(hash, &target_node.private_key.0)
+            })
             .expect("build invoice success");
 
         target_node.insert_invoice(ckb_invoice.clone(), Some(preimage));
@@ -1576,6 +1579,7 @@ impl NetworkNode {
                 event_sender,
                 chain_actor.clone(),
                 store.clone(),
+                None,
                 network_graph.clone(),
                 chain_client.clone(),
             ),
@@ -1658,6 +1662,7 @@ impl NetworkNode {
                     Some(network_actor.clone()),
                     None,
                     store.clone(),
+                    None,
                     Some(network_graph.clone()),
                     root.get_cell(),
                     None,
@@ -1862,11 +1867,20 @@ impl NetworkNode {
             other.listening_addrs, &self.listening_addrs
         );
 
-        self.network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(peer_addr.clone(), false, None),
+        let result = call!(self.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+                peer_addr.clone(),
+                false,
+                crate::fiber::network::PeerConnectSource::Manual,
+                Some(rpc_reply),
             ))
-            .expect("self alive");
+        })
+        .expect("self alive");
+        assert!(
+            result.is_ok(),
+            "connect peer should be accepted: {:?}",
+            result
+        );
     }
 
     pub async fn connect_to(&mut self, other: &mut Self) {
@@ -2020,7 +2034,8 @@ impl NetworkNode {
         .await
     }
 
-    pub fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
+    #[allow(dead_code)]
+    pub(crate) fn send_message_to_gossip_actor(&self, message: GossipActorMessage) {
         self.gossip_actor
             .as_ref()
             .expect("gossip actor should have been started")
@@ -2028,7 +2043,12 @@ impl NetworkNode {
             .expect("send message to gossip actor");
     }
 
-    pub fn mock_received_gossip_message_from_peer(&self, pubkey: Pubkey, message: GossipMessage) {
+    #[allow(dead_code)]
+    pub(crate) fn mock_received_gossip_message_from_peer(
+        &self,
+        pubkey: Pubkey,
+        message: GossipMessage,
+    ) {
         self.send_message_to_gossip_actor(GossipActorMessage::GossipMessageReceived(
             GossipMessageWithTarget {
                 target: pubkey,
@@ -2039,6 +2059,11 @@ impl NetworkNode {
 
     pub fn get_store(&self) -> &Store {
         &self.store
+    }
+
+    #[cfg(test)]
+    pub fn get_actor(&self) -> ActorRef<NetworkActorMessage> {
+        self.network_actor.clone()
     }
 }
 
@@ -2101,7 +2126,15 @@ where
 {
     let start = tokio::time::Instant::now();
     let interval = Duration::from_millis(200);
-    let max_wait_time = Duration::from_secs(10);
+    let max_wait_time = if let Some(timeout_secs) = env::var(EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+    {
+        Duration::from_secs(timeout_secs)
+    } else {
+        Duration::from_secs(10)
+    };
     loop {
         if f().await {
             return;
@@ -2109,8 +2142,8 @@ where
         tokio::time::sleep(interval).await;
         if start.elapsed() > max_wait_time {
             panic!(
-                "Wait timeout after {:?} (interval {:?})",
-                max_wait_time, interval
+                "Wait timeout after {:?} (interval {:?}). You can adjust it with {}",
+                max_wait_time, interval, EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV
             );
         }
     }

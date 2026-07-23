@@ -29,6 +29,7 @@ impl ChannelActorState {
         ChannelActorState {
             core,
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -36,7 +37,9 @@ impl ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         }
     }
 
@@ -51,6 +54,7 @@ impl ChannelActorState {
         ChannelActorState {
             core,
             waiting_peer_response: None,
+            reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -58,7 +62,9 @@ impl ChannelActorState {
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
             ephemeral_config: Default::default(),
+            funding_abort_detail: None,
             private_key: None,
+            needs_backup: false,
         }
     }
 }

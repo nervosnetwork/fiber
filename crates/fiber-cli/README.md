@@ -72,7 +72,7 @@ $ fnn-cli -u http://54.178.252.1:8227
  | |    _| || |_\| |____| | \ \
  |_|   |___|____/|______|_|  \_\
 
-[  fnn-cli version ]: 0.8.1
+[  fnn-cli version ]: 0.9.0-rc7
 [              url ]: http://54.178.252.1:8227
 [    output format ]: yaml
 [           status ]: Connected
@@ -84,7 +84,7 @@ FNN> exit
 
 Features:
 - **Tab completion** for commands, subcommands, and `--flags`
-- **Command history** persisted to `~/.fnn_cli_history`
+- **Command history** persisted to `~/.fnn_cli_history`; secret-like option values are redacted before saving
 - **Colored output** with syntax highlighting for JSON/YAML responses
 - **Shell-like quoting** — supports single quotes, double quotes, and backslash escaping
 
