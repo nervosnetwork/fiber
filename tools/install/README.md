@@ -19,6 +19,14 @@ curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/inst
 If you omit the network argument in guided mode, `install.sh` defaults to `mainnet`.
 When it runs via `curl | bash`, the same script uses bootstrap mode and defaults to `testnet`.
 
+Mainnet installations do not select a public CKB RPC endpoint automatically.
+The guided installer requires you to enter a trusted endpoint. For a
+non-interactive mainnet installation, set it explicitly:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash
+```
+
 ### Windows
 
 ```powershell

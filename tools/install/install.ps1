@@ -31,7 +31,6 @@ $FNN_VERSION = if ($env:FNN_VERSION) { $env:FNN_VERSION } else { "0.8.0" }
 $CKB_CLI_VERSION = if ($env:CKB_CLI_VERSION) { $env:CKB_CLI_VERSION } else { "1.12.0" }
 $GITHUB_RELEASE_URL = "https://github.com/nervosnetwork/fiber/releases/download/v$FNN_VERSION"
 $CKB_CLI_RELEASE_URL = "https://github.com/nervosnetwork/ckb-cli/releases/download/v$CKB_CLI_VERSION"
-$DEFAULT_MAINNET_CKB_RPC_URL = "https://mainnet.ckb.dev/"
 $NETWORK_MARKER_FILE_NAME = ".fiber-network"
 $MAINNET_GENESIS_HASH = "0x92b197aa1fba0f63633922c61c92375c9c074a93e85963554f5499fe1450d0e5"
 $TESTNET_GENESIS_HASH = "0x10639e0895502b5688a6be8cf69460d76541bfa4821629d86d62ba0aae3f9606"
@@ -750,10 +749,6 @@ function Apply-NetworkConfigDefaults {
     $configPath = Join-Path $InstallDir "config.yml"
     $rpcUrlOverride = $env:CKB_RPC_URL
 
-    if (-not $rpcUrlOverride -and $Network -eq "mainnet") {
-        $rpcUrlOverride = $DEFAULT_MAINNET_CKB_RPC_URL
-    }
-
     if ($rpcUrlOverride) {
         if (-not (Set-ConfigValueInSection -ConfigPath $configPath -SectionName "ckb" -KeyName "rpc_url" -KeyValue $rpcUrlOverride)) {
             Write-FnnError "Failed to update ckb.rpc_url in $configPath"
@@ -776,15 +771,23 @@ function Configure-CkbRpcUrl {
         return
     }
 
-    $currentRpcUrl = Get-CkbRpcUrlFromConfig
+    if (-not (Test-InteractiveStdin)) {
+        Write-FnnError "Mainnet installs require an explicitly configured CKB RPC endpoint."
+        Write-Host "  Set CKB_RPC_URL to a trusted mainnet CKB RPC URL and run the installer again."
+        exit 1
+    }
+
     Write-Host ""
     Write-FnnWarning "Mainnet requires a reachable CKB RPC endpoint."
-    Write-Host "  Press Enter to use the default public RPC, or provide your own trusted endpoint."
-    Write-Host "  Current ckb.rpc_url: $currentRpcUrl"
-    $desiredRpcUrl = Read-Host "Enter the CKB RPC URL to use (press Enter to keep the current value)"
-    if ([string]::IsNullOrWhiteSpace($desiredRpcUrl)) {
-        $desiredRpcUrl = $currentRpcUrl
-    }
+    Write-Host "  No public RPC endpoint is selected automatically."
+    do {
+        $desiredRpcUrl = Read-Host "Enter a trusted mainnet CKB RPC URL"
+        if ([string]::IsNullOrWhiteSpace($desiredRpcUrl)) {
+            Write-FnnWarning "The CKB RPC URL cannot be empty."
+        }
+    } while ([string]::IsNullOrWhiteSpace($desiredRpcUrl))
+
+    $desiredRpcUrl = $desiredRpcUrl.Trim()
 
     if (-not (Set-ConfigValueInSection -ConfigPath (Join-Path $InstallDir "config.yml") -SectionName "ckb" -KeyName "rpc_url" -KeyValue $desiredRpcUrl)) {
         Write-FnnError "Failed to update ckb.rpc_url in $InstallDir\config.yml"

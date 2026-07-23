@@ -11,7 +11,6 @@ INSTALL_REF_DEFAULT="main"
 INSTALL_URL_DEFAULT=""
 FNN_VERSION_DEFAULT="0.8.0"
 CKB_CLI_VERSION_DEFAULT="1.12.0"
-DEFAULT_MAINNET_CKB_RPC_URL="https://mainnet.ckb.dev/"
 NETWORK_MARKER_FILE_NAME=".fiber-network"
 
 setup_install_colors() {
@@ -530,13 +529,8 @@ write_install_network_marker() {
 
 apply_network_config_defaults() {
     local install_dir="$1"
-    local network="$2"
     local config_file="$install_dir/config.yml"
     local rpc_url_override="${CKB_RPC_URL:-}"
-
-    if [ "$network" = "mainnet" ] && [ -z "$rpc_url_override" ]; then
-        rpc_url_override="$DEFAULT_MAINNET_CKB_RPC_URL"
-    fi
 
     if [ -n "$rpc_url_override" ]; then
         update_config_value_or_exit "$config_file" "ckb" "rpc_url" "$rpc_url_override"
@@ -738,7 +732,7 @@ download_config_file() {
     fi
 
     cp "$bundled_config" "$install_dir/config.yml"
-    apply_network_config_defaults "$install_dir" "$network"
+    apply_network_config_defaults "$install_dir"
     write_install_network_marker "$install_dir" "$network"
 
     if [ "$missing_templates" -eq 1 ]; then
@@ -832,6 +826,7 @@ Behavior:
   - Guided mode reuses an existing installed bundle by default and backs up non-empty install directories.
   - Guided mode defaults to mainnet when no network is provided.
   - Bootstrap mode matches the one-liner installer behavior and defaults to ~/.fiber on testnet.
+  - Non-interactive mainnet installs require CKB_RPC_URL to be set explicitly.
   - Mainnet guided installs ask whether this should be a public Fiber node.
 EOF
 }
@@ -1016,11 +1011,7 @@ get_ckb_rpc_url_from_config() {
 }
 
 configure_ckb_rpc_url() {
-    local current_rpc_url
-    local desired_rpc_url
-
-    current_rpc_url="$(get_ckb_rpc_url_from_config)"
-    desired_rpc_url="${CKB_RPC_URL:-$current_rpc_url}"
+    local desired_rpc_url=""
 
     if [ -n "${CKB_RPC_URL:-}" ]; then
         update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$CKB_RPC_URL"
@@ -1028,16 +1019,29 @@ configure_ckb_rpc_url() {
         return
     fi
 
-    if [ "$NETWORK" != "mainnet" ] || ! is_interactive_stdin; then
+    if [ "$NETWORK" != "mainnet" ]; then
         return
+    fi
+
+    if ! is_interactive_stdin; then
+        print_error "Mainnet installs require an explicitly configured CKB RPC endpoint."
+        echo "  Set CKB_RPC_URL to a trusted mainnet CKB RPC URL and run the installer again."
+        exit 1
     fi
 
     echo ""
     print_warning "Mainnet requires a reachable CKB RPC endpoint."
-    echo "  Press Enter to use the default public RPC, or provide your own trusted endpoint."
-    echo "  Current ckb.rpc_url: $current_rpc_url"
-    read -p "Enter the CKB RPC URL to use (press Enter to keep the current value): " desired_rpc_url
-    desired_rpc_url="${desired_rpc_url:-$current_rpc_url}"
+    echo "  No public RPC endpoint is selected automatically."
+    while [ -z "$desired_rpc_url" ]; do
+        if ! read -r -p "Enter a trusted mainnet CKB RPC URL: " desired_rpc_url; then
+            print_error "Could not read the CKB RPC URL."
+            exit 1
+        fi
+        desired_rpc_url="$(printf '%s' "$desired_rpc_url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -z "$desired_rpc_url" ]; then
+            print_warning "The CKB RPC URL cannot be empty."
+        fi
+    done
 
     update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$desired_rpc_url"
     print_success "Configured CKB RPC URL: $desired_rpc_url"

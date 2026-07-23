@@ -35,9 +35,13 @@ TODO
 # Install to default location (~/.fiber)
 curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | bash
 
-# Install to custom location and versions
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber FNN_VERSION=0.8.0 NETWORK=mainnet bash
+# Install mainnet non-interactively with a trusted CKB RPC endpoint
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber FNN_VERSION=0.8.0 NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash
 ```
+
+Mainnet installations do not select a public CKB RPC endpoint automatically.
+The guided installer prompts for one; non-interactive installations require
+`CKB_RPC_URL` to be set explicitly.
 
 ## Build from source and run a testnet node
 
