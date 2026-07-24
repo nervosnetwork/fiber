@@ -36,6 +36,7 @@ $MAINNET_GENESIS_HASH = "0x92b197aa1fba0f63633922c61c92375c9c074a93e85963554f549
 $TESTNET_GENESIS_HASH = "0x10639e0895502b5688a6be8cf69460d76541bfa4821629d86d62ba0aae3f9606"
 $PUBLIC_NODE_ANNOUNCED_ADDR_PLACEHOLDER = "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228"
 $PUBLIC_NODE_NAME_PLACEHOLDER = "my-fiber-node"
+$CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS = if ($env:CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS) { [int]$env:CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS } else { 30 }
 $script:StartupBlockerMessage = $null
 
 # Global variable for ckb-cli command
@@ -767,6 +768,11 @@ function Configure-CkbRpcUrl {
     }
 
     if ($env:CKB_RPC_URL) {
+        $rpcPreflight = Check-CkbRpcPreflight
+        if (-not $rpcPreflight.Ok) {
+            Write-FnnError $rpcPreflight.Message
+            exit 1
+        }
         Write-Success "Configured CKB RPC URL: $env:CKB_RPC_URL"
         return
     }
@@ -780,21 +786,29 @@ function Configure-CkbRpcUrl {
     Write-Host ""
     Write-FnnWarning "Mainnet requires a reachable CKB RPC endpoint."
     Write-Host "  No public RPC endpoint is selected automatically."
-    do {
+    while ($true) {
         $desiredRpcUrl = Read-Host "Enter a trusted mainnet CKB RPC URL"
         if ([string]::IsNullOrWhiteSpace($desiredRpcUrl)) {
             Write-FnnWarning "The CKB RPC URL cannot be empty."
+            continue
         }
-    } while ([string]::IsNullOrWhiteSpace($desiredRpcUrl))
 
-    $desiredRpcUrl = $desiredRpcUrl.Trim()
+        $desiredRpcUrl = $desiredRpcUrl.Trim()
 
-    if (-not (Set-ConfigValueInSection -ConfigPath (Join-Path $InstallDir "config.yml") -SectionName "ckb" -KeyName "rpc_url" -KeyValue $desiredRpcUrl)) {
-        Write-FnnError "Failed to update ckb.rpc_url in $InstallDir\config.yml"
-        exit 1
+        if (-not (Set-ConfigValueInSection -ConfigPath (Join-Path $InstallDir "config.yml") -SectionName "ckb" -KeyName "rpc_url" -KeyValue $desiredRpcUrl)) {
+            Write-FnnError "Failed to update ckb.rpc_url in $InstallDir\config.yml"
+            exit 1
+        }
+
+        $rpcPreflight = Check-CkbRpcPreflight
+        if ($rpcPreflight.Ok) {
+            Write-Success "Configured CKB RPC URL: $desiredRpcUrl"
+            return
+        }
+
+        Write-FnnWarning $rpcPreflight.Message
+        Write-Host "  Please enter a reachable $Network CKB RPC URL."
     }
-
-    Write-Success "Configured CKB RPC URL: $desiredRpcUrl"
 }
 
 function Configure-MainnetPublicNode {
@@ -902,7 +916,7 @@ function Check-CkbRpcPreflight {
     }
 
     try {
-        $response = Invoke-RestMethod -Uri $rpcUrl -Method Post -ContentType "application/json" -Body '{"id":2,"jsonrpc":"2.0","method":"get_block_hash","params":["0x0"]}' -ErrorAction Stop
+        $response = Invoke-RestMethod -Uri $rpcUrl -Method Post -ContentType "application/json" -Body '{"id":2,"jsonrpc":"2.0","method":"get_block_hash","params":["0x0"]}' -TimeoutSec $CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS -ErrorAction Stop
     }
     catch {
         return [pscustomobject]@{

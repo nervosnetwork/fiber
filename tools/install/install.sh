@@ -12,6 +12,7 @@ INSTALL_URL_DEFAULT=""
 FNN_VERSION_DEFAULT="0.8.0"
 CKB_CLI_VERSION_DEFAULT="1.12.0"
 NETWORK_MARKER_FILE_NAME=".fiber-network"
+CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS_DEFAULT="30"
 
 setup_install_colors() {
     RED="$(printf '\033[0;31m')"
@@ -109,6 +110,7 @@ init_install_defaults() {
     INSTALL_URL="${INSTALL_URL:-$INSTALL_URL_DEFAULT}"
     FNN_VERSION="${FNN_VERSION:-$FNN_VERSION_DEFAULT}"
     CKB_CLI_VERSION="${CKB_CLI_VERSION:-$CKB_CLI_VERSION_DEFAULT}"
+    CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS="${CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS:-$CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS_DEFAULT}"
     GITHUB_RELEASE_URL="https://github.com/nervosnetwork/fiber/releases/download/v${FNN_VERSION}"
     CKB_CLI_RELEASE_URL="https://github.com/nervosnetwork/ckb-cli/releases/download/v${CKB_CLI_VERSION}"
 }
@@ -826,7 +828,7 @@ Behavior:
   - Guided mode reuses an existing installed bundle by default and backs up non-empty install directories.
   - Guided mode defaults to mainnet when no network is provided.
   - Bootstrap mode matches the one-liner installer behavior and defaults to ~/.fiber on testnet.
-  - Non-interactive mainnet installs require CKB_RPC_URL to be set explicitly.
+  - Bootstrap or non-interactive mainnet installs require CKB_RPC_URL to be set explicitly.
   - Mainnet guided installs ask whether this should be a public Fiber node.
 EOF
 }
@@ -1015,6 +1017,10 @@ configure_ckb_rpc_url() {
 
     if [ -n "${CKB_RPC_URL:-}" ]; then
         update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$CKB_RPC_URL"
+        if [ "$NETWORK" = "mainnet" ] && ! check_ckb_rpc_preflight; then
+            print_error "$STARTUP_BLOCKER_MESSAGE"
+            exit 1
+        fi
         print_success "Configured CKB RPC URL: $CKB_RPC_URL"
         return
     fi
@@ -1023,7 +1029,7 @@ configure_ckb_rpc_url() {
         return
     fi
 
-    if ! is_interactive_stdin; then
+    if [ "$INSTALL_MODE" = "bootstrap" ] || ! is_interactive_stdin; then
         print_error "Mainnet installs require an explicitly configured CKB RPC endpoint."
         echo "  Set CKB_RPC_URL to a trusted mainnet CKB RPC URL and run the installer again."
         exit 1
@@ -1032,7 +1038,7 @@ configure_ckb_rpc_url() {
     echo ""
     print_warning "Mainnet requires a reachable CKB RPC endpoint."
     echo "  No public RPC endpoint is selected automatically."
-    while [ -z "$desired_rpc_url" ]; do
+    while true; do
         if ! read -r -p "Enter a trusted mainnet CKB RPC URL: " desired_rpc_url; then
             print_error "Could not read the CKB RPC URL."
             exit 1
@@ -1040,10 +1046,18 @@ configure_ckb_rpc_url() {
         desired_rpc_url="$(printf '%s' "$desired_rpc_url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
         if [ -z "$desired_rpc_url" ]; then
             print_warning "The CKB RPC URL cannot be empty."
+            continue
         fi
+
+        update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$desired_rpc_url"
+        if check_ckb_rpc_preflight; then
+            break
+        fi
+        print_warning "$STARTUP_BLOCKER_MESSAGE"
+        echo "  Please enter a reachable $NETWORK CKB RPC URL."
+        desired_rpc_url=""
     done
 
-    update_config_value_or_exit "$INSTALL_DIR/config.yml" "ckb" "rpc_url" "$desired_rpc_url"
     print_success "Configured CKB RPC URL: $desired_rpc_url"
 }
 
@@ -1124,11 +1138,15 @@ rpc_post() {
 
     if check_command curl; then
         curl -fsSL \
+            --connect-timeout "$CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS" \
+            --max-time "$CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS" \
             -H "Content-Type: application/json" \
             -d "$payload" \
             "$rpc_url" 2> /dev/null
     else
         wget -qO- \
+            --timeout="$CKB_RPC_PREFLIGHT_TIMEOUT_SECONDS" \
+            --tries=1 \
             --header="Content-Type: application/json" \
             --post-data="$payload" \
             "$rpc_url" 2> /dev/null
@@ -1670,6 +1688,11 @@ run_bootstrap_install() {
 
     validate_network "$NETWORK"
     ensure_install_dir_matches_network "$INSTALL_DIR" "$NETWORK"
+    if [ "$NETWORK" = "mainnet" ] && [ -z "${CKB_RPC_URL:-}" ]; then
+        print_error "Mainnet bootstrap installs require an explicitly configured CKB RPC endpoint."
+        echo "  Set CKB_RPC_URL to a trusted mainnet CKB RPC URL and run the installer again."
+        exit 1
+    fi
     ensure_download_tool
 
     mkdir -p "$INSTALL_DIR"
@@ -1678,6 +1701,7 @@ run_bootstrap_install() {
 
     install_fnn_binary "$INSTALL_DIR"
     download_config_file "$INSTALL_DIR" "$NETWORK"
+    configure_ckb_rpc_url
     install_unix_installer_script
 
     mkdir -p "$INSTALL_DIR/fiber"

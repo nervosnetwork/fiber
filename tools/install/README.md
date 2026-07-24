@@ -21,7 +21,7 @@ When it runs via `curl | bash`, the same script uses bootstrap mode and defaults
 
 Mainnet installations do not select a public CKB RPC endpoint automatically.
 The guided installer requires you to enter a trusted endpoint. For a
-non-interactive mainnet installation, set it explicitly:
+bootstrap or non-interactive mainnet installation, set it explicitly:
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash

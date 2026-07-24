@@ -40,7 +40,7 @@ curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/inst
 ```
 
 Mainnet installations do not select a public CKB RPC endpoint automatically.
-The guided installer prompts for one; non-interactive installations require
+The guided installer prompts for one; bootstrap or non-interactive installations require
 `CKB_RPC_URL` to be set explicitly.
 
 ## Build from source and run a testnet node
