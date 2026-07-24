@@ -9643,16 +9643,17 @@ impl ChannelActorState {
     pub(crate) fn owns_payment_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> bool {
         let attempt_id = Some(attempt_id);
 
-        self.tlc_state
-            .all_tlcs()
-            .any(|tlc| tlc.payment_hash == payment_hash && tlc.attempt_id == attempt_id)
-            || self.retryable_tlc_operations.iter().any(|operation| {
-                matches!(
-                    operation,
-                    RetryableTlcOperation::AddTlc(command)
-                        if command.payment_hash == payment_hash && command.attempt_id == attempt_id
-                )
-            })
+        self.tlc_state.all_tlcs().any(|tlc| {
+            !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                && tlc.payment_hash == payment_hash
+                && tlc.attempt_id == attempt_id
+        }) || self.retryable_tlc_operations.iter().any(|operation| {
+            matches!(
+                operation,
+                RetryableTlcOperation::AddTlc(command)
+                    if command.payment_hash == payment_hash && command.attempt_id == attempt_id
+            )
+        })
     }
 
     /// Perform the next step in shutting down the channel.

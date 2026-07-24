@@ -1116,6 +1116,25 @@ fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
         "created attempts already owned by channel TLCs should not be woken"
     );
 
+    let terminal_tlc = channel_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .first_mut()
+        .expect("offered TLC exists");
+    terminal_tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
+    terminal_tlc.applied_flags |= AppliedFlags::REMOVE;
+    terminal_tlc.removed_confirmed_at = Some(1);
+    store.insert_channel_actor_state(channel_state.clone());
+    let orphan_created_attempts =
+        store.get_pending_attempts_by_channel_outpoint(&first_hop_outpoint);
+    assert_eq!(
+        orphan_created_attempts.len(),
+        1,
+        "created attempts with terminal channel TLCs should be woken"
+    );
+    assert_eq!(orphan_created_attempts[0].id, attempt.id);
+
     channel_state.tlc_state = Default::default();
     channel_state
         .retryable_tlc_operations
