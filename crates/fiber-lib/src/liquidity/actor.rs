@@ -832,7 +832,9 @@ where
                 .is_some_and(|record| {
                     matches!(
                         record.status,
-                        LiquidityChainTxStatus::Broadcast | LiquidityChainTxStatus::Confirmed
+                        LiquidityChainTxStatus::Planned
+                            | LiquidityChainTxStatus::Broadcast
+                            | LiquidityChainTxStatus::Confirmed
                     ) && record.outpoint.is_some()
                 });
             if has_watchable_lock {
@@ -1204,7 +1206,15 @@ where
         .await
     {
         let reason = error.to_string();
-        mark_loop_in_broadcast_failed(store, swap_id, reason.clone(), now_ms)?;
+        if store
+            .get_liquidity_chain_tx(&swap_id, LiquidityChainTxRole::Payout)
+            .map_err(map_store_error)?
+            .is_some()
+        {
+            persist_loop_out_payment_failure_context(store, swap_id, reason.clone());
+        } else {
+            mark_loop_in_broadcast_failed(store, swap_id, reason.clone(), now_ms)?;
+        }
         return Err(LiquidityLoopOutError::Chain(reason));
     }
 
@@ -2085,6 +2095,7 @@ mod tests {
         fail_next_claim: bool,
         fail_next_loop_in_lock: bool,
         fail_next_loop_in_broadcast: bool,
+        persist_loop_in_lock_before_failure: bool,
         claim_preimages: Vec<Hash256>,
         payout_locks: Shared<Vec<(ckb_types::packed::Script, ckb_types::packed::Script)>>,
         loop_in_funding_txs: Shared<Vec<String>>,
@@ -2100,6 +2111,7 @@ mod tests {
                 fail_next_claim: false,
                 fail_next_loop_in_lock: false,
                 fail_next_loop_in_broadcast: false,
+                persist_loop_in_lock_before_failure: false,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -2115,6 +2127,7 @@ mod tests {
                 fail_next_claim: false,
                 fail_next_loop_in_lock: false,
                 fail_next_loop_in_broadcast: false,
+                persist_loop_in_lock_before_failure: false,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -2136,6 +2149,11 @@ mod tests {
 
         fn fail_next_loop_in_broadcast(&mut self) {
             self.fail_next_loop_in_broadcast = true;
+        }
+
+        fn fail_next_loop_in_broadcast_after_persisting_lock(&mut self) {
+            self.fail_next_loop_in_broadcast = true;
+            self.persist_loop_in_lock_before_failure = true;
         }
 
         fn loop_in_funding_txs(&self) -> Vec<String> {
@@ -2269,7 +2287,7 @@ mod tests {
 
         async fn broadcast_loop_in_lock(
             &mut self,
-            _quote: &LoopOutQuoteTerms,
+            quote: &LoopOutQuoteTerms,
             funding_tx: &str,
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
@@ -2277,6 +2295,24 @@ mod tests {
             self.loop_in_funding_txs
                 .borrow_mut()
                 .push(funding_tx.to_string());
+            if self.persist_loop_in_lock_before_failure {
+                let store = self
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| "missing store".to_string())?;
+                store
+                    .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                        swap_id: quote.quote_id,
+                        role: LiquidityChainTxRole::Payout,
+                        tx_hash: [37u8; 32].into(),
+                        outpoint: Some(self.outpoint.clone()),
+                        status: LiquidityChainTxStatus::Rejected,
+                        failure_reason: Some("loop in broadcast failed".to_string()),
+                        created_at: now_ms(),
+                        updated_at: now_ms(),
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
             if self.fail_next_loop_in_broadcast {
                 self.fail_next_loop_in_broadcast = false;
                 return Err("loop in broadcast failed".to_string());
@@ -3702,6 +3738,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loop_in_post_persistence_broadcast_failure_preserves_pending_swap() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client")
+            .with_store(store.clone());
+        chain.fail_next_loop_in_broadcast_after_persisting_lock();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            chain,
+        )
+        .await;
+
+        let error = call_loop_in(actor, quote.quote_id).await.unwrap_err();
+
+        assert!(error.to_string().contains("loop in broadcast failed"));
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::OnchainLockPending);
+        assert_eq!(
+            swap.failure_reason,
+            Some("loop in broadcast failed".to_string())
+        );
+        assert!(store
+            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn loop_in_accept_passes_funding_tx_to_chain_adapter() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
@@ -3717,11 +3786,14 @@ mod tests {
         )
         .await;
 
-        call_loop_in_with_funding_tx(actor, quote.quote_id, "0xfeedbeef")
+        call_loop_in_with_funding_tx(actor, quote.quote_id, "local-wallet")
             .await
             .unwrap();
 
-        assert_eq!(chain.loop_in_funding_txs(), vec!["0xfeedbeef".to_string()]);
+        assert_eq!(
+            chain.loop_in_funding_txs(),
+            vec!["local-wallet".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -3798,6 +3870,41 @@ mod tests {
         assert_eq!(event_count(&events, "watch_loop_in_lock"), 1);
         assert_eq!(event_count(&events, "watch_payout"), 0);
         assert_eq!(event_count(&events, "broadcast_refund"), 0);
+    }
+
+    #[tokio::test]
+    async fn loop_in_lock_pending_recovery_watches_planned_lock_record() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut swap = recovery_swap(36, LiquiditySwapState::OnchainLockPending);
+        swap.swap_kind = LiquiditySwapKind::LoopIn;
+        swap.role = LiquiditySwapRole::Client;
+        swap.onchain_outpoint = Some(OutPoint::new(Byte32::from_slice(&[36u8; 32]).unwrap(), 36));
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: swap.swap_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [37u8; 32].into(),
+                outpoint: swap.onchain_outpoint.clone(),
+                status: LiquidityChainTxStatus::Planned,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 1);
+        assert_eq!(event_count(&events, "watch_loop_in_lock"), 1);
+        assert_eq!(event_count(&events, "watch_payout"), 0);
     }
 
     #[tokio::test]
