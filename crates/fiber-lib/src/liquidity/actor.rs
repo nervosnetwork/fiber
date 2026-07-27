@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 use fiber_json_types::{
-    LiquidityQuoteResponse, LiquiditySwapResponse, LoopOutParams, ProviderAcceptLoopOutParams,
-    ProviderQuoteLoopOutParams, QuoteLoopOutParams,
+    LiquidityQuoteResponse, LiquiditySwapResponse, LoopInParams, LoopOutParams,
+    ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
 };
 use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -20,7 +20,7 @@ use secp256k1::{SecretKey, SECP256K1};
 pub use crate::liquidity::chain::{
     LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimPlan, LoopOutClaimRequest,
 };
-use crate::liquidity::quote::validate_loop_out_quote_request;
+use crate::liquidity::quote::{build_loop_in_quote_terms, validate_loop_out_quote_request};
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
     LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
@@ -44,9 +44,19 @@ pub enum LiquidityActorMessage {
         QuoteLoopOutParams,
         RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
     ),
+    /// Client-side request for a provider Loop In quote.
+    QuoteLoopIn(
+        QuoteLoopInParams,
+        RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+    ),
     /// Client-side acceptance/execution of a Loop Out quote.
     LoopOut(
         LoopOutParams,
+        RpcReplyPort<Result<LiquiditySwapResponse, LiquidityLoopOutError>>,
+    ),
+    /// Client-side acceptance/execution of a Loop In quote.
+    LoopIn(
+        LoopInParams,
         RpcReplyPort<Result<LiquiditySwapResponse, LiquidityLoopOutError>>,
     ),
     /// Provider-side quote request.
@@ -73,6 +83,8 @@ pub enum LiquidityActorMessage {
     RefundConfirmed(Hash256),
     /// Internal continuation after a watched chain transaction is rejected.
     ChainTxRejected(Hash256, LiquidityChainTxRole, String),
+    /// Internal continuation after the Loop In client lock is confirmed.
+    LoopInLockConfirmed(Hash256),
     /// Internal continuation after a payment recovery task reaches a non-settled terminal point.
     PaymentRecoveryFinished(Hash256),
 }
@@ -82,7 +94,9 @@ impl LiquidityActorMessage {
     fn variant_names() -> &'static [&'static str] {
         &[
             "quote_loop_out",
+            "quote_loop_in",
             "loop_out",
+            "loop_in",
             "provider_quote_loop_out",
             "provider_accept_loop_out",
             "resume_non_terminal",
@@ -92,6 +106,7 @@ impl LiquidityActorMessage {
             "provider_claim_observed",
             "refund_confirmed",
             "chain_tx_rejected",
+            "loop_in_lock_confirmed",
             "payment_recovery_finished",
         ]
     }
@@ -157,6 +172,10 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            LiquidityActorMessage::LoopIn(params, reply) => {
+                let result = state.handle_loop_in(params, myself.clone()).await;
+                let _ = reply.send(result);
+            }
             LiquidityActorMessage::LoopOut(params, reply) => {
                 let result = state.handle_loop_out(params, myself.clone()).await;
                 let _ = reply.send(result);
@@ -245,8 +264,17 @@ where
                 }
                 state.prune_recovery_guards(swap_id);
             }
+            LiquidityActorMessage::LoopInLockConfirmed(swap_id) => {
+                if let Err(error) = mark_loop_in_lock_confirmed(&state.store, swap_id, now_ms()) {
+                    tracing::warn!(?swap_id, %error, "ignoring loop in lock continuation");
+                }
+            }
             LiquidityActorMessage::PaymentRecoveryFinished(swap_id) => {
                 state.active_payment_swaps.remove(&swap_id);
+            }
+            LiquidityActorMessage::QuoteLoopIn(params, reply) => {
+                let result = state.handle_quote_loop_in(params);
+                let _ = reply.send(result);
             }
             LiquidityActorMessage::QuoteLoopOut(params, reply) => {
                 let result = state.handle_quote_loop_out(params);
@@ -269,6 +297,19 @@ where
     C: LoopOutChainAdapter,
     C::Error: Display,
 {
+    async fn handle_loop_in(
+        &mut self,
+        params: LoopInParams,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        let quote_id: Hash256 = params.quote_id.into();
+        let quote = self.quote_terms(&quote_id)?;
+        let now_ms = now_ms();
+        let swap_id =
+            accept_client_loop_in(&self.store, &mut self.chain, quote, now_ms, myself).await?;
+        self.loop_in_swap_response(&swap_id)
+    }
+
     async fn handle_loop_out(
         &mut self,
         params: LoopOutParams,
@@ -325,6 +366,36 @@ where
             .insert_loop_out_quote(terms.clone(), now_ms)
             .map_err(map_store_error)?;
         Ok(quote_response_from_terms(terms))
+    }
+
+    fn handle_quote_loop_in(
+        &mut self,
+        params: QuoteLoopInParams,
+    ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        let asset = self
+            .store
+            .get_liquidity_asset(&params.asset_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| LiquidityLoopOutError::AssetNotFound(params.asset_id.clone()))?;
+        let now_ms = now_ms();
+        let expires_at = quote_expires_at(now_ms, params.expires_after_seconds)?;
+        let terms = build_loop_in_quote_terms(
+            loop_in_quote_hash(&params, now_ms, b"quote"),
+            deterministic_provider_pubkey(),
+            &asset,
+            params.amount,
+            asset.udt_type_script.as_ref(),
+            params.client_invoice,
+            expires_at,
+            1_000,
+        )?;
+        if terms.provider_fee > params.max_provider_fee {
+            return Err(LiquidityLoopOutError::ProviderFeeTooHigh);
+        }
+        self.store
+            .insert_loop_out_quote(terms.clone(), now_ms)
+            .map_err(map_store_error)?;
+        Ok(loop_in_quote_response_from_terms(terms))
     }
 
     fn handle_quote_loop_out(
@@ -761,6 +832,25 @@ where
             created_at: swap.created_at,
         })
     }
+
+    fn loop_in_swap_response(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        let swap = self
+            .store
+            .get_liquidity_swap(swap_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        Ok(LiquiditySwapResponse {
+            swap_id: swap.swap_id.into(),
+            state: "onchain_lock_pending".to_string(),
+            payment_hash: swap.payment_hash.into(),
+            created_at: swap.created_at,
+        })
+    }
 }
 
 async fn reconcile_loop_out_payment<P>(
@@ -861,6 +951,19 @@ fn loop_out_quote_hash(params: &ProviderQuoteLoopOutParams, now_ms: u64, domain:
     ckb_hash::blake2b_256(seed).into()
 }
 
+fn loop_in_quote_hash(params: &QuoteLoopInParams, now_ms: u64, domain: &[u8]) -> Hash256 {
+    let mut seed = Vec::new();
+    seed.extend_from_slice(domain);
+    seed.extend_from_slice(params.asset_id.as_bytes());
+    seed.extend_from_slice(&params.amount.to_le_bytes());
+    seed.extend_from_slice(params.client_invoice.as_bytes());
+    seed.extend_from_slice(&params.max_provider_fee.to_le_bytes());
+    seed.extend_from_slice(&params.max_routing_fee.to_le_bytes());
+    seed.extend_from_slice(&params.expires_after_seconds.to_le_bytes());
+    seed.extend_from_slice(&now_ms.to_le_bytes());
+    ckb_hash::blake2b_256(seed).into()
+}
+
 fn deterministic_provider_pubkey() -> fiber_types::Pubkey {
     let sk = SecretKey::from_slice(&[42; 32]).expect("valid deterministic provider secret key");
     fiber_types::Pubkey::from(sk.public_key(SECP256K1))
@@ -879,6 +982,23 @@ fn quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuoteResponse
         payment_hash: terms.payment_hash.into(),
         expires_at: terms.expires_at,
         payout_deadline: Some(terms.payout_deadline),
+        refund_after_lock_time: terms.refund_after_lock_time,
+    }
+}
+
+fn loop_in_quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuoteResponse {
+    LiquidityQuoteResponse {
+        quote_id: terms.quote_id.into(),
+        swap_kind: fiber_json_types::LiquiditySwapKind::LoopIn,
+        asset_id: terms.asset.asset_id,
+        amount: terms.amount,
+        provider_fee: terms.provider_fee,
+        routing_fee_limit: terms.routing_fee_limit,
+        onchain_fee_estimate_ckb: terms.onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: terms.capacity_requirement_ckb,
+        payment_hash: terms.payment_hash.into(),
+        expires_at: terms.expires_at,
+        payout_deadline: None,
         refund_after_lock_time: terms.refund_after_lock_time,
     }
 }
@@ -984,6 +1104,35 @@ where
     Ok(swap_id)
 }
 
+/// Accept a client Loop In quote and persist restart-safe state before chain broadcast.
+pub async fn accept_client_loop_in<S, C>(
+    store: &S,
+    chain: &mut C,
+    quote: LoopOutQuoteTerms,
+    now_ms: u64,
+    myself: ActorRef<LiquidityActorMessage>,
+) -> Result<Hash256, LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+    C: LoopOutChainAdapter,
+    C::Error: Display,
+{
+    if quote.expires_at <= now_ms {
+        return Err(LiquidityLoopOutError::QuoteExpired);
+    }
+
+    let swap_id = quote.quote_id;
+    store
+        .insert_liquidity_swap(loop_in_record(&quote, LiquiditySwapRole::Client, now_ms))
+        .map_err(map_store_error)?;
+    chain
+        .broadcast_loop_in_lock(&quote, myself)
+        .await
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+
+    Ok(swap_id)
+}
+
 /// Accept a provider Loop Out quote and persist restart-safe state before chain broadcast.
 pub async fn accept_provider_loop_out<S, C>(
     store: &S,
@@ -1076,6 +1225,18 @@ where
     S: LiquidityStore,
 {
     transition_swap(store, &swap_id, LiquiditySwapState::PayoutLocked, now_ms)
+}
+
+/// Mark the client-side Loop In lock as confirmed on-chain.
+pub fn mark_loop_in_lock_confirmed<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    transition_swap(store, &swap_id, LiquiditySwapState::OnchainLocked, now_ms)
 }
 
 /// Send the client Fiber payment after payout lock persistence and persist the preimage.
@@ -1322,6 +1483,31 @@ fn loop_out_record(
     }
 }
 
+fn loop_in_record(
+    quote: &LoopOutQuoteTerms,
+    role: LiquiditySwapRole,
+    now_ms: u64,
+) -> LiquiditySwapRecord {
+    LiquiditySwapRecord {
+        swap_id: quote.quote_id,
+        quote_id: quote.quote_id,
+        role,
+        swap_kind: LiquiditySwapKind::LoopIn,
+        asset_id: quote.asset.asset_id.clone(),
+        state: LiquiditySwapState::OnchainLockPending,
+        payment_hash: quote.payment_hash,
+        payment_preimage: None,
+        amount: quote.amount,
+        onchain_outpoint: None,
+        payout_deadline: None,
+        refund_after_lock_time: quote.refund_after_lock_time,
+        expires_at: quote.expires_at,
+        failure_reason: None,
+        created_at: now_ms,
+        updated_at: now_ms,
+    }
+}
+
 fn transition_swap<S>(
     store: &S,
     swap_id: &Hash256,
@@ -1417,7 +1603,9 @@ mod tests {
             names,
             &[
                 "quote_loop_out",
+                "quote_loop_in",
                 "loop_out",
+                "loop_in",
                 "provider_quote_loop_out",
                 "provider_accept_loop_out",
                 "resume_non_terminal",
@@ -1427,6 +1615,7 @@ mod tests {
                 "provider_claim_observed",
                 "refund_confirmed",
                 "chain_tx_rejected",
+                "loop_in_lock_confirmed",
                 "payment_recovery_finished",
             ]
         );
@@ -1435,6 +1624,15 @@ mod tests {
     #[test]
     fn resume_non_terminal_action_is_explicit_actor_message() {
         assert!(LiquidityActorMessage::variant_names().contains(&"resume_non_terminal"));
+    }
+
+    #[test]
+    fn actor_message_names_cover_loop_in_runtime() {
+        let names = LiquidityActorMessage::variant_names();
+
+        assert!(names.contains(&"quote_loop_in"));
+        assert!(names.contains(&"loop_in"));
+        assert!(names.contains(&"loop_in_lock_confirmed"));
     }
 
     #[derive(Default)]
@@ -1486,10 +1684,19 @@ mod tests {
             self.events.clone()
         }
 
-        fn insert_event(&self, role: LiquiditySwapRole) -> &'static str {
-            match (self.label, role) {
-                (Some("client"), LiquiditySwapRole::Client) => "client_insert_created",
-                (Some("provider"), LiquiditySwapRole::Provider) => "provider_insert_created",
+        fn insert_event(
+            &self,
+            role: LiquiditySwapRole,
+            swap_kind: LiquiditySwapKind,
+        ) -> &'static str {
+            match (self.label, role, swap_kind) {
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapKind::LoopIn) => {
+                    "client_insert_swap"
+                }
+                (Some("client"), LiquiditySwapRole::Client, LiquiditySwapKind::LoopOut) => {
+                    "client_insert_created"
+                }
+                (Some("provider"), LiquiditySwapRole::Provider, _) => "provider_insert_created",
                 _ => "insert_swap",
             }
         }
@@ -1600,7 +1807,9 @@ mod tests {
             &self,
             swap: LiquiditySwapRecord,
         ) -> Result<(), LiquidityStoreError> {
-            self.events.borrow_mut().push(self.insert_event(swap.role));
+            self.events
+                .borrow_mut()
+                .push(self.insert_event(swap.role, swap.swap_kind));
             self.swaps.borrow_mut().insert(swap.swap_id, swap);
             Ok(())
         }
@@ -1918,6 +2127,15 @@ mod tests {
                 self.events.borrow_mut().push("create_tx_tracer");
             }
             self.events.borrow_mut().push("watch_payout");
+            Ok(())
+        }
+
+        async fn broadcast_loop_in_lock(
+            &mut self,
+            _quote: &LoopOutQuoteTerms,
+            _myself: ActorRef<LiquidityActorMessage>,
+        ) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("broadcast_loop_in_lock");
             Ok(())
         }
 
@@ -2348,6 +2566,20 @@ mod tests {
         actor: ractor::ActorRef<LiquidityActorMessage>,
     ) -> Result<usize, LiquidityLoopOutError> {
         ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal).unwrap()
+    }
+
+    async fn call_loop_in(
+        actor: ractor::ActorRef<LiquidityActorMessage>,
+        quote_id: Hash256,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        ractor::call!(actor, |reply| LiquidityActorMessage::LoopIn(
+            LoopInParams {
+                quote_id: quote_id.into(),
+                funding_tx: "0x01".to_string(),
+            },
+            reply,
+        ))
+        .unwrap()
     }
 
     async fn wait_for_event(events: &Shared<Vec<&'static str>>, expected: &'static str) {
@@ -3160,6 +3392,40 @@ mod tests {
             claimant_lock: Default::default(),
             refund_lock: Default::default(),
         }
+    }
+
+    fn test_loop_in_quote(expires_at: u64) -> LoopOutQuoteTerms {
+        LoopOutQuoteTerms {
+            quote_id: [2u8; 32].into(),
+            routing_fee_limit: 0,
+            payout_deadline: expires_at,
+            refund_after_lock_time: expires_at + 20_000,
+            ..test_loop_out_quote(expires_at)
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_in_accept_persists_before_client_lock_broadcast() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let response = call_loop_in(actor, quote.quote_id).await.unwrap();
+
+        assert_eq!(response.state, "onchain_lock_pending");
+        assert_eq!(
+            events.borrow().as_slice(),
+            ["client_insert_swap", "broadcast_loop_in_lock"]
+        );
     }
 
     #[tokio::test]
