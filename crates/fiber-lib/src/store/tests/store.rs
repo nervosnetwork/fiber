@@ -39,9 +39,14 @@ use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
 use fiber_types::protocol::AnnouncedNodeName;
-use fiber_types::{AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData};
 #[cfg(not(target_arch = "wasm32"))]
-use fiber_types::{SettlementTlc, TLCId};
+use fiber_types::{
+    AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
+    SettlementTlc, TLCId, TlcInfo, TlcStatus,
+};
+use fiber_types::{
+    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
+};
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -1027,6 +1032,142 @@ fn test_store_payment_session() {
     assert_eq!(res.request.max_fee_amount, Some(1000));
     assert_eq!(res.status, PaymentStatus::Created);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_channel_ready_retry_index_handles_created_attempt_channel_ownership() {
+    let (store, _dir) = generate_store();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut channel_state = sample_channel_actor_state(ChannelState::ChannelReady, None);
+    let first_hop_outpoint = channel_state.must_get_funding_transaction_outpoint();
+    let first_hop_funding_tx_hash = first_hop_outpoint.tx_hash().into();
+    let target = gen_rand_fiber_public_key();
+    let first_hop = gen_rand_fiber_public_key();
+    let _payment_data = SendPaymentDataBuilder::new(target, 100, payment_hash)
+        .router(vec![RouterHop {
+            target: first_hop,
+            channel_outpoint: first_hop_outpoint.clone(),
+            amount_received: 100,
+            incoming_tlc_expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+        }])
+        .final_tlc_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA)
+        .tlc_expiry_limit(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
+        .timeout(Some(10))
+        .max_fee_amount(Some(1000))
+        .build()
+        .expect("valid payment_data");
+    let now = now_timestamp_as_millis_u64();
+    let route_hops = vec![PaymentHopData {
+        amount: 100,
+        expiry: now + DEFAULT_TLC_EXPIRY_DELTA,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        funding_tx_hash: first_hop_funding_tx_hash,
+        next_hop: Some(target),
+        custom_records: None,
+    }];
+    let route = SessionRoute::new(first_hop, target, &route_hops);
+    let mut attempt = Attempt {
+        id: 1,
+        hash: payment_hash,
+        try_limit: 10,
+        tried_times: 1,
+        payment_hash,
+        route,
+        route_hops,
+        session_key: [0; 32],
+        preimage: None,
+        created_at: now,
+        last_updated_at: now,
+        last_error: None,
+        status: AttemptStatus::Created,
+    };
+
+    assert_eq!(attempt.status, AttemptStatus::Created);
+    store.insert_attempt(attempt.clone());
+    let orphan_created_attempts =
+        store.get_pending_attempts_by_channel_outpoint(&first_hop_outpoint);
+    assert_eq!(orphan_created_attempts.len(), 1);
+    assert_eq!(orphan_created_attempts[0].id, attempt.id);
+    assert_eq!(orphan_created_attempts[0].status, AttemptStatus::Created);
+
+    channel_state.tlc_state.add_offered_tlc(TlcInfo {
+        status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        tlc_id: TLCId::Offered(0),
+        amount: 100,
+        payment_hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: Some(attempt.id),
+        expiry: now + DEFAULT_TLC_EXPIRY_DELTA,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+        shared_secret: [0u8; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::new(),
+        removed_reason: None,
+        forwarding_tlc: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
+    });
+    store.insert_channel_actor_state(channel_state.clone());
+    assert!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&first_hop_outpoint)
+            .is_empty(),
+        "created attempts already owned by channel TLCs should not be woken"
+    );
+
+    let terminal_tlc = channel_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .first_mut()
+        .expect("offered TLC exists");
+    terminal_tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
+    terminal_tlc.applied_flags |= AppliedFlags::REMOVE;
+    terminal_tlc.removed_confirmed_at = Some(1);
+    store.insert_channel_actor_state(channel_state.clone());
+    let orphan_created_attempts =
+        store.get_pending_attempts_by_channel_outpoint(&first_hop_outpoint);
+    assert_eq!(
+        orphan_created_attempts.len(),
+        1,
+        "created attempts with terminal channel TLCs should be woken"
+    );
+    assert_eq!(orphan_created_attempts[0].id, attempt.id);
+
+    channel_state.tlc_state = Default::default();
+    channel_state
+        .retryable_tlc_operations
+        .push_back(RetryableTlcOperation::AddTlc(AddTlcCommand {
+            amount: 100,
+            payment_hash,
+            attempt_id: Some(attempt.id),
+            expiry: now + DEFAULT_TLC_EXPIRY_DELTA,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0u8; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        }));
+    store.insert_channel_actor_state(channel_state);
+    assert!(
+        store
+            .get_pending_attempts_by_channel_outpoint(&first_hop_outpoint)
+            .is_empty(),
+        "created attempts already owned by queued channel AddTlc should not be woken"
+    );
+
+    attempt.status = AttemptStatus::Retrying;
+    store.insert_attempt(attempt.clone());
+    let retrying_attempts = store.get_pending_attempts_by_channel_outpoint(&first_hop_outpoint);
+    assert_eq!(retrying_attempts.len(), 1);
+    assert_eq!(retrying_attempts[0].id, attempt.id);
+    assert_eq!(retrying_attempts[0].status, AttemptStatus::Retrying);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

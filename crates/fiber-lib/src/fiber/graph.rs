@@ -3115,7 +3115,10 @@ pub trait NetworkGraphStateStore {
     fn delete_attempts(&self, payment_hash: Hash256);
     /// Clears only the channel index entries for attempts, keeping the attempt records.
     fn clear_attempts_channel_index(&self, payment_hash: Hash256);
-    /// Returns all pending attempts (Created/Retrying status) using this channel as first hop.
+    /// Returns attempts that should be woken by a ChannelReady scan.
+    ///
+    /// Retrying attempts are always returned. Created attempts are returned only
+    /// when the channel state does not already own a matching TLC or queued AddTlc.
     fn get_pending_attempts_by_channel_outpoint(&self, channel_outpoint: &OutPoint)
         -> Vec<Attempt>;
 }

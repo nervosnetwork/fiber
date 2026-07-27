@@ -28,9 +28,9 @@ use ckb_types::packed::{OutPoint, Script};
 pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
-    Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
-    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
+    Attempt, AttemptStatus, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint,
+    PaymentCustomRecords, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey,
+    RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
     DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
@@ -1595,6 +1595,17 @@ where
         }
     }
 
+    fn channel_owns_attempt(&self, attempt: &Attempt) -> bool {
+        let Some(channel_outpoint) = attempt.first_hop_channel_outpoint() else {
+            return false;
+        };
+        self.store
+            .get_channel_state_by_outpoint(channel_outpoint)
+            .is_some_and(|channel_state| {
+                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+            })
+    }
+
     async fn send_attempt(
         &self,
         myself: ActorRef<PaymentActorMessage>,
@@ -1700,6 +1711,23 @@ where
                         return Err(err);
                     }
                     _ => {}
+                }
+            }
+            Some(mut attempt) if attempt.status == AttemptStatus::Created => {
+                if self.channel_owns_attempt(&attempt) {
+                    debug!(
+                        payment_hash = ?session.payment_hash(),
+                        attempt_id = attempt.id,
+                        "Skipping channel-owned Created payment attempt"
+                    );
+                } else {
+                    warn!(
+                        payment_hash = ?session.payment_hash(),
+                        attempt_id = attempt.id,
+                        "Retrying orphan Created payment attempt"
+                    );
+                    self.send_attempt(myself, state, session, &mut attempt)
+                        .await?;
                 }
             }
             Some(_) => {
