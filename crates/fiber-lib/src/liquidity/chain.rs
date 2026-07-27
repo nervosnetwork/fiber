@@ -239,8 +239,12 @@ pub trait LiquidityChainWatcher {
     async fn broadcast_loop_in_lock(
         &mut self,
         quote: &LoopOutQuoteTerms,
+        funding_tx: &str,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), Self::Error>;
+
+    /// Validate Loop In lock broadcast availability before durable swap creation.
+    fn ensure_loop_in_lock_available(&mut self, funding_tx: &str) -> Result<(), Self::Error>;
 
     /// Schedule payout lock watching and report completion back to `myself`.
     async fn watch_payout_lock(
@@ -733,8 +737,15 @@ where
     async fn broadcast_loop_in_lock(
         &mut self,
         _quote: &LoopOutQuoteTerms,
+        _funding_tx: &str,
         _myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), Self::Error> {
+        Err(LiquidityLoopOutError::Chain(
+            "loop in lock broadcast is not wired to CKB yet".to_string(),
+        ))
+    }
+
+    fn ensure_loop_in_lock_available(&mut self, _funding_tx: &str) -> Result<(), Self::Error> {
         Err(LiquidityLoopOutError::Chain(
             "loop in lock broadcast is not wired to CKB yet".to_string(),
         ))
@@ -1347,8 +1358,13 @@ mod tests {
         async fn broadcast_loop_in_lock(
             &mut self,
             _quote: &LoopOutQuoteTerms,
+            _funding_tx: &str,
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
+            Err(LiquidityLoopOutError::Chain("unused".to_string()))
+        }
+
+        fn ensure_loop_in_lock_available(&mut self, _funding_tx: &str) -> Result<(), Self::Error> {
             Err(LiquidityLoopOutError::Chain("unused".to_string()))
         }
 
