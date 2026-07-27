@@ -6611,10 +6611,12 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
     let hash_algorithm = HashAlgorithm::CkbHash;
     let mut custom_records = PaymentCustomRecords::default();
     BasicMppPaymentData::new(payment_secret, 20_000).write(&mut custom_records);
+    let tlc_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA;
     let hops_infos = vec![
         PaymentHopData {
             amount: 10_000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             next_hop: Some(node_1.pubkey),
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
@@ -6622,7 +6624,7 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
         },
         PaymentHopData {
             amount: 10_000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             hash_algorithm,
             custom_records: Some(custom_records),
             ..Default::default()
@@ -6646,7 +6648,7 @@ async fn test_payee_mpp_invoice_paid_from_onchain_preimages_across_channels() {
                             amount: 10_000,
                             hash_algorithm,
                             payment_hash,
-                            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                            expiry: tlc_expiry,
                             onion_packet: packet.next.clone(),
                             shared_secret: packet.shared_secret,
                             is_trampoline_hop: false,
