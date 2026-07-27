@@ -4019,6 +4019,7 @@ where
                     &pubkey,
                     now_timestamp_as_millis_u64(),
                 );
+                state.policy.remove_outbound_peer(&pubkey);
                 state.schedule_next_delayed_flush();
             }
             GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
