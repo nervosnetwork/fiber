@@ -22,8 +22,8 @@ use crate::{
     now_timestamp_as_millis_u64,
     rpc::invoice::NewInvoiceParams,
     test_utils::{
-        create_n_nodes_network, establish_channel_between_nodes, init_tracing, ChannelParameters,
-        NetworkNode, MIN_RESERVED_CKB,
+        create_n_nodes_network, establish_channel_between_nodes, init_tracing, wait_until_timeout,
+        ChannelParameters, NetworkNode, MIN_RESERVED_CKB,
     },
     NetworkServiceEvent, HUGE_CKB_AMOUNT,
 };
@@ -509,6 +509,8 @@ async fn test_mpp_tlc_set() {
 
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
+    let tlc_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA;
 
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
@@ -516,7 +518,7 @@ async fn test_mpp_tlc_set() {
     let hops_infos = vec![
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             next_hop: Some(target_pubkey),
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
@@ -524,7 +526,7 @@ async fn test_mpp_tlc_set() {
         },
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
             ..Default::default()
@@ -548,7 +550,7 @@ async fn test_mpp_tlc_set() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -572,7 +574,7 @@ async fn test_mpp_tlc_set() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -590,19 +592,19 @@ async fn test_mpp_tlc_set() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // wait tlc 1 is removed
-    while source_node
-        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
-        .is_some()
-    {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+    wait_until_timeout(30_000, || {
+        source_node
+            .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+            .is_none()
+    })
+    .await;
     // wait tlc 2 is removed
-    while source_node
-        .get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id))
-        .is_some()
-    {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+    wait_until_timeout(30_000, || {
+        source_node
+            .get_tlc(channels[1], TLCId::Offered(add_tlc_result_2.tlc_id))
+            .is_none()
+    })
+    .await;
 
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
@@ -781,6 +783,8 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
 
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
+    let tlc_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA;
 
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 10000000000);
@@ -788,7 +792,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
     let hops_infos = vec![
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             next_hop: Some(target_pubkey),
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
@@ -796,7 +800,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
         },
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
             ..Default::default()
@@ -820,7 +824,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -838,12 +842,12 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // wait tlc 1 is removed
-    while source_node
-        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
-        .is_some()
-    {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+    wait_until_timeout(30_000, || {
+        source_node
+            .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+            .is_none()
+    })
+    .await;
 
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
@@ -1460,6 +1464,8 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
 
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
+    let tlc_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA;
 
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 30000000000);
@@ -1467,7 +1473,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     let hops_infos = vec![
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             next_hop: Some(target_pubkey),
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
@@ -1475,7 +1481,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         },
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
             ..Default::default()
@@ -1499,7 +1505,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -1515,9 +1521,10 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     .expect("tlc");
 
     // wait until tlc is hold
-    while node_1.store.get_payment_hold_tlcs(payment_hash).is_empty() {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+    wait_until_timeout(30_000, || {
+        !node_1.store.get_payment_hold_tlcs(payment_hash).is_empty()
+    })
+    .await;
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -1528,7 +1535,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -1671,6 +1678,8 @@ async fn test_mpp_tlc_set_timeout() {
 
     let payment_hash = *ckb_invoice.payment_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
+    let tlc_expiry =
+        now_timestamp_as_millis_u64() + DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA;
 
     let mut custom_records = PaymentCustomRecords::default();
     let record = BasicMppPaymentData::new(payment_secret, 20000000000);
@@ -1678,7 +1687,7 @@ async fn test_mpp_tlc_set_timeout() {
     let hops_infos = vec![
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             next_hop: Some(target_pubkey),
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
@@ -1686,7 +1695,7 @@ async fn test_mpp_tlc_set_timeout() {
         },
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: tlc_expiry,
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
             ..Default::default()
@@ -1710,7 +1719,7 @@ async fn test_mpp_tlc_set_timeout() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -1726,9 +1735,10 @@ async fn test_mpp_tlc_set_timeout() {
     .expect("tlc");
 
     // wait until tlc is hold
-    while node_1.store.get_payment_hold_tlcs(payment_hash).is_empty() {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+    wait_until_timeout(30_000, || {
+        !node_1.store.get_payment_hold_tlcs(payment_hash).is_empty()
+    })
+    .await;
 
     // timeout hold tlc
     for hold_tlc in node_1.store.get_payment_hold_tlcs(payment_hash) {
@@ -1765,7 +1775,7 @@ async fn test_mpp_tlc_set_timeout() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: tlc_expiry,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,

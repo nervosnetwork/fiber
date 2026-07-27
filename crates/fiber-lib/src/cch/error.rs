@@ -87,6 +87,12 @@ pub enum CchError {
     LndPaymentAlreadyTracked(Hash256),
     #[error("LND payment tracker capacity exceeded (maximum {0})")]
     LndPaymentTrackerCapacityExceeded(usize),
+    #[error("LND invoice {0} is already being tracked")]
+    LndInvoiceAlreadyTracked(Hash256),
+    #[error("LND invoice tracker capacity exceeded (maximum {0})")]
+    LndInvoiceTrackerCapacityExceeded(usize),
+    #[error("LND invoice tracker error: {0}")]
+    LndInvoiceTrackerError(String),
     #[error("Fiber node error: {0}")]
     FiberNodeError(anyhow::Error),
 }

@@ -4486,7 +4486,7 @@ async fn test_send_payment_with_invalid_tlc_expiry() {
             target_pubkey: Some(nodes[1].pubkey),
             amount: Some(1000),
             keysend: Some(true),
-            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + 1), // Ok now
+            tlc_expiry_limit: Some(DEFAULT_FINAL_TLC_EXPIRY_DELTA + DEFAULT_TLC_EXPIRY_DELTA),
             ..Default::default()
         })
         .await;
@@ -5673,6 +5673,7 @@ async fn test_shutdown_with_pending_tlc() {
         .payment_hash(payment_hash)
         .hash_algorithm(hash_algorithm)
         .payee_pub_key(nodes[1].pubkey.into())
+        .final_expiry_delta(0)
         .build()
         .expect("build pending invoice");
     nodes[1].insert_invoice(invoice, None);
@@ -5827,6 +5828,7 @@ async fn test_payment_onion_invoice_udt_type_script_mismatch_fails() {
         .hash_algorithm(HashAlgorithm::CkbHash)
         .udt_type_script(invoice_udt_script)
         .payee_pub_key(target_pubkey.into())
+        .final_expiry_delta(0)
         .build()
         .expect("build invoice");
     node_b.insert_invoice(invoice.clone(), Some(preimage));
@@ -7524,7 +7526,9 @@ async fn test_payment_with_payment_data_record() {
     let hops_infos = vec![
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: now_timestamp_as_millis_u64()
+                + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+                + DEFAULT_TLC_EXPIRY_DELTA,
             next_hop: Some(target_pubkey),
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
@@ -7532,7 +7536,9 @@ async fn test_payment_with_payment_data_record() {
         },
         PaymentHopData {
             amount: 10000000000,
-            expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+            expiry: now_timestamp_as_millis_u64()
+                + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+                + DEFAULT_TLC_EXPIRY_DELTA,
             hash_algorithm,
             custom_records: Some(custom_records.clone()),
             ..Default::default()
@@ -7556,7 +7562,9 @@ async fn test_payment_with_payment_data_record() {
                         amount: 10000000000,
                         hash_algorithm,
                         payment_hash,
-                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        expiry: now_timestamp_as_millis_u64()
+                            + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+                            + DEFAULT_TLC_EXPIRY_DELTA,
                         onion_packet: packet.next.clone(),
                         shared_secret: packet.shared_secret,
                         is_trampoline_hop: false,
@@ -7574,12 +7582,12 @@ async fn test_payment_with_payment_data_record() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // wait tlc 1 is removed
-    while source_node
-        .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
-        .is_some()
-    {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
+    wait_until_timeout(30_000, || {
+        source_node
+            .get_tlc(channels[0], TLCId::Offered(add_tlc_result_1.tlc_id))
+            .is_none()
+    })
+    .await;
 
     let node_0_balance = source_node.get_local_balance_from_channel(channels[0]);
     let node_1_balance = node_1.get_local_balance_from_channel(channels[0]);
@@ -8202,13 +8210,16 @@ async fn test_network_with_hops_max_number_limit() {
     )
     .await;
 
+    let thirteen_hop_base_limit = DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let thirteen_hop_limit = thirteen_hop_base_limit + DEFAULT_TLC_EXPIRY_DELTA;
+
     let payment = nodes[0]
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(nodes[14].pubkey), // can not make a payment with 14 hops
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await;
@@ -8222,7 +8233,7 @@ async fn test_network_with_hops_max_number_limit() {
             amount: Some(1000),
             keysend: Some(true),
             max_fee_rate: Some(1000),
-            tlc_expiry_limit: Some(DEFAULT_TLC_EXPIRY_DELTA * 12 + DEFAULT_FINAL_TLC_EXPIRY_DELTA), // 13 hops limit
+            tlc_expiry_limit: Some(thirteen_hop_limit),
             ..Default::default()
         })
         .await

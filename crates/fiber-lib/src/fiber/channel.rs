@@ -70,7 +70,7 @@ use fiber_types::{
     PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
     RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData, SettlementTlc,
     ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket,
-    TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
+    TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -874,6 +874,7 @@ where
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
                 let flags = match state.state {
+                    ChannelState::ChannelReady => return Ok(()),
                     ChannelState::AwaitingTxSignatures(flags)
                         if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
                     {
@@ -8389,6 +8390,49 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Returns whether reconnect is in the initial `ChannelReady` replay window.
+    ///
+    /// The funding commitment exchange leaves both counters at the first post-initial value,
+    /// while entering `ChannelReady` advances them once more. Requiring the persisted funding
+    /// confirmation and no pending commitment/TLC work keeps this one-step gap from being
+    /// confused with a later channel update. The confirmation is historical local evidence;
+    /// this check does not query the chain again during reestablishment.
+    fn should_replay_channel_ready_on_reestablish(
+        &mut self,
+        myself: &ActorRef<ChannelActorMessage>,
+        reestablish_channel: &ReestablishChannel,
+    ) -> bool {
+        let funding_commitment_number = INITIAL_COMMITMENT_NUMBER + 1;
+        let channel_ready_commitment_number = funding_commitment_number + 1;
+
+        let should_relay_channel_ready = matches!(self.state, ChannelState::ChannelReady)
+            && self.funding_tx_confirmed_at.is_some()
+            && self.get_local_commitment_number() == channel_ready_commitment_number
+            && self.get_remote_commitment_number() == channel_ready_commitment_number
+            && reestablish_channel.local_commitment_number == funding_commitment_number
+            && reestablish_channel.remote_commitment_number == funding_commitment_number
+            && !self.tlc_state.waiting_ack
+            && self.tlc_state.all_tlcs().next().is_none();
+
+        if should_relay_channel_ready {
+            self.on_reestablished_channel_ready(myself);
+            let network = self.network();
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        self.get_remote_pubkey(),
+                        FiberMessage::channel_ready(ChannelReady {
+                            channel_id: self.get_id(),
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            debug_event!(network, "Replayed ChannelReady after reestablishment");
+            return true;
+        }
+        false
+    }
+
     async fn handle_reestablish_channel_message(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -8542,6 +8586,10 @@ impl ChannelActorState {
                     return Err(ProcessingChannelError::InvalidParameter(
                         "reestablish channel message with invalid commitment numbers".to_string(),
                     ));
+                }
+
+                if self.should_replay_channel_ready_on_reestablish(myself, reestablish_channel) {
+                    return Ok(());
                 }
 
                 if my_local_commitment_number == peer_remote_commitment_number
@@ -9691,6 +9739,22 @@ impl ChannelActorState {
 
     pub fn has_pending_operations(&self) -> bool {
         !self.retryable_tlc_operations.is_empty()
+    }
+
+    pub(crate) fn owns_payment_attempt(&self, payment_hash: Hash256, attempt_id: u64) -> bool {
+        let attempt_id = Some(attempt_id);
+
+        self.tlc_state.all_tlcs().any(|tlc| {
+            !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                && tlc.payment_hash == payment_hash
+                && tlc.attempt_id == attempt_id
+        }) || self.retryable_tlc_operations.iter().any(|operation| {
+            matches!(
+                operation,
+                RetryableTlcOperation::AddTlc(command)
+                    if command.payment_hash == payment_hash && command.attempt_id == attempt_id
+            )
+        })
     }
 
     /// Perform the next step in shutting down the channel.

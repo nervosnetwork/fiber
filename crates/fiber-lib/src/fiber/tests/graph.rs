@@ -3,6 +3,7 @@ use crate::fiber::config::{
     DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::graph::GraphChannelStat;
 use crate::fiber::graph::NetworkGraph;
 use crate::fiber::graph::PathFindError;
 use crate::fiber::graph::SendPaymentState;
@@ -34,6 +35,15 @@ use crate::{
 const TLC_EXPIRY_DELTA_IN_TESTS: u64 = 42 * 60 * 1000;
 // Default final tlc expiry delta used in this test environment.
 const FINAL_TLC_EXPIRY_DELTA_IN_TESTS: u64 = 43 * 60 * 1000;
+
+fn assert_tlc_expiry_limit_error<T: std::fmt::Debug>(result: Result<T, PathFindError>) {
+    let err = result.expect_err("route should reject actual expiry over tlc_expiry_limit");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("tlc_expiry_limit"),
+        "unexpected error message: {msg}"
+    );
+}
 
 fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     let mut keys = vec![];
@@ -1513,6 +1523,180 @@ fn test_graph_build_route_with_expiry_limit() {
         true,
     );
     assert!(route.is_err());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_build_route_rejects_random_expiry_over_tlc_limit() {
+    let mut network = MockNetworkGraph::new(3);
+    network
+        .graph
+        .set_fixed_rand_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA);
+
+    network.set_source(network.keys[1]);
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(0));
+
+    let target = network.keys[3];
+    let base_route_expiry = FINAL_TLC_EXPIRY_DELTA_IN_TESTS + TLC_EXPIRY_DELTA_IN_TESTS;
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(target.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(base_route_expiry)
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment data")
+            .into();
+
+    assert_tlc_expiry_limit_error(network.graph.build_route(
+        payment_state.amount,
+        None,
+        None,
+        &payment_state,
+    ));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_build_route_allows_random_expiry_within_tlc_limit() {
+    let mut network = MockNetworkGraph::new(3);
+    network
+        .graph
+        .set_fixed_rand_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA);
+
+    network.set_source(network.keys[1]);
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(0));
+
+    let target = network.keys[3];
+    let base_route_expiry = FINAL_TLC_EXPIRY_DELTA_IN_TESTS + TLC_EXPIRY_DELTA_IN_TESTS;
+    let tlc_expiry_limit = base_route_expiry + DEFAULT_TLC_EXPIRY_DELTA;
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(target.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(tlc_expiry_limit)
+            .max_fee_amount(Some(1000))
+            .build()
+            .expect("valid payment data")
+            .into();
+
+    let route = network
+        .graph
+        .build_route(payment_state.amount, None, None, &payment_state)
+        .expect("route should fit after accounting for random expiry delta");
+    let after = now_timestamp_as_millis_u64();
+
+    for hop in &route {
+        assert!(
+            hop.expiry <= after + tlc_expiry_limit,
+            "actual hop expiry {} exceeds limit {}",
+            hop.expiry,
+            after + tlc_expiry_limit
+        );
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_mpp_route_rejects_random_expiry_over_tlc_limit() {
+    let mut network = MockNetworkGraph::new(3);
+    network
+        .graph
+        .set_fixed_rand_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA);
+
+    network.set_source(network.keys[1]);
+    network.add_edge(1, 2, Some(10_000), Some(0));
+    network.add_edge(2, 3, Some(10_000), Some(0));
+
+    let target = network.keys[3];
+    let base_route_expiry = FINAL_TLC_EXPIRY_DELTA_IN_TESTS + TLC_EXPIRY_DELTA_IN_TESTS;
+    let payment_data = SendPaymentDataBuilder::new(target.into(), 1000, Hash256::default())
+        .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+        .tlc_expiry_limit(base_route_expiry)
+        .max_fee_amount(Some(1000))
+        .max_parts(Some(2))
+        .allow_mpp(true)
+        .build()
+        .expect("valid payment data");
+    let payment_state = SendPaymentState::with_channel_stats(
+        payment_data,
+        GraphChannelStat::new(Some(network.graph.channel_stats())),
+    );
+
+    assert_tlc_expiry_limit_error(network.graph.build_route(
+        payment_state.amount,
+        Some(1),
+        None,
+        &payment_state,
+    ));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_trampoline_route_rejects_random_expiry_over_tlc_limit() {
+    let mut network = MockNetworkGraph::new(3);
+    network
+        .graph
+        .set_fixed_rand_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA);
+
+    network.set_source(network.keys[1]);
+    let first_trampoline = network.keys[2];
+    let target = network.keys[3];
+    network.add_edge(1, 2, Some(10_000), Some(0));
+
+    let base_final = FINAL_TLC_EXPIRY_DELTA_IN_TESTS.max(MIN_TLC_EXPIRY_DELTA);
+    let segment_budget =
+        TRAMPOLINE_FORWARDING_ROUTE_DELTA_COUNT * DEFAULT_TLC_EXPIRY_DELTA + MIN_TLC_EXPIRY_DELTA;
+    let tlc_expiry_limit = base_final + segment_budget;
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(target.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(tlc_expiry_limit)
+            .max_fee_amount(Some(1000))
+            .trampoline_hops(Some(vec![first_trampoline.into()]))
+            .build()
+            .expect("valid payment data")
+            .into();
+
+    assert_tlc_expiry_limit_error(network.graph.build_route(
+        payment_state.amount,
+        None,
+        None,
+        &payment_state,
+    ));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_graph_explicit_router_rejects_random_expiry_over_tlc_limit() {
+    let mut network = MockNetworkGraph::new(1);
+    network
+        .graph
+        .set_fixed_rand_expiry_delta(DEFAULT_TLC_EXPIRY_DELTA);
+    network.add_edge(0, 1, Some(10_000), Some(0));
+
+    let target = network.keys[1];
+    let payment_state: SendPaymentState =
+        SendPaymentDataBuilder::new(target.into(), 1000, Hash256::default())
+            .final_tlc_expiry_delta(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .tlc_expiry_limit(FINAL_TLC_EXPIRY_DELTA_IN_TESTS)
+            .max_fee_amount(Some(0))
+            .router(vec![RouterHop {
+                target: target.into(),
+                channel_outpoint: network.edges[0].2.clone(),
+                amount_received: 1000,
+                incoming_tlc_expiry: FINAL_TLC_EXPIRY_DELTA_IN_TESTS,
+            }])
+            .build()
+            .expect("valid payment data")
+            .into();
+
+    assert_tlc_expiry_limit_error(network.graph.build_route(
+        payment_state.amount,
+        None,
+        None,
+        &payment_state,
+    ));
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

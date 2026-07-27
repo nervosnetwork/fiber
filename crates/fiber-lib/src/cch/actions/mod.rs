@@ -1,8 +1,10 @@
 pub(crate) mod backend_dispatchers;
+pub(crate) mod cancel_incoming_invoice;
 pub(crate) mod send_outgoing_payment;
 pub(crate) mod settle_incoming_invoice;
 pub(crate) mod track_incoming_invoice;
 pub(crate) mod track_outgoing_payment;
+use cancel_incoming_invoice::CancelIncomingInvoiceDispatcher;
 use fiber_types::{CchOrder, CchOrderStatus};
 use send_outgoing_payment::SendOutgoingPaymentDispatcher;
 use settle_incoming_invoice::SettleIncomingInvoiceDispatcher;
@@ -20,6 +22,7 @@ pub enum CchOrderAction {
     SendOutgoingPayment,
     TrackOutgoingPayment,
     SettleIncomingInvoice,
+    CancelIncomingInvoice,
 }
 
 #[async_trait::async_trait]
@@ -50,6 +53,9 @@ impl ActionDispatcher {
             CchOrderAction::SettleIncomingInvoice => {
                 SettleIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order, retry_count)
             }
+            CchOrderAction::CancelIncomingInvoice => {
+                CancelIncomingInvoiceDispatcher::dispatch(state, cch_actor_ref, order, retry_count)
+            }
         }
     }
 
@@ -79,7 +85,13 @@ impl ActionDispatcher {
             CchOrderStatus::OutgoingInFlight => vec![CchOrderAction::TrackOutgoingPayment],
             CchOrderStatus::OutgoingSuccess => vec![CchOrderAction::SettleIncomingInvoice],
             CchOrderStatus::Success => vec![],
-            CchOrderStatus::Failed => vec![],
+            CchOrderStatus::Failed => {
+                if CancelIncomingInvoiceDispatcher::should_dispatch(order) {
+                    vec![CchOrderAction::CancelIncomingInvoice]
+                } else {
+                    vec![]
+                }
+            }
         }
     }
 

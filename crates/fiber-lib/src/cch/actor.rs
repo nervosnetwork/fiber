@@ -14,16 +14,21 @@ use tentacle::secio::SecioKeyPair;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::cch::actions::send_outgoing_payment::{
+    outgoing_fee_budget_from_fee_sats, outgoing_max_fee_rate,
+};
 use crate::cch::actions::{ActionDispatcher, CchOrderAction};
 use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, CchFiberAgentRef};
 use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
-    CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
-    PaymentTrackingReservationResult, RedactedCchTrackingEvent, MAX_TRACKED_PAYMENTS,
+    CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
+    LndTrackerArgs, LndTrackerMessage, PaymentTrackingReservationResult, RedactedCchTrackingEvent,
+    MAX_TRACKED_INVOICES, MAX_TRACKED_PAYMENTS,
 };
-use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
+use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::NetworkActorMessage;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::now_timestamp_as_millis_u64;
@@ -80,6 +85,9 @@ pub enum CchMessage {
         action: CchOrderAction,
         retry_count: u32,
     },
+
+    /// Expire an active order after its configured expiry window elapses.
+    ExpireOrder(Hash256),
 
     /// Test-only message to insert an order directly into the database
     #[cfg(test)]
@@ -204,6 +212,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             SchedulerArgs {
                 store: args.store.clone(),
                 lnd_tracker: lnd_tracker.clone(),
+                cch_actor: myself.clone(),
             },
             myself.get_cell(),
         )
@@ -265,6 +274,14 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         {
             // Only process active (non-final) orders
             if order.is_final() {
+                let actions = ActionDispatcher::on_starting(&order);
+                if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
+                    tracing::error!(
+                        "Failed to schedule final-order resume actions for order {:x}: {}",
+                        order.payment_hash,
+                        err
+                    );
+                }
                 state.schedule_job_for_final_order(&order);
                 continue;
             }
@@ -273,6 +290,8 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             if order.update_if_expired(current_time) {
                 let payment_hash = order.payment_hash;
                 state.store.update_cch_order(order.clone());
+                let actions = ActionDispatcher::on_entering(&order);
+                append_actions(myself.clone(), payment_hash, actions)?;
                 state.schedule_job_for_final_order(&order);
                 tracing::info!("Marked expired order {:x} as Failed", payment_hash);
                 continue;
@@ -400,7 +419,10 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 retry_count,
                 reason,
             } => {
-                if state.get_active_order_or_none(&payment_hash)?.is_none() {
+                if state
+                    .get_order_for_action_or_none(&payment_hash, action)?
+                    .is_none()
+                {
                     return Ok(());
                 }
                 schedule_action_retry(&myself, payment_hash, action, retry_count, &reason);
@@ -411,7 +433,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 action,
                 retry_count,
             } => {
-                let order = match state.get_active_order_or_none(&payment_hash)? {
+                let order = match state.get_order_for_action_or_none(&payment_hash, action)? {
                     None => return Ok(()),
                     Some(order) => order,
                 };
@@ -426,6 +448,11 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                         &err.to_string(),
                     );
                 }
+                Ok(())
+            }
+            CchMessage::ExpireOrder(payment_hash) => {
+                let actions = state.expire_order(payment_hash, "Order expired")?;
+                append_actions(myself, payment_hash, actions)?;
                 Ok(())
             }
             #[cfg(test)]
@@ -472,6 +499,47 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(self
             .get_order_or_none(payment_hash)?
             .filter(|order| !order.is_final()))
+    }
+
+    fn get_order_for_action_or_none(
+        &self,
+        payment_hash: &Hash256,
+        action: CchOrderAction,
+    ) -> Result<Option<CchOrder>, CchError> {
+        Ok(self
+            .get_order_or_none(payment_hash)?
+            .filter(|order| action_can_still_run(order, action)))
+    }
+
+    fn expire_order(
+        &self,
+        payment_hash: Hash256,
+        failure_reason: &str,
+    ) -> Result<Vec<CchOrderAction>, CchError> {
+        let mut order = match self.get_active_order_or_none(&payment_hash)? {
+            None => return Ok(vec![]),
+            Some(order) => order,
+        };
+
+        if order.status != CchOrderStatus::Pending {
+            tracing::debug!(
+                "Ignoring expiry for order {:x} in status {:?}",
+                payment_hash,
+                order.status
+            );
+            return Ok(vec![]);
+        }
+
+        order.status = CchOrderStatus::Failed;
+        order.failure_reason = Some(failure_reason.to_string());
+        self.store.update_cch_order(order.clone());
+        let _ = self
+            .lnd_tracker
+            .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
+        self.schedule_job_for_final_order(&order);
+        tracing::info!("Expired order {:x}", payment_hash);
+
+        Ok(ActionDispatcher::on_entering(&order))
     }
 
     fn schedule_job_for_non_final_order(&self, order: &CchOrder) {
@@ -700,6 +768,37 @@ impl<S: CchOrderStore> CchState<S> {
         result
     }
 
+    fn remaining_outgoing_invoice_expiry_seconds(
+        &self,
+        invoice: &CkbInvoice,
+        current_time_seconds: u64,
+    ) -> Result<u64, CchError> {
+        let remaining_seconds = match invoice.expiry_time() {
+            Some(expiry) => invoice
+                .data
+                .timestamp
+                .checked_add(expiry.as_millis())
+                .and_then(|expiry_at| {
+                    u64::try_from(expiry_at / 1000)
+                        .unwrap_or(u64::MAX)
+                        .checked_sub(current_time_seconds)
+                })
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+            // CKB invoices have no default expiry, so use twice the configured minimum when the
+            // outgoing invoice does not set one explicitly.
+            None => self
+                .config
+                .min_outgoing_invoice_expiry_delta_seconds
+                .checked_mul(2)
+                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
+        };
+
+        if remaining_seconds < self.config.min_outgoing_invoice_expiry_delta_seconds {
+            return Err(CchError::OutgoingInvoiceExpiryTooShort);
+        }
+        Ok(remaining_seconds)
+    }
+
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
         // `from_str` requires the invoice to carry a valid signature, so parsing
         // here also guarantees the Fiber invoice is signed.
@@ -733,10 +832,7 @@ impl<S: CchOrderStore> CchState<S> {
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // CKB uses milliseconds, BTC uses blocks (~10 min each).
-        let ckb_final_tlc_millis = invoice
-            .final_tlc_minimum_expiry_delta()
-            .copied()
-            .unwrap_or(0);
+        let ckb_final_tlc_millis = invoice.final_tlc_minimum_expiry_delta_or_default();
         let btc_final_cltv_millis = self
             .config
             .btc_final_tlc_expiry_delta_blocks
@@ -760,30 +856,7 @@ impl<S: CchOrderStore> CchState<S> {
             });
         }
 
-        // Convert timestamp + expiry_time to the expiry time relative to `duration_since`.
-        let outgoing_invoice_expiry_delta_seconds = match invoice.expiry_time() {
-            Some(expiry) => invoice
-                .data
-                .timestamp
-                .checked_add(expiry.as_millis())
-                .and_then(|expiry_at| {
-                    u64::try_from(expiry_at / 1000)
-                        .unwrap_or(u64::MAX)
-                        .checked_sub(order_created_at)
-                })
-                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
-            // CKB invoice has no default expiry, use minimal * 2 to create the invoice
-            None => self
-                .config
-                .min_outgoing_invoice_expiry_delta_seconds
-                .checked_mul(2)
-                .ok_or(CchError::OutgoingInvoiceExpiryTooShort)?,
-        };
-        if outgoing_invoice_expiry_delta_seconds
-            < self.config.min_outgoing_invoice_expiry_delta_seconds
-        {
-            return Err(CchError::OutgoingInvoiceExpiryTooShort);
-        }
+        self.remaining_outgoing_invoice_expiry_seconds(&invoice, order_created_at)?;
 
         // Verify wrapped_btc_type_script matches invoice UDT type script
         let wrapped_btc_type_script = self.resolve_wrapped_btc_type_script()?;
@@ -807,37 +880,93 @@ impl<S: CchOrderStore> CchState<S> {
             return Err(CchError::CKBInvoiceIncompatibleHashAlgorithm);
         }
 
-        let mut client = self.lnd_connection.create_invoices_client().await?;
-        let req = invoicesrpc::AddHoldInvoiceRequest {
-            hash: payment_hash.as_ref().to_vec(),
-            value_msat: total_msat,
-            expiry: outgoing_invoice_expiry_delta_seconds as i64,
-            cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
-            ..Default::default()
-        };
-        let add_invoice_resp = client
-            .add_hold_invoice(req.clone())
-            .await
-            .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
-            .into_inner();
-        let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
+        // Do not create externally payable BTC-side state for an invoice Fiber cannot currently
+        // route. The actual payment is still attempted only after the hold invoice is accepted;
+        // this dry run is a side-effect-free snapshot that rejects already-invalid orders early.
+        let fee_budget_sats =
+            outgoing_fee_budget_from_fee_sats(fee_sats, self.config.max_outgoing_fee_percentage);
+        self.fiber_agent_ref
+            .call_payment_preflight(
+                receive_btc.fiber_pay_req.clone(),
+                (btc_final_cltv_millis / 2).min(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+                OutgoingFeeLimit {
+                    max_fee_amount: fee_budget_sats,
+                    max_fee_rate: outgoing_max_fee_rate(amount_sats, fee_budget_sats),
+                },
+            )
+            .await?;
 
-        let order = CchOrder {
-            created_at: order_created_at,
-            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
-            failure_reason: None,
-            incoming_invoice: CchInvoice::Lightning(incoming_invoice),
-            outgoing_pay_req: receive_btc.fiber_pay_req,
-            payment_preimage: None,
-            status: CchOrderStatus::Pending,
-            amount_sats,
-            fee_sats,
-            payment_hash,
-            wrapped_btc_type_script,
-        };
+        let reservation = ractor::call!(self.lnd_tracker, |reply| {
+            LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply)
+        })
+        .map_err(|err| CchError::LndInvoiceTrackerError(err.to_string()))?;
+        match reservation {
+            InvoiceTrackingReservationResult::Reserved => {}
+            InvoiceTrackingReservationResult::AlreadyTracked => {
+                return Err(CchError::LndInvoiceAlreadyTracked(payment_hash));
+            }
+            InvoiceTrackingReservationResult::CapacityExceeded => {
+                return Err(CchError::LndInvoiceTrackerCapacityExceeded(
+                    MAX_TRACKED_INVOICES,
+                ));
+            }
+        }
 
-        self.store.insert_cch_order(order.clone())?;
-        Ok(order)
+        let result = async {
+            let mut client = self.lnd_connection.create_invoices_client().await?;
+
+            // Preflight and client setup may take long enough for the absolute Fiber invoice expiry
+            // to move materially closer. Refresh it immediately before creating the relative-expiry
+            // LND hold invoice so elapsed setup time is not added to the incoming invoice lifetime.
+            let refreshed_at = now_timestamp_as_millis_u64() / 1000;
+            let outgoing_invoice_expiry_delta_seconds =
+                self.remaining_outgoing_invoice_expiry_seconds(&invoice, refreshed_at)?;
+
+            let req = invoicesrpc::AddHoldInvoiceRequest {
+                hash: payment_hash.as_ref().to_vec(),
+                value_msat: total_msat,
+                expiry: outgoing_invoice_expiry_delta_seconds as i64,
+                cltv_expiry: self.config.btc_final_tlc_expiry_delta_blocks,
+                ..Default::default()
+            };
+            let add_invoice_resp = client
+                .add_hold_invoice(req.clone())
+                .await
+                .map_err(|err| CchError::LndRpcError(format!("{}, request: {:?}", err, req)))?
+                .into_inner();
+            let incoming_invoice = Bolt11Invoice::from_str(&add_invoice_resp.payment_request)?;
+
+            let order = CchOrder {
+                created_at: order_created_at,
+                expiry_delta_seconds: self.config.order_expiry_delta_seconds,
+                failure_reason: None,
+                incoming_invoice: CchInvoice::Lightning(incoming_invoice),
+                outgoing_pay_req: receive_btc.fiber_pay_req,
+                payment_preimage: None,
+                status: CchOrderStatus::Pending,
+                amount_sats,
+                fee_sats,
+                payment_hash,
+                wrapped_btc_type_script,
+            };
+
+            self.store.insert_cch_order(order.clone())?;
+            Ok(order)
+        };
+        let result = result.await;
+        if result.is_err() {
+            if let Err(err) = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTracking(payment_hash))
+            {
+                tracing::warn!(
+                    "Failed to release invoice tracker reservation for {:x}: {}",
+                    payment_hash,
+                    err
+                );
+            }
+        }
+        result
     }
 
     async fn handle_tracking_event(&self, event: CchTrackingEvent) -> Result<Vec<CchOrderAction>> {
@@ -935,6 +1064,24 @@ impl<S: CchOrderStore> CchState<S> {
             }
         }
     }
+}
+
+fn action_can_still_run(order: &CchOrder, action: CchOrderAction) -> bool {
+    match action {
+        // Most actions are stale once the order reaches a final state. Incoming invoice
+        // cancellation is the exception: it is the cleanup action for a failed order.
+        CchOrderAction::CancelIncomingInvoice => should_cancel_incoming_invoice(order),
+        _ => order_allows_active_action(order),
+    }
+}
+
+fn order_allows_active_action(order: &CchOrder) -> bool {
+    !order.is_final()
+}
+
+fn should_cancel_incoming_invoice(order: &CchOrder) -> bool {
+    // If the preimage exists, the incoming payment can be settled and must not be cancelled.
+    order.status == CchOrderStatus::Failed && order.payment_preimage.is_none()
 }
 
 fn append_actions(
