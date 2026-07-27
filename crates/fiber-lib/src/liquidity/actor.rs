@@ -265,7 +265,18 @@ where
                 state.prune_recovery_guards(swap_id);
             }
             LiquidityActorMessage::LoopInLockConfirmed(swap_id) => {
-                if let Err(error) = mark_loop_in_lock_confirmed(&state.store, swap_id, now_ms()) {
+                let now_ms = now_ms();
+                if let Err(error) = state.store.update_liquidity_chain_tx_status(
+                    &swap_id,
+                    LiquidityChainTxRole::Payout,
+                    LiquidityChainTxStatus::Confirmed,
+                    None,
+                    now_ms,
+                ) {
+                    tracing::warn!(?swap_id, %error, "failed to mark loop in lock tx confirmed");
+                } else if let Err(error) =
+                    mark_loop_in_lock_confirmed(&state.store, swap_id, now_ms)
+                {
                     tracing::warn!(?swap_id, %error, "ignoring loop in lock continuation");
                 }
             }
@@ -3972,6 +3983,101 @@ mod tests {
         assert_eq!(resumed, 1);
         assert_eq!(event_count(&events, "watch_loop_in_lock"), 1);
         assert_eq!(event_count(&events, "watch_payout"), 0);
+    }
+
+    #[tokio::test]
+    async fn loop_in_lock_confirmed_marks_payout_tx_record_confirmed() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_liquidity_swap(loop_in_record(&quote, LiquiditySwapRole::Client, now_ms()))
+            .unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [38u8; 32].into(),
+                outpoint: Some(OutPoint::new(Byte32::from_slice(&[38u8; 32]).unwrap(), 38)),
+                status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new(events.clone()),
+        )
+        .await;
+
+        actor
+            .send_message(LiquidityActorMessage::LoopInLockConfirmed(quote.quote_id))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+                .unwrap()
+                .unwrap()
+                .status,
+            LiquidityChainTxStatus::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn late_loop_in_lock_rejection_does_not_downgrade_confirmed_payout_record() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = LoopOutQuoteTerms {
+            quote_id: [39u8; 32].into(),
+            ..test_loop_in_quote(now_ms() + 60_000)
+        };
+        store
+            .insert_liquidity_swap(loop_in_record(&quote, LiquiditySwapRole::Client, now_ms()))
+            .unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [39u8; 32].into(),
+                outpoint: Some(OutPoint::new(Byte32::from_slice(&[39u8; 32]).unwrap(), 39)),
+                status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new(events.clone()),
+        )
+        .await;
+
+        actor
+            .send_message(LiquidityActorMessage::LoopInLockConfirmed(quote.quote_id))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        actor
+            .send_message(LiquidityActorMessage::ChainTxRejected(
+                quote.quote_id,
+                LiquidityChainTxRole::Payout,
+                "late rejected".to_string(),
+            ))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+                .unwrap()
+                .unwrap()
+                .status,
+            LiquidityChainTxStatus::Confirmed
+        );
     }
 
     #[tokio::test]
