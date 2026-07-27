@@ -413,12 +413,22 @@ impl<S> CkbLiquidityChainWatcher<S> {
             let Ok(result) = receiver.await else {
                 return;
             };
-            let TxStatus::Committed(block_number, ..) = result.tx_status else {
-                return;
-            };
-            let _ = ckb_chain_actor
-                .send_message(CkbChainMessage::CommitFundingTx(tx_hash, block_number));
-            let _ = liquidity_actor.send_message(LiquidityActorMessage::PayoutConfirmed(swap_id));
+            match result.tx_status {
+                TxStatus::Committed(block_number, ..) => {
+                    let _ = ckb_chain_actor
+                        .send_message(CkbChainMessage::CommitFundingTx(tx_hash, block_number));
+                    let _ = liquidity_actor
+                        .send_message(LiquidityActorMessage::PayoutConfirmed(swap_id));
+                }
+                TxStatus::Rejected(reason) => {
+                    let _ = liquidity_actor.send_message(LiquidityActorMessage::ChainTxRejected(
+                        swap_id,
+                        LiquidityChainTxRole::Payout,
+                        reason,
+                    ));
+                }
+                _ => {}
+            }
         });
         RpcReplyPort::from(sender)
     }
@@ -4019,6 +4029,52 @@ mod tests {
             LiquidityActorMessage::PayoutConfirmed,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_maps_rejected_payout_tracer_result_to_actor_message() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let quote = test_loop_out_quote_terms();
+        let funded_tx = test_funding_transaction_with_script(&quote, 0);
+        let signed_tx = test_funding_transaction_with_script(&quote, 1);
+        let tx_hash: Hash256 = signed_tx.hash().into();
+        let (ckb_actor, _handle) = ractor::Actor::spawn(
+            None,
+            PayoutMockCkbActor,
+            PayoutMockCkbActorArgs {
+                events,
+                funded_tx,
+                signed_tx,
+                send_error: false,
+            },
+        )
+        .await
+        .unwrap();
+        let (liquidity_actor, mut receiver) = spawn_mock_liquidity_actor().await;
+
+        CkbLiquidityChainWatcher::<NoopLiquidityStore>::payout_tracer_callback_for(
+            quote.quote_id,
+            tx_hash,
+            ckb_actor,
+            liquidity_actor,
+        )
+        .send(CkbTxTracingResult {
+            tx_hash,
+            tx_status: TxStatus::Rejected("rejected by pool".to_string()),
+        })
+        .expect("callback accepts rejected status");
+
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("liquidity actor receives rejected continuation")
+            .expect("mock actor is alive");
+        assert!(matches!(
+            message,
+            LiquidityActorMessage::ChainTxRejected(swap_id, role, reason)
+                if swap_id == quote.quote_id
+                    && role == LiquidityChainTxRole::Payout
+                    && reason == "rejected by pool"
+        ));
     }
 
     #[tokio::test]
