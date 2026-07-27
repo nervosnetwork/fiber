@@ -235,6 +235,13 @@ pub trait LiquidityChainWatcher {
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), Self::Error>;
 
+    /// Broadcast the client Loop In lock transaction for the accepted quote.
+    async fn broadcast_loop_in_lock(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), Self::Error>;
+
     /// Schedule payout lock watching and report completion back to `myself`.
     async fn watch_payout_lock(
         &mut self,
@@ -721,6 +728,16 @@ where
                 ))
             })?;
         Ok(())
+    }
+
+    async fn broadcast_loop_in_lock(
+        &mut self,
+        _quote: &LoopOutQuoteTerms,
+        _myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), Self::Error> {
+        Err(LiquidityLoopOutError::Chain(
+            "loop in lock broadcast is not wired to CKB yet".to_string(),
+        ))
     }
 
     async fn broadcast_claim(
@@ -1322,6 +1339,14 @@ mod tests {
         async fn watch_payout_lock(
             &mut self,
             _swap_id: Hash256,
+            _myself: ActorRef<LiquidityActorMessage>,
+        ) -> Result<(), Self::Error> {
+            Err(LiquidityLoopOutError::Chain("unused".to_string()))
+        }
+
+        async fn broadcast_loop_in_lock(
+            &mut self,
+            _quote: &LoopOutQuoteTerms,
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
             Err(LiquidityLoopOutError::Chain("unused".to_string()))
