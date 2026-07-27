@@ -286,6 +286,9 @@ impl<S: CchOrderStore> SchedulerState<S> {
         let _ = self
             .lnd_tracker
             .send_message(LndTrackerMessage::StopTracking(payment_hash));
+        let _ = self
+            .lnd_tracker
+            .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
 
         // Delete order from store
         self.store.delete_cch_order(&payment_hash);

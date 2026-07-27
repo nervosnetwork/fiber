@@ -17,7 +17,7 @@ use crate::cch::{
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS,
     },
     order::CchOrderStore,
-    trackers::CchTrackingEvent,
+    trackers::{CchTrackingEvent, MAX_TRACKED_PAYMENTS},
     CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
@@ -27,7 +27,7 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::invoice::{
-    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, PreimageStore,
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError, PreimageStore,
     SettleInvoiceError,
 };
 use crate::store::{store_impl::StoreChange, Store};
@@ -41,7 +41,10 @@ use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort}
 use secp256k1::{Secp256k1, SecretKey};
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Bitcoin block interval in seconds (see [`BTC_BLOCK_TIME_MILLIS`] in `cch::actor`).
@@ -144,6 +147,8 @@ struct MockNetworkState {
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
     send_payment_status: Arc<Mutex<PaymentStatus>>,
+    /// Makes mocked Fiber invoice creation fail after payment tracking was reserved.
+    fail_add_invoice: Arc<AtomicBool>,
     /// Durable Fiber store used by store-backed recovery tests.
     payment_store: Option<Store>,
     /// Whether mocked Fiber SettleInvoice should return an already-paid error.
@@ -176,8 +181,11 @@ impl Actor for MockNetworkActor {
         match message {
             NetworkActorMessage::Command(cmd) => match cmd {
                 NetworkActorCommand::AddInvoice(_invoice, _opt_hash, reply) => {
-                    // Accept all invoices
-                    let _ = reply.send(Ok(()));
+                    if state.fail_add_invoice.load(Ordering::SeqCst) {
+                        let _ = reply.send(Err(InvoiceError::InvoiceAlreadyExists));
+                    } else {
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 NetworkActorCommand::SendPayment(cmd, reply) => {
                     // Extract payment hash from invoice
@@ -490,8 +498,15 @@ impl TestHarness {
     /// Create a SendBTC order via CchMessage
     /// Returns both the order and the preimage that hashes to its payment hash
     async fn create_send_btc_order_with_preimage(&self) -> Result<(CchOrder, Hash256), CchError> {
+        self.create_send_btc_order_with_seed(200).await
+    }
+
+    async fn create_send_btc_order_with_seed(
+        &self,
+        seed: u8,
+    ) -> Result<(CchOrder, Hash256), CchError> {
         // Generate a valid preimage/payment hash pair first
-        let (preimage, payment_hash) = create_valid_preimage_pair(200);
+        let (preimage, payment_hash) = create_valid_preimage_pair(seed);
         let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
         let btc_pay_req = lightning_invoice.to_string();
 
@@ -506,6 +521,12 @@ impl TestHarness {
         .expect("actor call failed")?;
 
         Ok((order, preimage))
+    }
+
+    fn set_add_invoice_failure(&self, fail: bool) {
+        self.mock_state
+            .fail_add_invoice
+            .store(fail, Ordering::SeqCst);
     }
 
     /// Insert an order directly into the database (for testing without LND)
@@ -607,6 +628,7 @@ async fn setup_test_harness_with_config_and_store(
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        fail_add_invoice: Arc::new(AtomicBool::new(false)),
         payment_store: None,
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
@@ -665,6 +687,7 @@ async fn setup_store_backed_test_harness_with_store(
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        fail_add_invoice: Arc::new(AtomicBool::new(false)),
         payment_store: Some(store.clone()),
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
@@ -787,9 +810,99 @@ fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) ->
     invoice
 }
 
+fn insert_pending_send_btc_orders(store: &MockCchOrderStore, count: usize) {
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    for value in 0..count {
+        let payment_hash = test_payment_hash(value as u8);
+        store
+            .insert_cch_order(CchOrder {
+                created_at: current_time,
+                expiry_delta_seconds: 3600,
+                wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+                outgoing_pay_req: "restored send_btc order".to_string(),
+                incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+                payment_hash,
+                payment_preimage: None,
+                amount_sats: 100_000,
+                fee_sats: 1_000,
+                status: CchOrderStatus::Pending,
+                failure_reason: None,
+            })
+            .expect("insert pending send_btc order");
+    }
+}
+
 // =============================================================================
 // SendBTC Happy Path Test
 // =============================================================================
+
+#[tokio::test]
+async fn test_send_btc_rejects_when_payment_tracking_capacity_is_full() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS);
+    let harness = setup_test_harness_with_store(store).await;
+
+    let error = harness
+        .create_send_btc_order_with_seed(200)
+        .await
+        .expect_err("send_btc must reject orders above payment tracking capacity");
+    assert!(matches!(
+        error,
+        CchError::LndPaymentTrackerCapacityExceeded(MAX_TRACKED_PAYMENTS)
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_releases_reservation_when_invoice_creation_fails() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS - 1);
+    let harness = setup_test_harness_with_store(store).await;
+
+    harness.set_add_invoice_failure(true);
+    harness
+        .create_send_btc_order_with_seed(200)
+        .await
+        .expect_err("mocked invoice creation must fail");
+
+    harness.set_add_invoice_failure(false);
+    harness
+        .create_send_btc_order_with_seed(201)
+        .await
+        .expect("failed invoice creation must release payment tracking capacity");
+}
+
+#[tokio::test]
+async fn test_final_send_btc_order_releases_payment_tracking_capacity() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS - 1);
+    let harness = setup_test_harness_with_store(store).await;
+
+    let (order, _) = harness
+        .create_send_btc_order_with_seed(200)
+        .await
+        .expect("last available payment tracking slot");
+    harness
+        .create_send_btc_order_with_seed(201)
+        .await
+        .expect_err("capacity must be full before the order becomes final");
+
+    harness.event_port.send(CchTrackingEvent::InvoiceChanged {
+        payment_hash: order.payment_hash,
+        status: CkbInvoiceStatus::Expired,
+        failure_reason: Some("test expiry".to_string()),
+    });
+    harness
+        .wait_for_order_status(order.payment_hash, CchOrderStatus::Failed, 1000)
+        .await;
+
+    harness
+        .create_send_btc_order_with_seed(201)
+        .await
+        .expect("final order must release payment tracking capacity");
+}
 
 /// Tests the complete happy path for a SendBTC order.
 ///

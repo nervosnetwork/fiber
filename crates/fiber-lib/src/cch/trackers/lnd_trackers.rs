@@ -5,20 +5,23 @@
 //!
 //! ## Key Features
 //!
-//! - **Bounded Tracking**: Tracks every admitted invoice, up to the global invoice limit.
+//! - **Bounded Tracking**: Tracks every admitted invoice and outgoing payment up to separate
+//!   global limits.
 //! - **Connection Reuse**: Multiplexes invoice subscriptions over one shared LND client.
 //! - **Reconnect Protection**: Bounds concurrent subscription attempts and adds retry jitter.
 //! - **Completion Handling**: Properly cleans up when tracker tasks complete, stop, or fail.
 //!
 //! ## Architecture
 //!
-//! The actor uses a message-passing model with two main message types:
-//! - `TrackInvoice(Hash256)`: Adds invoice to tracking queue
-//! - `InvoiceTrackerCompleted{...}`: Sent by spawned tracker tasks when they finish
+//! Tracking requests are submitted through `TrackInvoice(Hash256)` and
+//! `TrackPayment(Hash256)`. Spawned tracker tasks report completion back to the actor.
 //!
 //! The queue is only needed when restoring more persisted orders than the current global
 //! admission limit. Newly created orders reserve global capacity before their LND invoice is
 //! created, so every newly admitted invoice starts tracking immediately.
+//! Outgoing payments use the same admission model: `send_btc` reserves capacity before exposing
+//! its payable Fiber invoice, while restored orders above the limit wait in a bounded-concurrency
+//! queue.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -45,6 +48,7 @@ use fiber_types::payment::PaymentStatus as FiberPaymentStatus;
 use fiber_types::Hash256;
 
 pub(crate) const MAX_TRACKED_INVOICES: usize = 100;
+pub(crate) const MAX_TRACKED_PAYMENTS: usize = 100;
 const MAX_CONCURRENT_SUBSCRIBE_ATTEMPTS: usize = 10;
 const SUBSCRIBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 const INVOICE_TRACKER_RETRY_DELAY: Duration = Duration::from_secs(15);
@@ -104,6 +108,18 @@ pub enum LndTrackerMessage {
     /// Stop tracking an invoice (remove from queue if not yet being tracked)
     StopTracking(Hash256),
 
+    /// Reserve global capacity before exposing a payable Fiber invoice for `send_btc`.
+    ReservePaymentTracking(Hash256, RpcReplyPort<PaymentTrackingReservationResult>),
+
+    /// Restore a persisted payment-tracking order created before admission control.
+    RestorePaymentTracking(Hash256),
+
+    /// Track an outgoing payment by hash until LND reports a terminal status.
+    TrackPayment(Hash256),
+
+    /// Stop tracking an outgoing payment.
+    StopTrackingPayment(Hash256),
+
     /// Notification that an invoice tracker task has completed
     ///
     /// Sent by InvoiceTracker tasks when they terminate (either successfully
@@ -113,6 +129,12 @@ pub enum LndTrackerMessage {
         completed_successfully: bool,
     },
 
+    /// Notification that a per-payment tracker task has terminated.
+    PaymentTrackerCompleted {
+        payment_hash: Hash256,
+        tracker_id: u64,
+    },
+
     /// Get current state snapshot (for testing)
     #[cfg(test)]
     GetState(ractor::RpcReplyPort<StateSnapshot>),
@@ -120,6 +142,13 @@ pub enum LndTrackerMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvoiceTrackingReservationResult {
+    Reserved,
+    AlreadyTracked,
+    CapacityExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentTrackingReservationResult {
     Reserved,
     AlreadyTracked,
     CapacityExceeded,
@@ -142,6 +171,10 @@ pub struct StateSnapshot {
     pub reserved_invoice_trackers: usize,
     pub stopping_invoice_trackers: usize,
     pub tracked_invoices: usize,
+    pub payment_queue_len: usize,
+    pub active_payment_trackers: usize,
+    pub reserved_payment_trackers: usize,
+    pub tracked_payment_count: usize,
 }
 
 /// Arguments for starting the LndTrackerActor
@@ -155,6 +188,7 @@ pub struct LndTrackerArgs {
 /// State for the LndTrackerActor
 pub struct LndTrackerState {
     port: Arc<OutputPort<CchTrackingEvent>>,
+    lnd_connection: LndConnectionInfo,
     invoices_client: InvoicesClient,
     token: CancellationToken,
     tracker: TaskTracker,
@@ -168,6 +202,22 @@ pub struct LndTrackerState {
     restart_stopping_invoices: HashSet<Hash256>,
     /// Limits only subscription establishment. Permits are released once streams are established.
     subscribe_attempts: Arc<Semaphore>,
+    /// Payment hashes waiting for a bounded tracking slot.
+    payment_queue: VecDeque<Hash256>,
+    /// State of every admitted or restored outgoing Lightning payment.
+    payment_trackers: HashMap<Hash256, PaymentTrackingState>,
+    next_payment_tracker_id: u64,
+}
+
+struct ActivePaymentTracker {
+    tracker_id: u64,
+    token: CancellationToken,
+}
+
+enum PaymentTrackingState {
+    Reserved,
+    Queued,
+    Active(ActivePaymentTracker),
 }
 
 /// Ractor Actor to track LND payments and invoices
@@ -176,7 +226,9 @@ pub struct LndTrackerState {
 /// It provides the following features:
 ///
 /// ## Payment Tracking
-/// - Automatically tracks all LND payments in the background
+/// - Reserves capacity before admitting new `send_btc` orders
+/// - Bounds concurrently active per-payment trackers while preserving restart recovery
+/// - Deduplicates trackers and reconnects until LND reports a terminal status
 /// - Sends `CchTrackingEvent::PaymentChanged` events to the output port
 ///
 /// ## Invoice Tracking
@@ -242,27 +294,20 @@ impl Actor for LndTrackerActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let invoices_client = args.lnd_connection.create_invoices_client().await?;
         let state = LndTrackerState {
-            port: args.port.clone(),
+            port: args.port,
+            lnd_connection: args.lnd_connection,
             invoices_client,
-            token: args.token.clone(),
-            tracker: args.tracker.clone(),
+            token: args.token,
+            tracker: args.tracker,
             invoice_queue: VecDeque::new(),
             invoice_trackers: HashMap::new(),
             active_invoice_tracker_tokens: HashMap::new(),
             restart_stopping_invoices: HashSet::new(),
             subscribe_attempts: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSCRIBE_ATTEMPTS)),
+            payment_queue: VecDeque::new(),
+            payment_trackers: HashMap::new(),
+            next_payment_tracker_id: 0,
         };
-
-        // Start payment tracker in background
-        let payment_tracker = PaymentTracker {
-            port: args.port,
-            lnd_connection: args.lnd_connection,
-            token: args.token,
-        };
-
-        args.tracker.spawn(async move {
-            payment_tracker.run().await;
-        });
 
         Ok(state)
     }
@@ -353,6 +398,23 @@ impl Actor for LndTrackerActor {
                 tracing::debug!("Stopped tracking invoice {:x}", payment_hash);
                 Ok(())
             }
+            LndTrackerMessage::ReservePaymentTracking(payment_hash, reply_port) => {
+                let result = state.reserve_payment_tracking(payment_hash);
+                let _ = reply_port.send(result);
+                Ok(())
+            }
+            LndTrackerMessage::RestorePaymentTracking(payment_hash) => {
+                state.restore_payment_tracking(payment_hash);
+                Ok(())
+            }
+            LndTrackerMessage::TrackPayment(payment_hash) => {
+                state.queue_payment_tracker(myself, payment_hash);
+                Ok(())
+            }
+            LndTrackerMessage::StopTrackingPayment(payment_hash) => {
+                state.stop_payment_tracker(payment_hash);
+                Ok(())
+            }
             LndTrackerMessage::InvoiceTrackerCompleted {
                 payment_hash,
                 completed_successfully,
@@ -400,6 +462,13 @@ impl Actor for LndTrackerActor {
 
                 Ok(())
             }
+            LndTrackerMessage::PaymentTrackerCompleted {
+                payment_hash,
+                tracker_id,
+            } => {
+                state.complete_payment_tracker(myself, payment_hash, tracker_id);
+                Ok(())
+            }
 
             #[cfg(test)]
             LndTrackerMessage::GetState(reply_port) => {
@@ -411,6 +480,10 @@ impl Actor for LndTrackerActor {
                     stopping_invoice_trackers: state
                         .count_invoice_trackers(InvoiceTrackingState::Stopping),
                     tracked_invoices: state.invoice_trackers.len(),
+                    payment_queue_len: state.payment_queue.len(),
+                    active_payment_trackers: state.active_payment_tracker_count(),
+                    reserved_payment_trackers: state.reserved_payment_tracker_count(),
+                    tracked_payment_count: state.payment_trackers.len(),
                 };
                 let _ = reply_port.send(snapshot);
                 Ok(())
@@ -431,6 +504,184 @@ impl Actor for LndTrackerActor {
 }
 
 impl LndTrackerState {
+    fn reserve_payment_tracking(
+        &mut self,
+        payment_hash: Hash256,
+    ) -> PaymentTrackingReservationResult {
+        if self.payment_trackers.contains_key(&payment_hash) {
+            return PaymentTrackingReservationResult::AlreadyTracked;
+        }
+        if self.payment_trackers.len() >= MAX_TRACKED_PAYMENTS {
+            return PaymentTrackingReservationResult::CapacityExceeded;
+        }
+        self.payment_trackers
+            .insert(payment_hash, PaymentTrackingState::Reserved);
+        PaymentTrackingReservationResult::Reserved
+    }
+
+    fn restore_payment_tracking(&mut self, payment_hash: Hash256) {
+        if self.payment_trackers.contains_key(&payment_hash) {
+            return;
+        }
+        self.payment_trackers
+            .insert(payment_hash, PaymentTrackingState::Reserved);
+        if self.payment_trackers.len() > MAX_TRACKED_PAYMENTS {
+            tracing::warn!(
+                "Restored outgoing payment tracker {} above the global limit of {}",
+                payment_hash,
+                MAX_TRACKED_PAYMENTS
+            );
+        }
+    }
+
+    fn queue_payment_tracker(
+        &mut self,
+        myself: ActorRef<LndTrackerMessage>,
+        payment_hash: Hash256,
+    ) {
+        match self.payment_trackers.get_mut(&payment_hash) {
+            Some(PaymentTrackingState::Reserved) => {
+                self.payment_trackers
+                    .insert(payment_hash, PaymentTrackingState::Queued);
+                self.payment_queue.push_back(payment_hash);
+            }
+            Some(PaymentTrackingState::Queued) | Some(PaymentTrackingState::Active(_)) => {
+                tracing::debug!(
+                    "Outgoing payment tracker already queued or active for payment_hash={}",
+                    payment_hash
+                );
+                return;
+            }
+            None => {
+                // Persisted orders created before admission control must still recover.
+                self.payment_trackers
+                    .insert(payment_hash, PaymentTrackingState::Queued);
+                if self.payment_trackers.len() > MAX_TRACKED_PAYMENTS {
+                    tracing::warn!(
+                        "Restoring outgoing payment tracker {} above the global limit of {}",
+                        payment_hash,
+                        MAX_TRACKED_PAYMENTS
+                    );
+                }
+                self.payment_queue.push_back(payment_hash);
+            }
+        }
+
+        self.process_payment_queue(myself);
+    }
+
+    fn process_payment_queue(&mut self, myself: ActorRef<LndTrackerMessage>) {
+        while self.active_payment_tracker_count() < MAX_TRACKED_PAYMENTS {
+            let Some(payment_hash) = self.payment_queue.pop_front() else {
+                break;
+            };
+            if !matches!(
+                self.payment_trackers.get(&payment_hash),
+                Some(PaymentTrackingState::Queued)
+            ) {
+                continue;
+            }
+
+            let tracker_id = self.next_payment_tracker_id;
+            self.next_payment_tracker_id = self.next_payment_tracker_id.wrapping_add(1);
+            let token = self.token.child_token();
+            self.payment_trackers.insert(
+                payment_hash,
+                PaymentTrackingState::Active(ActivePaymentTracker {
+                    tracker_id,
+                    token: token.clone(),
+                }),
+            );
+
+            let tracker = PaymentTracker {
+                port: self.port.clone(),
+                payment_hash,
+                lnd_connection: self.lnd_connection.clone(),
+                token,
+            };
+            let myself = myself.clone();
+            self.tracker.spawn(async move {
+                tracker.run().await;
+                let _ = myself.send_message(LndTrackerMessage::PaymentTrackerCompleted {
+                    payment_hash,
+                    tracker_id,
+                });
+            });
+            tracing::debug!(
+                "Started outgoing payment tracker for payment_hash={} tracker_id={} active={}/{}",
+                payment_hash,
+                tracker_id,
+                self.active_payment_tracker_count(),
+                MAX_TRACKED_PAYMENTS
+            );
+        }
+    }
+
+    fn stop_payment_tracker(&mut self, payment_hash: Hash256) {
+        let remove_immediately = match self.payment_trackers.get_mut(&payment_hash) {
+            Some(PaymentTrackingState::Reserved | PaymentTrackingState::Queued) => true,
+            Some(PaymentTrackingState::Active(active_tracker)) => {
+                active_tracker.token.cancel();
+                tracing::debug!(
+                    "Stopping outgoing payment tracker for payment_hash={} tracker_id={}",
+                    payment_hash,
+                    active_tracker.tracker_id
+                );
+                false
+            }
+            None => false,
+        };
+        if remove_immediately {
+            self.payment_trackers.remove(&payment_hash);
+            self.payment_queue.retain(|hash| *hash != payment_hash);
+            tracing::debug!(
+                "Released outgoing payment tracking reservation for payment_hash={}",
+                payment_hash
+            );
+        }
+    }
+
+    fn complete_payment_tracker(
+        &mut self,
+        myself: ActorRef<LndTrackerMessage>,
+        payment_hash: Hash256,
+        tracker_id: u64,
+    ) {
+        let is_current_tracker = self
+            .payment_trackers
+            .get(&payment_hash)
+            .is_some_and(|state| {
+                matches!(
+                    state,
+                    PaymentTrackingState::Active(tracker) if tracker.tracker_id == tracker_id
+                )
+            });
+        if is_current_tracker {
+            self.payment_trackers.remove(&payment_hash);
+            tracing::debug!(
+                "Completed outgoing payment tracker for payment_hash={} tracker_id={}",
+                payment_hash,
+                tracker_id
+            );
+            self.process_payment_queue(myself);
+        }
+    }
+
+    fn active_payment_tracker_count(&self) -> usize {
+        self.payment_trackers
+            .values()
+            .filter(|state| matches!(state, PaymentTrackingState::Active(_)))
+            .count()
+    }
+
+    #[cfg(test)]
+    fn reserved_payment_tracker_count(&self) -> usize {
+        self.payment_trackers
+            .values()
+            .filter(|state| matches!(state, PaymentTrackingState::Reserved))
+            .count()
+    }
+
     #[cfg(test)]
     fn count_invoice_trackers(&self, expected_state: InvoiceTrackingState) -> usize {
         self.invoice_trackers
@@ -512,9 +763,11 @@ impl LndTrackerState {
     }
 }
 
-/// Internal struct for tracking payments
+/// Tracks one outgoing payment by hash. `TrackPaymentV2` returns the current state
+/// after every reconnect, including a terminal state reached while CCH was unavailable.
 struct PaymentTracker {
     port: Arc<OutputPort<CchTrackingEvent>>,
+    payment_hash: Hash256,
     lnd_connection: LndConnectionInfo,
     token: CancellationToken,
 }
@@ -526,39 +779,46 @@ impl PaymentTracker {
         token.run_until_cancelled(fut).await;
     }
 
-    async fn run_loop(self) {
-        tracing::debug!("PaymentTracker: will connect {}", self.lnd_connection.uri);
-
+    async fn run_loop(&self) {
         while let Err(err) = self.run_once().await {
             tracing::error!(
-                "Error tracking LND payments, retry 15 seconds later: {:?}",
+                "Error tracking outgoing LND payment {}, retry 15 seconds later: {:?}",
+                self.payment_hash,
                 err
             );
             sleep(Duration::from_secs(15)).await;
         }
+        tracing::debug!(
+            "Outgoing payment tracker completed for payment_hash={}",
+            self.payment_hash
+        );
     }
 
     async fn run_once(&self) -> Result<()> {
         let mut client = self.lnd_connection.create_router_client().await?;
         let mut stream = client
-            .track_payments(routerrpc::TrackPaymentsRequest {
-                no_inflight_updates: true,
-            })
+            .track_payment_v2(track_payment_request(self.payment_hash))
             .await?
             .into_inner();
 
         loop {
             match stream.next().await {
-                Some(Ok(payment)) => self.on_payment(payment).await?,
+                Some(Ok(payment)) => {
+                    if self.on_payment(payment).await? {
+                        return Ok(());
+                    }
+                }
                 Some(Err(err)) => return Err(err.into()),
                 None => return Err(anyhow!("unexpected closed stream")),
             }
         }
     }
 
-    async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
+    /// Emits every update and returns true once the payment is terminal.
+    async fn on_payment(&self, payment: lnrpc::Payment) -> Result<bool> {
         let payment_hash = payment.payment_hash.clone();
         let status = payment.status();
+        let is_terminal = is_lnd_payment_terminal(status);
         let has_payment_preimage = !is_payment_preimage_empty(&payment.payment_preimage, status);
         tracing::debug!(
             "payment changed payment_hash={} status={:?} has_payment_preimage={}",
@@ -567,8 +827,22 @@ impl PaymentTracker {
             has_payment_preimage
         );
         self.port.send(map_lnd_payment_changed_event(payment)?);
-        Ok(())
+        Ok(is_terminal)
     }
+}
+
+fn track_payment_request(payment_hash: Hash256) -> routerrpc::TrackPaymentRequest {
+    routerrpc::TrackPaymentRequest {
+        payment_hash: payment_hash.into(),
+        no_inflight_updates: false,
+    }
+}
+
+fn is_lnd_payment_terminal(status: lnrpc::payment::PaymentStatus) -> bool {
+    matches!(
+        status,
+        lnrpc::payment::PaymentStatus::Succeeded | lnrpc::payment::PaymentStatus::Failed
+    )
 }
 
 /// Internal struct for tracking individual invoices
@@ -785,5 +1059,50 @@ mod tests {
             }
             CchTrackingEvent::InvoiceChanged { .. } => panic!("expected payment event"),
         }
+    }
+
+    #[test]
+    fn test_track_payment_request_targets_one_hash_and_streams_inflight_updates() {
+        let payment_hash = Hash256::from_str(PAYMENT_HASH).expect("payment hash should parse");
+        let request = track_payment_request(payment_hash);
+
+        assert_eq!(request.payment_hash, payment_hash.as_ref());
+        assert!(!request.no_inflight_updates);
+    }
+
+    #[tokio::test]
+    async fn test_payment_tracker_stops_on_current_terminal_state() {
+        let tracker = PaymentTracker {
+            port: Arc::new(OutputPort::default()),
+            payment_hash: Hash256::from_str(PAYMENT_HASH).expect("payment hash should parse"),
+            lnd_connection: LndConnectionInfo {
+                uri: "https://localhost:10009".parse().unwrap(),
+                cert: None,
+                macaroon: None,
+            },
+            token: CancellationToken::new(),
+        };
+
+        assert!(tracker
+            .on_payment(lnd_payment(
+                lnrpc::payment::PaymentStatus::Succeeded,
+                ZERO_PREIMAGE,
+            ))
+            .await
+            .expect("successful payment should map"));
+        assert!(tracker
+            .on_payment(lnd_payment(
+                lnrpc::payment::PaymentStatus::Failed,
+                ZERO_PREIMAGE,
+            ))
+            .await
+            .expect("failed payment should map"));
+        assert!(!tracker
+            .on_payment(lnd_payment(
+                lnrpc::payment::PaymentStatus::InFlight,
+                ZERO_PREIMAGE,
+            ))
+            .await
+            .expect("in-flight payment should map"));
     }
 }

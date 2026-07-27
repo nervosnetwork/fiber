@@ -8,6 +8,7 @@ use crate::cch::actions::{
     send_outgoing_payment::SendOutgoingPaymentDispatcher,
     settle_incoming_invoice::SettleIncomingInvoiceDispatcher,
     track_incoming_invoice::TrackIncomingInvoiceDispatcher,
+    track_outgoing_payment::TrackOutgoingPaymentDispatcher,
     ActionDispatcher, CchOrderAction,
 };
 use fiber_types::{CchInvoice, CchOrder, CchOrderStatus, Hash256};
@@ -321,6 +322,22 @@ fn test_track_incoming_invoice_should_not_dispatch_when_success() {
 fn test_track_incoming_invoice_should_not_dispatch_when_failed() {
     let order = create_order_with_lightning_invoice(CchOrderStatus::Failed);
     assert!(!TrackIncomingInvoiceDispatcher::should_dispatch(&order));
+}
+
+// =============================================================================
+// TrackOutgoingPaymentDispatcher::should_dispatch tests
+// =============================================================================
+
+#[test]
+fn test_track_outgoing_payment_dispatches_for_lightning_payment() {
+    let order = create_order_with_fiber_invoice(CchOrderStatus::OutgoingInFlight);
+    assert!(TrackOutgoingPaymentDispatcher::should_dispatch(&order));
+}
+
+#[test]
+fn test_track_outgoing_payment_dispatches_for_fiber_payment() {
+    let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingInFlight);
+    assert!(TrackOutgoingPaymentDispatcher::should_dispatch(&order));
 }
 
 // =============================================================================

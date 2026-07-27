@@ -81,6 +81,12 @@ pub enum CchError {
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
     LndRpcError(String),
+    #[error("LND payment tracker error: {0}")]
+    LndPaymentTrackerError(String),
+    #[error("LND payment is already tracked: {0}")]
+    LndPaymentAlreadyTracked(Hash256),
+    #[error("LND payment tracker capacity exceeded (maximum {0})")]
+    LndPaymentTrackerCapacityExceeded(usize),
     #[error("LND invoice {0} is already being tracked")]
     LndInvoiceAlreadyTracked(Hash256),
     #[error("LND invoice tracker capacity exceeded (maximum {0})")]
