@@ -17,7 +17,7 @@ use crate::cch::{
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS,
     },
     order::CchOrderStore,
-    trackers::CchTrackingEvent,
+    trackers::{CchTrackingEvent, MAX_TRACKED_PAYMENTS},
     CchConfig, CchError, CchStoreError,
 };
 use crate::fiber::{
@@ -27,7 +27,7 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::invoice::{
-    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, PreimageStore,
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError, PreimageStore,
     SettleInvoiceError,
 };
 use crate::store::{store_impl::StoreChange, Store};
@@ -42,7 +42,10 @@ use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort}
 use secp256k1::{Secp256k1, SecretKey};
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Bitcoin block interval in seconds (see [`BTC_BLOCK_TIME_MILLIS`] in `cch::actor`).
@@ -346,8 +349,12 @@ struct MockNetworkState {
     fiber_preflight_delay: Arc<Mutex<Duration>>,
     /// Tracks the `max_fee_amount` of each outgoing Fiber SendPayment, keyed by payment hash.
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
+    /// Tracks the `max_fee_rate` of each outgoing Fiber SendPayment, keyed by payment hash.
+    sent_fiber_payment_fee_rates: Arc<Mutex<std::collections::HashMap<Hash256, Option<u64>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
     send_payment_status: Arc<Mutex<PaymentStatus>>,
+    /// Makes mocked Fiber invoice creation fail after payment tracking was reserved.
+    fail_add_invoice: Arc<AtomicBool>,
     /// Durable Fiber store used by store-backed recovery tests.
     payment_store: Option<Store>,
     /// Whether mocked Fiber SettleInvoice should return an already-paid error.
@@ -380,8 +387,11 @@ impl Actor for MockNetworkActor {
         match message {
             NetworkActorMessage::Command(cmd) => match cmd {
                 NetworkActorCommand::AddInvoice(_invoice, _opt_hash, reply) => {
-                    // Accept all invoices
-                    let _ = reply.send(Ok(()));
+                    if state.fail_add_invoice.load(Ordering::SeqCst) {
+                        let _ = reply.send(Err(InvoiceError::InvoiceAlreadyExists));
+                    } else {
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 NetworkActorCommand::SendPayment(cmd, reply) => {
                     // Extract payment hash from invoice
@@ -413,6 +423,11 @@ impl Actor for MockNetworkActor {
                             .lock()
                             .unwrap()
                             .insert(payment_hash, cmd.max_fee_amount);
+                        state
+                            .sent_fiber_payment_fee_rates
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash, cmd.max_fee_rate);
                     }
 
                     // Return success response - the executor will create CchTrackingEvent
@@ -612,6 +627,16 @@ impl TestHarness {
             .copied()
     }
 
+    /// Return the `max_fee_rate` of the outgoing Fiber SendPayment for `payment_hash`, if sent.
+    fn fiber_payment_max_fee_rate(&self, payment_hash: Hash256) -> Option<Option<u64>> {
+        self.mock_state
+            .sent_fiber_payment_fee_rates
+            .lock()
+            .unwrap()
+            .get(&payment_hash)
+            .copied()
+    }
+
     fn set_send_payment_status(&self, status: PaymentStatus) {
         *self.mock_state.send_payment_status.lock().unwrap() = status;
     }
@@ -695,8 +720,15 @@ impl TestHarness {
     /// Create a SendBTC order via CchMessage
     /// Returns both the order and the preimage that hashes to its payment hash
     async fn create_send_btc_order_with_preimage(&self) -> Result<(CchOrder, Hash256), CchError> {
+        self.create_send_btc_order_with_seed(200).await
+    }
+
+    async fn create_send_btc_order_with_seed(
+        &self,
+        seed: u8,
+    ) -> Result<(CchOrder, Hash256), CchError> {
         // Generate a valid preimage/payment hash pair first
-        let (preimage, payment_hash) = create_valid_preimage_pair(200);
+        let (preimage, payment_hash) = create_valid_preimage_pair(seed);
         let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
         let btc_pay_req = lightning_invoice.to_string();
 
@@ -711,6 +743,12 @@ impl TestHarness {
         .expect("actor call failed")?;
 
         Ok((order, preimage))
+    }
+
+    fn set_add_invoice_failure(&self, fail: bool) {
+        self.mock_state
+            .fail_add_invoice
+            .store(fail, Ordering::SeqCst);
     }
 
     /// Insert an order directly into the database (for testing without LND)
@@ -819,7 +857,9 @@ async fn setup_test_harness_with_config_store_and_lnd(
         fiber_preflight_error: Arc::new(Mutex::new(None)),
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        sent_fiber_payment_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        fail_add_invoice: Arc::new(AtomicBool::new(false)),
         payment_store: None,
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
@@ -879,7 +919,9 @@ async fn setup_store_backed_test_harness_with_store(
         fiber_preflight_error: Arc::new(Mutex::new(None)),
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        sent_fiber_payment_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        fail_add_invoice: Arc::new(AtomicBool::new(false)),
         payment_store: Some(store.clone()),
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
@@ -926,17 +968,37 @@ async fn setup_store_backed_test_harness_with_store(
 fn create_test_lightning_invoice_with_payment_hash(
     payment_hash: Hash256,
 ) -> lightning_invoice::Bolt11Invoice {
+    create_test_lightning_invoice_with_payment_hash_and_amount(payment_hash, 100_000)
+}
+
+fn create_test_lightning_invoice_with_payment_hash_and_amount(
+    payment_hash: Hash256,
+    amount_sats: u64,
+) -> lightning_invoice::Bolt11Invoice {
     let duration_since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time");
-    create_test_lightning_invoice_with_payment_hash_and_timestamp(
+    create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
         payment_hash,
+        amount_sats,
         duration_since_epoch,
     )
 }
 
 fn create_test_lightning_invoice_with_payment_hash_and_timestamp(
     payment_hash: Hash256,
+    duration_since_epoch: std::time::Duration,
+) -> lightning_invoice::Bolt11Invoice {
+    create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
+        payment_hash,
+        100_000,
+        duration_since_epoch,
+    )
+}
+
+fn create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
+    payment_hash: Hash256,
+    amount_sats: u64,
     duration_since_epoch: std::time::Duration,
 ) -> lightning_invoice::Bolt11Invoice {
     use bitcoin::hashes::Hash as _;
@@ -962,7 +1024,7 @@ fn create_test_lightning_invoice_with_payment_hash_and_timestamp(
         .payment_secret(payment_secret)
         .duration_since_epoch(duration_since_epoch)
         .min_final_cltv_expiry_delta(36)
-        .amount_milli_satoshis(100_000_000) // 100k sats
+        .amount_milli_satoshis(amount_sats * 1_000)
         .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build lightning invoice")
 }
@@ -1003,9 +1065,99 @@ fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) ->
     invoice
 }
 
+fn insert_pending_send_btc_orders(store: &MockCchOrderStore, count: usize) {
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    for value in 0..count {
+        let payment_hash = test_payment_hash(value as u8);
+        store
+            .insert_cch_order(CchOrder {
+                created_at: current_time,
+                expiry_delta_seconds: 3600,
+                wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+                outgoing_pay_req: "restored send_btc order".to_string(),
+                incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+                payment_hash,
+                payment_preimage: None,
+                amount_sats: 100_000,
+                fee_sats: 1_000,
+                status: CchOrderStatus::Pending,
+                failure_reason: None,
+            })
+            .expect("insert pending send_btc order");
+    }
+}
+
 // =============================================================================
 // SendBTC Happy Path Test
 // =============================================================================
+
+#[tokio::test]
+async fn test_send_btc_rejects_when_payment_tracking_capacity_is_full() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS);
+    let harness = setup_test_harness_with_store(store).await;
+
+    let error = harness
+        .create_send_btc_order_with_seed(200)
+        .await
+        .expect_err("send_btc must reject orders above payment tracking capacity");
+    assert!(matches!(
+        error,
+        CchError::LndPaymentTrackerCapacityExceeded(MAX_TRACKED_PAYMENTS)
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_releases_reservation_when_invoice_creation_fails() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS - 1);
+    let harness = setup_test_harness_with_store(store).await;
+
+    harness.set_add_invoice_failure(true);
+    harness
+        .create_send_btc_order_with_seed(200)
+        .await
+        .expect_err("mocked invoice creation must fail");
+
+    harness.set_add_invoice_failure(false);
+    harness
+        .create_send_btc_order_with_seed(201)
+        .await
+        .expect("failed invoice creation must release payment tracking capacity");
+}
+
+#[tokio::test]
+async fn test_final_send_btc_order_releases_payment_tracking_capacity() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS - 1);
+    let harness = setup_test_harness_with_store(store).await;
+
+    let (order, _) = harness
+        .create_send_btc_order_with_seed(200)
+        .await
+        .expect("last available payment tracking slot");
+    harness
+        .create_send_btc_order_with_seed(201)
+        .await
+        .expect_err("capacity must be full before the order becomes final");
+
+    harness.event_port.send(CchTrackingEvent::InvoiceChanged {
+        payment_hash: order.payment_hash,
+        status: CkbInvoiceStatus::Expired,
+        failure_reason: Some("test expiry".to_string()),
+    });
+    harness
+        .wait_for_order_status(order.payment_hash, CchOrderStatus::Failed, 1000)
+        .await;
+
+    harness
+        .create_send_btc_order_with_seed(201)
+        .await
+        .expect("final order must release payment tracking capacity");
+}
 
 /// Tests the complete happy path for a SendBTC order.
 ///
@@ -1672,9 +1824,10 @@ async fn dispatch_fiber_outgoing_and_capture_fee(
     let (_preimage, payment_hash) = create_valid_preimage_pair(seed);
 
     let fiber_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000);
-    let lightning_invoice = create_test_lightning_invoice_with_cltv(
+    let lightning_invoice = create_test_lightning_invoice_with_cltv_and_amount(
         payment_hash,
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        u64::try_from(amount_sats).expect("test amount fits in u64"),
     );
     let order = CchOrder {
         created_at: SystemTime::now()
@@ -1755,6 +1908,113 @@ async fn test_receive_btc_outgoing_fiber_fee_scaled_by_percentage() {
         max_fee,
         Some(fee_sats * 50 / 100),
         "outgoing Fiber fee budget must be scaled by max_outgoing_fee_percentage"
+    );
+}
+
+/// The fee-rate denominator must remain the outgoing Fiber principal after `amount_sats` changes
+/// to represent the incoming total. The invoice is the source of truth for both legacy orders
+/// (`amount_sats == principal`) and fixed orders (`amount_sats == principal + CCH fee`).
+#[tokio::test]
+async fn test_receive_btc_outgoing_fiber_fee_rate_uses_outgoing_principal() {
+    let harness = setup_test_harness().await;
+    let principal_sats = 100_000;
+    let fee_sats = 30_000;
+    let expected_rate = 300; // ceil(30_000 * 1000 / 100_000)
+
+    for (seed, stored_amount_sats) in [(63, principal_sats), (64, principal_sats + fee_sats)] {
+        dispatch_fiber_outgoing_and_capture_fee(&harness, seed, stored_amount_sats, fee_sats).await;
+        let (_, payment_hash) = create_valid_preimage_pair(seed);
+        assert_eq!(
+            harness.fiber_payment_max_fee_rate(payment_hash),
+            Some(Some(expected_rate)),
+            "fee rate must be based on the outgoing principal for stored amount {}",
+            stored_amount_sats
+        );
+    }
+}
+
+/// Legacy ReceiveBTC orders stored the outgoing Fiber principal in `amount_sats`, even though
+/// the incoming Lightning invoice required the principal plus the CCH fee. Reading such an order
+/// must report the amount actually required by the persisted incoming invoice.
+#[tokio::test]
+async fn test_get_receive_btc_legacy_order_reports_incoming_invoice_amount() {
+    let harness = setup_test_harness().await;
+    let (_preimage, payment_hash) = create_valid_preimage_pair(62);
+    let principal_sats = 98_000;
+    let fee_sats = 2_000;
+    let incoming_amount_sats = 100_000;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_amount(payment_hash, principal_sats)
+            .to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_payment_hash(
+            payment_hash,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        // This is the value persisted by versions affected by #1499.
+        amount_sats: principal_sats,
+        fee_sats,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    // Both receive_btc and get_cch_order use this conversion for their immediate RPC response.
+    let response = fiber_json_types::CchOrderResponse::from(order.clone());
+    assert_eq!(response.amount_sats, incoming_amount_sats);
+
+    harness.insert_order_directly(order).await.unwrap();
+
+    let fetched = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(
+        fetched.amount_sats, incoming_amount_sats,
+        "amount_sats must match the amount required by the incoming Lightning invoice"
+    );
+}
+
+/// Orders created before incoming Lightning invoices included the CCH fee must retain the actual
+/// invoice amount. Compatibility handling must not blindly add `fee_sats` to every old record.
+#[tokio::test]
+async fn test_get_receive_btc_pre_fee_invoice_does_not_add_fee() {
+    let harness = setup_test_harness().await;
+    let (_preimage, payment_hash) = create_valid_preimage_pair(65);
+    let incoming_amount_sats = 100_000;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_amount(payment_hash, incoming_amount_sats)
+            .to_string(),
+        incoming_invoice: CchInvoice::Lightning(
+            create_test_lightning_invoice_with_payment_hash_and_amount(
+                payment_hash,
+                incoming_amount_sats as u64,
+            ),
+        ),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: incoming_amount_sats,
+        fee_sats: 2_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    let fetched = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(fetched.amount_sats, incoming_amount_sats);
+    assert_ne!(
+        fetched.amount_sats,
+        incoming_amount_sats + fetched.fee_sats,
+        "historical compatibility must use the invoice amount rather than blindly adding the fee"
     );
 }
 
@@ -2757,6 +3017,7 @@ async fn test_receive_btc_fee_calculation() {
     // fee_sats = 200_000 * 5_000 / 1_000_000 + 500 = 1_000 + 500 = 1_500
     let expected_fee: u128 = 1_500;
     assert_eq!(order.fee_sats, expected_fee);
+    assert_eq!(order.amount_sats, amount_sats + expected_fee);
     let CchInvoice::Lightning(incoming_invoice) = order.incoming_invoice else {
         panic!("expected Lightning incoming invoice")
     };
@@ -3357,6 +3618,14 @@ fn create_test_lightning_invoice_with_cltv(
     payment_hash: Hash256,
     min_final_cltv: u64,
 ) -> lightning_invoice::Bolt11Invoice {
+    create_test_lightning_invoice_with_cltv_and_amount(payment_hash, min_final_cltv, 100_000)
+}
+
+fn create_test_lightning_invoice_with_cltv_and_amount(
+    payment_hash: Hash256,
+    min_final_cltv: u64,
+    amount_sats: u64,
+) -> lightning_invoice::Bolt11Invoice {
     use bitcoin::hashes::Hash as _;
     use lightning_invoice::{Currency as LnCurrency, InvoiceBuilder as LnInvoiceBuilder};
 
@@ -3375,7 +3644,7 @@ fn create_test_lightning_invoice_with_cltv(
         .payment_secret(payment_secret)
         .duration_since_epoch(duration_since_epoch)
         .min_final_cltv_expiry_delta(min_final_cltv)
-        .amount_milli_satoshis(100_000_000)
+        .amount_milli_satoshis(amount_sats * 1_000)
         .build_signed(|hash| secp.sign_ecdsa_recoverable(hash, &private_key))
         .expect("build lightning invoice")
 }

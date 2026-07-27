@@ -24,7 +24,8 @@ use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
     CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
-    LndTrackerArgs, LndTrackerMessage, RedactedCchTrackingEvent, MAX_TRACKED_INVOICES,
+    LndTrackerArgs, LndTrackerMessage, PaymentTrackingReservationResult, RedactedCchTrackingEvent,
+    MAX_TRACKED_INVOICES, MAX_TRACKED_PAYMENTS,
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
@@ -385,6 +386,16 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 continue;
             }
 
+            if matches!(&order.incoming_invoice, CchInvoice::Fiber(_)) {
+                // Restore reservations before dispatching payment tracking. Orders created before
+                // the admission limit remain recoverable even when they exceed the new limit.
+                state
+                    .lnd_tracker
+                    .send_message(LndTrackerMessage::RestorePaymentTracking(
+                        order.payment_hash,
+                    ))?;
+            }
+
             // Schedule expiry job for non-final orders
             state.schedule_job_for_non_final_order(&order);
 
@@ -508,7 +519,9 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::GetCchOrder(payment_hash, port) => {
-                let result = state.store.get_cch_order(&payment_hash).map_err(Into::into);
+                let result = state.get_order_or_none(&payment_hash).and_then(|order| {
+                    order.ok_or_else(|| CchStoreError::NotFound(payment_hash).into())
+                });
                 if !port.is_closed() {
                     // ignore error
                     let _ = port.send(result);
@@ -717,7 +730,10 @@ impl<S: CchOrderStore> CchState<S> {
         match self.store.get_cch_order(payment_hash) {
             Err(CchStoreError::NotFound(_)) => Ok(None),
             Err(err) => Err(err.into()),
-            Ok(order) => Ok(Some(order)),
+            Ok(mut order) => {
+                order.normalize_amount_sats();
+                Ok(Some(order))
+            }
         }
     }
 
@@ -763,6 +779,9 @@ impl<S: CchOrderStore> CchState<S> {
         order.status = CchOrderStatus::Failed;
         order.failure_reason = Some(failure_reason.to_string());
         self.store.update_cch_order(order.clone());
+        let _ = self
+            .lnd_tracker
+            .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
         self.schedule_job_for_final_order(&order);
         tracing::info!("Expired order {:x}", payment_hash);
 
@@ -806,6 +825,12 @@ impl<S: CchOrderStore> CchState<S> {
 
     fn schedule_job_on_entering(&self, order: &CchOrder) {
         if order.is_final() {
+            // A final order no longer needs its dedicated LND payment stream. This
+            // also covers terminal transitions triggered by the incoming invoice
+            // or another tracker before the per-payment stream completes.
+            let _ = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTrackingPayment(order.payment_hash));
             self.schedule_job_for_final_order(order);
         } else {
             self.schedule_job_for_non_final_order(order);
@@ -944,24 +969,49 @@ impl<S: CchOrderStore> CchState<S> {
             invoice_builder.build()
         }?;
 
-        let invoice = self.fiber_agent_ref.call_add_invoice(invoice).await?;
+        let reservation = ractor::call!(self.lnd_tracker, |reply| {
+            LndTrackerMessage::ReservePaymentTracking(payment_hash, reply)
+        })
+        .map_err(|err| CchError::LndPaymentTrackerError(err.to_string()))?;
+        match reservation {
+            PaymentTrackingReservationResult::Reserved => {}
+            PaymentTrackingReservationResult::AlreadyTracked => {
+                return Err(CchError::LndPaymentAlreadyTracked(payment_hash));
+            }
+            PaymentTrackingReservationResult::CapacityExceeded => {
+                return Err(CchError::LndPaymentTrackerCapacityExceeded(
+                    MAX_TRACKED_PAYMENTS,
+                ));
+            }
+        }
 
-        let order = CchOrder {
-            amount_sats: invoice_amount_sats,
-            created_at: order_created_at,
-            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
-            failure_reason: None,
-            incoming_invoice: CchInvoice::Fiber(invoice),
-            outgoing_pay_req: send_btc.btc_pay_req,
-            payment_preimage: None,
-            status: CchOrderStatus::Pending,
-            fee_sats,
-            payment_hash,
-            wrapped_btc_type_script,
+        let result = async {
+            let invoice = self.fiber_agent_ref.call_add_invoice(invoice).await?;
+
+            let order = CchOrder {
+                amount_sats: invoice_amount_sats,
+                created_at: order_created_at,
+                expiry_delta_seconds: self.config.order_expiry_delta_seconds,
+                failure_reason: None,
+                incoming_invoice: CchInvoice::Fiber(invoice),
+                outgoing_pay_req: send_btc.btc_pay_req,
+                payment_preimage: None,
+                status: CchOrderStatus::Pending,
+                fee_sats,
+                payment_hash,
+                wrapped_btc_type_script,
+            };
+
+            self.store.insert_cch_order(order.clone())?;
+            Ok(order)
         };
-
-        self.store.insert_cch_order(order.clone())?;
-        Ok(order)
+        let result = result.await;
+        if result.is_err() {
+            let _ = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
+        }
+        result
     }
 
     fn remaining_outgoing_invoice_expiry_seconds(
@@ -1307,6 +1357,12 @@ impl<S: CchOrderStore> CchState<S> {
             }
         };
 
+        // `creation.amount_sats` is the outgoing Fiber principal. Public CCH order amounts
+        // represent what the incoming Lightning payer owes, including the CCH fee.
+        let total_sats = creation
+            .amount_sats
+            .checked_add(creation.fee_sats)
+            .ok_or(CchError::ReceiveBTCOrderAmountTooLarge)?;
         let order = CchOrder {
             created_at: creation.created_at,
             expiry_delta_seconds: creation.order_expiry_delta_seconds,
@@ -1315,7 +1371,7 @@ impl<S: CchOrderStore> CchState<S> {
             outgoing_pay_req: creation.fiber_pay_req.clone(),
             payment_preimage: None,
             status: initial_status,
-            amount_sats: creation.amount_sats,
+            amount_sats: total_sats,
             fee_sats: creation.fee_sats,
             payment_hash: creation.payment_hash,
             wrapped_btc_type_script: creation.wrapped_btc_type_script,

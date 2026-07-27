@@ -3,7 +3,7 @@ pub(crate) mod cancel_incoming_invoice;
 pub(crate) mod send_outgoing_payment;
 pub(crate) mod settle_incoming_invoice;
 pub(crate) mod track_incoming_invoice;
-mod track_outgoing_payment;
+pub(crate) mod track_outgoing_payment;
 use cancel_incoming_invoice::CancelIncomingInvoiceDispatcher;
 use fiber_types::{CchOrder, CchOrderStatus};
 use send_outgoing_payment::SendOutgoingPaymentDispatcher;

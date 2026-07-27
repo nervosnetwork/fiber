@@ -17,14 +17,14 @@ use crate::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
-            select_connect_peer_address, AcceptChannelCommand, DebugEvent, NetworkActorStateStore,
-            OpenChannelCommand, PeerDisconnectReason,
+            select_connect_peer_address, AcceptChannelCommand, DebugEvent, FiberMessageWithTarget,
+            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason,
         },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
             BroadcastMessagesFilterResult, FiberMessage, GetBroadcastMessagesResult, GossipMessage,
-            OpenChannel,
+            Init, OpenChannel, ReestablishChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NodeAnnouncement, Privkey,
@@ -1844,6 +1844,67 @@ async fn test_invalid_gossip_from_no_channel_peer_triggers_disconnect_and_temp_b
 }
 
 #[tokio::test]
+async fn test_repeated_init_message_disconnects_peer() {
+    init_tracing();
+
+    let [target, mut peer] = NetworkNode::new_n_interconnected_nodes().await;
+    peer.send_init_peer_message(
+        target.pubkey,
+        Init {
+            features: FeatureVector::default(),
+            chain_hash: get_chain_hash(),
+        },
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        peer.expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+        ),
+    )
+    .await
+    .expect("peer sending a duplicate Init message should be disconnected");
+}
+
+#[tokio::test]
+async fn test_repeated_nonexistent_channel_messages_trigger_disconnect_and_temp_ban() {
+    init_tracing();
+
+    let mut target = NetworkNode::new().await;
+    let mut peer = NetworkNode::new().await;
+
+    peer.connect_to(&mut target).await;
+
+    for _ in 0..20 {
+        peer.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    target.pubkey,
+                    FiberMessage::reestablish_channel(ReestablishChannel {
+                        channel_id: gen_rand_sha256_hash(),
+                        local_commitment_number: 0,
+                        remote_commitment_number: 0,
+                    }),
+                )),
+            ))
+            .expect("peer network actor alive");
+    }
+
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    peer.connect_to_nonblocking(&target).await;
+    peer.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+    )
+    .await;
+
+    wait_until_async_timeout(|| async { list_connected_peers(&target).await.is_empty() }).await;
+}
+
+#[tokio::test]
 async fn test_rate_limited_channel_update_from_no_channel_peer_triggers_disconnect_and_temp_ban() {
     init_tracing();
 
@@ -2795,6 +2856,7 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
         .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
             peer.pubkey,
             FiberMessage::ChannelInitialization(open_channel),
+            None,
         )))
         .expect("network actor alive");
 
