@@ -22,7 +22,7 @@ use crate::{
         types::{
             broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
             BroadcastMessagesFilterResult, FiberMessage, GetBroadcastMessagesResult, GossipMessage,
-            OpenChannel, ReestablishChannel,
+            Init, OpenChannel, ReestablishChannel,
         },
         BroadcastMessage, ChannelAnnouncement, ChannelUpdateChannelFlags, Cursor, FeatureVector,
         NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NodeAnnouncement, Privkey,
@@ -1724,6 +1724,29 @@ async fn test_invalid_gossip_from_no_channel_peer_triggers_disconnect_and_temp_b
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(list_connected_peers(&target).await.is_empty());
+}
+
+#[tokio::test]
+async fn test_repeated_init_message_disconnects_peer() {
+    init_tracing();
+
+    let [target, mut peer] = NetworkNode::new_n_interconnected_nodes().await;
+    peer.send_init_peer_message(
+        target.pubkey,
+        Init {
+            features: FeatureVector::default(),
+            chain_hash: get_chain_hash(),
+        },
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        peer.expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _) if id == &target.pubkey),
+        ),
+    )
+    .await
+    .expect("peer sending a duplicate Init message should be disconnected");
 }
 
 #[tokio::test]

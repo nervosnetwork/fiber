@@ -304,9 +304,9 @@ impl PeerMessagePolicy {
             return;
         };
         entry.expire_violation_windows(now_ms);
-        if entry.invalid_messages.count > 0 || entry.rate_limit_violations.count > 0 {
-            self.insert_entry(*peer, entry);
-        }
+        // Preserve depleted buckets across clean reconnects. Retained entries remain bounded by
+        // max_entries and are evicted through ordinary_lru when capacity is needed.
+        self.insert_entry(*peer, entry);
     }
 
     pub(crate) fn release_ingress(&mut self, bytes: u64) {
@@ -358,6 +358,38 @@ mod tests {
         policy.on_disconnected(&peer, 0);
         assert!(!policy.is_banned(&peer, 0));
         expect_allowed(&mut policy, &peer, 1, PEER_MESSAGE_INTERVAL_MS);
+    }
+
+    #[test]
+    fn clean_reconnect_preserves_depleted_message_bucket() {
+        let peer = Privkey::from_slice(&[19u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::with_limits(
+            8,
+            PEER_MESSAGE_BURST.saturating_add(1),
+            PEER_MESSAGE_BURST_BYTES.saturating_add(1),
+        );
+
+        for _ in 0..PEER_MESSAGE_BURST {
+            expect_allowed(&mut policy, &peer, 1, 0);
+        }
+        policy.on_disconnected(&peer, 0);
+
+        assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Disconnect);
+    }
+
+    #[test]
+    fn clean_reconnect_preserves_depleted_byte_bucket() {
+        let peer = Privkey::from_slice(&[20u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::with_limits(
+            8,
+            PEER_MESSAGE_BURST.saturating_add(1),
+            PEER_MESSAGE_BURST_BYTES.saturating_add(1),
+        );
+
+        expect_allowed(&mut policy, &peer, PEER_MESSAGE_BURST_BYTES, 0);
+        policy.on_disconnected(&peer, 0);
+
+        assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Disconnect);
     }
 
     #[test]

@@ -656,6 +656,8 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+    /// Duplicate Init message.
+    DuplicateInitMessage,
     /// Gossip peer temporarily banned.
     Banned,
 }
@@ -5926,11 +5928,27 @@ where
         peer_pubkey: Pubkey,
         init_msg: Init,
     ) -> ProcessingChannelResult {
-        if !self.peer_session_map.contains_key(&peer_pubkey) {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Peer {:?} is not connected",
-                &peer_pubkey
-            )));
+        match self.peer_session_map.get(&peer_pubkey) {
+            None => {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} is not connected",
+                    &peer_pubkey
+                )));
+            }
+            Some(info) if info.features.is_some() => {
+                warn!("Peer {peer_pubkey:?} sent a duplicate Init message, disconnecting");
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::DisconnectPeer(
+                            peer_pubkey,
+                            PeerDisconnectReason::DuplicateInitMessage,
+                            None,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                return Ok(());
+            }
+            Some(_) => {}
         }
 
         check_chain_hash(&init_msg.chain_hash).map_err(|e| {
