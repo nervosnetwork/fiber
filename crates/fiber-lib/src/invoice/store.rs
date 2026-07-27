@@ -47,3 +47,17 @@ pub enum SettleInvoiceError {
     #[error("Internal error: {0}")]
     InternalError(String),
 }
+
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum CancelInvoiceError {
+    #[error("invoice not found")]
+    InvoiceNotFound,
+    #[error("invoice can not be canceled, current status: Cancelled")]
+    InvoiceAlreadyCancelled,
+    #[error("invoice can not be canceled, current status: Paid")]
+    InvoiceAlreadyPaid,
+    #[error("invoice can not be canceled because payment preimage already exists")]
+    PaymentPreimageAlreadyExists,
+    #[error("{0}")]
+    InternalError(String),
+}

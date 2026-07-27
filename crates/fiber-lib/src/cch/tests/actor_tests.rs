@@ -11,6 +11,7 @@
 //!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSuccess → Success
 
 use crate::cch::{
+    actions::CchOrderAction,
     actor::{CchActor, CchArgs, CchMessage, BTC_BLOCK_TIME_MILLIS},
     config::{
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS,
@@ -25,7 +26,9 @@ use crate::fiber::{
     payment::{PaymentSessionExt, SendPaymentCommand, SendPaymentDataBuilder},
     NetworkActorCommand, NetworkActorMessage,
 };
-use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
+use crate::invoice::{
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, SettleInvoiceError,
+};
 use crate::store::{store_impl::StoreChange, Store};
 use crate::tests::test_utils::{generate_store, TempDir};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -128,6 +131,8 @@ struct MockNetworkState {
     event_port: Arc<OutputPort<CchTrackingEvent>>,
     /// Tracks payment hashes for which SendPayment was called (outgoing Fiber payments)
     sent_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
+    /// Tracks payment hashes for which CancelInvoice was called (incoming Fiber invoices)
+    cancelled_fiber_invoices: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Tracks payment hashes for which a dry-run Fiber payment was requested.
     preflighted_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Optional error returned by dry-run Fiber payments.
@@ -138,6 +143,8 @@ struct MockNetworkState {
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
     send_payment_status: Arc<Mutex<PaymentStatus>>,
+    /// Whether mocked Fiber SettleInvoice should return an already-paid error.
+    settle_invoice_already_paid: Arc<Mutex<bool>>,
 }
 
 /// Mock network actor that handles commands from action executors
@@ -227,6 +234,10 @@ impl Actor for MockNetworkActor {
                     let _ = reply.send(Ok(response));
                 }
                 NetworkActorCommand::SettleInvoice(payment_hash, _preimage, reply) => {
+                    if *state.settle_invoice_already_paid.lock().unwrap() {
+                        let _ = reply.send(Err(SettleInvoiceError::InvoiceAlreadyPaid));
+                        return Ok(());
+                    }
                     // Accept settlement - the InvoiceChanged(Paid) event will be sent
                     // via the event_port by the test (simulating FiberStoreWatcher)
                     let _ = reply.send(Ok(()));
@@ -237,6 +248,14 @@ impl Actor for MockNetworkActor {
                         status: CkbInvoiceStatus::Paid,
                         failure_reason: None,
                     });
+                }
+                NetworkActorCommand::CancelInvoice(payment_hash, reply) => {
+                    state
+                        .cancelled_fiber_invoices
+                        .lock()
+                        .unwrap()
+                        .insert(payment_hash);
+                    let _ = reply.send(Ok(()));
                 }
                 _ => {
                     // Ignore other commands
@@ -336,6 +355,35 @@ impl TestHarness {
             .contains(&payment_hash)
     }
 
+    fn was_fiber_invoice_cancelled(&self, payment_hash: Hash256) -> bool {
+        self.mock_state
+            .cancelled_fiber_invoices
+            .lock()
+            .unwrap()
+            .contains(&payment_hash)
+    }
+
+    async fn wait_for_fiber_invoice_cancelled(&self, payment_hash: Hash256, timeout_ms: u64) {
+        let start = std::time::Instant::now();
+        let poll_interval = tokio::time::Duration::from_millis(10);
+        let timeout = tokio::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            if self.was_fiber_invoice_cancelled(payment_hash) {
+                return;
+            }
+
+            if start.elapsed() > timeout {
+                panic!(
+                    "Timeout waiting for Fiber invoice {:x} to be cancelled",
+                    payment_hash
+                );
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     /// Return the `max_fee_amount` of the outgoing Fiber SendPayment for `payment_hash`, if sent.
     fn fiber_payment_max_fee(&self, payment_hash: Hash256) -> Option<Option<u128>> {
         self.mock_state
@@ -348,6 +396,10 @@ impl TestHarness {
 
     fn set_send_payment_status(&self, status: PaymentStatus) {
         *self.mock_state.send_payment_status.lock().unwrap() = status;
+    }
+
+    fn set_settle_invoice_already_paid(&self, already_paid: bool) {
+        *self.mock_state.settle_invoice_already_paid.lock().unwrap() = already_paid;
     }
 
     fn fail_fiber_payment_preflight(&self, error: impl Into<String>) {
@@ -536,11 +588,13 @@ async fn setup_test_harness_with_config_and_store(
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        cancelled_fiber_invoices: Arc::new(Mutex::new(std::collections::HashSet::new())),
         preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fiber_preflight_error: Arc::new(Mutex::new(None)),
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
@@ -584,11 +638,13 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        cancelled_fiber_invoices: Arc::new(Mutex::new(std::collections::HashSet::new())),
         preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fiber_preflight_error: Arc::new(Mutex::new(None)),
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
@@ -1331,6 +1387,192 @@ async fn test_resume_expired_order_marked_as_failed() {
         .failure_reason
         .unwrap()
         .contains("Order expired on startup"));
+    harness
+        .wait_for_fiber_invoice_cancelled(payment_hash, 1000)
+        .await;
+}
+
+#[tokio::test]
+async fn test_scheduled_expiry_cancels_fiber_incoming_invoice() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        order_expiry_delta_seconds: 1,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (order, _preimage) = harness.create_send_btc_order_with_preimage().await.unwrap();
+    let payment_hash = order.payment_hash;
+
+    harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2500)
+        .await;
+    harness
+        .wait_for_fiber_invoice_cancelled(payment_hash, 1000)
+        .await;
+}
+
+#[tokio::test]
+async fn test_resume_expired_outgoing_success_does_not_cancel_incoming_invoice() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(154);
+    let store = MockCchOrderStore::new();
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired_outgoing_success = CchOrder {
+        created_at: current_time - 7200,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: Some(preimage),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingSuccess,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(expired_outgoing_success).unwrap();
+
+    let harness = setup_test_harness_with_store(store).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_ne!(order.status, CchOrderStatus::Failed);
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(
+        !harness.was_fiber_invoice_cancelled(payment_hash),
+        "an order with a preimage must be settled or retried, never cancelled on startup expiry"
+    );
+}
+
+#[tokio::test]
+async fn test_live_expiry_ignores_outgoing_success_with_preimage() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(155);
+    let harness = setup_test_harness().await;
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let outgoing_success_order = CchOrder {
+        created_at: current_time - 7200,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: Some(preimage),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingSuccess,
+        failure_reason: None,
+    };
+
+    harness
+        .insert_order_directly(outgoing_success_order)
+        .await
+        .unwrap();
+    harness
+        .actor
+        .send_message(CchMessage::ExpireOrder(payment_hash))
+        .expect("actor should accept expiry message");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingSuccess);
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(
+        !harness.was_fiber_invoice_cancelled(payment_hash),
+        "live order expiry must not cancel an incoming invoice after outgoing success"
+    );
+}
+
+#[tokio::test]
+async fn test_incoming_cancel_does_not_finalize_outgoing_in_flight_order() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(156);
+    let harness = setup_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+
+    harness.insert_order_directly(order).await.unwrap();
+    harness.event_port.send(CchTrackingEvent::InvoiceChanged {
+        payment_hash,
+        status: CkbInvoiceStatus::Cancelled,
+        failure_reason: Some("stale incoming cancellation".to_string()),
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert!(order.failure_reason.is_none());
+    assert!(!harness.was_fiber_invoice_cancelled(payment_hash));
+
+    harness.simulate_lightning_payment_success(payment_hash, preimage);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+}
+
+#[tokio::test]
+async fn test_settle_incoming_invoice_already_paid_marks_order_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(157);
+    let harness = setup_test_harness().await;
+    harness.set_settle_invoice_already_paid(true);
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: Some(preimage),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingSuccess,
+        failure_reason: None,
+    };
+
+    harness.insert_order_directly(order).await.unwrap();
+    harness
+        .actor
+        .send_message(CchMessage::ExecuteAction {
+            payment_hash,
+            action: CchOrderAction::SettleIncomingInvoice,
+            retry_count: 0,
+        })
+        .expect("actor should accept settle action");
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(order.failure_reason.is_none());
 }
 
 #[tokio::test]
@@ -1406,9 +1648,9 @@ async fn test_resume_active_order_tracking_resumed() {
     assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
 }
 
-/// Tests that final orders (Success/Failed) are skipped when resuming.
+/// Tests that final Success orders are left alone and final Failed orders recover cleanup.
 #[tokio::test]
-async fn test_resume_skips_final_orders() {
+async fn test_resume_final_orders() {
     let (preimage1, payment_hash1) = create_valid_preimage_pair(152);
     let (_preimage2, payment_hash2) = create_valid_preimage_pair(153);
     let store = MockCchOrderStore::new();
@@ -1460,6 +1702,9 @@ async fn test_resume_skips_final_orders() {
     let order2 = harness.get_order(payment_hash2).await.unwrap();
     assert_eq!(order2.status, CchOrderStatus::Failed);
     assert_eq!(order2.failure_reason, Some("Test failure".to_string()));
+    harness
+        .wait_for_fiber_invoice_cancelled(payment_hash2, 1000)
+        .await;
 }
 
 // =============================================================================
