@@ -100,6 +100,7 @@ fn create_mock_pending_add_tlc_command(
             .payment_hash(payment_hash)
             .hash_algorithm(hash_algorithm)
             .payee_pub_key(target.pubkey.into())
+            .final_expiry_delta(0)
             .build()
             .expect("build mock pending invoice");
         target.insert_invoice(invoice, None);
@@ -5895,6 +5896,14 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
             true,
         )
         .await;
+    let unexpected_channel_ready_replay =
+        vec!["Replayed ChannelReady after reestablishment".to_string()];
+    node_a
+        .add_unexpected_events(unexpected_channel_ready_replay.clone())
+        .await;
+    node_b
+        .add_unexpected_events(unexpected_channel_ready_replay)
+        .await;
 
     node_a.restart().await;
 
@@ -5975,6 +5984,121 @@ async fn test_reestablished_channel_ready_notification_is_not_delayed() {
         .await;
     assert!(node_a.get_triggered_unexpected_events().await.is_empty());
     assert!(node_b.get_triggered_unexpected_events().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_reconnect_resolves_awaiting_channel_ready_when_peer_is_already_ready() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+    node_a
+        .add_unexpected_events(vec![
+            "received ChannelReady message, but we're not ready for ChannelReady".to_string(),
+        ])
+        .await;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    node_b_state.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    node_b_state.commitment_numbers.local = node_b_state
+        .commitment_numbers
+        .local
+        .checked_sub(1)
+        .expect("established channel has an initial local commitment");
+    node_b_state.commitment_numbers.remote = node_b_state
+        .commitment_numbers
+        .remote
+        .checked_sub(1)
+        .expect("established channel has an initial remote commitment");
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    assert!(matches!(
+        node_a.get_channel_actor_state(channel_id).state,
+        ChannelState::ChannelReady
+    ));
+    assert!(matches!(
+        node_b.get_channel_actor_state(channel_id).state,
+        ChannelState::AwaitingChannelReady(flags)
+            if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                && !flags.contains(AwaitingChannelReadyFlags::THEIR_CHANNEL_READY)
+    ));
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        node_a_state.commitment_numbers.local,
+        node_b_state.commitment_numbers.remote + 1
+    );
+    assert_eq!(
+        node_a_state.commitment_numbers.remote,
+        node_b_state.commitment_numbers.local + 1
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("node_a alive");
+
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) if pubkey == &node_b.pubkey
+            )
+        })
+        .await;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) if pubkey == &node_a.pubkey
+            )
+        })
+        .await;
+
+    node_a.connect_to_nonblocking(&node_b).await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PeerConnected(pubkey, _) if pubkey == &node_b.pubkey
+            )
+        })
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut final_state = node_b.get_channel_actor_state(channel_id).state;
+    while tokio::time::Instant::now() < deadline {
+        final_state = node_b.get_channel_actor_state(channel_id).state;
+        if matches!(final_state, ChannelState::ChannelReady) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(
+        matches!(final_state, ChannelState::ChannelReady),
+        "node_b stayed in {:?} after peers disconnected and reconnected; missing peer ChannelReady was not recovered",
+        final_state,
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        node_a.get_triggered_unexpected_events().await.is_empty(),
+        "replayed ChannelReady should be handled idempotently"
+    );
 }
 
 #[tokio::test]
@@ -7877,14 +8001,14 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     let source_node = &mut node_0;
     let target_pubkey = node_3.pubkey;
 
-    let expected_minimal_tlc_expiry_limit =
-        DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let base_route_tlc_expiry_limit = DEFAULT_TLC_EXPIRY_DELTA * 2 + DEFAULT_FINAL_TLC_EXPIRY_DELTA;
+    let expected_minimal_tlc_expiry_limit = base_route_tlc_expiry_limit + DEFAULT_TLC_EXPIRY_DELTA;
 
     let res = source_node
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(target_pubkey),
             amount: Some(999),
-            tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
+            tlc_expiry_limit: Some(base_route_tlc_expiry_limit - 1),
             keysend: Some(true),
             ..Default::default()
         })

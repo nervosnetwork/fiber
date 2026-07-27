@@ -420,17 +420,46 @@ impl ByteTokenBucket {
         }
 
         self.refill(now_ms);
+        let delay_ms = self.peek_delay(bytes);
+        self.available_bytes = self.available_bytes.saturating_sub(i128::from(bytes));
+        delay_ms
+    }
+
+    fn peek_delay(&self, bytes: u64) -> u64 {
         let bytes = i128::from(bytes);
         let deficit_bytes = (bytes.saturating_sub(self.available_bytes)).max(0) as u128;
-        let delay_ms = if deficit_bytes == 0 {
+        if deficit_bytes == 0 {
             0
         } else {
             deficit_bytes
                 .saturating_mul(1_000)
                 .div_ceil(u128::from(self.config.rate_bytes_per_sec)) as u64
+        }
+    }
+
+    fn peek_delay_after_refill(&self, bytes: u64, now_ms: u64) -> u64 {
+        if self.config.is_disabled() {
+            return 0;
+        }
+        let available = if now_ms > self.last_refill_ms {
+            let elapsed_ms = now_ms - self.last_refill_ms;
+            let refill_bytes = (u128::from(elapsed_ms) * u128::from(self.config.rate_bytes_per_sec)
+                / 1_000) as i128;
+            self.available_bytes
+                .saturating_add(refill_bytes)
+                .min(i128::from(self.config.burst_bytes))
+        } else {
+            self.available_bytes
         };
-        self.available_bytes = self.available_bytes.saturating_sub(bytes);
-        delay_ms
+        let bytes = i128::from(bytes);
+        let deficit_bytes = (bytes.saturating_sub(available)).max(0) as u128;
+        if deficit_bytes == 0 {
+            0
+        } else {
+            deficit_bytes
+                .saturating_mul(1_000)
+                .div_ceil(u128::from(self.config.rate_bytes_per_sec)) as u64
+        }
     }
 
     pub(crate) fn refund(&mut self, bytes: u64, now_ms: u64) {
@@ -672,8 +701,17 @@ impl GossipPolicyState {
         bytes: u64,
         now_ms: u64,
     ) -> u64 {
-        let mut cloned = self.clone();
-        cloned.reserve_outbound_message(peer, bytes, now_ms)
+        let global_delay = self.global_outbound.peek_delay_after_refill(bytes, now_ms);
+        let peer_delay = self
+            .peer_outbound
+            .get(peer)
+            .map(|bucket| bucket.peek_delay_after_refill(bytes, now_ms))
+            .unwrap_or(0);
+        global_delay.max(peer_delay)
+    }
+
+    pub(crate) fn remove_outbound_peer(&mut self, peer: &Pubkey) {
+        self.peer_outbound.remove(peer);
     }
 
     pub(crate) fn reserve_outbound_message(

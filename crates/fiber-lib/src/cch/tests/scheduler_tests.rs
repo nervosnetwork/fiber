@@ -7,7 +7,7 @@ use crate::cch::{
     order::CchOrderStore,
     scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage, PRUNE_DELAY_SECONDS},
     tests::actor_tests::MockCchOrderStore,
-    CchStoreError,
+    CchMessage, CchStoreError,
 };
 use crate::invoice::{Attribute, CkbInvoice, Currency, InvoiceData};
 use crate::tests::test_utils::get_test_root_actor;
@@ -16,6 +16,7 @@ use fiber_types::{CchInvoice, Hash256};
 use fiber_types::{CchOrder, CchOrderStatus};
 use ractor::{Actor, ActorRef};
 use secp256k1::{Secp256k1, SecretKey};
+use std::sync::{Arc, Mutex};
 
 /// Mock LND tracker actor for testing
 #[derive(Default)]
@@ -42,6 +43,64 @@ impl Actor for MockLndTrackerActor {
         _state: &mut Self::State,
     ) -> Result<(), ractor::ActorProcessingErr> {
         // Mock tracker - just accept all messages
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct MockCchActorState {
+    store: MockCchOrderStore,
+    scheduler: Arc<Mutex<Option<ActorRef<SchedulerMessage>>>>,
+}
+
+struct MockCchActor;
+
+#[async_trait::async_trait]
+impl Actor for MockCchActor {
+    type Msg = CchMessage;
+    type State = MockCchActorState;
+    type Arguments = MockCchActorState;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ractor::ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        if let CchMessage::ExpireOrder(payment_hash) = message {
+            let mut order = match state.store.get_cch_order(&payment_hash) {
+                Ok(order) => order,
+                Err(_) => return Ok(()),
+            };
+            if order.is_final() {
+                return Ok(());
+            }
+            if order.status != CchOrderStatus::Pending {
+                return Ok(());
+            }
+
+            let created_at = order.created_at;
+            let expiry_delta_seconds = order.expiry_delta_seconds;
+            order.status = CchOrderStatus::Failed;
+            order.failure_reason = Some("Order expired".to_string());
+            state.store.update_cch_order(order);
+
+            if let Some(scheduler) = state.scheduler.lock().unwrap().clone() {
+                let _ = scheduler.send_message(SchedulerMessage::SchedulePrune {
+                    payment_hash,
+                    created_at,
+                    expiry_delta_seconds,
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -116,17 +175,30 @@ async fn setup_scheduler() -> (
     let (lnd_tracker, _) = Actor::spawn(None, MockLndTrackerActor, ())
         .await
         .expect("spawn mock lnd tracker");
+    let scheduler_ref = Arc::new(Mutex::new(None));
+    let (cch_actor, _) = Actor::spawn(
+        None,
+        MockCchActor,
+        MockCchActorState {
+            store: store.clone(),
+            scheduler: scheduler_ref.clone(),
+        },
+    )
+    .await
+    .expect("spawn mock cch actor");
 
     let root_actor = get_test_root_actor().await;
     let scheduler = CchOrderSchedulerActor::start(
         SchedulerArgs {
             store: store.clone(),
             lnd_tracker: lnd_tracker.clone(),
+            cch_actor,
         },
         root_actor.get_cell(),
     )
     .await
     .expect("spawn scheduler actor");
+    *scheduler_ref.lock().unwrap() = Some(scheduler.clone());
 
     (scheduler, store, lnd_tracker)
 }

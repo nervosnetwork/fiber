@@ -28,9 +28,9 @@ use ckb_types::packed::{OutPoint, Script};
 pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
-    Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
-    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
+    Attempt, AttemptStatus, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint,
+    PaymentCustomRecords, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey,
+    RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
     DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
@@ -449,11 +449,27 @@ impl SendPaymentDataExt for SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = invoice
-            .as_ref()
-            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            .or(command.final_tlc_expiry_delta)
-            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
+        let final_tlc_expiry_delta = match invoice.as_ref() {
+            Some(invoice) => match invoice.final_tlc_minimum_expiry_delta().copied() {
+                Some(delta) => delta,
+                None => {
+                    let minimum_delta = invoice.final_tlc_minimum_expiry_delta_or_default();
+                    match command.final_tlc_expiry_delta {
+                        Some(delta) if delta < minimum_delta => {
+                            return Err(format!(
+                                "final_tlc_expiry_delta is below the invoice minimum: {} < {}",
+                                delta, minimum_delta
+                            ));
+                        }
+                        Some(delta) => delta,
+                        None => minimum_delta,
+                    }
+                }
+            },
+            None => command
+                .final_tlc_expiry_delta
+                .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
+        };
 
         let tlc_expiry_limit = command
             .tlc_expiry_limit
@@ -1579,6 +1595,17 @@ where
         }
     }
 
+    fn channel_owns_attempt(&self, attempt: &Attempt) -> bool {
+        let Some(channel_outpoint) = attempt.first_hop_channel_outpoint() else {
+            return false;
+        };
+        self.store
+            .get_channel_state_by_outpoint(channel_outpoint)
+            .is_some_and(|channel_state| {
+                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+            })
+    }
+
     async fn send_attempt(
         &self,
         myself: ActorRef<PaymentActorMessage>,
@@ -1684,6 +1711,23 @@ where
                         return Err(err);
                     }
                     _ => {}
+                }
+            }
+            Some(mut attempt) if attempt.status == AttemptStatus::Created => {
+                if self.channel_owns_attempt(&attempt) {
+                    debug!(
+                        payment_hash = ?session.payment_hash(),
+                        attempt_id = attempt.id,
+                        "Skipping channel-owned Created payment attempt"
+                    );
+                } else {
+                    warn!(
+                        payment_hash = ?session.payment_hash(),
+                        attempt_id = attempt.id,
+                        "Retrying orphan Created payment attempt"
+                    );
+                    self.send_attempt(myself, state, session, &mut attempt)
+                        .await?;
                 }
             }
             Some(_) => {
