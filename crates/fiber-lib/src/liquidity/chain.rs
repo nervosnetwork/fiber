@@ -849,15 +849,6 @@ where
             ));
         }
 
-        self.store
-            .update_liquidity_chain_tx_status(
-                &quote.quote_id,
-                LiquidityChainTxRole::Payout,
-                fiber_types::LiquidityChainTxStatus::Broadcast,
-                None,
-                now_timestamp_as_millis_u64(),
-            )
-            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
         let send_result = ractor::call_t!(
             self.ckb_chain_actor,
             CkbChainMessage::SendTx,
@@ -865,7 +856,15 @@ where
             tx.clone()
         )
         .map_err(|error| {
-            LiquidityLoopOutError::Chain(format!("send tx actor call failed: {error}"))
+            let failure_reason = format!("send tx actor call failed: {error}");
+            let _ = self.store.update_liquidity_chain_tx_status(
+                &quote.quote_id,
+                LiquidityChainTxRole::Payout,
+                fiber_types::LiquidityChainTxStatus::Rejected,
+                Some(failure_reason.clone()),
+                now_timestamp_as_millis_u64(),
+            );
+            LiquidityLoopOutError::Chain(failure_reason)
         })?;
         if let Err(error) = send_result {
             let failure_reason = format!("send tx failed for liquidity tx {tx_hash}: {error}");
@@ -880,6 +879,16 @@ where
                 .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
             return Err(LiquidityLoopOutError::Chain(failure_reason));
         }
+
+        self.store
+            .update_liquidity_chain_tx_status(
+                &quote.quote_id,
+                LiquidityChainTxRole::Payout,
+                fiber_types::LiquidityChainTxStatus::Broadcast,
+                None,
+                now_timestamp_as_millis_u64(),
+            )
+            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
 
         self.ckb_chain_actor
             .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
@@ -3242,6 +3251,10 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("send tx failed"));
+        assert_eq!(
+            store.status_events.lock().unwrap().as_slice(),
+            [LiquidityChainTxStatus::Rejected]
+        );
 
         let retry_error = watcher
             .broadcast_payout_lock(
@@ -3252,6 +3265,13 @@ mod tests {
             .await
             .expect_err("mock still rejects retry");
         assert!(retry_error.to_string().contains("send tx failed"));
+        assert_eq!(
+            store.status_events.lock().unwrap().as_slice(),
+            [
+                LiquidityChainTxStatus::Rejected,
+                LiquidityChainTxStatus::Rejected
+            ]
+        );
         assert_eq!(
             events
                 .lock()
