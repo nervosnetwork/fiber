@@ -88,6 +88,9 @@ pub enum CchMessage {
         retry_count: u32,
     },
 
+    /// Expire an active order after its configured expiry window elapses.
+    ExpireOrder(Hash256),
+
     /// Test-only message to insert an order directly into the database
     #[cfg(test)]
     InsertOrder(CchOrder, RpcReplyPort<Result<(), CchError>>),
@@ -211,6 +214,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             SchedulerArgs {
                 store: args.store.clone(),
                 lnd_tracker: lnd_tracker.clone(),
+                cch_actor: myself.clone(),
             },
             myself.get_cell(),
         )
@@ -272,6 +276,14 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         {
             // Only process active (non-final) orders
             if order.is_final() {
+                let actions = ActionDispatcher::on_starting(&order);
+                if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
+                    tracing::error!(
+                        "Failed to schedule final-order resume actions for order {:x}: {}",
+                        order.payment_hash,
+                        err
+                    );
+                }
                 state.schedule_job_for_final_order(&order);
                 continue;
             }
@@ -280,6 +292,8 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             if order.update_if_expired(current_time) {
                 let payment_hash = order.payment_hash;
                 state.store.update_cch_order(order.clone());
+                let actions = ActionDispatcher::on_entering(&order);
+                append_actions(myself.clone(), payment_hash, actions)?;
                 state.schedule_job_for_final_order(&order);
                 tracing::info!("Marked expired order {:x} as Failed", payment_hash);
                 continue;
@@ -418,7 +432,10 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 retry_count,
                 reason,
             } => {
-                if state.get_active_order_or_none(&payment_hash)?.is_none() {
+                if state
+                    .get_order_for_action_or_none(&payment_hash, action)?
+                    .is_none()
+                {
                     return Ok(());
                 }
                 schedule_action_retry(&myself, payment_hash, action, retry_count, &reason);
@@ -429,7 +446,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 action,
                 retry_count,
             } => {
-                let order = match state.get_active_order_or_none(&payment_hash)? {
+                let order = match state.get_order_for_action_or_none(&payment_hash, action)? {
                     None => return Ok(()),
                     Some(order) => order,
                 };
@@ -444,6 +461,11 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                         &err.to_string(),
                     );
                 }
+                Ok(())
+            }
+            CchMessage::ExpireOrder(payment_hash) => {
+                let actions = state.expire_order(payment_hash, "Order expired")?;
+                append_actions(myself, payment_hash, actions)?;
                 Ok(())
             }
             #[cfg(test)]
@@ -490,6 +512,44 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(self
             .get_order_or_none(payment_hash)?
             .filter(|order| !order.is_final()))
+    }
+
+    fn get_order_for_action_or_none(
+        &self,
+        payment_hash: &Hash256,
+        action: CchOrderAction,
+    ) -> Result<Option<CchOrder>, CchError> {
+        Ok(self
+            .get_order_or_none(payment_hash)?
+            .filter(|order| action_can_still_run(order, action)))
+    }
+
+    fn expire_order(
+        &self,
+        payment_hash: Hash256,
+        failure_reason: &str,
+    ) -> Result<Vec<CchOrderAction>, CchError> {
+        let mut order = match self.get_active_order_or_none(&payment_hash)? {
+            None => return Ok(vec![]),
+            Some(order) => order,
+        };
+
+        if order.status != CchOrderStatus::Pending {
+            tracing::debug!(
+                "Ignoring expiry for order {:x} in status {:?}",
+                payment_hash,
+                order.status
+            );
+            return Ok(vec![]);
+        }
+
+        order.status = CchOrderStatus::Failed;
+        order.failure_reason = Some(failure_reason.to_string());
+        self.store.update_cch_order(order.clone());
+        self.schedule_job_for_final_order(&order);
+        tracing::info!("Expired order {:x}", payment_hash);
+
+        Ok(ActionDispatcher::on_entering(&order))
     }
 
     fn schedule_job_for_non_final_order(&self, order: &CchOrder) {
@@ -751,10 +811,7 @@ impl<S: CchOrderStore> CchState<S> {
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // CKB uses milliseconds, BTC uses blocks (~10 min each).
-        let ckb_final_tlc_millis = invoice
-            .final_tlc_minimum_expiry_delta()
-            .copied()
-            .unwrap_or(0);
+        let ckb_final_tlc_millis = invoice.final_tlc_minimum_expiry_delta_or_default();
         let btc_final_cltv_millis = self
             .config
             .btc_final_tlc_expiry_delta_blocks
@@ -971,6 +1028,24 @@ impl<S: CchOrderStore> CchState<S> {
             StoreChange::PutPreimage { .. } => vec![],
         }
     }
+}
+
+fn action_can_still_run(order: &CchOrder, action: CchOrderAction) -> bool {
+    match action {
+        // Most actions are stale once the order reaches a final state. Incoming invoice
+        // cancellation is the exception: it is the cleanup action for a failed order.
+        CchOrderAction::CancelIncomingInvoice => should_cancel_incoming_invoice(order),
+        _ => order_allows_active_action(order),
+    }
+}
+
+fn order_allows_active_action(order: &CchOrder) -> bool {
+    !order.is_final()
+}
+
+fn should_cancel_incoming_invoice(order: &CchOrder) -> bool {
+    // If the preimage exists, the incoming payment can be settled and must not be cancelled.
+    order.status == CchOrderStatus::Failed && order.payment_preimage.is_none()
 }
 
 fn append_actions(

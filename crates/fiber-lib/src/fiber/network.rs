@@ -101,7 +101,8 @@ use crate::fiber::{
     SettleTlcSetCommand,
 };
 use crate::invoice::{
-    CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore, SettleInvoiceError,
+    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
+    SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
@@ -867,6 +868,7 @@ pub enum NetworkActorCommand {
         Hash256,
         RpcReplyPort<Result<(), SettleInvoiceError>>,
     ),
+    CancelInvoice(Hash256, RpcReplyPort<Result<(), CancelInvoiceError>>),
 
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
     ListPeers((), RpcReplyPort<Result<Vec<PeerInfo>, String>>),
@@ -2901,6 +2903,9 @@ where
             NetworkActorCommand::SettleInvoice(hash, preimage, reply) => {
                 let _ = reply.send(self.settle_invoice(&myself, hash, preimage));
             }
+            NetworkActorCommand::CancelInvoice(hash, reply) => {
+                let _ = reply.send(self.cancel_invoice(&myself, hash));
+            }
             NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
                 let _ = reply.send(self.add_invoice(invoice, preimage));
             }
@@ -3802,6 +3807,44 @@ where
         // We will send network actor a message to settle the invoice immediately if possible.
         let _ = myself.send_message(NetworkActorMessage::new_command(
             NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+        ));
+
+        Ok(())
+    }
+
+    pub fn cancel_invoice(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+    ) -> Result<(), CancelInvoiceError> {
+        let invoice = self
+            .store
+            .get_invoice(&payment_hash)
+            .ok_or(CancelInvoiceError::InvoiceNotFound)?;
+        let status = match self
+            .store
+            .get_invoice_status(&payment_hash)
+            .ok_or(CancelInvoiceError::InvoiceNotFound)?
+        {
+            CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+            status => status,
+        };
+
+        match status {
+            CkbInvoiceStatus::Paid => return Err(CancelInvoiceError::InvoiceAlreadyPaid),
+            CkbInvoiceStatus::Cancelled => return Err(CancelInvoiceError::InvoiceAlreadyCancelled),
+            CkbInvoiceStatus::Received if self.store.get_preimage(&payment_hash).is_some() => {
+                return Err(CancelInvoiceError::PaymentPreimageAlreadyExists);
+            }
+            _ => {}
+        }
+
+        self.store
+            .update_invoice_status(&payment_hash, CkbInvoiceStatus::Cancelled)
+            .map_err(|err| CancelInvoiceError::InternalError(err.to_string()))?;
+
+        let _ = myself.send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SettleHoldTlcSet(payment_hash),
         ));
 
         Ok(())

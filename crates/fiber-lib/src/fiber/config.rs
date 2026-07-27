@@ -10,6 +10,7 @@ use clap_serde_derive::{
     ClapSerde,
 };
 use fiber_types::protocol::AnnouncedNodeName;
+pub use fiber_types::DEFAULT_FINAL_TLC_EXPIRY_DELTA;
 #[cfg(not(any(test, feature = "bench")))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
@@ -38,9 +39,6 @@ pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 
 /// The expiry delta to forward a tlc, in milliseconds, default to 4 hours.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 4 * 60 * 60 * 1000;
-
-/// The final hop expiry delta for a tlc, in milliseconds, default to 24 hours.
-pub const DEFAULT_FINAL_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
 /// 4 hours for each epoch
 #[cfg(not(debug_assertions))]

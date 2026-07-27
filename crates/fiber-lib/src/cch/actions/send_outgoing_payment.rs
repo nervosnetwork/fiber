@@ -258,16 +258,13 @@ impl SendOutgoingPaymentDispatcher {
     /// The other half is reserved for the CCH to settle the incoming payment
     /// after receiving the preimage.
     ///
-    /// The final expiry delta is extracted from the stored incoming invoice when
-    /// available, so that persisted orders use the actual inbound HTLC/TLC terms
-    /// even if the config has changed since order creation. Falls back to the
-    /// current config values when the invoice does not carry the setting.
+    /// The final expiry delta is extracted from the stored incoming invoice, so
+    /// persisted orders use the actual inbound HTLC/TLC terms even if the config
+    /// has changed since order creation. Fiber invoices that omit the attribute
+    /// use the protocol default.
     ///
     /// Returns `None` if there is insufficient time remaining.
-    fn compute_max_outgoing_expiry_seconds<S: CchOrderStore>(
-        state: &CchState<S>,
-        order: &CchOrder,
-    ) -> Option<u64> {
+    fn compute_max_outgoing_expiry_seconds(order: &CchOrder) -> Option<u64> {
         let now = now_timestamp_as_millis_u64() / 1000;
         let elapsed = now.saturating_sub(order.created_at);
 
@@ -280,9 +277,7 @@ impl SendOutgoingPaymentDispatcher {
         let incoming_expiry_seconds = match &order.incoming_invoice {
             CchInvoice::Fiber(inv) => {
                 // CkbInvoice stores the delta in milliseconds; convert to seconds.
-                inv.final_tlc_minimum_expiry_delta()
-                    .map(|ms| ms / 1000)
-                    .unwrap_or(state.config.ckb_final_tlc_expiry_delta_seconds)
+                inv.final_tlc_minimum_expiry_delta_or_default() / 1000
             }
             CchInvoice::Lightning(inv) => {
                 // Bolt11Invoice stores the delta in blocks; convert to seconds.
@@ -337,8 +332,7 @@ impl SendOutgoingPaymentDispatcher {
                 // Outgoing is CKB Fiber: parse the CKB invoice's final_tlc_minimum_expiry_delta
                 CkbInvoice::from_str(&order.outgoing_pay_req)
                     .ok()
-                    .and_then(|inv| inv.final_tlc_minimum_expiry_delta().copied())
-                    .map(|millis| millis / 1000)
+                    .map(|inv| inv.final_tlc_minimum_expiry_delta_or_default() / 1000)
                     .unwrap_or(0)
             }
         };
@@ -377,7 +371,7 @@ impl SendOutgoingPaymentDispatcher {
         // Check the remaining incoming time and compute the max outgoing route expiry.
         // This ensures the CCH has enough time to settle the incoming payment
         // even in the worst case where the outgoing payment settles at the last moment.
-        let max_outgoing_seconds = Self::compute_max_outgoing_expiry_seconds(state, order);
+        let max_outgoing_seconds = Self::compute_max_outgoing_expiry_seconds(order);
         let max_outgoing_seconds =
             Self::check_expiry_or_fail(cch_actor_ref, order, max_outgoing_seconds)?;
 

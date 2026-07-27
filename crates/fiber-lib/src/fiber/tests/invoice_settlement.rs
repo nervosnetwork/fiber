@@ -2,12 +2,13 @@ use crate::ckb::tests::test_utils::{MockChainActorMiddleware, MockChainActorStat
 use crate::ckb::CkbChainMessage;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::{NetworkActorEvent, NetworkActorMessage};
+use crate::fiber::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{
-    CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, PreimageStore, SettleInvoiceError,
+    CancelInvoiceError, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, PreimageStore,
+    SettleInvoiceError,
 };
-use crate::rpc::invoice::NewInvoiceParams;
+use crate::rpc::invoice::{InvoiceParams, InvoiceRpcServerImpl, NewInvoiceParams};
 use crate::tests::test_utils::{
     create_n_nodes_network, create_n_nodes_network_with_params, establish_channel_between_nodes,
     gen_rpc_config, init_tracing, wait_for_network_graph_update, wait_until_timeout,
@@ -21,7 +22,7 @@ use fiber_types::{
     ChannelState, CloseFlags, Hash256, HashAlgorithm, NodeId, Privkey, SettlementData,
     SettlementTlc, ShuttingDownFlags, TLCId,
 };
-use ractor::{ActorProcessingErr, ActorRef};
+use ractor::{call, ActorProcessingErr, ActorRef};
 use secp256k1::SECP256K1;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -159,6 +160,48 @@ fn insert_watch_channel_with_pending_tlc(
         local_funding_pubkey,
         remote_funding_pubkey,
         settlement_data,
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_open_invoice_with_stored_preimage_succeeds() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(preimage));
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .payment_hash(payment_hash)
+        .amount(Some(1000))
+        .fallback_address("ckt1qyq29z5c5ct9qvzdh5xs7a4d43uyvc253ptq5axtlf".to_string())
+        .expiry_time(Duration::from_secs(3600))
+        .build()
+        .unwrap();
+
+    node.store
+        .insert_invoice(invoice.clone(), Some(preimage))
+        .unwrap();
+    assert_eq!(
+        node.store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    assert_eq!(node.store.get_preimage(&payment_hash), Some(preimage));
+
+    let rpc = InvoiceRpcServerImpl::new(node.store.clone(), Some(node.network_actor.clone()), None);
+    let res = rpc
+        .cancel_invoice(InvoiceParams {
+            payment_hash: payment_hash.into(),
+        })
+        .await
+        .expect("open invoice with stored preimage can be cancelled");
+
+    assert_eq!(
+        res.status,
+        fiber_json_types::invoice::CkbInvoiceStatus::Cancelled
+    );
+    assert_eq!(
+        node.store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Cancelled)
     );
 }
 
@@ -304,6 +347,37 @@ async fn test_settle_invoice_status_checks() {
         .settle_invoice(&payment_hash_success, preimage_success)
         .await;
     assert!(res.is_ok());
+
+    let cancel_res = call!(node.network_actor, |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+            payment_hash_success,
+            reply,
+        ))
+    })
+    .expect("network actor alive");
+    assert_eq!(
+        cancel_res.unwrap_err(),
+        CancelInvoiceError::PaymentPreimageAlreadyExists
+    );
+    assert_eq!(
+        node.store.get_invoice_status(&payment_hash_success),
+        Some(CkbInvoiceStatus::Received)
+    );
+
+    let rpc = InvoiceRpcServerImpl::new(node.store.clone(), Some(node.network_actor.clone()), None);
+    let rpc_cancel_res = rpc
+        .cancel_invoice(InvoiceParams {
+            payment_hash: payment_hash_success.into(),
+        })
+        .await;
+    match rpc_cancel_res {
+        Ok(_) => panic!("RPC cancel must fail after the preimage has been stored"),
+        Err(err) => assert!(err.to_string().contains("payment preimage already exists")),
+    }
+    assert_eq!(
+        node.store.get_invoice_status(&payment_hash_success),
+        Some(CkbInvoiceStatus::Received)
+    );
 
     // 7. Test Success (Received but Expired) - Should succeed because it is already Received
     let preimage_success_expired = gen_rand_sha256_hash();
@@ -454,8 +528,23 @@ async fn test_cancel_hold_invoice_fails_pending_tlcs() {
         node_1.store.get_invoice_status(&payment_hash),
         Some(CkbInvoiceStatus::Received)
     );
+    assert_eq!(node_1.store.get_preimage(&payment_hash), None);
 
-    node_1.cancel_invoice(&payment_hash);
+    let rpc = InvoiceRpcServerImpl::new(
+        node_1.store.clone(),
+        Some(node_1.network_actor.clone()),
+        None,
+    );
+    let res = rpc
+        .cancel_invoice(InvoiceParams {
+            payment_hash: payment_hash.into(),
+        })
+        .await
+        .expect("hold invoice without preimage can be cancelled");
+    assert_eq!(
+        res.status,
+        fiber_json_types::invoice::CkbInvoiceStatus::Cancelled
+    );
 
     node_0.wait_until_failed(payment_hash).await;
 }

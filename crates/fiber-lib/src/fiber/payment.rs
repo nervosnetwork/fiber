@@ -449,11 +449,27 @@ impl SendPaymentDataExt for SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = invoice
-            .as_ref()
-            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            .or(command.final_tlc_expiry_delta)
-            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
+        let final_tlc_expiry_delta = match invoice.as_ref() {
+            Some(invoice) => match invoice.final_tlc_minimum_expiry_delta().copied() {
+                Some(delta) => delta,
+                None => {
+                    let minimum_delta = invoice.final_tlc_minimum_expiry_delta_or_default();
+                    match command.final_tlc_expiry_delta {
+                        Some(delta) if delta < minimum_delta => {
+                            return Err(format!(
+                                "final_tlc_expiry_delta is below the invoice minimum: {} < {}",
+                                delta, minimum_delta
+                            ));
+                        }
+                        Some(delta) => delta,
+                        None => minimum_delta,
+                    }
+                }
+            },
+            None => command
+                .final_tlc_expiry_delta
+                .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
+        };
 
         let tlc_expiry_limit = command
             .tlc_expiry_limit
