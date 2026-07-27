@@ -1,5 +1,6 @@
 use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, Pubkey};
 
+use crate::invoice::CkbInvoice;
 use crate::liquidity::types::{
     loop_out_gross_payment_amount, LiquidityLoopOutError, LoopOutQuoteTerms,
 };
@@ -96,6 +97,13 @@ pub fn loop_in_gross_onchain_amount(
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
 }
 
+fn parse_payment_hash_from_invoice(client_invoice: &str) -> Result<Hash256, LiquidityLoopOutError> {
+    let invoice = client_invoice.parse::<CkbInvoice>().map_err(|error| {
+        LiquidityLoopOutError::PaymentFailed(format!("invalid client invoice: {error}"))
+    })?;
+    Ok(*invoice.payment_hash())
+}
+
 /// Build quote terms for a Loop In request after provider-side validation.
 pub fn build_loop_in_quote_terms(
     quote_id: Hash256,
@@ -128,7 +136,7 @@ pub fn build_loop_in_quote_terms(
     }
 
     let provider_fee = compute_provider_fee(asset, amount)?;
-    let payment_hash = Hash256::from(ckb_hash::blake2b_256(client_invoice.as_bytes()));
+    let payment_hash = parse_payment_hash_from_invoice(&client_invoice)?;
     let quote = LoopOutQuoteTerms {
         quote_id,
         provider,
@@ -161,6 +169,10 @@ pub fn build_loop_in_quote_terms(
 mod tests {
     use ckb_jsonrpc_types::Script;
     use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, Pubkey};
+    use secp256k1::Secp256k1;
+
+    use crate::gen_deterministic_secp256k1_keypair_tuple;
+    use crate::invoice::{Currency, InvoiceBuilder};
 
     use super::*;
 
@@ -199,6 +211,16 @@ mod tests {
             proportional_fee_ppm: 1_000,
             enabled: true,
         }
+    }
+
+    fn client_invoice(payment_hash: Hash256) -> crate::invoice::CkbInvoice {
+        let (private_key, public_key) = gen_deterministic_secp256k1_keypair_tuple();
+        InvoiceBuilder::new(Currency::Fibb)
+            .amount(Some(1_000))
+            .payment_hash(payment_hash)
+            .payee_pub_key(public_key)
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .expect("invoice")
     }
 
     #[test]
@@ -316,7 +338,7 @@ mod tests {
             &asset,
             1_000,
             None,
-            "invoice:hash".to_string(),
+            client_invoice(Hash256::from([3; 32])).to_string(),
             60_000,
             1,
         )
@@ -329,6 +351,26 @@ mod tests {
             1_000 + asset.base_fee
         );
         assert_eq!(quote.payout_deadline, quote.expires_at);
+    }
+
+    #[test]
+    fn loop_in_quote_uses_payment_hash_from_client_invoice() {
+        let payment_hash = Hash256::from([3; 32]);
+        let client_invoice = client_invoice(payment_hash);
+
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            client_invoice.to_string(),
+            60_000,
+            1,
+        )
+        .expect("loop in quote");
+
+        assert_eq!(quote.payment_hash, *client_invoice.payment_hash());
     }
 
     #[test]
@@ -345,7 +387,7 @@ mod tests {
             &asset,
             u128::MAX,
             None,
-            "invoice:hash".to_string(),
+            client_invoice(Hash256::from([3; 32])).to_string(),
             60_000,
             1,
         )
@@ -363,7 +405,7 @@ mod tests {
             &asset,
             1_000,
             None,
-            "invoice:hash".to_string(),
+            client_invoice(Hash256::from([3; 32])).to_string(),
             60_000,
             1,
         )
