@@ -33,6 +33,7 @@ const CKB_SEND_TX_TIMEOUT_MS: u64 = 8000;
 #[cfg(test)]
 const CKB_SEND_TX_TIMEOUT_MS: u64 = 50;
 const DEFAULT_LIQUIDITY_PAYOUT_FEE_RATE: u64 = 1000;
+const LOOP_IN_LOCAL_FUNDING_TX_DESCRIPTOR: &str = "local-wallet";
 
 /// Chain claim request for a client Loop Out payout.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -655,6 +656,81 @@ where
 
         Ok((tx, outpoint, funded_tx_hash))
     }
+
+    async fn send_loop_in_lock_tx(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+        funding_tx: &str,
+        tx: TransactionView,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let tx_hash: Hash256 = tx.hash().into();
+
+        let send_result = ractor::call_t!(
+            self.ckb_chain_actor,
+            CkbChainMessage::SendTx,
+            CKB_SEND_TX_TIMEOUT_MS,
+            tx.clone()
+        )
+        .map_err(|error| {
+            let failure_reason = format!(
+                "send tx actor call failed for loop in lock liquidity tx {tx_hash} from funding_tx {funding_tx}: {error}"
+            );
+            let _ = self.store.update_liquidity_chain_tx_status(
+                &quote.quote_id,
+                LiquidityChainTxRole::Payout,
+                fiber_types::LiquidityChainTxStatus::Rejected,
+                Some(failure_reason.clone()),
+                now_timestamp_as_millis_u64(),
+            );
+            LiquidityLoopOutError::Chain(failure_reason)
+        })?;
+        if let Err(error) = send_result {
+            let failure_reason = format!(
+                "send tx failed for loop in lock liquidity tx {tx_hash} from funding_tx {funding_tx}: {error}"
+            );
+            self.store
+                .update_liquidity_chain_tx_status(
+                    &quote.quote_id,
+                    LiquidityChainTxRole::Payout,
+                    fiber_types::LiquidityChainTxStatus::Rejected,
+                    Some(failure_reason.clone()),
+                    now_timestamp_as_millis_u64(),
+                )
+                .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
+            return Err(LiquidityLoopOutError::Chain(failure_reason));
+        }
+
+        self.store
+            .update_liquidity_chain_tx_status(
+                &quote.quote_id,
+                LiquidityChainTxRole::Payout,
+                fiber_types::LiquidityChainTxStatus::Broadcast,
+                None,
+                now_timestamp_as_millis_u64(),
+            )
+            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
+        self.ckb_chain_actor
+            .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
+                tx_hash,
+                confirmations: 1,
+                mask: CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
+                callback: Self::loop_in_lock_tracer_callback_for(
+                    quote.quote_id,
+                    tx_hash,
+                    self.ckb_chain_actor.clone(),
+                    myself,
+                ),
+            }))
+            .map_err(|error| {
+                LiquidityLoopOutError::Chain(format!(
+                    "create tx tracer failed for liquidity tx {tx_hash}: {error}"
+                ))
+            })?;
+        self.pending_payout_txs.remove(&quote.quote_id);
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -884,12 +960,55 @@ where
             .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
             .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?
         {
-            if matches!(
-                record.status,
+            match record.status {
                 fiber_types::LiquidityChainTxStatus::Broadcast
-                    | fiber_types::LiquidityChainTxStatus::Confirmed
-            ) {
-                return self.watch_loop_in_lock(quote.quote_id, myself).await;
+                | fiber_types::LiquidityChainTxStatus::Confirmed => {
+                    return self.watch_loop_in_lock(quote.quote_id, myself).await;
+                }
+                fiber_types::LiquidityChainTxStatus::Planned => {
+                    let Some(tx) = self.pending_payout_txs.get(&quote.quote_id).cloned() else {
+                        return self.watch_loop_in_lock(quote.quote_id, myself).await;
+                    };
+                    let pending_tx_hash: Hash256 = tx.hash().into();
+                    if pending_tx_hash != record.tx_hash {
+                        return Err(LiquidityLoopOutError::Chain(
+                            "cannot retry loop in lock: pending signed transaction hash does not match persisted record"
+                                .to_string(),
+                        ));
+                    }
+                    return self
+                        .send_loop_in_lock_tx(quote, funding_tx, tx, myself)
+                        .await;
+                }
+                fiber_types::LiquidityChainTxStatus::Rejected => {
+                    let tx = self.pending_payout_txs.get(&quote.quote_id).cloned().ok_or_else(
+                        || {
+                            LiquidityLoopOutError::Chain(
+                                "cannot retry rejected loop in lock: missing pending signed transaction"
+                                    .to_string(),
+                            )
+                        },
+                    )?;
+                    let pending_tx_hash: Hash256 = tx.hash().into();
+                    if pending_tx_hash != record.tx_hash {
+                        return Err(LiquidityLoopOutError::Chain(
+                            "cannot retry loop in lock: pending signed transaction hash does not match persisted record"
+                                .to_string(),
+                        ));
+                    }
+                    self.store
+                        .update_liquidity_chain_tx_status(
+                            &quote.quote_id,
+                            LiquidityChainTxRole::Payout,
+                            fiber_types::LiquidityChainTxStatus::Planned,
+                            None,
+                            now_timestamp_as_millis_u64(),
+                        )
+                        .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
+                    return self
+                        .send_loop_in_lock_tx(quote, funding_tx, tx, myself)
+                        .await;
+                }
             }
         }
 
@@ -926,72 +1045,8 @@ where
             self.pending_payout_txs.insert(quote.quote_id, tx.clone());
             tx
         };
-        let tx_hash: Hash256 = tx.hash().into();
-
-        let send_result = ractor::call_t!(
-            self.ckb_chain_actor,
-            CkbChainMessage::SendTx,
-            CKB_SEND_TX_TIMEOUT_MS,
-            tx.clone()
-        )
-        .map_err(|error| {
-            let failure_reason = format!(
-                "send tx actor call failed for loop in lock liquidity tx {tx_hash} from funding_tx {funding_tx}: {error}"
-            );
-            let _ = self.store.update_liquidity_chain_tx_status(
-                &quote.quote_id,
-                LiquidityChainTxRole::Payout,
-                fiber_types::LiquidityChainTxStatus::Rejected,
-                Some(failure_reason.clone()),
-                now_timestamp_as_millis_u64(),
-            );
-            LiquidityLoopOutError::Chain(failure_reason)
-        })?;
-        if let Err(error) = send_result {
-            let failure_reason = format!(
-                "send tx failed for loop in lock liquidity tx {tx_hash} from funding_tx {funding_tx}: {error}"
-            );
-            self.store
-                .update_liquidity_chain_tx_status(
-                    &quote.quote_id,
-                    LiquidityChainTxRole::Payout,
-                    fiber_types::LiquidityChainTxStatus::Rejected,
-                    Some(failure_reason.clone()),
-                    now_timestamp_as_millis_u64(),
-                )
-                .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
-            return Err(LiquidityLoopOutError::Chain(failure_reason));
-        }
-
-        self.store
-            .update_liquidity_chain_tx_status(
-                &quote.quote_id,
-                LiquidityChainTxRole::Payout,
-                fiber_types::LiquidityChainTxStatus::Broadcast,
-                None,
-                now_timestamp_as_millis_u64(),
-            )
-            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
-        self.ckb_chain_actor
-            .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
-                tx_hash,
-                confirmations: 1,
-                mask: CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
-                callback: Self::loop_in_lock_tracer_callback_for(
-                    quote.quote_id,
-                    tx_hash,
-                    self.ckb_chain_actor.clone(),
-                    myself,
-                ),
-            }))
-            .map_err(|error| {
-                LiquidityLoopOutError::Chain(format!(
-                    "create tx tracer failed for liquidity tx {tx_hash}: {error}"
-                ))
-            })?;
-        self.pending_payout_txs.remove(&quote.quote_id);
-
-        Ok(())
+        self.send_loop_in_lock_tx(quote, funding_tx, tx, myself)
+            .await
     }
 
     fn ensure_loop_in_lock_available(&mut self, funding_tx: &str) -> Result<(), Self::Error> {
@@ -1002,6 +1057,11 @@ where
             return Err(LiquidityLoopOutError::Chain(
                 "loop in funding_tx must not be empty".to_string(),
             ));
+        }
+        if funding_tx != LOOP_IN_LOCAL_FUNDING_TX_DESCRIPTOR {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "unsupported loop in funding_tx: only {LOOP_IN_LOCAL_FUNDING_TX_DESCRIPTOR} is supported"
+            )));
         }
         Ok(())
     }
@@ -1022,11 +1082,12 @@ where
             })?;
         if !matches!(
             record.status,
-            fiber_types::LiquidityChainTxStatus::Broadcast
+            fiber_types::LiquidityChainTxStatus::Planned
+                | fiber_types::LiquidityChainTxStatus::Broadcast
                 | fiber_types::LiquidityChainTxStatus::Confirmed
         ) {
             return Err(LiquidityLoopOutError::Chain(format!(
-                "cannot watch loop in lock transaction with non-broadcast status {:?}",
+                "cannot watch loop in lock transaction with non-watchable status {:?}",
                 record.status
             )));
         }
@@ -1720,6 +1781,7 @@ mod tests {
         quotes: Arc<Mutex<HashMap<Hash256, LoopOutQuoteTerms>>>,
         swaps: Arc<Mutex<HashMap<Hash256, LiquiditySwapRecord>>>,
         chain_txs: Arc<Mutex<HashMap<(Hash256, LiquidityChainTxRole), LiquidityChainTxRecord>>>,
+        status_events: Arc<Mutex<Vec<LiquidityChainTxStatus>>>,
     }
 
     impl LiquidityStore for NoopLiquidityStore {
@@ -1797,10 +1859,14 @@ mod tests {
             &self,
             record: LiquidityChainTxRecord,
         ) -> Result<(), LiquidityStoreError> {
-            self.chain_txs
-                .lock()
-                .unwrap()
-                .insert((record.swap_id, record.role), record);
+            let mut chain_txs = self.chain_txs.lock().unwrap();
+            let key = (record.swap_id, record.role);
+            if chain_txs.contains_key(&key) {
+                return Err(LiquidityStoreError::Backend(
+                    "liquidity chain tx already exists".to_string(),
+                ));
+            }
+            chain_txs.insert(key, record);
             Ok(())
         }
 
@@ -1832,6 +1898,7 @@ mod tests {
             record.status = status;
             record.failure_reason = failure_reason;
             record.updated_at = updated_at;
+            self.status_events.lock().unwrap().push(status);
             Ok(())
         }
 
@@ -3232,7 +3299,7 @@ mod tests {
         );
 
         watcher
-            .broadcast_loop_in_lock(&quote, "funding-tx", spawn_mock_liquidity_actor().await.0)
+            .broadcast_loop_in_lock(&quote, "local-wallet", spawn_mock_liquidity_actor().await.0)
             .await
             .unwrap();
 
@@ -3283,6 +3350,179 @@ mod tests {
                 tx_hash: [37u8; 32].into(),
                 outpoint: Some(test_outpoint(36)),
                 status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new(ckb_actor, store);
+
+        watcher
+            .watch_loop_in_lock(swap_id, spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap();
+
+        wait_for_mock_events(&events, 1).await;
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![MockCkbEvent::CreateTxTracer(
+                CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_rejects_unsupported_loop_in_funding_tx_descriptor() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
+            .await
+            .unwrap();
+        let store = NoopLiquidityStore::default();
+        let quote = test_loop_in_quote_terms();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+
+        let error = watcher
+            .broadcast_loop_in_lock(&quote, "0xfeedbeef", spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported loop in funding_tx"));
+        assert!(events.lock().unwrap().is_empty());
+        assert!(store
+            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_retries_rejected_loop_in_lock_with_matching_pending_tx_as_planned() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let quote = test_loop_in_quote_terms();
+        let loop_in_lock_script = loop_in_lock_script_for_quote(&quote);
+        let signed_tx = test_funding_transaction_with_lock_script(&quote, 1, loop_in_lock_script);
+        let outpoint = packed::OutPoint::new(signed_tx.hash(), 1);
+        let (ckb_actor, _handle) = ractor::Actor::spawn(
+            None,
+            PayoutMockCkbActor,
+            PayoutMockCkbActorArgs {
+                events: events.clone(),
+                funded_tx: signed_tx.clone(),
+                signed_tx: signed_tx.clone(),
+                send_error: false,
+            },
+        )
+        .await
+        .unwrap();
+        let store = NoopLiquidityStore::default();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: signed_tx.hash().into(),
+                outpoint: Some(outpoint),
+                status: LiquidityChainTxStatus::Rejected,
+                failure_reason: Some("previous send failed".to_string()),
+                created_at: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+        watcher
+            .pending_payout_txs
+            .insert(quote.quote_id, signed_tx.clone());
+
+        watcher
+            .broadcast_loop_in_lock(&quote, "local-wallet", spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap();
+
+        wait_for_mock_events(&events, 3).await;
+        assert_eq!(
+            store.status_events.lock().unwrap().as_slice(),
+            [
+                LiquidityChainTxStatus::Planned,
+                LiquidityChainTxStatus::Broadcast
+            ]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, MockCkbEvent::SendTx))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_rejected_loop_in_lock_without_pending_tx_returns_clear_retry_error() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
+            .await
+            .unwrap();
+        let store = NoopLiquidityStore::default();
+        let quote = test_loop_in_quote_terms();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [38u8; 32].into(),
+                outpoint: Some(test_outpoint(38)),
+                status: LiquidityChainTxStatus::Rejected,
+                failure_reason: Some("previous send failed".to_string()),
+                created_at: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+
+        let error = watcher
+            .broadcast_loop_in_lock(&quote, "local-wallet", spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("missing pending signed transaction"));
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+                .unwrap()
+                .unwrap()
+                .status,
+            LiquidityChainTxStatus::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_watch_loop_in_lock_allows_planned_record_for_crash_window() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
+            .await
+            .unwrap();
+        let store = NoopLiquidityStore::default();
+        let swap_id: Hash256 = [39u8; 32].into();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [40u8; 32].into(),
+                outpoint: Some(test_outpoint(39)),
+                status: LiquidityChainTxStatus::Planned,
                 failure_reason: None,
                 created_at: 1,
                 updated_at: 2,
