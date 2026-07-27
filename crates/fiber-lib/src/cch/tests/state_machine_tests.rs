@@ -4,7 +4,7 @@
 //! - Valid state transitions
 //! - Invalid state transitions
 //! - on_entering actions for each status
-//! - Failure transitions from active states
+//! - Failure transitions from active states and stale incoming failure handling
 
 use crate::cch::order::{state_machine::CchOrderEvent, CchOrderStateMachine};
 use crate::cch::CchError;
@@ -282,6 +282,21 @@ fn test_staying_in_outgoing_in_flight_via_payment_inflight() {
     assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
 }
 
+#[test]
+fn test_incoming_failure_after_outgoing_in_flight_is_ignored() {
+    let mut order = create_test_order(CchOrderStatus::OutgoingInFlight);
+    let event = CchOrderEvent::IncomingInvoiceChanged {
+        status: CkbInvoiceStatus::Cancelled,
+        failure_reason: Some("stale incoming cancellation".to_string()),
+    };
+
+    let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
+
+    assert!(transition.is_none());
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert!(order.failure_reason.is_none());
+}
+
 // ============================================================================
 // Tests for invalid state transitions
 // ============================================================================
@@ -455,7 +470,7 @@ fn test_failure_from_outgoing_in_flight() {
 }
 
 #[test]
-fn test_failure_from_outgoing_succeeded() {
+fn test_incoming_failure_from_outgoing_succeeded_is_ignored() {
     let mut order = create_test_order(CchOrderStatus::OutgoingSuccess);
     let event = CchOrderEvent::IncomingInvoiceChanged {
         status: CkbInvoiceStatus::Cancelled,
@@ -464,8 +479,9 @@ fn test_failure_from_outgoing_succeeded() {
 
     let transition = CchOrderStateMachine::apply(&mut order, event).unwrap();
 
-    assert!(transition.is_some());
-    assert_eq!(order.status, CchOrderStatus::Failed);
+    assert!(transition.is_none());
+    assert_eq!(order.status, CchOrderStatus::OutgoingSuccess);
+    assert!(order.failure_reason.is_none());
 }
 
 // ============================================================================

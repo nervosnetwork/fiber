@@ -23,8 +23,8 @@ use crate::cch::cch_fiber_agent::{CchFiberAgentActor, CchFiberAgentHttpBackend, 
 use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
-    CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
-    RedactedCchTrackingEvent,
+    CchTrackingEvent, InvoiceTrackingReservationResult, LndConnectionInfo, LndTrackerActor,
+    LndTrackerArgs, LndTrackerMessage, RedactedCchTrackingEvent, MAX_TRACKED_INVOICES,
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeLimit};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
@@ -135,6 +135,9 @@ pub enum CchMessage {
     /// Store change event from the Fiber node (either in-process or via WebSocket).
     StoreChangeEvent(StoreChange),
 
+    /// Reconcile active outgoing Fiber payments from durable state after a WebSocket reconnect.
+    ReconcileFiberPayments,
+
     /// Schedule a retry for an action with backoff after a transient failure.
     ActionRetry {
         payment_hash: Hash256,
@@ -154,6 +157,9 @@ pub enum CchMessage {
         payment_hash: Hash256,
         retry_count: u32,
     },
+
+    /// Expire an active order after its configured expiry window elapses.
+    ExpireOrder(Hash256),
 
     /// Test-only message to insert an order directly into the database
     #[cfg(test)]
@@ -292,6 +298,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             SchedulerArgs {
                 store: args.store.clone(),
                 lnd_tracker: lnd_tracker.clone(),
+                cch_actor: myself.clone(),
             },
             myself.get_cell(),
         )
@@ -355,6 +362,14 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         {
             // Only process active (non-final) orders
             if order.is_final() {
+                let actions = ActionDispatcher::on_starting(&order);
+                if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
+                    tracing::error!(
+                        "Failed to schedule final-order resume actions for order {:x}: {}",
+                        order.payment_hash,
+                        err
+                    );
+                }
                 state.schedule_job_for_final_order(&order);
                 continue;
             }
@@ -363,6 +378,8 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             if order.update_if_expired(current_time) {
                 let payment_hash = order.payment_hash;
                 state.store.update_cch_order(order.clone());
+                let actions = ActionDispatcher::on_entering(&order);
+                append_actions(myself.clone(), payment_hash, actions)?;
                 state.schedule_job_for_final_order(&order);
                 tracing::info!("Marked expired order {:x} as Failed", payment_hash);
                 continue;
@@ -542,13 +559,37 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 }
                 Ok(())
             }
+            CchMessage::ReconcileFiberPayments => {
+                for order in state
+                    .store
+                    .get_cch_order_keys_iter()
+                    .into_iter()
+                    .filter_map(|payment_hash| state.store.get_cch_order(&payment_hash).ok())
+                    .filter(|order| {
+                        matches!(
+                            order.status,
+                            CchOrderStatus::IncomingAccepted | CchOrderStatus::OutgoingInFlight
+                        )
+                    })
+                {
+                    myself.send_message(CchMessage::ExecuteAction {
+                        payment_hash: order.payment_hash,
+                        action: CchOrderAction::TrackOutgoingPayment,
+                        retry_count: 0,
+                    })?;
+                }
+                Ok(())
+            }
             CchMessage::ActionRetry {
                 payment_hash,
                 action,
                 retry_count,
                 reason,
             } => {
-                if state.get_active_order_or_none(&payment_hash)?.is_none() {
+                if state
+                    .get_order_for_action_or_none(&payment_hash, action)?
+                    .is_none()
+                {
                     return Ok(());
                 }
                 schedule_action_retry(&myself, payment_hash, action, retry_count, &reason);
@@ -559,7 +600,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 action,
                 retry_count,
             } => {
-                let order = match state.get_active_order_or_none(&payment_hash)? {
+                let order = match state.get_order_for_action_or_none(&payment_hash, action)? {
                     None => return Ok(()),
                     Some(order) => order,
                 };
@@ -607,6 +648,11 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                         );
                     }
                 }
+                Ok(())
+            }
+            CchMessage::ExpireOrder(payment_hash) => {
+                let actions = state.expire_order(payment_hash, "Order expired")?;
+                append_actions(myself, payment_hash, actions)?;
                 Ok(())
             }
             #[cfg(test)]
@@ -683,6 +729,44 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(self
             .get_order_or_none(payment_hash)?
             .filter(|order| !order.is_final()))
+    }
+
+    fn get_order_for_action_or_none(
+        &self,
+        payment_hash: &Hash256,
+        action: CchOrderAction,
+    ) -> Result<Option<CchOrder>, CchError> {
+        Ok(self
+            .get_order_or_none(payment_hash)?
+            .filter(|order| action_can_still_run(order, action)))
+    }
+
+    fn expire_order(
+        &self,
+        payment_hash: Hash256,
+        failure_reason: &str,
+    ) -> Result<Vec<CchOrderAction>, CchError> {
+        let mut order = match self.get_active_order_or_none(&payment_hash)? {
+            None => return Ok(vec![]),
+            Some(order) => order,
+        };
+
+        if order.status != CchOrderStatus::Pending {
+            tracing::debug!(
+                "Ignoring expiry for order {:x} in status {:?}",
+                payment_hash,
+                order.status
+            );
+            return Ok(vec![]);
+        }
+
+        order.status = CchOrderStatus::Failed;
+        order.failure_reason = Some(failure_reason.to_string());
+        self.store.update_cch_order(order.clone());
+        self.schedule_job_for_final_order(&order);
+        tracing::info!("Expired order {:x}", payment_hash);
+
+        Ok(ActionDispatcher::on_entering(&order))
     }
 
     fn schedule_job_for_non_final_order(&self, order: &CchOrder) {
@@ -927,7 +1011,7 @@ impl<S: CchOrderStore> CchState<S> {
                 &creation,
             )?;
             return self
-                .complete_receive_btc_order_creation(creation, false)
+                .complete_receive_btc_order_creation_with_tracking(creation, false)
                 .await
                 .map(|order| (order, true));
         }
@@ -953,10 +1037,7 @@ impl<S: CchOrderStore> CchState<S> {
         // Validate that outgoing CKB invoice's final TLC is less than half of incoming BTC invoice's final CLTV expiry.
         // This ensures the CCH operator has sufficient time to settle the incoming side before the outgoing side expires.
         // CKB uses milliseconds, BTC uses blocks (~10 min each).
-        let ckb_final_tlc_millis = invoice
-            .final_tlc_minimum_expiry_delta()
-            .copied()
-            .unwrap_or(0);
+        let ckb_final_tlc_millis = invoice.final_tlc_minimum_expiry_delta_or_default();
         let btc_final_cltv_millis = self
             .config
             .btc_final_tlc_expiry_delta_blocks
@@ -1026,6 +1107,10 @@ impl<S: CchOrderStore> CchState<S> {
         let refreshed_at = now_timestamp_as_millis_u64() / 1000;
         self.remaining_outgoing_invoice_expiry_seconds(&invoice, refreshed_at)?;
 
+        // Reserve tracker capacity before persisting the intent. A capacity failure has no
+        // external side effect and must not leave an intent that blocks a later client retry.
+        self.reserve_lnd_invoice_tracking(payment_hash).await?;
+
         let creation = CchReceiveBtcOrderCreation {
             created_at: order_created_at,
             order_expiry_delta_seconds: self.config.order_expiry_delta_seconds,
@@ -1037,12 +1122,17 @@ impl<S: CchOrderStore> CchState<S> {
             btc_final_tlc_expiry_delta_blocks: self.config.btc_final_tlc_expiry_delta_blocks,
             max_outgoing_fee_percentage: self.config.max_outgoing_fee_percentage,
         };
-        self.store
-            .insert_receive_btc_order_creation(creation.clone())?;
-
-        self.complete_receive_btc_order_creation(creation, true)
-            .await
-            .map(|order| (order, true))
+        let result = async {
+            self.store
+                .insert_receive_btc_order_creation(creation.clone())?;
+            self.complete_receive_btc_order_creation(creation, true)
+                .await
+        }
+        .await;
+        if result.is_err() {
+            self.release_lnd_invoice_tracking(payment_hash);
+        }
+        result.map(|order| (order, true))
     }
 
     fn get_receive_btc_order_creation_or_none(
@@ -1097,9 +1187,54 @@ impl<S: CchOrderStore> CchState<S> {
         let Some(creation) = self.get_receive_btc_order_creation_or_none(&payment_hash)? else {
             return Ok(None);
         };
-        self.complete_receive_btc_order_creation(creation, false)
+        self.complete_receive_btc_order_creation_with_tracking(creation, false)
             .await
             .map(Some)
+    }
+
+    async fn reserve_lnd_invoice_tracking(&self, payment_hash: Hash256) -> Result<(), CchError> {
+        let reservation = ractor::call!(self.lnd_tracker, |reply| {
+            LndTrackerMessage::ReserveInvoiceTracking(payment_hash, reply)
+        })
+        .map_err(|err| CchError::LndInvoiceTrackerError(err.to_string()))?;
+        match reservation {
+            InvoiceTrackingReservationResult::Reserved => Ok(()),
+            InvoiceTrackingReservationResult::AlreadyTracked => {
+                Err(CchError::LndInvoiceAlreadyTracked(payment_hash))
+            }
+            InvoiceTrackingReservationResult::CapacityExceeded => Err(
+                CchError::LndInvoiceTrackerCapacityExceeded(MAX_TRACKED_INVOICES),
+            ),
+        }
+    }
+
+    fn release_lnd_invoice_tracking(&self, payment_hash: Hash256) {
+        if let Err(err) = self
+            .lnd_tracker
+            .send_message(LndTrackerMessage::StopTracking(payment_hash))
+        {
+            tracing::warn!(
+                "Failed to release invoice tracker reservation for {:x}: {}",
+                payment_hash,
+                err
+            );
+        }
+    }
+
+    async fn complete_receive_btc_order_creation_with_tracking(
+        &self,
+        creation: CchReceiveBtcOrderCreation,
+        preflight_complete: bool,
+    ) -> Result<CchOrder, CchError> {
+        let payment_hash = creation.payment_hash;
+        self.reserve_lnd_invoice_tracking(payment_hash).await?;
+        let result = self
+            .complete_receive_btc_order_creation(creation, preflight_complete)
+            .await;
+        if result.is_err() {
+            self.release_lnd_invoice_tracking(payment_hash);
+        }
+        result
     }
 
     async fn preflight_receive_btc_creation(
@@ -1394,22 +1529,15 @@ impl<S: CchOrderStore> CchState<S> {
             StoreChange::PutPaymentSession {
                 payment_hash,
                 payment_session,
+                payment_preimage,
             } => {
-                use fiber_types::payment::PaymentStatus;
                 let status = payment_session.status;
-                // For successful payments, we need the preimage. If it's not in the same
-                // store change batch, the PutPreimage event will follow.
-                if status == PaymentStatus::Success {
-                    // Defer to PutPreimage
-                    vec![]
-                } else {
-                    vec![CchTrackingEvent::PaymentChanged {
-                        payment_hash: *payment_hash,
-                        payment_preimage: None,
-                        status,
-                        failure_reason: None,
-                    }]
-                }
+                vec![CchTrackingEvent::PaymentChanged {
+                    payment_hash: *payment_hash,
+                    payment_preimage: *payment_preimage,
+                    status,
+                    failure_reason: None,
+                }]
             }
             StoreChange::PutAttempt {
                 payment_hash,
@@ -1424,20 +1552,30 @@ impl<S: CchOrderStore> CchState<S> {
                 }]
             }
             StoreChange::PutAttempt { .. } => vec![],
-            StoreChange::PutPreimage {
-                payment_hash,
-                payment_preimage,
-            } => {
-                use fiber_types::payment::PaymentStatus;
-                vec![CchTrackingEvent::PaymentChanged {
-                    payment_hash: *payment_hash,
-                    payment_preimage: Some(*payment_preimage),
-                    status: PaymentStatus::Success,
-                    failure_reason: None,
-                }]
-            }
+            // Preimages are global to a Fiber node and can be learned from unrelated TLCs
+            // that reuse the same payment hash. Only the correlated PaymentSession success
+            // above is authoritative for a CCH outgoing payment.
+            StoreChange::PutPreimage { .. } => vec![],
         }
     }
+}
+
+fn action_can_still_run(order: &CchOrder, action: CchOrderAction) -> bool {
+    match action {
+        // Most actions are stale once the order reaches a final state. Incoming invoice
+        // cancellation is the exception: it is the cleanup action for a failed order.
+        CchOrderAction::CancelIncomingInvoice => should_cancel_incoming_invoice(order),
+        _ => order_allows_active_action(order),
+    }
+}
+
+fn order_allows_active_action(order: &CchOrder) -> bool {
+    !order.is_final()
+}
+
+fn should_cancel_incoming_invoice(order: &CchOrder) -> bool {
+    // If the preimage exists, the incoming payment can be settled and must not be cancelled.
+    order.status == CchOrderStatus::Failed && order.payment_preimage.is_none()
 }
 
 fn append_actions(
@@ -1458,7 +1596,10 @@ fn append_actions(
 fn is_retryable_receive_btc_creation_error(error: &CchError) -> bool {
     matches!(
         error,
-        CchError::LndChannelError(_) | CchError::LndRpcError(_) | CchError::FiberNodeError(_)
+        CchError::LndChannelError(_)
+            | CchError::LndRpcError(_)
+            | CchError::LndInvoiceTrackerCapacityExceeded(_)
+            | CchError::FiberNodeError(_)
     )
 }
 
@@ -1588,6 +1729,10 @@ async fn subscribe_store_changes_ws(
         };
 
         tracing::info!("Successfully subscribed to Fiber node store changes");
+        if let Err(err) = actor.send_message(CchMessage::ReconcileFiberPayments) {
+            tracing::error!("Failed to schedule Fiber payment reconciliation: {}", err);
+            return;
+        }
 
         loop {
             tokio::select! {
@@ -1639,10 +1784,14 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
             payment_hash: *payment_hash,
             has_payment_preimage: false,
         },
-        StoreChange::PutPaymentSession { payment_hash, .. } => RedactedStoreChangeSummary {
+        StoreChange::PutPaymentSession {
+            payment_hash,
+            payment_preimage,
+            ..
+        } => RedactedStoreChangeSummary {
             kind: "PutPaymentSession",
             payment_hash: *payment_hash,
-            has_payment_preimage: false,
+            has_payment_preimage: payment_preimage.is_some(),
         },
         StoreChange::PutAttempt { payment_hash, .. } => RedactedStoreChangeSummary {
             kind: "PutAttempt",

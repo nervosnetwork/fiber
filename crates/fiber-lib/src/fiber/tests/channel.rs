@@ -20,6 +20,7 @@ use crate::fiber::network::{
     DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
     PeerDisconnectReason, CHECK_CHANNELS_INTERVAL,
 };
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
     AddTlc, CommitmentSigned, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey,
@@ -100,6 +101,7 @@ fn create_mock_pending_add_tlc_command(
             .payment_hash(payment_hash)
             .hash_algorithm(hash_algorithm)
             .payee_pub_key(target.pubkey.into())
+            .final_expiry_delta(0)
             .build()
             .expect("build mock pending invoice");
         target.insert_invoice(invoice, None);
@@ -3631,9 +3633,15 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
         .try_into()
         .expect("20-byte payment hash prefix");
-    node_1
-        .store
-        .update_tlc_settled(&channels[1], payment_hash_prefix);
+    node_1.store.insert_onchain_tlc_settlement(
+        &channels[1],
+        payment_hash_prefix,
+        OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: Some(gen_rand_sha256_hash()),
+            tlc_index: Some(0),
+        },
+    );
 
     node_1.restart().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -5895,6 +5903,14 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
             true,
         )
         .await;
+    let unexpected_channel_ready_replay =
+        vec!["Replayed ChannelReady after reestablishment".to_string()];
+    node_a
+        .add_unexpected_events(unexpected_channel_ready_replay.clone())
+        .await;
+    node_b
+        .add_unexpected_events(unexpected_channel_ready_replay)
+        .await;
 
     node_a.restart().await;
 
@@ -5975,6 +5991,121 @@ async fn test_reestablished_channel_ready_notification_is_not_delayed() {
         .await;
     assert!(node_a.get_triggered_unexpected_events().await.is_empty());
     assert!(node_b.get_triggered_unexpected_events().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_reconnect_resolves_awaiting_channel_ready_when_peer_is_already_ready() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+    node_a
+        .add_unexpected_events(vec![
+            "received ChannelReady message, but we're not ready for ChannelReady".to_string(),
+        ])
+        .await;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    node_b_state.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    node_b_state.commitment_numbers.local = node_b_state
+        .commitment_numbers
+        .local
+        .checked_sub(1)
+        .expect("established channel has an initial local commitment");
+    node_b_state.commitment_numbers.remote = node_b_state
+        .commitment_numbers
+        .remote
+        .checked_sub(1)
+        .expect("established channel has an initial remote commitment");
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    assert!(matches!(
+        node_a.get_channel_actor_state(channel_id).state,
+        ChannelState::ChannelReady
+    ));
+    assert!(matches!(
+        node_b.get_channel_actor_state(channel_id).state,
+        ChannelState::AwaitingChannelReady(flags)
+            if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                && !flags.contains(AwaitingChannelReadyFlags::THEIR_CHANNEL_READY)
+    ));
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    assert_eq!(
+        node_a_state.commitment_numbers.local,
+        node_b_state.commitment_numbers.remote + 1
+    );
+    assert_eq!(
+        node_a_state.commitment_numbers.remote,
+        node_b_state.commitment_numbers.local + 1
+    );
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::DisconnectPeer(
+                node_b.pubkey,
+                PeerDisconnectReason::Requested,
+                None,
+            ),
+        ))
+        .expect("node_a alive");
+
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) if pubkey == &node_b.pubkey
+            )
+        })
+        .await;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) if pubkey == &node_a.pubkey
+            )
+        })
+        .await;
+
+    node_a.connect_to_nonblocking(&node_b).await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::PeerConnected(pubkey, _) if pubkey == &node_b.pubkey
+            )
+        })
+        .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut final_state = node_b.get_channel_actor_state(channel_id).state;
+    while tokio::time::Instant::now() < deadline {
+        final_state = node_b.get_channel_actor_state(channel_id).state;
+        if matches!(final_state, ChannelState::ChannelReady) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    assert!(
+        matches!(final_state, ChannelState::ChannelReady),
+        "node_b stayed in {:?} after peers disconnected and reconnected; missing peer ChannelReady was not recovered",
+        final_state,
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        node_a.get_triggered_unexpected_events().await.is_empty(),
+        "replayed ChannelReady should be handled idempotently"
+    );
 }
 
 #[tokio::test]
@@ -11104,7 +11235,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
 
 /// UDT collaborative funding: peer-supplied funding cell CKB capacity must match negotiated totals.
 /// Reproduces the under-funded `output[0]` case (`local_reserved + 1` shannons) vs `is_tx_final` UDT branch.
-mod udt_funding_cell_capacity_tests {
+mod udt_funding_cell_capacity {
     use super::*;
     use crate::fiber::channel::ChannelActorState;
     use crate::time::SystemTime;

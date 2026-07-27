@@ -11,6 +11,7 @@
 //!   Pending → IncomingAccepted → OutgoingInFlight → OutgoingSuccess → Success
 
 use crate::cch::{
+    actions::CchOrderAction,
     actor::{CchActor, CchArgs, CchMessage, LndInvoiceClient, BTC_BLOCK_TIME_MILLIS},
     config::{
         DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS,
@@ -25,7 +26,10 @@ use crate::fiber::{
     payment::{PaymentSessionExt, SendPaymentCommand, SendPaymentDataBuilder},
     NetworkActorCommand, NetworkActorMessage,
 };
-use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData};
+use crate::invoice::{
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, PreimageStore,
+    SettleInvoiceError,
+};
 use crate::store::{store_impl::StoreChange, Store};
 use crate::tests::test_utils::{generate_store, TempDir};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -332,6 +336,8 @@ struct MockNetworkState {
     event_port: Arc<OutputPort<CchTrackingEvent>>,
     /// Tracks payment hashes for which SendPayment was called (outgoing Fiber payments)
     sent_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
+    /// Tracks payment hashes for which CancelInvoice was called (incoming Fiber invoices)
+    cancelled_fiber_invoices: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Tracks payment hashes for which a dry-run Fiber payment was requested.
     preflighted_fiber_payments: Arc<Mutex<std::collections::HashSet<Hash256>>>,
     /// Optional error returned by dry-run Fiber payments.
@@ -342,6 +348,10 @@ struct MockNetworkState {
     sent_fiber_payment_fees: Arc<Mutex<std::collections::HashMap<Hash256, Option<u128>>>>,
     /// Status returned by mocked outgoing Fiber SendPayment.
     send_payment_status: Arc<Mutex<PaymentStatus>>,
+    /// Durable Fiber store used by store-backed recovery tests.
+    payment_store: Option<Store>,
+    /// Whether mocked Fiber SettleInvoice should return an already-paid error.
+    settle_invoice_already_paid: Arc<Mutex<bool>>,
 }
 
 /// Mock network actor that handles commands from action executors
@@ -413,6 +423,7 @@ impl Actor for MockNetworkActor {
                     };
                     let response = SendPaymentResponse {
                         payment_hash,
+                        payment_preimage: None,
                         status,
                         created_at: SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -430,7 +441,20 @@ impl Actor for MockNetworkActor {
                     };
                     let _ = reply.send(Ok(response));
                 }
+                NetworkActorCommand::GetPayment(payment_hash, reply) => {
+                    let result = state
+                        .payment_store
+                        .as_ref()
+                        .and_then(|store| store.get_payment_session(payment_hash))
+                        .map(SendPaymentResponse::from)
+                        .ok_or_else(|| format!("Payment session not found: {payment_hash:?}"));
+                    let _ = reply.send(result);
+                }
                 NetworkActorCommand::SettleInvoice(payment_hash, _preimage, reply) => {
+                    if *state.settle_invoice_already_paid.lock().unwrap() {
+                        let _ = reply.send(Err(SettleInvoiceError::InvoiceAlreadyPaid));
+                        return Ok(());
+                    }
                     // Accept settlement - the InvoiceChanged(Paid) event will be sent
                     // via the event_port by the test (simulating FiberStoreWatcher)
                     let _ = reply.send(Ok(()));
@@ -441,6 +465,14 @@ impl Actor for MockNetworkActor {
                         status: CkbInvoiceStatus::Paid,
                         failure_reason: None,
                     });
+                }
+                NetworkActorCommand::CancelInvoice(payment_hash, reply) => {
+                    state
+                        .cancelled_fiber_invoices
+                        .lock()
+                        .unwrap()
+                        .insert(payment_hash);
+                    let _ = reply.send(Ok(()));
                 }
                 _ => {
                     // Ignore other commands
@@ -541,6 +573,35 @@ impl TestHarness {
             .contains(&payment_hash)
     }
 
+    fn was_fiber_invoice_cancelled(&self, payment_hash: Hash256) -> bool {
+        self.mock_state
+            .cancelled_fiber_invoices
+            .lock()
+            .unwrap()
+            .contains(&payment_hash)
+    }
+
+    async fn wait_for_fiber_invoice_cancelled(&self, payment_hash: Hash256, timeout_ms: u64) {
+        let start = std::time::Instant::now();
+        let poll_interval = tokio::time::Duration::from_millis(10);
+        let timeout = tokio::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            if self.was_fiber_invoice_cancelled(payment_hash) {
+                return;
+            }
+
+            if start.elapsed() > timeout {
+                panic!(
+                    "Timeout waiting for Fiber invoice {:x} to be cancelled",
+                    payment_hash
+                );
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+
     /// Return the `max_fee_amount` of the outgoing Fiber SendPayment for `payment_hash`, if sent.
     fn fiber_payment_max_fee(&self, payment_hash: Hash256) -> Option<Option<u128>> {
         self.mock_state
@@ -553,6 +614,10 @@ impl TestHarness {
 
     fn set_send_payment_status(&self, status: PaymentStatus) {
         *self.mock_state.send_payment_status.lock().unwrap() = status;
+    }
+
+    fn set_settle_invoice_already_paid(&self, already_paid: bool) {
+        *self.mock_state.settle_invoice_already_paid.lock().unwrap() = already_paid;
     }
 
     fn fail_fiber_payment_preflight(&self, error: impl Into<String>) {
@@ -749,11 +814,14 @@ async fn setup_test_harness_with_config_store_and_lnd(
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        cancelled_fiber_invoices: Arc::new(Mutex::new(std::collections::HashSet::new())),
         preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fiber_preflight_error: Arc::new(Mutex::new(None)),
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        payment_store: None,
+        settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
@@ -787,9 +855,16 @@ async fn setup_test_harness_with_config_store_and_lnd(
 }
 
 async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
+    let (store, store_dir) = generate_store();
+    setup_store_backed_test_harness_with_store(store, store_dir).await
+}
+
+async fn setup_store_backed_test_harness_with_store(
+    mut store: Store,
+    store_dir: TempDir,
+) -> StoreBackedTestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
     let store_change_port = Arc::new(OutputPort::<StoreChange>::default());
-    let (mut store, store_dir) = generate_store();
     let store_change_port_clone = store_change_port.clone();
     store.set_watcher(Arc::new(move |change| {
         store_change_port_clone.send(change);
@@ -799,11 +874,14 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
         cch_actor: Arc::new(Mutex::new(None)),
         event_port: event_port.clone(),
         sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        cancelled_fiber_invoices: Arc::new(Mutex::new(std::collections::HashSet::new())),
         preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
         fiber_preflight_error: Arc::new(Mutex::new(None)),
         fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+        payment_store: Some(store.clone()),
+        settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
@@ -1196,6 +1274,174 @@ async fn test_receive_btc_store_attempt_inflight_updates_payment_and_cch_status(
     assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
 }
 
+#[tokio::test]
+async fn test_receive_btc_unrelated_preimage_does_not_mark_outgoing_payment_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(100);
+    let harness = setup_store_backed_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    // Preimages are stored globally whenever any Fiber TLC with this hash is fulfilled.
+    // A fulfillment unrelated to the outgoing payment owned by this CCH order must not
+    // authorize settlement of the incoming Lightning hold invoice.
+    harness.store.insert_preimage(payment_hash, preimage);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert_eq!(order.payment_preimage, None);
+}
+
+#[tokio::test]
+async fn test_receive_btc_correlated_payment_session_success_marks_outgoing_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(101);
+    let harness = setup_store_backed_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    let payment_data =
+        SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100_000, payment_hash)
+            .final_tlc_expiry_delta(10_000)
+            .tlc_expiry_limit(10_000)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1_000))
+            .build()
+            .expect("valid payment_data");
+    let mut payment_session =
+        fiber_types::PaymentSession::new_session(&harness.store, payment_data, 10);
+    let route_hops = vec![PaymentHopData {
+        amount: 100_000,
+        expiry: 10_000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: crate::gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        crate::gen_rand_fiber_public_key(),
+        route_hops,
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    harness.store.insert_attempt(attempt.clone());
+    payment_session.append_attempt(attempt.clone());
+    payment_session.update_with_attempt(attempt);
+    harness.store.insert_payment_session(payment_session);
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+}
+
+#[tokio::test]
+async fn test_receive_btc_recovers_persisted_payment_success_after_notification_loss() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(102);
+    let (store, store_dir) = generate_store();
+    let outgoing_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string();
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: outgoing_invoice.clone(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    store.insert_cch_order(order).unwrap();
+
+    let payment_data =
+        SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100_000, payment_hash)
+            .invoice(Some(outgoing_invoice))
+            .final_tlc_expiry_delta(10_000)
+            .tlc_expiry_limit(10_000)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1_000))
+            .build()
+            .expect("valid payment_data");
+    let mut payment_session = fiber_types::PaymentSession::new_session(&store, payment_data, 10);
+    let route_hops = vec![PaymentHopData {
+        amount: 100_000,
+        expiry: 10_000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: crate::gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        crate::gen_rand_fiber_public_key(),
+        route_hops,
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    store.insert_attempt(attempt.clone());
+    payment_session.append_attempt(attempt.clone());
+    payment_session.update_with_attempt(attempt);
+    store.insert_payment_session(payment_session);
+
+    // Install the watcher only after both durable writes, reproducing a process restart or
+    // WebSocket reconnect after the live PutPaymentSession notification was lost.
+    let harness = setup_store_backed_test_harness_with_store(store, store_dir).await;
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+}
+
 async fn insert_receive_btc_order_with_expiry(
     harness: &TestHarness,
     payment_hash: Hash256,
@@ -1547,6 +1793,192 @@ async fn test_resume_expired_order_marked_as_failed() {
         .failure_reason
         .unwrap()
         .contains("Order expired on startup"));
+    harness
+        .wait_for_fiber_invoice_cancelled(payment_hash, 1000)
+        .await;
+}
+
+#[tokio::test]
+async fn test_scheduled_expiry_cancels_fiber_incoming_invoice() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        order_expiry_delta_seconds: 1,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+
+    let (order, _preimage) = harness.create_send_btc_order_with_preimage().await.unwrap();
+    let payment_hash = order.payment_hash;
+
+    harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2500)
+        .await;
+    harness
+        .wait_for_fiber_invoice_cancelled(payment_hash, 1000)
+        .await;
+}
+
+#[tokio::test]
+async fn test_resume_expired_outgoing_success_does_not_cancel_incoming_invoice() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(154);
+    let store = MockCchOrderStore::new();
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expired_outgoing_success = CchOrder {
+        created_at: current_time - 7200,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: Some(preimage),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingSuccess,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(expired_outgoing_success).unwrap();
+
+    let harness = setup_test_harness_with_store(store).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_ne!(order.status, CchOrderStatus::Failed);
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(
+        !harness.was_fiber_invoice_cancelled(payment_hash),
+        "an order with a preimage must be settled or retried, never cancelled on startup expiry"
+    );
+}
+
+#[tokio::test]
+async fn test_live_expiry_ignores_outgoing_success_with_preimage() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(155);
+    let harness = setup_test_harness().await;
+
+    let current_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let outgoing_success_order = CchOrder {
+        created_at: current_time - 7200,
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: Some(preimage),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingSuccess,
+        failure_reason: None,
+    };
+
+    harness
+        .insert_order_directly(outgoing_success_order)
+        .await
+        .unwrap();
+    harness
+        .actor
+        .send_message(CchMessage::ExpireOrder(payment_hash))
+        .expect("actor should accept expiry message");
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingSuccess);
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(
+        !harness.was_fiber_invoice_cancelled(payment_hash),
+        "live order expiry must not cancel an incoming invoice after outgoing success"
+    );
+}
+
+#[tokio::test]
+async fn test_incoming_cancel_does_not_finalize_outgoing_in_flight_order() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(156);
+    let harness = setup_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+
+    harness.insert_order_directly(order).await.unwrap();
+    harness.event_port.send(CchTrackingEvent::InvoiceChanged {
+        payment_hash,
+        status: CkbInvoiceStatus::Cancelled,
+        failure_reason: Some("stale incoming cancellation".to_string()),
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert!(order.failure_reason.is_none());
+    assert!(!harness.was_fiber_invoice_cancelled(payment_hash));
+
+    harness.simulate_lightning_payment_success(payment_hash, preimage);
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+}
+
+#[tokio::test]
+async fn test_settle_incoming_invoice_already_paid_marks_order_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(157);
+    let harness = setup_test_harness().await;
+    harness.set_settle_invoice_already_paid(true);
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: "test".to_string(),
+        incoming_invoice: CchInvoice::Fiber(create_test_fiber_invoice(payment_hash)),
+        payment_hash,
+        payment_preimage: Some(preimage),
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingSuccess,
+        failure_reason: None,
+    };
+
+    harness.insert_order_directly(order).await.unwrap();
+    harness
+        .actor
+        .send_message(CchMessage::ExecuteAction {
+            payment_hash,
+            action: CchOrderAction::SettleIncomingInvoice,
+            retry_count: 0,
+        })
+        .expect("actor should accept settle action");
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Success, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+    assert!(order.failure_reason.is_none());
 }
 
 #[tokio::test]
@@ -1622,9 +2054,9 @@ async fn test_resume_active_order_tracking_resumed() {
     assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
 }
 
-/// Tests that final orders (Success/Failed) are skipped when resuming.
+/// Tests that final Success orders are left alone and final Failed orders recover cleanup.
 #[tokio::test]
-async fn test_resume_skips_final_orders() {
+async fn test_resume_final_orders() {
     let (preimage1, payment_hash1) = create_valid_preimage_pair(152);
     let (_preimage2, payment_hash2) = create_valid_preimage_pair(153);
     let store = MockCchOrderStore::new();
@@ -1676,6 +2108,9 @@ async fn test_resume_skips_final_orders() {
     let order2 = harness.get_order(payment_hash2).await.unwrap();
     assert_eq!(order2.status, CchOrderStatus::Failed);
     assert_eq!(order2.failure_reason, Some("Test failure".to_string()));
+    harness
+        .wait_for_fiber_invoice_cancelled(payment_hash2, 1000)
+        .await;
 }
 
 // =============================================================================
@@ -2308,11 +2743,12 @@ async fn test_receive_btc_fee_calculation() {
     let (_preimage, payment_hash) = create_valid_preimage_pair(180);
     let amount_sats: u128 = 200_000;
     let invoice = create_receive_btc_fiber_invoice(payment_hash, amount_sats, "fee test");
+    let fiber_pay_req = invoice.to_string();
     let order = call!(
         harness.actor,
         CchMessage::ReceiveBTC,
         crate::cch::ReceiveBTC {
-            fiber_pay_req: invoice.to_string(),
+            fiber_pay_req: fiber_pay_req.clone(),
         }
     )
     .expect("actor call failed")
@@ -2376,6 +2812,37 @@ async fn wait_for_mock_order(store: &MockCchOrderStore, payment_hash: Hash256) -
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[tokio::test]
+async fn test_receive_btc_failed_creation_releases_tracker_reservation() {
+    let store = MockCchOrderStore::new();
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    lnd.set_fail_before_create(true);
+    let harness = setup_test_harness_with_config_store_and_lnd(
+        receive_btc_recovery_test_config(),
+        store.clone(),
+        Some(lnd.clone()),
+    )
+    .await;
+    let (_, payment_hash) = create_valid_preimage_pair(190);
+    let fiber_pay_req =
+        create_receive_btc_fiber_invoice(payment_hash, 100_000, "reservation retry").to_string();
+
+    let first_error = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC { fiber_pay_req }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(first_error, CchError::LndRpcError(_)));
+
+    // The automatic durable-intent retry must be able to reserve the same hash again.
+    lnd.set_fail_before_create(false);
+    let recovered = wait_for_mock_order(&store, payment_hash).await;
+    assert_eq!(recovered.payment_hash, payment_hash);
+    assert_eq!(lnd.add_calls(), 2);
 }
 
 #[tokio::test]
@@ -2913,13 +3380,24 @@ fn create_test_lightning_invoice_with_cltv(
         .expect("build lightning invoice")
 }
 
-/// Create a test Fiber invoice with a custom final_tlc_minimum_expiry_delta (in milliseconds).
-fn create_test_fiber_invoice_with_expiry(
+/// Create a test Fiber invoice with an optional final TLC minimum expiry delta.
+fn create_test_fiber_invoice_with_optional_expiry(
     payment_hash: Hash256,
-    final_tlc_expiry_delta_ms: u64,
+    final_tlc_expiry_delta_ms: Option<u64>,
 ) -> CkbInvoice {
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
+
+    let mut attrs = vec![
+        Attribute::Description("test".to_string()),
+        Attribute::ExpiryTime(Duration::from_secs(3600)),
+        Attribute::PayeePublicKey(public_key),
+    ];
+    if let Some(final_tlc_expiry_delta_ms) = final_tlc_expiry_delta_ms {
+        attrs.push(Attribute::FinalHtlcMinimumExpiryDelta(
+            final_tlc_expiry_delta_ms,
+        ));
+    }
 
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
@@ -2931,18 +3409,58 @@ fn create_test_fiber_invoice_with_expiry(
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis(),
-            attrs: vec![
-                Attribute::FinalHtlcMinimumExpiryDelta(final_tlc_expiry_delta_ms),
-                Attribute::Description("test".to_string()),
-                Attribute::ExpiryTime(Duration::from_secs(3600)),
-                Attribute::PayeePublicKey(public_key),
-            ],
+            attrs,
         },
     };
     invoice
         .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
     invoice
+}
+
+/// Create a test Fiber invoice with a custom final TLC minimum expiry delta.
+fn create_test_fiber_invoice_with_expiry(
+    payment_hash: Hash256,
+    final_tlc_expiry_delta_ms: u64,
+) -> CkbInvoice {
+    create_test_fiber_invoice_with_optional_expiry(payment_hash, Some(final_tlc_expiry_delta_ms))
+}
+
+/// Create a test Fiber invoice without a final TLC minimum expiry delta attribute.
+fn create_test_fiber_invoice_without_expiry(payment_hash: Hash256) -> CkbInvoice {
+    create_test_fiber_invoice_with_optional_expiry(payment_hash, None)
+}
+
+/// An omitted final TLC expiry delta still represents the protocol default of 24 hours.
+/// The ReceiveBTC static safety check must reject it when the configured incoming BTC
+/// CLTV only leaves a 12-hour outgoing budget.
+#[tokio::test]
+async fn test_receive_btc_applies_protocol_default_to_missing_fiber_expiry_delta() {
+    let (_, payment_hash) = create_valid_preimage_pair(253);
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // 144 blocks is 24 hours; only half (12 hours) is available outgoing.
+        btc_final_tlc_expiry_delta_blocks: 144,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
+    let invoice = create_test_fiber_invoice_without_expiry(payment_hash);
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::actor::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed");
+
+    assert!(matches!(
+        result,
+        Err(CchError::CKBInvoiceFinalTlcExpiryDeltaTooLarge)
+    ));
 }
 
 /// Tests that a SendBTC order fails when the incoming CKB TLC does not have enough
@@ -3091,6 +3609,107 @@ async fn test_receive_btc_fails_insufficient_expiry_delta() {
         reason.contains("Insufficient HTLC expiry delta"),
         "Expected expiry delta failure message, got: {}",
         reason,
+    );
+}
+
+/// A missing outgoing Fiber expiry attribute means 24 hours, not zero. With a
+/// 36-hour incoming Lightning budget, only 18 hours are safe for the outgoing route.
+#[tokio::test]
+async fn test_receive_btc_order_fails_when_omitted_outgoing_expiry_exceeds_budget() {
+    let (_, payment_hash) = create_valid_preimage_pair(254);
+    let store = MockCchOrderStore::new();
+    let incoming_lightning_invoice =
+        create_test_lightning_invoice_with_cltv(payment_hash, 36 * 60 * 60 / BTC_BLOCK_TIME_SECS);
+    let outgoing_fiber_invoice = create_test_fiber_invoice_without_expiry(payment_hash);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: outgoing_fiber_invoice.to_string(),
+        incoming_invoice: CchInvoice::Lightning(incoming_lightning_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert!(
+        order
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Insufficient HTLC expiry delta")),
+        "expected expiry delta failure, got {:?}",
+        order.failure_reason
+    );
+}
+
+/// Persisted incoming Fiber invoices without an expiry attribute guarantee 24 hours,
+/// even when the current CCH config has a longer default. Only 12 hours are therefore
+/// available for the outgoing route, which cannot fit an 18-hour Lightning CLTV.
+#[tokio::test]
+async fn test_send_btc_order_uses_protocol_default_for_omitted_incoming_expiry() {
+    let (_, payment_hash) = create_valid_preimage_pair(255);
+    let store = MockCchOrderStore::new();
+    let incoming_fiber_invoice = create_test_fiber_invoice_without_expiry(payment_hash);
+    let outgoing_lightning_invoice =
+        create_test_lightning_invoice_with_cltv(payment_hash, 18 * 60 * 60 / BTC_BLOCK_TIME_SECS);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let order = CchOrder {
+        created_at: now,
+        expiry_delta_seconds: 200_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: outgoing_lightning_invoice.to_string(),
+        incoming_invoice: CchInvoice::Fiber(incoming_fiber_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::IncomingAccepted,
+        failure_reason: None,
+    };
+
+    store.insert_cch_order(order).unwrap();
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        // The old fallback used this 60-hour value and incorrectly allowed the order.
+        ckb_final_tlc_expiry_delta_seconds: 60 * 60 * 60,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config_and_store(config, store).await;
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2000)
+        .await;
+    assert!(
+        order
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Insufficient HTLC expiry delta")),
+        "expected expiry delta failure, got {:?}",
+        order.failure_reason
     );
 }
 

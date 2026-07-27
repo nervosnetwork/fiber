@@ -10,19 +10,23 @@ use std::str::FromStr as _;
 
 use fiber_types::payment::PaymentStatus;
 use fiber_types::Hash256;
+use thiserror::Error;
 
 use crate::cch::actions::CchOrderAction;
 use crate::cch::actor::CchMessage;
 use crate::cch::trackers::CchTrackingEvent;
 use crate::cch::CchError;
 use crate::fiber::{
-    payment::SendPaymentCommand, NetworkActorCommand, NetworkActorMessage,
-    ASSUME_NETWORK_ACTOR_ALIVE,
+    network::SendPaymentResponse, payment::SendPaymentCommand, NetworkActorCommand,
+    NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
-use crate::invoice::CkbInvoice;
+use crate::invoice::{CancelInvoiceError, CkbInvoice, SettleInvoiceError};
 use crate::rpc::{
-    invoice::{InvoiceResult, NewInvoiceParams, SettleInvoiceParams, SettleInvoiceResult},
-    payment::{GetPaymentCommandResult, SendPaymentCommandParams},
+    invoice::{
+        GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, SettleInvoiceParams,
+        SettleInvoiceResult,
+    },
+    payment::{GetPaymentCommandParams, GetPaymentCommandResult, SendPaymentCommandParams},
 };
 
 /// Fee limits for a CCH outgoing payment. `max_fee_amount` is the order fee budget; `max_fee_rate`
@@ -32,6 +36,50 @@ use crate::rpc::{
 pub struct OutgoingFeeLimit {
     pub max_fee_amount: u128,
     pub max_fee_rate: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum CchFiberSettleInvoiceError {
+    #[error("invoice already paid")]
+    AlreadyPaid,
+    #[error("permanent settle invoice error: {0}")]
+    Permanent(String),
+    #[error("transient settle invoice error: {0}")]
+    Transient(String),
+}
+
+impl From<SettleInvoiceError> for CchFiberSettleInvoiceError {
+    fn from(err: SettleInvoiceError) -> Self {
+        match err {
+            SettleInvoiceError::InvoiceAlreadyPaid => Self::AlreadyPaid,
+            SettleInvoiceError::InvoiceNotFound
+            | SettleInvoiceError::HashMismatch
+            | SettleInvoiceError::InvoiceStillOpen
+            | SettleInvoiceError::InvoiceAlreadyCancelled
+            | SettleInvoiceError::InvoiceAlreadyExpired => Self::Permanent(err.to_string()),
+            SettleInvoiceError::InternalError(_) => Self::Transient(err.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum CchFiberCancelInvoiceError {
+    #[error("permanent cancel invoice error: {0}")]
+    Permanent(String),
+    #[error("transient cancel invoice error: {0}")]
+    Transient(String),
+}
+
+impl From<CancelInvoiceError> for CchFiberCancelInvoiceError {
+    fn from(err: CancelInvoiceError) -> Self {
+        match err {
+            CancelInvoiceError::InvoiceNotFound
+            | CancelInvoiceError::InvoiceAlreadyCancelled
+            | CancelInvoiceError::InvoiceAlreadyPaid
+            | CancelInvoiceError::PaymentPreimageAlreadyExists => Self::Permanent(err.to_string()),
+            CancelInvoiceError::InternalError(_) => Self::Transient(err.to_string()),
+        }
+    }
 }
 
 /// Messages for the fiber agent actor. Each variant carries an RpcReplyPort for the response.
@@ -44,6 +92,7 @@ pub enum CchFiberAgentMessage {
         Option<u64>,
         RpcReplyPort<Result<PaymentStatus>>,
     ),
+    GetPayment(Hash256, RpcReplyPort<Result<GetPaymentCommandResult>>),
     PreflightPayment(
         String,
         Option<u64>,
@@ -51,7 +100,15 @@ pub enum CchFiberAgentMessage {
         Option<u64>,
         RpcReplyPort<Result<PaymentStatus>>,
     ),
-    SettleInvoice(Hash256, Hash256, RpcReplyPort<Result<()>>),
+    SettleInvoice(
+        Hash256,
+        Hash256,
+        RpcReplyPort<Result<(), CchFiberSettleInvoiceError>>,
+    ),
+    CancelInvoice(
+        Hash256,
+        RpcReplyPort<Result<(), CchFiberCancelInvoiceError>>,
+    ),
 }
 
 /// Http-only backend state for the fiber agent actor.
@@ -103,6 +160,10 @@ impl Actor for CchFiberAgentActor {
                     .await;
                 let _ = port.send(result);
             }
+            CchFiberAgentMessage::GetPayment(payment_hash, port) => {
+                let result = state.get_payment(payment_hash).await;
+                let _ = port.send(result);
+            }
             CchFiberAgentMessage::PreflightPayment(
                 pay_req,
                 tlc_expiry_limit,
@@ -125,6 +186,10 @@ impl Actor for CchFiberAgentActor {
                 let result = state.settle_invoice(payment_hash, payment_preimage).await;
                 let _ = port.send(result);
             }
+            CchFiberAgentMessage::CancelInvoice(payment_hash, port) => {
+                let result = state.cancel_invoice(payment_hash).await;
+                let _ = port.send(result);
+            }
         }
         Ok(())
     }
@@ -145,7 +210,7 @@ impl CchFiberAgentHttpBackend {
             payment_hash: Some((*invoice.payment_hash()).into()),
             hash_algorithm: invoice.hash_algorithm().copied().map(Into::into),
             expiry: invoice.expiry_time().map(|duration| duration.as_secs()),
-            final_expiry_delta: invoice.final_tlc_minimum_expiry_delta().copied(),
+            final_expiry_delta: Some(invoice.final_tlc_minimum_expiry_delta_or_default()),
             udt_type_script: invoice
                 .udt_type_script()
                 .map(|script| script.clone().into()),
@@ -218,15 +283,124 @@ impl CchFiberAgentHttpBackend {
         &self,
         payment_hash: Hash256,
         payment_preimage: Hash256,
-    ) -> Result<()> {
+    ) -> Result<(), CchFiberSettleInvoiceError> {
         let settle_invoice_params = SettleInvoiceParams {
             payment_hash: payment_hash.into(),
             payment_preimage: payment_preimage.into(),
         };
-        self.client
+        match self
+            .client
             .request::<SettleInvoiceResult, _>("settle_invoice", rpc_params![settle_invoice_params])
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => self.classify_settle_invoice_error(payment_hash, err).await,
+        }
+    }
+
+    async fn classify_settle_invoice_error(
+        &self,
+        payment_hash: Hash256,
+        settle_err: jsonrpsee::core::ClientError,
+    ) -> Result<(), CchFiberSettleInvoiceError> {
+        let invoice_params = InvoiceParams {
+            payment_hash: payment_hash.into(),
+        };
+        let invoice = self
+            .client
+            .request::<GetInvoiceResult, _>("get_invoice", rpc_params![invoice_params])
+            .await
+            .map_err(|status_err| {
+                CchFiberSettleInvoiceError::Transient(format!(
+                    "settle_invoice rpc error: {}; get_invoice failed: {}",
+                    settle_err, status_err
+                ))
+            })?;
+
+        match invoice.status {
+            fiber_json_types::CkbInvoiceStatus::Paid => {
+                Err(CchFiberSettleInvoiceError::AlreadyPaid)
+            }
+            fiber_json_types::CkbInvoiceStatus::Cancelled
+            | fiber_json_types::CkbInvoiceStatus::Expired
+            | fiber_json_types::CkbInvoiceStatus::Open => {
+                Err(CchFiberSettleInvoiceError::Permanent(format!(
+                    "settle_invoice rpc error: {}; current invoice status: {:?}",
+                    settle_err, invoice.status
+                )))
+            }
+            fiber_json_types::CkbInvoiceStatus::Received => {
+                Err(CchFiberSettleInvoiceError::Transient(format!(
+                    "settle_invoice rpc error while invoice is still received: {}",
+                    settle_err
+                )))
+            }
+        }
+    }
+
+    pub async fn cancel_invoice(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<(), CchFiberCancelInvoiceError> {
+        let invoice_params = InvoiceParams {
+            payment_hash: payment_hash.into(),
+        };
+        match self
+            .client
+            .request::<GetInvoiceResult, _>("cancel_invoice", rpc_params![invoice_params])
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(err) => self.classify_cancel_invoice_error(payment_hash, err).await,
+        }
+    }
+
+    async fn classify_cancel_invoice_error(
+        &self,
+        payment_hash: Hash256,
+        cancel_err: jsonrpsee::core::ClientError,
+    ) -> Result<(), CchFiberCancelInvoiceError> {
+        let invoice_params = InvoiceParams {
+            payment_hash: payment_hash.into(),
+        };
+        let invoice = self
+            .client
+            .request::<GetInvoiceResult, _>("get_invoice", rpc_params![invoice_params])
+            .await
+            .map_err(|status_err| {
+                CchFiberCancelInvoiceError::Transient(format!(
+                    "cancel_invoice rpc error: {}; get_invoice failed: {}",
+                    cancel_err, status_err
+                ))
+            })?;
+
+        match invoice.status {
+            fiber_json_types::CkbInvoiceStatus::Paid
+            | fiber_json_types::CkbInvoiceStatus::Cancelled
+            | fiber_json_types::CkbInvoiceStatus::Received => {
+                Err(CchFiberCancelInvoiceError::Permanent(format!(
+                    "cancel_invoice rpc error: {}; current invoice status: {:?}",
+                    cancel_err, invoice.status
+                )))
+            }
+            fiber_json_types::CkbInvoiceStatus::Open
+            | fiber_json_types::CkbInvoiceStatus::Expired => {
+                Err(CchFiberCancelInvoiceError::Transient(format!(
+                    "cancel_invoice rpc error while invoice remains cancellable: {}; current invoice status: {:?}",
+                    cancel_err, invoice.status
+                )))
+            }
+        }
+    }
+
+    pub async fn get_payment(&self, payment_hash: Hash256) -> Result<GetPaymentCommandResult> {
+        let params = GetPaymentCommandParams {
+            payment_hash: payment_hash.into(),
+        };
+        Ok(self
+            .client
+            .request("get_payment", rpc_params![params])
+            .await?)
     }
 }
 
@@ -295,7 +469,7 @@ impl CchFiberAgent {
         &self,
         payment_hash: Hash256,
         payment_preimage: Hash256,
-    ) -> Result<()> {
+    ) -> Result<(), CchFiberSettleInvoiceError> {
         let Self::InProcess { network_actor } = self;
         let command = move |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
@@ -304,7 +478,26 @@ impl CchFiberAgent {
                 rpc_reply,
             ))
         };
-        call!(network_actor, command).expect(ASSUME_NETWORK_ACTOR_ALIVE)?;
+        call!(network_actor, command)
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+            .map_err(CchFiberSettleInvoiceError::from)?;
+        Ok(())
+    }
+
+    pub async fn cancel_invoice(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<(), CchFiberCancelInvoiceError> {
+        let Self::InProcess { network_actor } = self;
+        let command = move |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+                payment_hash,
+                rpc_reply,
+            ))
+        };
+        call!(network_actor, command)
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+            .map_err(CchFiberCancelInvoiceError::from)?;
         Ok(())
     }
 }
@@ -462,32 +655,114 @@ impl CchFiberAgentRef {
         }
     }
 
+    /// Query a durable Fiber payment and forward the result to the CCH actor.
+    pub async fn forward_get_payment(
+        &self,
+        target: &ActorRef<CchMessage>,
+        payment_hash: Hash256,
+        retry_count: u32,
+    ) -> Result<(), ractor::RactorErr<CchMessage>> {
+        let target_ref = target.clone();
+        match self {
+            Self::InProcess(network_actor) => forward!(
+                network_actor,
+                |port| NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
+                    payment_hash,
+                    port,
+                )),
+                target_ref,
+                move |result: Result<SendPaymentResponse, String>| {
+                    map_get_payment_result(
+                        result.map(|response| {
+                            (
+                                response.status,
+                                response.payment_preimage,
+                                response.failed_error,
+                            )
+                        }),
+                        payment_hash,
+                        retry_count,
+                    )
+                }
+            ),
+            Self::Rpc(rpc_actor) => forward!(
+                rpc_actor,
+                |port| CchFiberAgentMessage::GetPayment(payment_hash, port),
+                target_ref,
+                move |result| map_get_payment_result(
+                    result
+                        .map(|response| {
+                            (
+                                response.status.into(),
+                                response.payment_preimage.map(Into::into),
+                                response.failed_error,
+                            )
+                        })
+                        .map_err(|err| err.to_string()),
+                    payment_hash,
+                    retry_count,
+                )
+            ),
+        }
+    }
+
     /// Settle an invoice by payment hash and preimage.
     pub async fn call_settle_invoice(
         &self,
         payment_hash: Hash256,
         payment_preimage: Hash256,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<(), CchFiberSettleInvoiceError> {
         match self {
             Self::InProcess(network_actor) => {
-                let cmd =
-                    move |tx: RpcReplyPort<Result<(), crate::invoice::SettleInvoiceError>>| {
-                        NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
-                            payment_hash,
-                            payment_preimage,
-                            tx,
-                        ))
-                    };
+                let cmd = move |tx: RpcReplyPort<Result<(), SettleInvoiceError>>| {
+                    NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                        payment_hash,
+                        payment_preimage,
+                        tx,
+                    ))
+                };
                 call!(network_actor, cmd)
-                    .map_err(|e| anyhow::anyhow!("network actor: {}", e))?
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    .map_err(|e| {
+                        CchFiberSettleInvoiceError::Transient(format!("network actor: {}", e))
+                    })?
+                    .map_err(CchFiberSettleInvoiceError::from)?;
                 Ok(())
             }
             Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
                 CchFiberAgentMessage::SettleInvoice(payment_hash, payment_preimage, port)
             })
-            .map_err(|e| anyhow::anyhow!("fiber agent actor: {}", e))?
-            .map_err(|e| anyhow::anyhow!("{}", e)),
+            .map_err(|e| {
+                CchFiberSettleInvoiceError::Transient(format!("fiber agent actor: {}", e))
+            })?,
+        }
+    }
+
+    /// Cancel an incoming Fiber invoice by payment hash.
+    pub async fn call_cancel_invoice(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<(), CchFiberCancelInvoiceError> {
+        match self {
+            Self::InProcess(network_actor) => {
+                let cmd = move |tx: RpcReplyPort<Result<(), CancelInvoiceError>>| {
+                    NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+                        payment_hash,
+                        tx,
+                    ))
+                };
+                call!(network_actor, cmd)
+                    .map_err(|e| {
+                        CchFiberCancelInvoiceError::Transient(format!("network actor: {}", e))
+                    })?
+                    .map_err(CchFiberCancelInvoiceError::from)?;
+                Ok(())
+            }
+            Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
+                CchFiberAgentMessage::CancelInvoice(payment_hash, port)
+            })
+            .map_err(|e| {
+                CchFiberCancelInvoiceError::Transient(format!("fiber agent actor: {}", e))
+            })?,
         }
     }
 }
@@ -541,5 +816,60 @@ fn map_send_payment_result(
                 }
             }
         }
+    }
+}
+fn map_get_payment_result(
+    result: Result<(PaymentStatus, Option<Hash256>, Option<String>), String>,
+    payment_hash: Hash256,
+    retry_count: u32,
+) -> CchMessage {
+    match result {
+        Ok((PaymentStatus::Success, None, _)) => CchMessage::ActionRetry {
+            payment_hash,
+            action: CchOrderAction::TrackOutgoingPayment,
+            retry_count,
+            reason: "successful Fiber payment has no persisted preimage".to_string(),
+        },
+        Ok((status, payment_preimage, failure_reason)) => {
+            CchMessage::TrackingEvent(CchTrackingEvent::PaymentChanged {
+                payment_hash,
+                payment_preimage,
+                status,
+                failure_reason,
+            })
+        }
+        Err(reason) => CchMessage::ActionRetry {
+            payment_hash,
+            action: CchOrderAction::TrackOutgoingPayment,
+            retry_count,
+            reason: format!("failed to query Fiber payment: {reason}"),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_invoice_error_classification_uses_error_type() {
+        assert!(matches!(
+            CchFiberCancelInvoiceError::from(CancelInvoiceError::InvoiceNotFound),
+            CchFiberCancelInvoiceError::Permanent(_)
+        ));
+        assert!(matches!(
+            CchFiberCancelInvoiceError::from(CancelInvoiceError::InvoiceAlreadyPaid),
+            CchFiberCancelInvoiceError::Permanent(_)
+        ));
+        assert!(matches!(
+            CchFiberCancelInvoiceError::from(CancelInvoiceError::PaymentPreimageAlreadyExists),
+            CchFiberCancelInvoiceError::Permanent(_)
+        ));
+        assert!(matches!(
+            CchFiberCancelInvoiceError::from(CancelInvoiceError::InternalError(
+                "store failure".to_string()
+            )),
+            CchFiberCancelInvoiceError::Transient(_)
+        ));
     }
 }

@@ -1,0 +1,40 @@
+meta {
+  name: Node2 opens channel to Node3
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel",
+    "params": [
+      {
+        "pubkey": "{{NODE3_PUBKEY}}",
+        "funding_amount": "0x2e90edd000",
+        "tlc_fee_proportional_millionths": "0x0"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+}

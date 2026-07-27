@@ -1,0 +1,53 @@
+meta {
+  name: wait payer payment Inflight
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {"payment_hash": "{{PAYMENT_HASH}}"}
+    ]
+  }
+}
+
+vars:post-response {
+  PAYMENT_INFLIGHT_MAX_ITERATIONS: 30
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const status = res.body.result.status;
+  const iteration = Number(bru.getVar("PAYMENT_INFLIGHT_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("PAYMENT_INFLIGHT_MAX_ITERATIONS"));
+
+  if (status === "Inflight") {
+    bru.setVar("PAYMENT_INFLIGHT_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("PAYMENT_INFLIGHT_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait payer payment Inflight");
+    return;
+  }
+  throw new Error(`payer payment did not reach Inflight, last_status=${String(status)}`);
+}

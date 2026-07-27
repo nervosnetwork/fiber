@@ -28,9 +28,9 @@ use ckb_types::packed::{OutPoint, Script};
 pub use fiber_types::PaymentSession;
 pub use fiber_types::SendPaymentData;
 use fiber_types::{
-    Attempt, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint, PaymentCustomRecords,
-    PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey, RemoveTlcReason,
-    RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
+    Attempt, AttemptStatus, BasicMppPaymentData, EntityHex, Hash256, HashAlgorithm, HopHint,
+    PaymentCustomRecords, PaymentHopData, PaymentStatus, PeeledPaymentOnionPacket, Privkey, Pubkey,
+    RemoveTlcReason, RouterHop, TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode, TrampolineContext,
     DEFAULT_MAX_PARTS, DEFAULT_PAYMENT_MPP_ATTEMPT_TRY_LIMIT, USER_CUSTOM_RECORDS_MAX_INDEX,
 };
 use ractor::{call_t, Actor, ActorProcessingErr};
@@ -449,11 +449,27 @@ impl SendPaymentDataExt for SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        let final_tlc_expiry_delta = invoice
-            .as_ref()
-            .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
-            .or(command.final_tlc_expiry_delta)
-            .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA);
+        let final_tlc_expiry_delta = match invoice.as_ref() {
+            Some(invoice) => match invoice.final_tlc_minimum_expiry_delta().copied() {
+                Some(delta) => delta,
+                None => {
+                    let minimum_delta = invoice.final_tlc_minimum_expiry_delta_or_default();
+                    match command.final_tlc_expiry_delta {
+                        Some(delta) if delta < minimum_delta => {
+                            return Err(format!(
+                                "final_tlc_expiry_delta is below the invoice minimum: {} < {}",
+                                delta, minimum_delta
+                            ));
+                        }
+                        Some(delta) => delta,
+                        None => minimum_delta,
+                    }
+                }
+            },
+            None => command
+                .final_tlc_expiry_delta
+                .unwrap_or(DEFAULT_FINAL_TLC_EXPIRY_DELTA),
+        };
 
         let tlc_expiry_limit = command
             .tlc_expiry_limit
@@ -611,6 +627,10 @@ impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
         let status = session.status;
         let fee = session.fee_paid();
+        let payment_preimage = session
+            .attempts()
+            .filter(|attempt| attempt.is_success())
+            .find_map(|attempt| attempt.preimage);
         let mut all_attempts = session
             .attempts()
             .map(|a| {
@@ -633,6 +653,7 @@ impl From<PaymentSession> for SendPaymentResponse {
 
         Self {
             payment_hash: session.request.payment_hash,
+            payment_preimage,
             status,
             failed_error: session.last_error.clone(),
             created_at: session.created_at,
@@ -789,6 +810,12 @@ pub enum PaymentActorMessage {
     OnRemoveTlcEvent {
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
+    },
+    /// Reconcile a first-hop attempt from a channel-scoped on-chain fulfill proof.
+    ReconcileOnChainFulfill {
+        attempt_id: u64,
+        payment_preimage: Hash256,
+        reply: RpcReplyPort<Result<(), String>>,
     },
     /// Periodic check to detect stuck payments and log status
     CheckPaymentStatus,
@@ -1031,6 +1058,18 @@ where
             PaymentActorMessage::OnRemoveTlcEvent { attempt_id, reason } => {
                 self.handle_remove_tlc_event(myself.clone(), state, attempt_id, reason)
                     .await;
+                self.check_payment_final(myself, state);
+            }
+            PaymentActorMessage::ReconcileOnChainFulfill {
+                attempt_id,
+                payment_preimage,
+                reply,
+            } => {
+                let result = self
+                    .handle_reconcile_onchain_fulfill(state, attempt_id, payment_preimage)
+                    .await
+                    .map_err(|err| err.to_string());
+                let _ = reply.send(result);
                 self.check_payment_final(myself, state);
             }
             PaymentActorMessage::CheckPaymentStatus => {
@@ -1579,6 +1618,17 @@ where
         }
     }
 
+    fn channel_owns_attempt(&self, attempt: &Attempt) -> bool {
+        let Some(channel_outpoint) = attempt.first_hop_channel_outpoint() else {
+            return false;
+        };
+        self.store
+            .get_channel_state_by_outpoint(channel_outpoint)
+            .is_some_and(|channel_state| {
+                channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
+            })
+    }
+
     async fn send_attempt(
         &self,
         myself: ActorRef<PaymentActorMessage>,
@@ -1684,6 +1734,23 @@ where
                         return Err(err);
                     }
                     _ => {}
+                }
+            }
+            Some(mut attempt) if attempt.status == AttemptStatus::Created => {
+                if self.channel_owns_attempt(&attempt) {
+                    debug!(
+                        payment_hash = ?session.payment_hash(),
+                        attempt_id = attempt.id,
+                        "Skipping channel-owned Created payment attempt"
+                    );
+                } else {
+                    warn!(
+                        payment_hash = ?session.payment_hash(),
+                        attempt_id = attempt.id,
+                        "Retrying orphan Created payment attempt"
+                    );
+                    self.send_attempt(myself, state, session, &mut attempt)
+                        .await?;
                 }
             }
             Some(_) => {
@@ -1864,6 +1931,77 @@ where
                 );
             }
         }
+    }
+
+    /// Apply an on-chain-confirmed fulfill to one exact payment attempt.
+    ///
+    /// This is intentionally keyed by both the payment hash owned by this actor and the local
+    /// attempt id persisted on the first-hop TLC. Replaying the same proof is a no-op once both the
+    /// attempt and aggregate payment session have converged.
+    async fn handle_reconcile_onchain_fulfill(
+        &self,
+        state: &PaymentActorState,
+        attempt_id: u64,
+        payment_preimage: Hash256,
+    ) -> Result<(), Error> {
+        let payment_hash = state.payment_hash;
+        let persisted_session_status = self.store.get_persisted_payment_status(payment_hash);
+        let (Some(mut session), Some(mut attempt)) =
+            self.get_payment_session_with_attempt(payment_hash, Some(attempt_id))
+        else {
+            return Err(Error::InvalidParameter(format!(
+                "Payment session or attempt not found for on-chain fulfill: payment_hash={payment_hash:?}, attempt_id={attempt_id}"
+            )));
+        };
+
+        if let Some(existing_preimage) = attempt.preimage {
+            if existing_preimage != payment_preimage {
+                return Err(Error::InvalidParameter(format!(
+                    "On-chain fulfill preimage conflicts with attempt: payment_hash={payment_hash:?}, attempt_id={attempt_id}"
+                )));
+            }
+        }
+
+        let attempt_changed = !attempt.is_success() || attempt.preimage.is_none();
+        if attempt_changed {
+            self.network_graph
+                .write()
+                .await
+                .record_attempt_success(&attempt);
+            attempt.set_success_status();
+            attempt.preimage = Some(payment_preimage);
+            self.store.insert_attempt(attempt.clone());
+        }
+
+        let previous_session_status = session.status;
+        session.update_with_attempt(attempt);
+
+        // A confirmed on-chain outcome is authoritative even if a timeout previously made the
+        // aggregate session final. Only promote the session when successful shards cover the full
+        // requested amount; a partially paid MPP remains in its existing aggregate state.
+        let success_amount = session
+            .attempts()
+            .filter(|attempt| attempt.is_success())
+            .map(|attempt| attempt.route.receiver_amount())
+            .sum::<u128>();
+        if success_amount >= session.request.amount && session.status != PaymentStatus::Success {
+            session.set_success_status();
+        }
+
+        let session_record_changed = persisted_session_status != Some(session.status);
+        if !session.is_dry_run()
+            && (attempt_changed
+                || session.status != previous_session_status
+                || session_record_changed)
+        {
+            self.store.insert_payment_session(session.clone());
+            if session.status.is_final() {
+                self.store
+                    .clear_attempts_channel_index(session.payment_hash());
+            }
+        }
+
+        Ok(())
     }
 
     fn payment_need_more_retry(&self, session: &mut PaymentSession) -> Result<bool, Error> {

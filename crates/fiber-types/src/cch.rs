@@ -132,15 +132,17 @@ impl CchOrder {
         self.status == CchOrderStatus::Success || self.status == CchOrderStatus::Failed
     }
 
-    /// Check if the order is expired given the current time, and mark it as Failed if expired.
+    /// Check if the order is expired before the outgoing leg starts, and mark it as Failed.
     ///
-    /// Returns `true` if the order was expired (and has been marked as Failed).
-    /// Updates `status` to `Failed` and sets `failure_reason` when expired.
+    /// `expiry_delta_seconds` bounds how long a CCH order can wait for the incoming payment.
+    /// Once the incoming payment is accepted, the order is governed by payment tracking and the
+    /// incoming HTLC/TLC expiry budget; timing it out here could cancel funds after the outgoing
+    /// leg has already obtained a preimage.
     pub fn update_if_expired(&mut self, current_time: u64) -> bool {
         self.update_if_expired_with_reason(current_time, "Order expired on startup")
     }
 
-    /// Check if the order is expired given the current time, and mark it as Failed with
+    /// Check if the order is expired before the outgoing leg starts, and mark it as Failed with
     /// `expired_reason` if expired.
     ///
     /// Returns `true` if the order was expired (and has been marked as Failed).

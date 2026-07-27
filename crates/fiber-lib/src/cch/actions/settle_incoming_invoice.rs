@@ -10,7 +10,7 @@ use crate::{
         },
         actor::CchState,
         trackers::{CchTrackingEvent, LndConnectionInfo},
-        CchFiberAgentRef, CchMessage, CchOrderStore,
+        CchFiberAgentRef, CchFiberSettleInvoiceError, CchMessage, CchOrderStore,
     },
     invoice::CkbInvoiceStatus,
 };
@@ -37,36 +37,33 @@ impl ActionExecutor for SettleFiberIncomingInvoiceExecutor {
             .await
         {
             Ok(()) => Ok(()),
-            Err(err) => {
-                let failure_reason =
-                    format!("SettleFiberIncomingInvoiceExecutor failure: {:?}", err);
-                let err_str = err.to_string();
-                if Self::is_permanent_error_str(&err_str) {
-                    self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
-                        CchTrackingEvent::InvoiceChanged {
-                            payment_hash,
-                            status: CkbInvoiceStatus::Cancelled,
-                            failure_reason: Some(failure_reason),
-                        },
-                    ))?;
-                    Ok(())
-                } else {
-                    Err(anyhow!(failure_reason))
-                }
+            Err(CchFiberSettleInvoiceError::AlreadyPaid) => {
+                self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
+                    CchTrackingEvent::InvoiceChanged {
+                        payment_hash,
+                        status: CkbInvoiceStatus::Paid,
+                        failure_reason: None,
+                    },
+                ))?;
+                Ok(())
+            }
+            Err(CchFiberSettleInvoiceError::Permanent(err)) => {
+                self.cch_actor_ref.send_message(CchMessage::TrackingEvent(
+                    CchTrackingEvent::InvoiceChanged {
+                        payment_hash,
+                        status: CkbInvoiceStatus::Cancelled,
+                        failure_reason: Some(format!(
+                            "SettleFiberIncomingInvoiceExecutor permanent failure: {}",
+                            err
+                        )),
+                    },
+                ))?;
+                Ok(())
+            }
+            Err(CchFiberSettleInvoiceError::Transient(err)) => {
+                Err(anyhow!("SettleFiberIncomingInvoiceExecutor error: {}", err))
             }
         }
-    }
-}
-
-impl SettleFiberIncomingInvoiceExecutor {
-    fn is_permanent_error_str(err: &str) -> bool {
-        let err_lower = err.to_lowercase();
-        err_lower.contains("not found")
-            || err_lower.contains("hash mismatch")
-            || err_lower.contains("still open")
-            || err_lower.contains("already cancelled")
-            || err_lower.contains("already expired")
-            || err_lower.contains("already paid")
     }
 }
 
