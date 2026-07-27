@@ -1096,6 +1096,70 @@ pub fn build_loop_out_payout_output(
     )
 }
 
+fn loop_in_quote_with_gross_amount(
+    quote: &LoopOutQuoteTerms,
+) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
+    let mut quote = quote.clone();
+    quote.amount = quote
+        .amount
+        .checked_add(quote.provider_fee)
+        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
+    Ok(quote)
+}
+
+/// Build the client-funded liquidity-lock output for a Loop In swap.
+pub fn build_loop_in_client_lock_output(
+    artifact: &LiquidityLockScriptArtifact,
+    quote: &LoopOutQuoteTerms,
+) -> Result<(packed::CellOutput, packed::Bytes), LiquidityLoopOutError> {
+    let gross_quote = loop_in_quote_with_gross_amount(quote)?;
+    build_loop_out_payout_output(
+        artifact,
+        &LoopOutPayoutRequest {
+            payment_hash: gross_quote.payment_hash.into(),
+            claimant_lock: gross_quote.claimant_lock,
+            refund_lock: gross_quote.refund_lock,
+            refund_after_lock_time: gross_quote.refund_after_lock_time,
+            amount: gross_quote.amount,
+            asset_type_script: gross_quote.asset.udt_type_script.map(Into::into),
+            capacity: gross_quote.capacity_requirement_ckb,
+        },
+    )
+    .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))
+}
+
+/// Build a provider claim transaction spending a Loop In client lock.
+pub fn build_loop_in_provider_claim_transaction(
+    quote: &LoopOutQuoteTerms,
+    client_lock_outpoint: &packed::OutPoint,
+    payment_preimage: Hash256,
+    liquidity_lock_cell_deps: &[packed::CellDep],
+) -> Result<TransactionView, LiquidityLoopOutError> {
+    let gross_quote = loop_in_quote_with_gross_amount(quote)?;
+    build_loop_out_claim_transaction(
+        &gross_quote,
+        client_lock_outpoint,
+        payment_preimage,
+        liquidity_lock_cell_deps,
+    )
+}
+
+/// Build a client refund transaction spending an expired Loop In client lock.
+pub fn build_loop_in_client_refund_transaction(
+    quote: &LoopOutQuoteTerms,
+    client_lock_outpoint: &packed::OutPoint,
+    refund_after_lock_time: u64,
+    liquidity_lock_cell_deps: &[packed::CellDep],
+) -> Result<TransactionView, LiquidityLoopOutError> {
+    let gross_quote = loop_in_quote_with_gross_amount(quote)?;
+    build_loop_out_refund_transaction(
+        &gross_quote,
+        client_lock_outpoint,
+        refund_after_lock_time,
+        liquidity_lock_cell_deps,
+    )
+}
+
 /// Build a claim transaction spending one liquidity-lock payout cell.
 pub fn build_loop_out_claim_transaction(
     quote: &LoopOutQuoteTerms,
@@ -1750,6 +1814,10 @@ mod tests {
         }
     }
 
+    fn test_loop_in_quote_terms() -> LoopOutQuoteTerms {
+        test_loop_out_quote_terms()
+    }
+
     fn test_transaction_with_liquidity_output(
         quote: &LoopOutQuoteTerms,
         output_index: u32,
@@ -2004,6 +2072,145 @@ mod tests {
 
         assert_eq!(output.type_().to_opt(), Some(udt_type_script));
         assert_eq!(data.raw_data().as_ref(), 1000u128.to_le_bytes());
+    }
+
+    #[test]
+    fn loop_in_client_lock_output_uses_provider_claim_and_client_refund_locks() {
+        let artifact = liquidity_lock_artifact();
+        let quote = test_loop_in_quote_terms();
+
+        let (output, data) = build_loop_in_client_lock_output(&artifact, &quote)
+            .expect("loop in client lock output");
+
+        assert_eq!(u64::from(output.capacity()), quote.capacity_requirement_ckb);
+        assert_eq!(output.lock().code_hash(), artifact.code_hash);
+        assert_eq!(
+            output.lock(),
+            build_liquidity_lock_script(
+                &artifact,
+                &LiquidityLockOutputParams {
+                    payment_hash: quote.payment_hash.into(),
+                    claimant_lock: quote.claimant_lock.clone(),
+                    refund_lock: quote.refund_lock.clone(),
+                    refund_after_lock_time: quote.refund_after_lock_time,
+                    amount: quote.amount + quote.provider_fee,
+                    asset_type_script: None,
+                    capacity: quote.capacity_requirement_ckb,
+                },
+            )
+        );
+        assert!(data.raw_data().is_empty());
+    }
+
+    #[test]
+    fn loop_in_client_lock_output_uses_gross_udt_amount() {
+        let artifact = liquidity_lock_artifact();
+        let mut quote = test_loop_in_quote_terms();
+        let udt_type_script = script("loop-in-udt");
+        quote.asset = LiquidityAsset {
+            asset_id: "udt".to_string(),
+            kind: LiquidityAssetKind::Udt,
+            udt_type_script: Some(udt_type_script.clone().into()),
+            min_amount: 1,
+            max_amount: 1_000,
+            available_capacity: 2_000,
+            base_fee: 1,
+            proportional_fee_ppm: 0,
+            enabled: true,
+        };
+        quote.amount = 100;
+        quote.provider_fee = 7;
+
+        let (output, data) =
+            build_loop_in_client_lock_output(&artifact, &quote).expect("loop in udt lock output");
+
+        assert_eq!(output.type_().to_opt(), Some(udt_type_script));
+        assert_eq!(data.raw_data().as_ref(), 107u128.to_le_bytes());
+    }
+
+    #[test]
+    fn loop_in_client_lock_output_rejects_gross_overflow() {
+        let artifact = liquidity_lock_artifact();
+        let mut quote = test_loop_in_quote_terms();
+        quote.amount = u128::MAX;
+        quote.provider_fee = 1;
+
+        let error = build_loop_in_client_lock_output(&artifact, &quote)
+            .expect_err("gross amount should overflow");
+
+        assert_eq!(error, LiquidityLoopOutError::GrossAmountOverflow);
+    }
+
+    #[test]
+    fn loop_in_provider_claim_spends_client_lock_with_preimage_witness() {
+        let quote = test_loop_in_quote_terms();
+        let client_lock_outpoint = test_outpoint(22);
+        let preimage: Hash256 = [4u8; 32].into();
+        let cell_dep = packed::CellDep::new_builder()
+            .out_point(test_outpoint(23))
+            .dep_type(ckb_types::core::DepType::Code)
+            .build();
+
+        let tx = build_loop_in_provider_claim_transaction(
+            &quote,
+            &client_lock_outpoint,
+            preimage,
+            &[cell_dep.clone()],
+        )
+        .expect("loop in provider claim transaction");
+
+        assert_eq!(tx.inputs().len(), 1);
+        assert_eq!(
+            tx.inputs().get(0).unwrap().previous_output(),
+            client_lock_outpoint
+        );
+        let output = tx.outputs().get(0).unwrap();
+        assert_eq!(output.lock(), quote.claimant_lock);
+        assert!(output.type_().to_opt().is_none());
+        assert!(tx.outputs_data().get(0).unwrap().raw_data().is_empty());
+        assert_eq!(
+            tx.cell_deps().into_iter().collect::<Vec<_>>(),
+            vec![cell_dep]
+        );
+        assert_eq!(
+            tx.witnesses().get(0).unwrap(),
+            build_liquidity_lock_claim_witness(preimage.into())
+        );
+    }
+
+    #[test]
+    fn loop_in_client_refund_spends_client_lock_with_since_and_refund_witness() {
+        let quote = test_loop_in_quote_terms();
+        let client_lock_outpoint = test_outpoint(24);
+        let cell_dep = packed::CellDep::new_builder()
+            .out_point(test_outpoint(25))
+            .dep_type(ckb_types::core::DepType::Code)
+            .build();
+
+        let tx = build_loop_in_client_refund_transaction(
+            &quote,
+            &client_lock_outpoint,
+            quote.refund_after_lock_time,
+            &[cell_dep.clone()],
+        )
+        .expect("loop in client refund transaction");
+
+        assert_eq!(tx.inputs().len(), 1);
+        let input = tx.inputs().get(0).unwrap();
+        assert_eq!(input.previous_output(), client_lock_outpoint);
+        assert_eq!(u64::from(input.since()), quote.refund_after_lock_time);
+        let output = tx.outputs().get(0).unwrap();
+        assert_eq!(output.lock(), quote.refund_lock);
+        assert!(output.type_().to_opt().is_none());
+        assert!(tx.outputs_data().get(0).unwrap().raw_data().is_empty());
+        assert_eq!(
+            tx.cell_deps().into_iter().collect::<Vec<_>>(),
+            vec![cell_dep]
+        );
+        assert_eq!(
+            tx.witnesses().get(0).unwrap(),
+            build_liquidity_lock_refund_witness()
+        );
     }
 
     #[test]
