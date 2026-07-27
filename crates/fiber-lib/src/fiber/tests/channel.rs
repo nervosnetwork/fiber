@@ -100,6 +100,7 @@ fn create_mock_pending_add_tlc_command(
             .payment_hash(payment_hash)
             .hash_algorithm(hash_algorithm)
             .payee_pub_key(target.pubkey.into())
+            .final_expiry_delta(0)
             .build()
             .expect("build mock pending invoice");
         target.insert_invoice(invoice, None);
