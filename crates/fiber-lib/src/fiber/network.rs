@@ -5380,7 +5380,7 @@ where
                 }
                 return;
             }
-            // Ban expired, clean up
+            // Ban expired — clean up all ban state and resume normal reconnect.
             self.banned_peers.remove(&remote_pubkey);
             self.requested_disconnect_peers.remove(&remote_pubkey);
         }
@@ -5477,7 +5477,6 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
-        self.invalid_channel_msg_count.remove(&pubkey);
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
@@ -5517,8 +5516,8 @@ where
     async fn disconnect_and_ban_peer(&mut self, pubkey: Pubkey) {
         // Don't remove from peer_session_map — let the normal disconnect flow
         // handle cleanup (channel actor notifications, pending records, etc.).
-        // Record the ban with expiry so the peer cannot reconnect for a cooldown.
-        self.invalid_channel_msg_count.remove(&pubkey);
+        // Don't clear invalid_channel_msg_count — preserve violation state
+        // across voluntary reconnects.
         self.requested_disconnect_peers.insert(pubkey);
         let ban_until = now_timestamp_as_millis_u64().saturating_add(10 * 60 * 1000);
         self.banned_peers.insert(pubkey, ban_until);
