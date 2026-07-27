@@ -163,9 +163,9 @@ pub fn build_loop_in_quote_terms(
         .checked_add(provider_fee)
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
     let capacity_requirement_ckb = match asset.kind {
-        LiquidityAssetKind::Ckb => {
-            u64::try_from(gross_amount).map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?
-        }
+        LiquidityAssetKind::Ckb => u64::try_from(gross_amount)
+            .map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?
+            .max(1),
         LiquidityAssetKind::Udt => onchain_fee_estimate_ckb.max(1),
     };
     let quote = LoopOutQuoteTerms {
@@ -417,6 +417,29 @@ mod tests {
             quote.capacity_requirement_ckb,
             loop_in_gross_onchain_amount(&quote).unwrap() as u64
         );
+    }
+
+    #[test]
+    fn loop_in_quote_keeps_ckb_capacity_nonzero_for_zero_gross_amount() {
+        let mut asset = ckb_asset(true);
+        asset.min_amount = 0;
+        asset.base_fee = 0;
+        asset.proportional_fee_ppm = 0;
+
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &asset,
+            0,
+            None,
+            client_invoice(Hash256::from([3; 32]), Some(0), None).to_string(),
+            60_000,
+            1,
+        )
+        .expect("loop in quote");
+
+        assert_eq!(loop_in_gross_onchain_amount(&quote).unwrap(), 0);
+        assert!(quote.capacity_requirement_ckb > 0);
     }
 
     #[test]
