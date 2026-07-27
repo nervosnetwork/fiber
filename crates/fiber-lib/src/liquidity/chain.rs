@@ -18,6 +18,7 @@ use crate::ckb::{
     CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingRequest, FundingTx,
 };
 use crate::liquidity::actor::LiquidityActorMessage;
+use crate::liquidity::quote::loop_in_gross_onchain_amount;
 use crate::liquidity::store::{LiquidityStore, LiquiditySwapRecord, LiquiditySwapRole};
 use crate::liquidity::tx::{
     build_liquidity_lock_claim_witness, build_liquidity_lock_output,
@@ -1100,11 +1101,27 @@ fn loop_in_quote_with_gross_amount(
     quote: &LoopOutQuoteTerms,
 ) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
     let mut quote = quote.clone();
-    quote.amount = quote
-        .amount
-        .checked_add(quote.provider_fee)
-        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
+    quote.amount = loop_in_gross_onchain_amount(&quote)?;
     Ok(quote)
+}
+
+fn build_loop_in_terminal_output(
+    quote: &LoopOutQuoteTerms,
+    lock: packed::Script,
+    gross_amount: u128,
+) -> (packed::CellOutput, packed::Bytes) {
+    let mut output = packed::CellOutput::new_builder()
+        .capacity(quote.capacity_requirement_ckb.max(1))
+        .lock(lock);
+    let output_data = if let Some(udt_type_script) = &quote.asset.udt_type_script {
+        let udt_type_script: packed::Script = udt_type_script.clone().into();
+        output = output.type_(Some(udt_type_script).pack());
+        Bytes::from(gross_amount.to_le_bytes().to_vec()).pack()
+    } else {
+        Bytes::new().pack()
+    };
+
+    (output.build(), output_data)
 }
 
 /// Build the client-funded liquidity-lock output for a Loop In swap.
@@ -1135,13 +1152,18 @@ pub fn build_loop_in_provider_claim_transaction(
     payment_preimage: Hash256,
     liquidity_lock_cell_deps: &[packed::CellDep],
 ) -> Result<TransactionView, LiquidityLoopOutError> {
-    let gross_quote = loop_in_quote_with_gross_amount(quote)?;
-    build_loop_out_claim_transaction(
-        &gross_quote,
-        client_lock_outpoint,
-        payment_preimage,
-        liquidity_lock_cell_deps,
-    )
+    let gross_amount = loop_in_gross_onchain_amount(quote)?;
+    let (output, output_data) =
+        build_loop_in_terminal_output(quote, quote.claimant_lock.clone(), gross_amount);
+    let cell_deps = liquidity_lock_cell_deps.to_vec();
+
+    Ok(TransactionView::new_advanced_builder()
+        .input(packed::CellInput::new(client_lock_outpoint.clone(), 0))
+        .output(output)
+        .output_data(output_data)
+        .set_cell_deps(cell_deps)
+        .witness(build_liquidity_lock_claim_witness(payment_preimage.into()))
+        .build())
 }
 
 /// Build a client refund transaction spending an expired Loop In client lock.
@@ -1151,13 +1173,27 @@ pub fn build_loop_in_client_refund_transaction(
     refund_after_lock_time: u64,
     liquidity_lock_cell_deps: &[packed::CellDep],
 ) -> Result<TransactionView, LiquidityLoopOutError> {
-    let gross_quote = loop_in_quote_with_gross_amount(quote)?;
-    build_loop_out_refund_transaction(
-        &gross_quote,
-        client_lock_outpoint,
-        refund_after_lock_time,
-        liquidity_lock_cell_deps,
-    )
+    if refund_after_lock_time != quote.refund_after_lock_time {
+        return Err(LiquidityLoopOutError::Chain(
+            "loop in refund lock time does not match quote".to_string(),
+        ));
+    }
+
+    let gross_amount = loop_in_gross_onchain_amount(quote)?;
+    let (output, output_data) =
+        build_loop_in_terminal_output(quote, quote.refund_lock.clone(), gross_amount);
+    let cell_deps = liquidity_lock_cell_deps.to_vec();
+
+    Ok(TransactionView::new_advanced_builder()
+        .input(packed::CellInput::new(
+            client_lock_outpoint.clone(),
+            quote.refund_after_lock_time,
+        ))
+        .output(output)
+        .output_data(output_data)
+        .set_cell_deps(cell_deps)
+        .witness(build_liquidity_lock_refund_witness())
+        .build())
 }
 
 /// Build a claim transaction spending one liquidity-lock payout cell.
@@ -1818,6 +1854,25 @@ mod tests {
         test_loop_out_quote_terms()
     }
 
+    fn test_loop_in_udt_quote_terms() -> (LoopOutQuoteTerms, packed::Script) {
+        let mut quote = test_loop_in_quote_terms();
+        let udt_type_script = script("loop-in-udt");
+        quote.asset = LiquidityAsset {
+            asset_id: "udt".to_string(),
+            kind: LiquidityAssetKind::Udt,
+            udt_type_script: Some(udt_type_script.clone().into()),
+            min_amount: 1,
+            max_amount: 1_000,
+            available_capacity: 2_000,
+            base_fee: 1,
+            proportional_fee_ppm: 0,
+            enabled: true,
+        };
+        quote.amount = 100;
+        quote.provider_fee = 7;
+        (quote, udt_type_script)
+    }
+
     fn test_transaction_with_liquidity_output(
         quote: &LoopOutQuoteTerms,
         output_index: u32,
@@ -2105,21 +2160,7 @@ mod tests {
     #[test]
     fn loop_in_client_lock_output_uses_gross_udt_amount() {
         let artifact = liquidity_lock_artifact();
-        let mut quote = test_loop_in_quote_terms();
-        let udt_type_script = script("loop-in-udt");
-        quote.asset = LiquidityAsset {
-            asset_id: "udt".to_string(),
-            kind: LiquidityAssetKind::Udt,
-            udt_type_script: Some(udt_type_script.clone().into()),
-            min_amount: 1,
-            max_amount: 1_000,
-            available_capacity: 2_000,
-            base_fee: 1,
-            proportional_fee_ppm: 0,
-            enabled: true,
-        };
-        quote.amount = 100;
-        quote.provider_fee = 7;
+        let (quote, udt_type_script) = test_loop_in_udt_quote_terms();
 
         let (output, data) =
             build_loop_in_client_lock_output(&artifact, &quote).expect("loop in udt lock output");
@@ -2211,6 +2252,70 @@ mod tests {
             tx.witnesses().get(0).unwrap(),
             build_liquidity_lock_refund_witness()
         );
+    }
+
+    #[test]
+    fn loop_in_provider_claim_udt_output_capacity_remains_nonzero_when_fee_equals_capacity() {
+        let (mut quote, udt_type_script) = test_loop_in_udt_quote_terms();
+        quote.capacity_requirement_ckb = 1_000;
+        quote.onchain_fee_estimate_ckb = 1_000;
+
+        let tx = build_loop_in_provider_claim_transaction(
+            &quote,
+            &test_outpoint(26),
+            [4u8; 32].into(),
+            &[],
+        )
+        .expect("loop in provider claim transaction");
+
+        let output = tx.outputs().get(0).unwrap();
+        assert!(u64::from(output.capacity()) > 0);
+        assert_eq!(output.type_().to_opt(), Some(udt_type_script));
+        assert_eq!(
+            tx.outputs_data().get(0).unwrap().raw_data().as_ref(),
+            107u128.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn loop_in_client_refund_udt_output_capacity_remains_nonzero_when_fee_equals_capacity() {
+        let (mut quote, udt_type_script) = test_loop_in_udt_quote_terms();
+        quote.capacity_requirement_ckb = 1_000;
+        quote.onchain_fee_estimate_ckb = 1_000;
+
+        let tx = build_loop_in_client_refund_transaction(
+            &quote,
+            &test_outpoint(27),
+            quote.refund_after_lock_time,
+            &[],
+        )
+        .expect("loop in client refund transaction");
+
+        let output = tx.outputs().get(0).unwrap();
+        assert!(u64::from(output.capacity()) > 0);
+        assert_eq!(output.type_().to_opt(), Some(udt_type_script));
+        assert_eq!(
+            tx.outputs_data().get(0).unwrap().raw_data().as_ref(),
+            107u128.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn loop_in_client_refund_rejects_mismatched_refund_lock_time() {
+        let quote = test_loop_in_quote_terms();
+
+        let error = build_loop_in_client_refund_transaction(
+            &quote,
+            &test_outpoint(28),
+            quote.refund_after_lock_time + 1,
+            &[],
+        )
+        .expect_err("mismatched refund lock time should fail");
+
+        assert!(matches!(
+            error,
+            LiquidityLoopOutError::Chain(message) if message.contains("refund lock time")
+        ));
     }
 
     #[test]
