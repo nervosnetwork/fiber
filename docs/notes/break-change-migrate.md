@@ -177,4 +177,4 @@ This will return:
 And that’s it! You’ve nailed the migration and are ready to upgrade to the latest Fiber node.
 
 - [Download latest version of Fiber](https://github.com/nervosnetwork/fiber/releases)
-- [Start run a Fiber node with new database](https://docs.fiber.world/docs/quick-start/run-a-node)
+- [Start run a Fiber node with new database](https://www.fiber.world/docs/quick-start/run-a-node)

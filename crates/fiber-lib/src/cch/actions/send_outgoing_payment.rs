@@ -28,11 +28,15 @@ const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 /// charged on the incoming/order leg. This enforces the invariant that the total outgoing route
 /// fee never exceeds the fee the operator collected. `max_outgoing_fee_percentage` is validated
 /// to be within `1..=100` at startup, so the multiplication only ever shrinks `fee_sats`.
+pub(crate) fn outgoing_fee_budget_from_fee_sats(
+    fee_sats: u128,
+    max_outgoing_fee_percentage: u64,
+) -> u128 {
+    fee_sats.saturating_mul(max_outgoing_fee_percentage as u128) / 100
+}
+
 pub(crate) fn outgoing_fee_budget_sats(order: &CchOrder, max_outgoing_fee_percentage: u64) -> u128 {
-    order
-        .fee_sats
-        .saturating_mul(max_outgoing_fee_percentage as u128)
-        / 100
+    outgoing_fee_budget_from_fee_sats(order.fee_sats, max_outgoing_fee_percentage)
 }
 
 /// Compute the `max_fee_rate` (proportional, over `MAX_FEE_RATE_DENOMINATOR`) that corresponds to
@@ -145,7 +149,20 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
         );
 
         let mut client = self.lnd_connection.create_router_client().await?;
-        let mut stream = client.send_payment_v2(req).await?.into_inner();
+        let mut stream = match client.send_payment_v2(req).await {
+            Ok(response) => response.into_inner(),
+            Err(err) => {
+                tracing::debug!(
+                    "SendLightningOutgoingPaymentExecutor initial response error code={} message={}",
+                    err.code(),
+                    err.message()
+                );
+                let event = Self::event_for_payment_error(self.payment_hash, &err)?;
+                self.cch_actor_ref
+                    .send_message(CchMessage::TrackingEvent(event))?;
+                return Ok(());
+            }
+        };
         // Wait for the first message then quit
         let payment_result_opt = stream.next().await;
         match &payment_result_opt {
@@ -170,32 +187,7 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
         }
         let event = match payment_result_opt {
             Some(Ok(payment)) => map_lnd_payment_changed_event(payment)?,
-            Some(Err(err)) if err.code() == tonic::Code::AlreadyExists => {
-                CchTrackingEvent::PaymentChanged {
-                    payment_hash: self.payment_hash,
-                    payment_preimage: None,
-                    status: PaymentStatus::Inflight,
-                    failure_reason: None,
-                }
-            }
-            Some(Err(err)) => {
-                let failure_reason =
-                    format!("SendLightningOutgoingPaymentExecutor failure: {:?}", err);
-                if Self::is_permanent_error(&err) {
-                    CchTrackingEvent::PaymentChanged {
-                        payment_hash: self.payment_hash,
-                        payment_preimage: None,
-                        status: PaymentStatus::Failed,
-                        failure_reason: Some(failure_reason),
-                    }
-                } else {
-                    tracing::warn!(
-                        "SendLightningOutgoingPaymentExecutor transient error, will retry. code: {}, error: {}",
-                        err.code(), err.message()
-                    );
-                    return Err(anyhow!(failure_reason));
-                }
-            }
+            Some(Err(err)) => Self::event_for_payment_error(self.payment_hash, &err)?,
             None => {
                 return Err(anyhow!(
                     "SendLightningOutgoingPaymentExecutor failed to get payment result because stream is closed"
@@ -209,6 +201,36 @@ impl ActionExecutor for SendLightningOutgoingPaymentExecutor {
 }
 
 impl SendLightningOutgoingPaymentExecutor {
+    fn event_for_payment_error(
+        payment_hash: Hash256,
+        status: &tonic::Status,
+    ) -> Result<CchTrackingEvent> {
+        if status.code() == tonic::Code::AlreadyExists {
+            return Ok(CchTrackingEvent::PaymentChanged {
+                payment_hash,
+                payment_preimage: None,
+                status: PaymentStatus::Inflight,
+                failure_reason: None,
+            });
+        }
+
+        let failure_reason = format!("SendLightningOutgoingPaymentExecutor failure: {:?}", status);
+        if Self::is_permanent_error(status) {
+            Ok(CchTrackingEvent::PaymentChanged {
+                payment_hash,
+                payment_preimage: None,
+                status: PaymentStatus::Failed,
+                failure_reason: Some(failure_reason),
+            })
+        } else {
+            tracing::warn!(
+                "SendLightningOutgoingPaymentExecutor transient error, will retry. code: {}, error: {}",
+                status.code(), status.message()
+            );
+            Err(anyhow!(failure_reason))
+        }
+    }
+
     fn is_permanent_error(status: &tonic::Status) -> bool {
         // Check for explicit invalid argument errors
         if matches!(status.code(), tonic::Code::InvalidArgument) {
@@ -247,16 +269,13 @@ impl SendOutgoingPaymentDispatcher {
     /// The other half is reserved for the CCH to settle the incoming payment
     /// after receiving the preimage.
     ///
-    /// The final expiry delta is extracted from the stored incoming invoice when
-    /// available, so that persisted orders use the actual inbound HTLC/TLC terms
-    /// even if the config has changed since order creation. Falls back to the
-    /// current config values when the invoice does not carry the setting.
+    /// The final expiry delta is extracted from the stored incoming invoice, so
+    /// persisted orders use the actual inbound HTLC/TLC terms even if the config
+    /// has changed since order creation. Fiber invoices that omit the attribute
+    /// use the protocol default.
     ///
     /// Returns `None` if there is insufficient time remaining.
-    fn compute_max_outgoing_expiry_seconds<S: CchOrderStore>(
-        state: &CchState<S>,
-        order: &CchOrder,
-    ) -> Option<u64> {
+    fn compute_max_outgoing_expiry_seconds(order: &CchOrder) -> Option<u64> {
         let now = now_timestamp_as_millis_u64() / 1000;
         let elapsed = now.saturating_sub(order.created_at);
 
@@ -269,9 +288,7 @@ impl SendOutgoingPaymentDispatcher {
         let incoming_expiry_seconds = match &order.incoming_invoice {
             CchInvoice::Fiber(inv) => {
                 // CkbInvoice stores the delta in milliseconds; convert to seconds.
-                inv.final_tlc_minimum_expiry_delta()
-                    .map(|ms| ms / 1000)
-                    .unwrap_or(state.config.ckb_final_tlc_expiry_delta_seconds)
+                inv.final_tlc_minimum_expiry_delta_or_default() / 1000
             }
             CchInvoice::Lightning(inv) => {
                 // Bolt11Invoice stores the delta in blocks; convert to seconds.
@@ -326,8 +343,7 @@ impl SendOutgoingPaymentDispatcher {
                 // Outgoing is CKB Fiber: parse the CKB invoice's final_tlc_minimum_expiry_delta
                 CkbInvoice::from_str(&order.outgoing_pay_req)
                     .ok()
-                    .and_then(|inv| inv.final_tlc_minimum_expiry_delta().copied())
-                    .map(|millis| millis / 1000)
+                    .map(|inv| inv.final_tlc_minimum_expiry_delta_or_default() / 1000)
                     .unwrap_or(0)
             }
         };
@@ -366,7 +382,7 @@ impl SendOutgoingPaymentDispatcher {
         // Check the remaining incoming time and compute the max outgoing route expiry.
         // This ensures the CCH has enough time to settle the incoming payment
         // even in the worst case where the outgoing payment settles at the last moment.
-        let max_outgoing_seconds = Self::compute_max_outgoing_expiry_seconds(state, order);
+        let max_outgoing_seconds = Self::compute_max_outgoing_expiry_seconds(order);
         let max_outgoing_seconds =
             Self::check_expiry_or_fail(cch_actor_ref, order, max_outgoing_seconds)?;
 
@@ -427,5 +443,78 @@ impl SendOutgoingPaymentDispatcher {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lnd_permanent_payment_error_returns_failed_event() {
+        let payment_hash = Hash256::from([42; 32]);
+        let error = tonic::Status::unknown("self-payments not allowed");
+
+        let event =
+            SendLightningOutgoingPaymentExecutor::event_for_payment_error(payment_hash, &error)
+                .expect("permanent errors should be converted into tracking events");
+
+        match event {
+            CchTrackingEvent::PaymentChanged {
+                payment_hash: event_payment_hash,
+                payment_preimage,
+                status,
+                failure_reason,
+            } => {
+                assert_eq!(event_payment_hash, payment_hash);
+                assert_eq!(payment_preimage, None);
+                assert_eq!(status, PaymentStatus::Failed);
+                assert!(failure_reason
+                    .expect("failed payment should include a reason")
+                    .contains("self-payments not allowed"));
+            }
+            CchTrackingEvent::InvoiceChanged { .. } => {
+                panic!("payment errors should not produce invoice events")
+            }
+        }
+    }
+
+    #[test]
+    fn test_lnd_already_exists_payment_error_returns_inflight_event() {
+        let payment_hash = Hash256::from([43; 32]);
+        let error = tonic::Status::already_exists("payment is in flight");
+
+        let event =
+            SendLightningOutgoingPaymentExecutor::event_for_payment_error(payment_hash, &error)
+                .expect("already-existing payments should be tracked rather than retried");
+
+        match event {
+            CchTrackingEvent::PaymentChanged {
+                payment_hash: event_payment_hash,
+                payment_preimage,
+                status,
+                failure_reason,
+            } => {
+                assert_eq!(event_payment_hash, payment_hash);
+                assert_eq!(payment_preimage, None);
+                assert_eq!(status, PaymentStatus::Inflight);
+                assert_eq!(failure_reason, None);
+            }
+            CchTrackingEvent::InvoiceChanged { .. } => {
+                panic!("payment errors should not produce invoice events")
+            }
+        }
+    }
+
+    #[test]
+    fn test_lnd_transient_payment_error_remains_retryable() {
+        let payment_hash = Hash256::from([44; 32]);
+        let error = tonic::Status::unavailable("lnd is unavailable");
+
+        let result =
+            SendLightningOutgoingPaymentExecutor::event_for_payment_error(payment_hash, &error);
+
+        let error = result.expect_err("transient errors should be returned for actor retry");
+        assert!(error.to_string().contains("lnd is unavailable"));
     }
 }

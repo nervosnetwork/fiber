@@ -9,7 +9,7 @@ use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
-use crate::rpc::utils::{rpc_error, RpcResultExt};
+use crate::rpc::utils::rpc_error;
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use fiber_types::{FeatureVector, Privkey};
 
@@ -329,9 +329,22 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        let network_actor = self
+            .network_actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("network actor not initialized"))?;
+
         let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
+                let message = move |rpc_reply| -> NetworkActorMessage {
+                    NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+                        payment_hash,
+                        rpc_reply,
+                    ))
+                };
+                handle_actor_call!(network_actor, message, params)?;
+
                 let status = match self
                     .store
                     .get_invoice_status(&payment_hash)
@@ -341,27 +354,10 @@ where
                     status => status,
                 };
 
-                let new_status = match status {
-                    CkbInvoiceStatus::Paid | CkbInvoiceStatus::Cancelled => {
-                        return Err(rpc_error(format!(
-                            "invoice can not be canceled, current status: {}",
-                            status
-                        )));
-                    }
-                    _ => CkbInvoiceStatus::Cancelled,
-                };
-                self.store
-                    .update_invoice_status(&payment_hash, new_status)
-                    .rpc_err()?;
-                if let Some(network_actor) = &self.network_actor {
-                    let _ = network_actor.send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SettleHoldTlcSet(payment_hash),
-                    ));
-                }
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice: invoice.into(),
-                    status: new_status.into(),
+                    status: status.into(),
                 })
             }
             None => Err(rpc_error("invoice not found")),

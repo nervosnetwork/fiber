@@ -34,9 +34,20 @@ impl CchOrderStateMachine {
             CchOrderEvent::IncomingInvoiceChanged {
                 status,
                 failure_reason,
-            } => Self::try_transite_to(order, status.into(), move || {
-                failure_reason.unwrap_or_else(|| format!("incoming invoice failed: {}", status))
-            }),
+            } => {
+                let to = status.into();
+                if to == CchOrderStatus::Failed
+                    && matches!(
+                        order.status,
+                        CchOrderStatus::OutgoingInFlight | CchOrderStatus::OutgoingSuccess
+                    )
+                {
+                    return Ok(None);
+                }
+                Self::try_transite_to(order, to, move || {
+                    failure_reason.unwrap_or_else(|| format!("incoming invoice failed: {}", status))
+                })
+            }
             CchOrderEvent::OutgoingPaymentChanged {
                 status,
                 payment_preimage,
@@ -88,7 +99,14 @@ impl CchOrderStateMachine {
             ) => true,
             (CchOrderStatus::OutgoingInFlight, CchOrderStatus::OutgoingSuccess) => true,
             (CchOrderStatus::OutgoingSuccess, CchOrderStatus::Success) => true,
-            (_, CchOrderStatus::Failed) if from != CchOrderStatus::Success => true,
+            (_, CchOrderStatus::Failed)
+                if !matches!(
+                    from,
+                    CchOrderStatus::Success | CchOrderStatus::OutgoingSuccess
+                ) =>
+            {
+                true
+            }
             _ => {
                 // Allow staying in the same status
                 from == to

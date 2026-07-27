@@ -1,0 +1,92 @@
+name: Build FNN release package
+description: Build, smoke test, and package FNN release binaries.
+
+inputs:
+  os:
+    description: Runner OS label.
+    required: true
+  package-name:
+    description: Output package file name.
+    required: true
+  bin-suffix:
+    description: Binary suffix, such as .exe on Windows.
+    required: false
+    default: ''
+  portable:
+    description: Whether to build with the portable feature.
+    required: false
+    default: 'false'
+  openssl-configure:
+    description: OpenSSL Configure arguments for portable Linux builds.
+    required: false
+    default: ''
+  windows-dependencies:
+    description: 'Windows dependency setup mode: none, minimal, or release.'
+    required: false
+    default: 'none'
+
+outputs:
+  package_name:
+    description: Generated package file name.
+    value: ${{ steps.package.outputs.package_name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Windows release dependencies
+      if: ${{ inputs.windows-dependencies == 'release' }}
+      shell: pwsh
+      run: |
+        iwr -useb get.scoop.sh -outfile 'install-scoop.ps1'
+        .\install-scoop.ps1 -RunAsAdmin
+        echo "LIBCLANG_PATH=$($HOME)/scoop/apps/llvm/current/bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        scoop install llvm yasm
+        vcpkg integrate install
+        vcpkg install openssl:x64-windows-static
+
+    - name: Install Windows dependencies
+      if: ${{ inputs.windows-dependencies == 'minimal' }}
+      shell: pwsh
+      run: |
+        vcpkg integrate install
+        vcpkg install openssl:x64-windows-static
+
+    - name: Build Linux portable release binary
+      if: ${{ startsWith(inputs.os, 'ubuntu') && inputs.portable == 'true' }}
+      shell: bash
+      run: bash .github/actions/build-release-package/helpers/build-linux-portable.sh "${{ inputs.openssl-configure }}"
+
+    - name: Build Windows release binary
+      if: ${{ inputs.os == 'windows-2022' }}
+      shell: pwsh
+      env:
+        RUSTFLAGS: -C target-feature=+crt-static
+      run: cargo build --release --locked
+
+    - name: Build portable release binary
+      if: ${{ startsWith(inputs.os, 'macos') && inputs.portable == 'true' }}
+      shell: bash
+      run: cargo build --release --locked --features portable
+
+    - name: Build release binary
+      if: ${{ inputs.os != 'windows-2022' && inputs.portable != 'true' }}
+      shell: bash
+      run: cargo build --release --locked
+
+    - name: Smoke test Windows store open
+      if: ${{ inputs.os == 'windows-2022' }}
+      shell: pwsh
+      run: '& .github/actions/build-release-package/helpers/smoke-test-windows-store.ps1 -Executable target\release\fnn.exe'
+
+    - name: Smoke test release binary
+      if: ${{ inputs.os != 'windows-2022' }}
+      shell: bash
+      run: |
+        target/release/fnn --version
+        target/release/fnn-cli --version
+
+    - name: Package release binary
+      id: package
+      shell: bash
+      run: bash .github/actions/build-release-package/helpers/package-release.sh "${{ inputs.package-name }}" "${{ inputs.bin-suffix }}"

@@ -5,9 +5,9 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tokio::task::AbortHandle;
 use tokio::time::Duration;
 
-use crate::cch::{order::CchOrderStore, trackers::LndTrackerMessage, CchError};
+use crate::cch::{order::CchOrderStore, trackers::LndTrackerMessage, CchError, CchMessage};
 use crate::now_timestamp_as_millis_u64;
-use fiber_types::{CchOrderStatus, Hash256};
+use fiber_types::Hash256;
 
 const PRUNE_DELAY_DAYS: u64 = 21;
 pub const PRUNE_DELAY_SECONDS: u64 = PRUNE_DELAY_DAYS * 24 * 60 * 60;
@@ -79,12 +79,14 @@ pub enum SchedulerMessage {
 pub struct SchedulerArgs<S> {
     pub store: S,
     pub lnd_tracker: ActorRef<LndTrackerMessage>,
+    pub cch_actor: ActorRef<CchMessage>,
 }
 
 /// State for the scheduler actor
 pub struct SchedulerState<S> {
     store: S,
     lnd_tracker: ActorRef<LndTrackerMessage>,
+    cch_actor: ActorRef<CchMessage>,
     jobs: BinaryHeap<ScheduledJob>,
     processing_abort_handle: Option<AbortHandle>,
 }
@@ -123,6 +125,7 @@ impl<S: CchOrderStore + Send + Sync + 'static> Actor for CchOrderSchedulerActor<
         let state = SchedulerState {
             store: args.store,
             lnd_tracker: args.lnd_tracker,
+            cch_actor: args.cch_actor,
             jobs: BinaryHeap::new(),
             processing_abort_handle: None,
         };
@@ -214,7 +217,7 @@ impl<S: CchOrderStore> SchedulerState<S> {
         for job in due_jobs {
             match job {
                 ScheduledJob::ExpireOrder { payment_hash, .. } => {
-                    if let Err(err) = self.expire_order(mailbox.clone(), payment_hash) {
+                    if let Err(err) = self.expire_order(payment_hash) {
                         tracing::error!("Failed to expire order {:x}: {}", payment_hash, err);
                     }
                 }
@@ -258,53 +261,12 @@ impl<S: CchOrderStore> SchedulerState<S> {
     }
 
     /// Handle expiring an order
-    fn expire_order(
-        &self,
-        mailbox: ActorRef<SchedulerMessage>,
-        payment_hash: Hash256,
-    ) -> Result<(), CchError> {
-        let mut order = match self.store.get_cch_order(&payment_hash) {
-            Ok(order) => order,
-            Err(_) => return Ok(()),
-        };
-
-        // Skip if order is already final
-        if order.is_final() {
-            tracing::debug!("Order {:x} is already final, skipping expiry", payment_hash);
-            return Ok(());
-        }
-
-        if order.status != CchOrderStatus::Pending {
-            tracing::debug!(
-                "Order {:x} is {:?}, skipping pending-order expiry",
-                payment_hash,
-                order.status
-            );
-            return Ok(());
-        }
-
-        // Store order info before updating
-        let created_at = order.created_at;
-        let expiry_delta_seconds = order.expiry_delta_seconds;
-
-        order.status = CchOrderStatus::Failed;
-        order.failure_reason = Some("Order expired".to_string());
-        self.store.update_cch_order(order);
-        tracing::info!("Expired order {:x}", payment_hash);
-
-        // Schedule prune job for this expired order
-        if let Err(err) = mailbox.send_message(SchedulerMessage::SchedulePrune {
-            payment_hash,
-            created_at,
-            expiry_delta_seconds,
-        }) {
-            tracing::error!(
-                "Failed to schedule prune job for expired order {:x}: {}",
-                payment_hash,
-                err
-            );
-        }
-
+    fn expire_order(&self, payment_hash: Hash256) -> Result<(), CchError> {
+        self.cch_actor
+            .send_message(CchMessage::ExpireOrder(payment_hash))
+            .map_err(|err| {
+                CchError::FiberNodeError(anyhow::anyhow!("send expire order: {}", err))
+            })?;
         Ok(())
     }
 

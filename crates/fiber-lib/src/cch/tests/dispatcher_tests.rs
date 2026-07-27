@@ -4,6 +4,7 @@ use crate::cch::actions::{
     backend_dispatchers::{
         dispatch_invoice_handler, dispatch_payment_handler, InvoiceHandlerType, PaymentHandlerType,
     },
+    cancel_incoming_invoice::CancelIncomingInvoiceDispatcher,
     send_outgoing_payment::SendOutgoingPaymentDispatcher,
     settle_incoming_invoice::SettleIncomingInvoiceDispatcher,
     track_incoming_invoice::TrackIncomingInvoiceDispatcher,
@@ -149,10 +150,37 @@ fn test_on_entering_success_returns_empty() {
 }
 
 #[test]
-fn test_on_entering_failed_returns_empty() {
+fn test_on_entering_failed_returns_cancel_invoice() {
     let order = create_order_with_lightning_invoice(CchOrderStatus::Failed);
     let actions = ActionDispatcher::on_entering(&order);
+    assert_eq!(actions, vec![CchOrderAction::CancelIncomingInvoice]);
+}
+
+#[test]
+fn test_on_entering_failed_with_preimage_does_not_cancel_invoice() {
+    let mut order = create_order_with_lightning_invoice(CchOrderStatus::Failed);
+    order.payment_preimage = Some(test_payment_hash(42));
+
+    let actions = ActionDispatcher::on_entering(&order);
+
     assert!(actions.is_empty());
+}
+
+#[test]
+fn test_cancel_incoming_invoice_requires_failed_without_preimage() {
+    let failed_without_preimage = create_order_with_lightning_invoice(CchOrderStatus::Failed);
+    assert!(CancelIncomingInvoiceDispatcher::should_dispatch(
+        &failed_without_preimage
+    ));
+
+    let mut failed_with_preimage = create_order_with_lightning_invoice(CchOrderStatus::Failed);
+    failed_with_preimage.payment_preimage = Some(test_payment_hash(42));
+    assert!(!CancelIncomingInvoiceDispatcher::should_dispatch(
+        &failed_with_preimage
+    ));
+
+    let pending = create_order_with_lightning_invoice(CchOrderStatus::Pending);
+    assert!(!CancelIncomingInvoiceDispatcher::should_dispatch(&pending));
 }
 
 // =============================================================================
