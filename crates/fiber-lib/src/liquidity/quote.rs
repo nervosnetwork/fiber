@@ -97,11 +97,31 @@ pub fn loop_in_gross_onchain_amount(
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
 }
 
-fn parse_payment_hash_from_invoice(client_invoice: &str) -> Result<Hash256, LiquidityLoopOutError> {
-    let invoice = client_invoice.parse::<CkbInvoice>().map_err(|error| {
+fn parse_client_invoice(client_invoice: &str) -> Result<CkbInvoice, LiquidityLoopOutError> {
+    client_invoice.parse::<CkbInvoice>().map_err(|error| {
         LiquidityLoopOutError::PaymentFailed(format!("invalid client invoice: {error}"))
-    })?;
-    Ok(*invoice.payment_hash())
+    })
+}
+
+fn validate_loop_in_invoice(
+    invoice: &CkbInvoice,
+    amount: u128,
+    expected_udt_type_script: Option<&ckb_jsonrpc_types::Script>,
+) -> Result<(), LiquidityLoopOutError> {
+    if invoice.amount() != Some(amount) {
+        return Err(LiquidityLoopOutError::PaymentFailed(format!(
+            "invoice amount {:?} does not match requested amount {amount}",
+            invoice.amount()
+        )));
+    }
+
+    let invoice_udt_type_script: Option<ckb_jsonrpc_types::Script> =
+        invoice.udt_type_script().cloned().map(Into::into);
+    if invoice_udt_type_script.as_ref() != expected_udt_type_script {
+        return Err(LiquidityLoopOutError::UdtTypeMismatch);
+    }
+
+    Ok(())
 }
 
 /// Build quote terms for a Loop In request after provider-side validation.
@@ -135,8 +155,19 @@ pub fn build_loop_in_quote_terms(
         return Err(LiquidityLoopOutError::UdtTypeMismatch);
     }
 
+    let invoice = parse_client_invoice(&client_invoice)?;
+    validate_loop_in_invoice(&invoice, amount, expected_udt_type_script)?;
+
     let provider_fee = compute_provider_fee(asset, amount)?;
-    let payment_hash = parse_payment_hash_from_invoice(&client_invoice)?;
+    let gross_amount = amount
+        .checked_add(provider_fee)
+        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
+    let capacity_requirement_ckb = match asset.kind {
+        LiquidityAssetKind::Ckb => {
+            u64::try_from(gross_amount).map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?
+        }
+        LiquidityAssetKind::Udt => onchain_fee_estimate_ckb.max(1),
+    };
     let quote = LoopOutQuoteTerms {
         quote_id,
         provider,
@@ -145,8 +176,8 @@ pub fn build_loop_in_quote_terms(
         provider_fee,
         routing_fee_limit: 0,
         onchain_fee_estimate_ckb,
-        capacity_requirement_ckb: 0,
-        payment_hash,
+        capacity_requirement_ckb,
+        payment_hash: *invoice.payment_hash(),
         expires_at,
         payout_deadline: expires_at,
         refund_after_lock_time: expires_at,
@@ -154,7 +185,6 @@ pub fn build_loop_in_quote_terms(
         refund_lock: Default::default(),
     };
 
-    let gross_amount = loop_in_gross_onchain_amount(&quote)?;
     if gross_amount > asset.available_capacity {
         return Err(LiquidityLoopOutError::CapacityTooLow {
             available: asset.available_capacity,
@@ -213,14 +243,26 @@ mod tests {
         }
     }
 
-    fn client_invoice(payment_hash: Hash256) -> crate::invoice::CkbInvoice {
+    fn client_invoice(
+        payment_hash: Hash256,
+        amount: Option<u128>,
+        udt_type_script: Option<ckb_types::packed::Script>,
+    ) -> crate::invoice::CkbInvoice {
         let (private_key, public_key) = gen_deterministic_secp256k1_keypair_tuple();
-        InvoiceBuilder::new(Currency::Fibb)
-            .amount(Some(1_000))
+        let mut builder = InvoiceBuilder::new(Currency::Fibb)
+            .amount(amount)
             .payment_hash(payment_hash)
-            .payee_pub_key(public_key)
+            .payee_pub_key(public_key);
+        if let Some(script) = udt_type_script {
+            builder = builder.udt_type_script(script);
+        }
+        builder
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .expect("invoice")
+    }
+
+    fn ckb_client_invoice(payment_hash: Hash256) -> crate::invoice::CkbInvoice {
+        client_invoice(payment_hash, Some(1_000), None)
     }
 
     #[test]
@@ -338,7 +380,7 @@ mod tests {
             &asset,
             1_000,
             None,
-            client_invoice(Hash256::from([3; 32])).to_string(),
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
             60_000,
             1,
         )
@@ -354,9 +396,33 @@ mod tests {
     }
 
     #[test]
+    fn loop_in_quote_sets_nonzero_capacity_requirement() {
+        let mut asset = ckb_asset(true);
+        asset.proportional_fee_ppm = 0;
+
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &asset,
+            1_000,
+            None,
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            60_000,
+            1,
+        )
+        .expect("loop in quote");
+
+        assert_ne!(quote.capacity_requirement_ckb, 0);
+        assert_eq!(
+            quote.capacity_requirement_ckb,
+            loop_in_gross_onchain_amount(&quote).unwrap() as u64
+        );
+    }
+
+    #[test]
     fn loop_in_quote_uses_payment_hash_from_client_invoice() {
         let payment_hash = Hash256::from([3; 32]);
-        let client_invoice = client_invoice(payment_hash);
+        let client_invoice = ckb_client_invoice(payment_hash);
 
         let quote = build_loop_in_quote_terms(
             Hash256::from([1; 32]),
@@ -374,6 +440,81 @@ mod tests {
     }
 
     #[test]
+    fn loop_in_quote_rejects_invoice_amount_mismatch() {
+        let err = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            client_invoice(Hash256::from([3; 32]), Some(999), None).to_string(),
+            60_000,
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invoice amount"));
+
+        let err = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            client_invoice(Hash256::from([3; 32]), None, None).to_string(),
+            60_000,
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invoice amount"));
+    }
+
+    #[test]
+    fn loop_in_quote_rejects_invoice_udt_type_mismatch() {
+        let ckb_err = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            client_invoice(
+                Hash256::from([3; 32]),
+                Some(1_000),
+                Some(udt_script("0x01").into()),
+            )
+            .to_string(),
+            60_000,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            ckb_err,
+            crate::liquidity::types::LiquidityLoopOutError::UdtTypeMismatch
+        ));
+
+        let asset = udt_asset();
+        let udt_err = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &asset,
+            1_000,
+            asset.udt_type_script.as_ref(),
+            client_invoice(
+                Hash256::from([3; 32]),
+                Some(1_000),
+                Some(udt_script("0x02").into()),
+            )
+            .to_string(),
+            60_000,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            udt_err,
+            crate::liquidity::types::LiquidityLoopOutError::UdtTypeMismatch
+        ));
+    }
+
+    #[test]
     fn loop_in_quote_rejects_gross_amount_overflow_and_capacity_shortfall() {
         let mut asset = ckb_asset(true);
         asset.max_amount = u128::MAX;
@@ -387,7 +528,7 @@ mod tests {
             &asset,
             u128::MAX,
             None,
-            client_invoice(Hash256::from([3; 32])).to_string(),
+            client_invoice(Hash256::from([3; 32]), Some(u128::MAX), None).to_string(),
             60_000,
             1,
         )
@@ -405,7 +546,7 @@ mod tests {
             &asset,
             1_000,
             None,
-            client_invoice(Hash256::from([3; 32])).to_string(),
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
             60_000,
             1,
         )
