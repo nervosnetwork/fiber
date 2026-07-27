@@ -357,6 +357,7 @@ where
         )?;
         let terms = LoopOutQuoteTerms {
             quote_id: loop_out_quote_hash(&params, now_ms, b"quote"),
+            swap_kind: LiquiditySwapKind::LoopOut,
             provider: deterministic_provider_pubkey(),
             asset,
             amount: params.amount,
@@ -577,7 +578,7 @@ where
             ClaimPending,
             RefundPending,
         ];
-        let loop_in_states = [OnchainLockPending, OnchainLocked, RefundPending];
+        let loop_in_states = [OnchainLockPending, OnchainLocked];
         let mut swaps = self
             .store
             .list_liquidity_swaps_by_states(&loop_out_states, LiquiditySwapKind::LoopOut)
@@ -612,6 +613,10 @@ where
         swap: LiquiditySwapRecord,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<bool, LiquidityLoopOutError> {
+        if swap.swap_kind == LiquiditySwapKind::LoopIn {
+            return self.resume_loop_in_swap(swap).await;
+        }
+
         match recovery_action_for_loop_out_state(swap.state) {
             Some(RecoveryAction::WatchPayout) => {
                 if swap.onchain_outpoint.is_none() {
@@ -812,6 +817,13 @@ where
             }
             None => Ok(false),
         }
+    }
+
+    async fn resume_loop_in_swap(
+        &mut self,
+        _swap: LiquiditySwapRecord,
+    ) -> Result<bool, LiquidityLoopOutError> {
+        Ok(false)
     }
 
     fn prune_recovery_guards(&mut self, swap_id: Hash256) {
@@ -1020,7 +1032,7 @@ fn loop_in_quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuote
 }
 
 fn ensure_loop_in_quote_terms(quote: &LoopOutQuoteTerms) -> Result<(), LiquidityLoopOutError> {
-    if quote.routing_fee_limit == 0 && quote.payout_deadline == quote.expires_at {
+    if quote.swap_kind == LiquiditySwapKind::LoopIn {
         return Ok(());
     }
 
@@ -1031,7 +1043,7 @@ fn ensure_loop_in_quote_terms(quote: &LoopOutQuoteTerms) -> Result<(), Liquidity
 }
 
 fn ensure_loop_out_quote_terms(quote: &LoopOutQuoteTerms) -> Result<(), LiquidityLoopOutError> {
-    if quote.routing_fee_limit == 0 && quote.payout_deadline == quote.expires_at {
+    if quote.swap_kind != LiquiditySwapKind::LoopOut {
         return Err(LiquidityLoopOutError::Store(format!(
             "quote is not a loop out quote: {:?}",
             quote.quote_id
@@ -1167,10 +1179,14 @@ where
     store
         .insert_liquidity_swap(loop_in_record(&quote, LiquiditySwapRole::Client, now_ms))
         .map_err(map_store_error)?;
-    chain
+    if let Err(error) = chain
         .broadcast_loop_in_lock(&quote, &funding_tx, myself)
         .await
-        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+    {
+        let reason = error.to_string();
+        mark_loop_in_broadcast_failed(store, swap_id, reason.clone(), now_ms)?;
+        return Err(LiquidityLoopOutError::Chain(reason));
+    }
 
     Ok(swap_id)
 }
@@ -1279,6 +1295,28 @@ where
     S: LiquidityStore,
 {
     transition_swap(store, &swap_id, LiquiditySwapState::OnchainLocked, now_ms)
+}
+
+/// Mark a Loop In swap failed when lock broadcast fails before a transaction is accepted.
+pub fn mark_loop_in_broadcast_failed<S>(
+    store: &S,
+    swap_id: Hash256,
+    reason: String,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    store
+        .update_liquidity_swap_state(
+            &swap_id,
+            LiquidityStateTransition {
+                state: LiquiditySwapState::Failed,
+                updated_at: now_ms,
+                reason: Some(reason),
+            },
+        )
+        .map_err(map_store_error)
 }
 
 /// Send the client Fiber payment after payout lock persistence and persist the preimage.
@@ -2026,6 +2064,7 @@ mod tests {
         store: Option<TestLiquidityStore>,
         fail_next_claim: bool,
         fail_next_loop_in_lock: bool,
+        fail_next_loop_in_broadcast: bool,
         claim_preimages: Vec<Hash256>,
         payout_locks: Shared<Vec<(ckb_types::packed::Script, ckb_types::packed::Script)>>,
         loop_in_funding_txs: Shared<Vec<String>>,
@@ -2040,6 +2079,7 @@ mod tests {
                 store: None,
                 fail_next_claim: false,
                 fail_next_loop_in_lock: false,
+                fail_next_loop_in_broadcast: false,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -2054,6 +2094,7 @@ mod tests {
                 store: None,
                 fail_next_claim: false,
                 fail_next_loop_in_lock: false,
+                fail_next_loop_in_broadcast: false,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -2071,6 +2112,10 @@ mod tests {
 
         fn fail_next_loop_in_lock(&mut self) {
             self.fail_next_loop_in_lock = true;
+        }
+
+        fn fail_next_loop_in_broadcast(&mut self) {
+            self.fail_next_loop_in_broadcast = true;
         }
 
         fn loop_in_funding_txs(&self) -> Vec<String> {
@@ -2203,6 +2248,10 @@ mod tests {
             self.loop_in_funding_txs
                 .borrow_mut()
                 .push(funding_tx.to_string());
+            if self.fail_next_loop_in_broadcast {
+                self.fail_next_loop_in_broadcast = false;
+                return Err("loop in broadcast failed".to_string());
+            }
             Ok(())
         }
 
@@ -3451,6 +3500,7 @@ mod tests {
         let sk = SecretKey::from_slice(&[42; 32]).unwrap();
         LoopOutQuoteTerms {
             quote_id: [1u8; 32].into(),
+            swap_kind: LiquiditySwapKind::LoopOut,
             provider: Pubkey::from(sk.public_key(SECP256K1)),
             asset: LiquidityAsset {
                 asset_id: "ckb".to_string(),
@@ -3480,6 +3530,7 @@ mod tests {
     fn test_loop_in_quote(expires_at: u64) -> LoopOutQuoteTerms {
         LoopOutQuoteTerms {
             quote_id: [2u8; 32].into(),
+            swap_kind: LiquiditySwapKind::LoopIn,
             routing_fee_limit: 0,
             payout_deadline: expires_at,
             refund_after_lock_time: expires_at + 20_000,
@@ -3533,6 +3584,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loop_in_accept_uses_explicit_quote_kind_not_sentinel_fields() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = LoopOutQuoteTerms {
+            quote_id: [33u8; 32].into(),
+            swap_kind: LiquiditySwapKind::LoopIn,
+            routing_fee_limit: 7,
+            payout_deadline: now_ms() + 10_000,
+            ..test_loop_out_quote(now_ms() + 60_000)
+        };
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let response = call_loop_in(actor, quote.quote_id).await.unwrap();
+
+        assert_eq!(response.state, "onchain_lock_pending");
+    }
+
+    #[tokio::test]
     async fn loop_out_rejects_loop_in_quote_before_side_effects() {
         let harness = RuntimeActorHarness::new_client();
         let quote = test_loop_in_quote(now_ms() + 60_000);
@@ -3565,6 +3642,34 @@ mod tests {
 
         assert!(error.to_string().contains("loop in lock unavailable"));
         assert!(store.get_liquidity_swap(&quote.quote_id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn loop_in_broadcast_failure_marks_swap_failed() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client");
+        chain.fail_next_loop_in_broadcast();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            chain,
+        )
+        .await;
+
+        let error = call_loop_in(actor, quote.quote_id).await.unwrap_err();
+
+        assert!(error.to_string().contains("loop in broadcast failed"));
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::Failed);
+        assert_eq!(
+            swap.failure_reason,
+            Some("loop in broadcast failed".to_string())
+        );
     }
 
     #[tokio::test]
@@ -3607,6 +3712,27 @@ mod tests {
             store.listed_swap_kinds(),
             vec![LiquiditySwapKind::LoopOut, LiquiditySwapKind::LoopIn]
         );
+    }
+
+    #[tokio::test]
+    async fn resume_non_terminal_does_not_run_loop_out_refund_for_loop_in_refund_pending() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut swap = recovery_swap(34, LiquiditySwapState::RefundPending);
+        swap.role = LiquiditySwapRole::Provider;
+        swap.swap_kind = LiquiditySwapKind::LoopIn;
+        store.insert_liquidity_swap(swap).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 0);
+        assert_eq!(event_count(&events, "broadcast_refund"), 0);
     }
 
     #[tokio::test]

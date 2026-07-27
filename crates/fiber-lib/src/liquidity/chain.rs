@@ -1865,6 +1865,7 @@ mod tests {
         let sk = SecretKey::from_slice(&[42; 32]).unwrap();
         LoopOutQuoteTerms {
             quote_id: [1u8; 32].into(),
+            swap_kind: LiquiditySwapKind::LoopOut,
             provider: Pubkey::from(sk.public_key(SECP256K1)),
             asset: LiquidityAsset {
                 asset_id: "ckb".to_string(),
@@ -1892,7 +1893,10 @@ mod tests {
     }
 
     fn test_loop_in_quote_terms() -> LoopOutQuoteTerms {
-        test_loop_out_quote_terms()
+        LoopOutQuoteTerms {
+            swap_kind: LiquiditySwapKind::LoopIn,
+            ..test_loop_out_quote_terms()
+        }
     }
 
     fn test_loop_in_udt_quote_terms() -> (LoopOutQuoteTerms, packed::Script) {

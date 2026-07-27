@@ -78,6 +78,9 @@ pub struct LiquidityAsset {
 pub struct LoopOutQuoteRecord {
     /// Unique provider quote identifier.
     pub quote_id: Hash256,
+    /// Quoted swap direction.
+    #[serde(default = "default_loop_out_swap_kind")]
+    pub swap_kind: LiquiditySwapKind,
     /// Provider node public key.
     pub provider: Pubkey,
     /// Asset being swapped out.
@@ -108,6 +111,10 @@ pub struct LoopOutQuoteRecord {
     pub refund_lock: ckb_types::packed::Script,
     /// Creation timestamp in milliseconds.
     pub created_at: u64,
+}
+
+fn default_loop_out_swap_kind() -> LiquiditySwapKind {
+    LiquiditySwapKind::LoopOut
 }
 
 /// Persisted liquidity swap record needed for restart recovery.
@@ -255,6 +262,7 @@ impl LiquiditySwapState {
                 | (PayoutLocked, PaymentInFlight)
                 | (PaymentInFlight, PaymentSettled)
                 | (PaymentInFlight, Failed)
+                | (OnchainLockPending, Failed)
                 | (PaymentSettled, ClaimPending)
                 | (ClaimPending, Success)
                 | (OnchainLockPending, RefundPending)

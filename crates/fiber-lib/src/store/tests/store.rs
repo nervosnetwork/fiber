@@ -198,6 +198,7 @@ fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
     let sk = SecretKey::from_slice(&[42; 32]).unwrap();
     LoopOutQuoteTerms {
         quote_id: [seed; 32].into(),
+        swap_kind: LiquiditySwapKind::LoopOut,
         provider: Pubkey::from(sk.public_key(SECP256K1)),
         asset: mock_liquidity_asset("ckb"),
         amount: 10_000,
@@ -227,6 +228,27 @@ fn test_store_liquidity_loop_out_quote_insert_get_and_missing() {
         Some(quote)
     );
     assert_eq!(store.get_loop_out_quote(&[99u8; 32].into()).unwrap(), None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_quote_kind_round_trips() {
+    let (store, _dir) = generate_store();
+    let quote = LoopOutQuoteTerms {
+        swap_kind: LiquiditySwapKind::LoopIn,
+        ..mock_loop_out_quote(78)
+    };
+
+    store.insert_loop_out_quote(quote.clone(), 1_000).unwrap();
+
+    assert_eq!(
+        store
+            .get_loop_out_quote(&quote.quote_id)
+            .unwrap()
+            .unwrap()
+            .swap_kind,
+        LiquiditySwapKind::LoopIn
+    );
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
