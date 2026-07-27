@@ -23,6 +23,7 @@ This design wires the full M3 Loop Out chain path behind `CkbLiquidityChainWatch
 - Build, send, and trace provider refund transactions.
 - Persist CKB transaction identity before or atomically with broadcast intent.
 - Reuse existing CKB actor sending/tracing APIs and existing wallet/funding machinery where possible.
+- Load the deployed liquidity-lock script and cell dependencies from the existing `FiberConfig.scripts` / `ContractsContext` mechanism by adding a `Contract::LiquidityLock` entry.
 - Make restart recovery watch known transactions instead of rebuilding duplicate payouts, claims, or refunds.
 - Keep the scope limited to M3 Manual Loop Out.
 
@@ -39,6 +40,10 @@ This design wires the full M3 Loop Out chain path behind `CkbLiquidityChainWatch
 Use persisted transaction-plan records plus existing CKB actor funding, sending, and tracing.
 
 `CkbLiquidityChainWatcher` becomes the production adapter for payout, claim, and refund. It does not own authoritative swap state. It builds transaction plans from persisted swap and quote terms, persists transaction identity, sends transactions through `CkbChainMessage::SendTx`, and registers confirmation tracers through `CkbChainMessage::CreateTxTracer`.
+
+The `LiquidityChainWatcher` boundary is async. Real funding, signing, sending, and tracing all cross actor/RPC boundaries, so synchronous watcher methods must not block or fake success.
+
+The watcher receives a real `LiquidityLockScriptArtifact` and liquidity-lock cell deps from `ContractsContext`. This avoids raw hash-only config and follows the existing `FiberConfig.scripts` deployment override pattern used by other Fiber contracts.
 
 Recovery checks persisted transaction identity first. If a transaction identity exists, recovery watches that transaction. If no transaction identity exists, recovery rebuilds only when the current swap state makes the side effect safe. Missing identity in unsafe states fails closed and records recoverable context.
 
@@ -72,8 +77,8 @@ The existing `LiquiditySwapRecord.onchain_outpoint` remains the convenient payou
 Provider accept flow already persists the provider swap and accepted claimant/refund locks before chain side effects. The CKB integration extends the chain step:
 
 1. Load accepted `LoopOutQuoteTerms` and provider `LiquiditySwapRecord`.
-2. Build the liquidity-lock output using `build_loop_out_payout_output`.
-3. Use existing CKB funding machinery to select inputs, pay fees, and create a signed payout transaction.
+2. Build the liquidity-lock output using `build_loop_out_payout_output` and the configured `Contract::LiquidityLock` artifact.
+3. Use existing CKB funding machinery to select inputs, pay fees, attach liquidity-lock cell deps, and create a signed payout transaction.
 4. Derive the payout lock output outpoint from the transaction hash and output index.
 5. Persist the payout transaction record and `LiquiditySwapRecord.onchain_outpoint` before `SendTx`.
 6. Send through `CkbChainMessage::SendTx`.

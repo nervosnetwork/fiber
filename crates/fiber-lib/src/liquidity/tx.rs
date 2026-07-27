@@ -92,3 +92,52 @@ pub fn build_liquidity_lock_output(
 
     Ok((output.build(), data))
 }
+
+/// Build the witness bytes accepted by the liquidity-lock claim path.
+pub fn build_liquidity_lock_claim_witness(payment_preimage: [u8; 32]) -> packed::Bytes {
+    let mut witness = packed::WitnessArgs::default().as_bytes().to_vec();
+    witness.push(1);
+    witness.extend_from_slice(&payment_preimage);
+    Bytes::from(witness).pack()
+}
+
+/// Build the witness bytes accepted by the liquidity-lock refund path.
+pub fn build_liquidity_lock_refund_witness() -> packed::Bytes {
+    let mut witness = packed::WitnessArgs::default().as_bytes().to_vec();
+    witness.push(2);
+    Bytes::from(witness).pack()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claim_witness_matches_liquidity_lock_contract_layout() {
+        let preimage = [7u8; 32];
+
+        let witness = build_liquidity_lock_claim_witness(preimage);
+
+        let expected_prefix = packed::WitnessArgs::default().as_bytes();
+        assert_eq!(
+            &witness.raw_data()[..expected_prefix.len()],
+            expected_prefix.as_ref()
+        );
+        assert_eq!(witness.raw_data()[expected_prefix.len()], 1);
+        assert_eq!(&witness.raw_data()[expected_prefix.len() + 1..], &preimage);
+        assert_eq!(witness.raw_data().len(), expected_prefix.len() + 33);
+    }
+
+    #[test]
+    fn refund_witness_matches_liquidity_lock_contract_layout() {
+        let witness = build_liquidity_lock_refund_witness();
+
+        let expected_prefix = packed::WitnessArgs::default().as_bytes();
+        assert_eq!(
+            &witness.raw_data()[..expected_prefix.len()],
+            expected_prefix.as_ref()
+        );
+        assert_eq!(witness.raw_data()[expected_prefix.len()], 2);
+        assert_eq!(witness.raw_data().len(), expected_prefix.len() + 1);
+    }
+}

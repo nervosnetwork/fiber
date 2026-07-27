@@ -24,6 +24,7 @@ pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {
+    use crate::ckb::contracts::{get_cell_deps_by_contracts, try_get_script_by_contract, Contract};
     use crate::ckb::CkbChainMessage;
     use crate::ckb::CkbConfig;
     use crate::fiber::gossip::GossipMessageStore;
@@ -336,32 +337,68 @@ pub mod server {
             {
                 match (network_actor.clone(), ckb_chain_actor.clone()) {
                     (Some(network_actor), Some(ckb_chain_actor)) => {
-                        let (actor, _handle) = Actor::spawn_linked(
-                            None,
-                            LiquidityActor::<_, _, _>(std::marker::PhantomData),
-                            LiquidityActorArguments {
-                                store: store.clone(),
-                                payment: NetworkLoopOutPaymentAdapter::new(network_actor),
-                                chain: CkbLiquidityChainWatcher::new(
-                                    ckb_chain_actor,
-                                    store.clone(),
-                                ),
-                            },
-                            supervisor.clone(),
-                        )
-                        .await?;
-                        match ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal) {
-                            Ok(Ok(resumed)) => {
-                                tracing::info!(resumed, "resumed non-terminal liquidity swaps");
+                        if let Some(liquidity_lock_script) =
+                            try_get_script_by_contract(Contract::LiquidityLock, &[])
+                        {
+                            match get_cell_deps_by_contracts(vec![Contract::LiquidityLock]).await {
+                                Ok(cell_deps) => {
+                                    let liquidity_lock_cell_deps: Vec<_> =
+                                        cell_deps.into_iter().collect();
+                                    if liquidity_lock_cell_deps.is_empty() {
+                                        tracing::warn!(
+                                            "liquidity-lock cell deps are not configured; mutation RPCs will be unavailable"
+                                        );
+                                        None
+                                    } else {
+                                        let (actor, _handle) = Actor::spawn_linked(
+                                            None,
+                                            LiquidityActor::<_, _, _>(std::marker::PhantomData),
+                                            LiquidityActorArguments {
+                                                store: store.clone(),
+                                                payment: NetworkLoopOutPaymentAdapter::new(
+                                                    network_actor,
+                                                ),
+                                                chain: CkbLiquidityChainWatcher::new_with_liquidity_lock_script(
+                                                    ckb_chain_actor,
+                                                    store.clone(),
+                                                    liquidity_lock_script,
+                                                    liquidity_lock_cell_deps,
+                                                ),
+                                            },
+                                            supervisor.clone(),
+                                        )
+                                        .await?;
+                                        match ractor::call!(
+                                            actor,
+                                            LiquidityActorMessage::ResumeNonTerminal
+                                        ) {
+                                            Ok(Ok(resumed)) => {
+                                                tracing::info!(
+                                                    resumed,
+                                                    "resumed non-terminal liquidity swaps"
+                                                );
+                                            }
+                                            Ok(Err(error)) => {
+                                                tracing::warn!(%error, "failed to resume non-terminal liquidity swaps");
+                                            }
+                                            Err(error) => {
+                                                tracing::warn!(%error, "failed to call liquidity actor recovery");
+                                            }
+                                        }
+                                        Some(actor)
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "failed to load liquidity-lock cell deps; mutation RPCs will be unavailable");
+                                    None
+                                }
                             }
-                            Ok(Err(error)) => {
-                                tracing::warn!(%error, "failed to resume non-terminal liquidity swaps");
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "failed to call liquidity actor recovery");
-                            }
+                        } else {
+                            tracing::warn!(
+                                "liquidity module enabled but liquidity-lock script is not configured; mutation RPCs will be unavailable"
+                            );
+                            None
                         }
-                        Some(actor)
                     }
                     _ => None,
                 }
