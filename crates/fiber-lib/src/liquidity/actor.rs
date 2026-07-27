@@ -1198,9 +1198,28 @@ where
         .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
 
     let swap_id = quote.quote_id;
-    store
-        .insert_liquidity_swap(loop_in_record(&quote, LiquiditySwapRole::Client, now_ms))
-        .map_err(map_store_error)?;
+    if let Some(existing) = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+    {
+        if existing.swap_kind != LiquiditySwapKind::LoopIn
+            || existing.role != LiquiditySwapRole::Client
+        {
+            return Err(LiquidityLoopOutError::Store(
+                "existing swap is not a client loop in swap".to_string(),
+            ));
+        }
+        if existing.state != LiquiditySwapState::OnchainLockPending {
+            return Err(LiquidityLoopOutError::InvalidStateTransition {
+                from: existing.state,
+                to: LiquiditySwapState::OnchainLockPending,
+            });
+        }
+    } else {
+        store
+            .insert_liquidity_swap(loop_in_record(&quote, LiquiditySwapRole::Client, now_ms))
+            .map_err(map_store_error)?;
+    }
     if let Err(error) = chain
         .broadcast_loop_in_lock(&quote, &funding_tx, myself)
         .await
@@ -2296,6 +2315,7 @@ mod tests {
                 .borrow_mut()
                 .push(funding_tx.to_string());
             if self.persist_loop_in_lock_before_failure {
+                self.persist_loop_in_lock_before_failure = false;
                 let store = self
                     .store
                     .as_ref()
@@ -3768,6 +3788,36 @@ mod tests {
             .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn loop_in_retry_after_persisted_broadcast_failure_reaches_chain_retry() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client")
+            .with_store(store.clone());
+        chain.fail_next_loop_in_broadcast_after_persisting_lock();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            chain,
+        )
+        .await;
+
+        let first_error = call_loop_in(actor.clone(), quote.quote_id)
+            .await
+            .unwrap_err();
+        assert!(first_error.to_string().contains("loop in broadcast failed"));
+
+        let retry = call_loop_in(actor, quote.quote_id).await.unwrap();
+
+        assert_eq!(retry.state, "onchain_lock_pending");
+        assert_eq!(event_count(&events, "client_insert_swap"), 1);
+        assert_eq!(event_count(&events, "broadcast_loop_in_lock"), 2);
     }
 
     #[tokio::test]
