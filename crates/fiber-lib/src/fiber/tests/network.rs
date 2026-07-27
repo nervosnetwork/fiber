@@ -1,8 +1,10 @@
 use crate::fiber::channel::{
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_TLC_NUMBER_IN_FLIGHT,
-    MIN_COMMITMENT_DELAY_EPOCHS,
+    ChannelActorMessage, ChannelCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
 };
 use crate::fiber::network::get_chain_hash;
+use crate::fiber::network::onchain_upstream_removed_reason_matches;
+use crate::fiber::tests::settle_tlc_set_command_tests::create_test_channel_state_with_tlc;
 use crate::{
     ckb::{
         tests::test_utils::{
@@ -43,9 +45,9 @@ use ckb_types::{
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
-use fiber_types::{ChannelFlags, ShutdownInfo};
+use fiber_types::{ChannelFlags, RemoveTlcFulfill, RemoveTlcReason, ShutdownInfo, TLCId};
 use musig2::{PartialSignature, SecNonce};
-use ractor::{call, ActorProcessingErr, ActorRef};
+use ractor::{call, Actor, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
     multiaddr::{MultiAddr, Multiaddr, Protocol},
@@ -74,6 +76,121 @@ fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
     .expect("valid multiaddr");
     address.push(Protocol::P2P(Cow::Owned(peer_id.clone().into_bytes())));
     (peer_id, address)
+}
+
+#[test]
+fn onchain_upstream_removed_reason_matches_exact_reason_only() {
+    let mut state = create_test_channel_state_with_tlc(
+        gen_rand_sha256_hash(),
+        7,
+        1000,
+        gen_rand_sha256_hash(),
+        None,
+    );
+    let reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: gen_rand_sha256_hash(),
+    });
+
+    assert!(!onchain_upstream_removed_reason_matches(&state, 7, &reason));
+
+    state.tlc_state.set_received_tlc_removed(7, reason.clone());
+    assert!(onchain_upstream_removed_reason_matches(&state, 7, &reason));
+
+    let different_reason = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: gen_rand_sha256_hash(),
+    });
+    assert!(!onchain_upstream_removed_reason_matches(
+        &state,
+        7,
+        &different_reason
+    ));
+    assert!(!onchain_upstream_removed_reason_matches(&state, 8, &reason));
+}
+
+struct DelayedRemoveTlcActor;
+
+struct DelayedRemoveTlcState {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl Actor for DelayedRemoveTlcActor {
+    type Msg = ChannelActorMessage;
+    type State = DelayedRemoveTlcState;
+    type Arguments = DelayedRemoveTlcState;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let ChannelActorMessage::Command(ChannelCommand::RemoveTlc(_, reply)) = message {
+            state.entered.notify_one();
+            state.release.notified().await;
+            let _ = reply.send(Ok(()));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn relay_onchain_tlc_remove_does_not_block_network_actor() {
+    let [node] = NetworkNode::new_n_interconnected_nodes().await;
+    let forwarding_channel_id = gen_rand_sha256_hash();
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (channel_actor, _) = Actor::spawn(
+        None,
+        DelayedRemoveTlcActor,
+        DelayedRemoveTlcState {
+            entered: entered.clone(),
+            release: release.clone(),
+        },
+    )
+    .await
+    .expect("spawn delayed channel actor");
+
+    call!(node.network_actor, |reply| {
+        NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+            forwarding_channel_id,
+            channel_actor,
+            reply,
+        ))
+    })
+    .expect("network actor alive");
+
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::RelayOnChainTlcRemove {
+                downstream_channel_id: gen_rand_sha256_hash(),
+                downstream_tlc_id: TLCId::Offered(1),
+                forwarding_channel_id,
+                forwarding_tlc_id: 2,
+                payment_hash: gen_rand_sha256_hash(),
+                reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                    payment_preimage: gen_rand_sha256_hash(),
+                }),
+            },
+        ))
+        .expect("network actor alive");
+    entered.notified().await;
+
+    let node_info = tokio::time::timeout(Duration::from_millis(250), node.node_info()).await;
+    release.notify_one();
+    assert!(
+        node_info.is_ok(),
+        "NetworkActor must remain responsive while a ChannelActor RemoveTlc reply is pending"
+    );
 }
 
 fn create_invalid_node_announcement_message() -> BroadcastMessage {

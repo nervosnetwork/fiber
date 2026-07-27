@@ -142,6 +142,7 @@ fn send_payment_response_to_json(
 ) -> GetPaymentCommandResult {
     GetPaymentCommandResult {
         payment_hash: response.payment_hash.into(),
+        payment_preimage: response.payment_preimage.map(Into::into),
         status: response.status.into(),
         created_at: response.created_at,
         last_updated_at: response.last_updated_at,

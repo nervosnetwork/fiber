@@ -335,9 +335,9 @@ fn test_track_outgoing_payment_dispatches_for_lightning_payment() {
 }
 
 #[test]
-fn test_track_outgoing_payment_does_not_dispatch_for_fiber_payment() {
+fn test_track_outgoing_payment_dispatches_for_fiber_payment() {
     let order = create_order_with_lightning_invoice(CchOrderStatus::OutgoingInFlight);
-    assert!(!TrackOutgoingPaymentDispatcher::should_dispatch(&order));
+    assert!(TrackOutgoingPaymentDispatcher::should_dispatch(&order));
 }
 
 // =============================================================================

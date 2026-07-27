@@ -1,0 +1,34 @@
+meta {
+  name: Node2 force-closes one payer channel
+  type: http
+  seq: 20
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "shutdown_channel",
+    "params": [
+      {
+        "channel_id": "{{FORCE_CLOSED_CHANNEL}}",
+        "force": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}

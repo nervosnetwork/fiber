@@ -1,0 +1,45 @@
+meta {
+  name: verify forwarder final channel state
+  type: http
+  seq: 33
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}",
+        "include_closed": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const paymentHash = bru.getVar("PAYMENT_HASH");
+  const channelId = bru.getVar("FORCE_CLOSED_CHANNEL");
+  const channel = res.body.result.channels.find(channel => channel.channel_id === channelId);
+  const tlc = channel?.pending_tlcs.find(tlc => tlc.payment_hash === paymentHash);
+
+  if (tlc?.status?.Inbound !== "LocalRemoved") {
+    throw new Error(`closed forwarder part status=${JSON.stringify(tlc?.status)}`);
+  }
+}

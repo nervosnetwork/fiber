@@ -6,7 +6,7 @@
 
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
-    traits::{DefaultTransactionDependencyProvider, SecpCkbRawKeySigner},
+    traits::SecpCkbRawKeySigner,
     tx_builder::unlock_tx_async,
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
     util::blake160,
@@ -15,7 +15,7 @@ use ckb_sdk::{
 use secp256k1::{Message, PublicKey, SecretKey, SECP256K1};
 use std::collections::HashMap;
 
-use super::{FundingError, FundingTx};
+use super::{config::new_default_transaction_dependency_provider, FundingError, FundingTx};
 
 /// A local signer that holds a secret key and provides signing capabilities.
 ///
@@ -92,7 +92,7 @@ impl LocalSigner {
             Box::new(sighash_unlocker) as Box<dyn ScriptUnlocker>,
         );
         let inner_tx = tx.take().ok_or(FundingError::AbsentTx)?;
-        let tx_dep_provider = DefaultTransactionDependencyProvider::new(&rpc_url, 10);
+        let tx_dep_provider = new_default_transaction_dependency_provider(&rpc_url, 10).await;
 
         let (signed_tx, _) = unlock_tx_async(inner_tx, &tx_dep_provider, &unlockers).await?;
         tx.update_for_self(signed_tx);

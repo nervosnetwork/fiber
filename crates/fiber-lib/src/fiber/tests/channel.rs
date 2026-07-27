@@ -20,6 +20,7 @@ use crate::fiber::network::{
     DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
     PeerDisconnectReason, CHECK_CHANNELS_INTERVAL,
 };
+use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
     AddTlc, CommitmentSigned, FiberMessage, Hash256, Init, PeeledPaymentOnionPacket, Pubkey,
@@ -3632,9 +3633,15 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
         .try_into()
         .expect("20-byte payment hash prefix");
-    node_1
-        .store
-        .update_tlc_settled(&channels[1], payment_hash_prefix);
+    node_1.store.insert_onchain_tlc_settlement(
+        &channels[1],
+        payment_hash_prefix,
+        OnChainTlcSettlement {
+            preimage: None,
+            tx_hash: Some(gen_rand_sha256_hash()),
+            tlc_index: Some(0),
+        },
+    );
 
     node_1.restart().await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -11228,7 +11235,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
 
 /// UDT collaborative funding: peer-supplied funding cell CKB capacity must match negotiated totals.
 /// Reproduces the under-funded `output[0]` case (`local_reserved + 1` shannons) vs `is_tx_final` UDT branch.
-mod udt_funding_cell_capacity_tests {
+mod udt_funding_cell_capacity {
     use super::*;
     use crate::fiber::channel::ChannelActorState;
     use crate::time::SystemTime;

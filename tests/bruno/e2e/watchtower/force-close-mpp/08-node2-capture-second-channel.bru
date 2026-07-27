@@ -1,0 +1,57 @@
+meta {
+  name: Node2 captures second Node1 channel
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {"pubkey": "{{NODE1_PUBKEY}}"}
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+vars:post-response {
+  CAPTURE_CHANNEL_MAX_ITERATIONS: 30
+}
+
+script:post-response {
+  const firstChannelId = bru.getVar("AB_CHANNEL_1");
+  const second = res.body.result.channels.find(
+    channel => channel.channel_id !== firstChannelId
+  );
+  const iteration = Number(bru.getVar("CAPTURE_AB2_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("CAPTURE_CHANNEL_MAX_ITERATIONS"));
+
+  if (second) {
+    bru.setVar("CAPTURE_AB2_ITERATION", 0);
+    bru.setVar("AB_CHANNEL_2", second.channel_id);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("CAPTURE_AB2_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("Node2 captures second Node1 channel");
+    return;
+  }
+  throw new Error("second Node1-Node2 channel not found");
+}

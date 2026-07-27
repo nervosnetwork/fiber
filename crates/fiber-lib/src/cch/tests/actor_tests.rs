@@ -27,7 +27,7 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::invoice::{
-    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError,
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError, PreimageStore,
     SettleInvoiceError,
 };
 use crate::store::{store_impl::StoreChange, Store};
@@ -149,6 +149,8 @@ struct MockNetworkState {
     send_payment_status: Arc<Mutex<PaymentStatus>>,
     /// Makes mocked Fiber invoice creation fail after payment tracking was reserved.
     fail_add_invoice: Arc<AtomicBool>,
+    /// Durable Fiber store used by store-backed recovery tests.
+    payment_store: Option<Store>,
     /// Whether mocked Fiber SettleInvoice should return an already-paid error.
     settle_invoice_already_paid: Arc<Mutex<bool>>,
 }
@@ -225,6 +227,7 @@ impl Actor for MockNetworkActor {
                     };
                     let response = SendPaymentResponse {
                         payment_hash,
+                        payment_preimage: None,
                         status,
                         created_at: SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -241,6 +244,15 @@ impl Actor for MockNetworkActor {
                         routers: vec![],
                     };
                     let _ = reply.send(Ok(response));
+                }
+                NetworkActorCommand::GetPayment(payment_hash, reply) => {
+                    let result = state
+                        .payment_store
+                        .as_ref()
+                        .and_then(|store| store.get_payment_session(payment_hash))
+                        .map(SendPaymentResponse::from)
+                        .ok_or_else(|| format!("Payment session not found: {payment_hash:?}"));
+                    let _ = reply.send(result);
                 }
                 NetworkActorCommand::SettleInvoice(payment_hash, _preimage, reply) => {
                     if *state.settle_invoice_already_paid.lock().unwrap() {
@@ -617,6 +629,7 @@ async fn setup_test_harness_with_config_and_store(
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
         fail_add_invoice: Arc::new(AtomicBool::new(false)),
+        payment_store: None,
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
 
@@ -649,9 +662,16 @@ async fn setup_test_harness_with_config_and_store(
 }
 
 async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
+    let (store, store_dir) = generate_store();
+    setup_store_backed_test_harness_with_store(store, store_dir).await
+}
+
+async fn setup_store_backed_test_harness_with_store(
+    mut store: Store,
+    store_dir: TempDir,
+) -> StoreBackedTestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
     let store_change_port = Arc::new(OutputPort::<StoreChange>::default());
-    let (mut store, store_dir) = generate_store();
     let store_change_port_clone = store_change_port.clone();
     store.set_watcher(Arc::new(move |change| {
         store_change_port_clone.send(change);
@@ -668,6 +688,7 @@ async fn setup_store_backed_test_harness() -> StoreBackedTestHarness {
         sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
         fail_add_invoice: Arc::new(AtomicBool::new(false)),
+        payment_store: Some(store.clone()),
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
     };
 
@@ -1148,6 +1169,174 @@ async fn test_receive_btc_store_attempt_inflight_updates_payment_and_cch_status(
         .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingInFlight, 1000)
         .await;
     assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+}
+
+#[tokio::test]
+async fn test_receive_btc_unrelated_preimage_does_not_mark_outgoing_payment_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(100);
+    let harness = setup_store_backed_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    // Preimages are stored globally whenever any Fiber TLC with this hash is fulfilled.
+    // A fulfillment unrelated to the outgoing payment owned by this CCH order must not
+    // authorize settlement of the incoming Lightning hold invoice.
+    harness.store.insert_preimage(payment_hash, preimage);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let order = harness.get_order(payment_hash).await.unwrap();
+    assert_eq!(order.status, CchOrderStatus::OutgoingInFlight);
+    assert_eq!(order.payment_preimage, None);
+}
+
+#[tokio::test]
+async fn test_receive_btc_correlated_payment_session_success_marks_outgoing_success() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(101);
+    let harness = setup_store_backed_test_harness().await;
+
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    harness.insert_order_directly(order).await.unwrap();
+
+    let payment_data =
+        SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100_000, payment_hash)
+            .final_tlc_expiry_delta(10_000)
+            .tlc_expiry_limit(10_000)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1_000))
+            .build()
+            .expect("valid payment_data");
+    let mut payment_session =
+        fiber_types::PaymentSession::new_session(&harness.store, payment_data, 10);
+    let route_hops = vec![PaymentHopData {
+        amount: 100_000,
+        expiry: 10_000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: crate::gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        crate::gen_rand_fiber_public_key(),
+        route_hops,
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    harness.store.insert_attempt(attempt.clone());
+    payment_session.append_attempt(attempt.clone());
+    payment_session.update_with_attempt(attempt);
+    harness.store.insert_payment_session(payment_session);
+
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
+}
+
+#[tokio::test]
+async fn test_receive_btc_recovers_persisted_payment_success_after_notification_loss() {
+    let (preimage, payment_hash) = create_valid_preimage_pair(102);
+    let (store, store_dir) = generate_store();
+    let outgoing_invoice = create_test_fiber_invoice_with_expiry(payment_hash, 10_000).to_string();
+    let order = CchOrder {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        expiry_delta_seconds: 3600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: outgoing_invoice.clone(),
+        incoming_invoice: CchInvoice::Lightning(create_test_lightning_invoice_with_cltv(
+            payment_hash,
+            DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS,
+        )),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::OutgoingInFlight,
+        failure_reason: None,
+    };
+    store.insert_cch_order(order).unwrap();
+
+    let payment_data =
+        SendPaymentDataBuilder::new(crate::gen_rand_fiber_public_key(), 100_000, payment_hash)
+            .invoice(Some(outgoing_invoice))
+            .final_tlc_expiry_delta(10_000)
+            .tlc_expiry_limit(10_000)
+            .timeout(Some(10))
+            .max_fee_amount(Some(1_000))
+            .build()
+            .expect("valid payment_data");
+    let mut payment_session = fiber_types::PaymentSession::new_session(&store, payment_data, 10);
+    let route_hops = vec![PaymentHopData {
+        amount: 100_000,
+        expiry: 10_000,
+        payment_preimage: None,
+        hash_algorithm: HashAlgorithm::default(),
+        funding_tx_hash: crate::gen_rand_sha256_hash(),
+        next_hop: None,
+        custom_records: None,
+    }];
+    let mut attempt = payment_session.new_attempt(
+        1,
+        crate::gen_rand_fiber_public_key(),
+        crate::gen_rand_fiber_public_key(),
+        route_hops,
+    );
+    attempt.set_success_status();
+    attempt.preimage = Some(preimage);
+    store.insert_attempt(attempt.clone());
+    payment_session.append_attempt(attempt.clone());
+    payment_session.update_with_attempt(attempt);
+    store.insert_payment_session(payment_session);
+
+    // Install the watcher only after both durable writes, reproducing a process restart or
+    // WebSocket reconnect after the live PutPaymentSession notification was lost.
+    let harness = setup_store_backed_test_harness_with_store(store, store_dir).await;
+    let order = harness
+        .wait_for_order_status(payment_hash, CchOrderStatus::OutgoingSuccess, 1000)
+        .await;
+    assert_eq!(order.payment_preimage, Some(preimage));
 }
 
 async fn insert_receive_btc_order_with_expiry(

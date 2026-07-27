@@ -72,6 +72,9 @@ pub enum CchMessage {
     /// Store change event from the Fiber node (either in-process or via WebSocket).
     StoreChangeEvent(StoreChange),
 
+    /// Reconcile active outgoing Fiber payments from durable state after a WebSocket reconnect.
+    ReconcileFiberPayments,
+
     /// Schedule a retry for an action with backoff after a transient failure.
     ActionRetry {
         payment_hash: Hash256,
@@ -410,6 +413,27 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                             );
                         }
                     }
+                }
+                Ok(())
+            }
+            CchMessage::ReconcileFiberPayments => {
+                for order in state
+                    .store
+                    .get_cch_order_keys_iter()
+                    .into_iter()
+                    .filter_map(|payment_hash| state.store.get_cch_order(&payment_hash).ok())
+                    .filter(|order| {
+                        matches!(
+                            order.status,
+                            CchOrderStatus::IncomingAccepted | CchOrderStatus::OutgoingInFlight
+                        )
+                    })
+                {
+                    myself.send_message(CchMessage::ExecuteAction {
+                        payment_hash: order.payment_hash,
+                        action: CchOrderAction::TrackOutgoingPayment,
+                        retry_count: 0,
+                    })?;
                 }
                 Ok(())
             }
@@ -1020,22 +1044,15 @@ impl<S: CchOrderStore> CchState<S> {
             StoreChange::PutPaymentSession {
                 payment_hash,
                 payment_session,
+                payment_preimage,
             } => {
-                use fiber_types::payment::PaymentStatus;
                 let status = payment_session.status;
-                // For successful payments, we need the preimage. If it's not in the same
-                // store change batch, the PutPreimage event will follow.
-                if status == PaymentStatus::Success {
-                    // Defer to PutPreimage
-                    vec![]
-                } else {
-                    vec![CchTrackingEvent::PaymentChanged {
-                        payment_hash: *payment_hash,
-                        payment_preimage: None,
-                        status,
-                        failure_reason: None,
-                    }]
-                }
+                vec![CchTrackingEvent::PaymentChanged {
+                    payment_hash: *payment_hash,
+                    payment_preimage: *payment_preimage,
+                    status,
+                    failure_reason: None,
+                }]
             }
             StoreChange::PutAttempt {
                 payment_hash,
@@ -1050,18 +1067,10 @@ impl<S: CchOrderStore> CchState<S> {
                 }]
             }
             StoreChange::PutAttempt { .. } => vec![],
-            StoreChange::PutPreimage {
-                payment_hash,
-                payment_preimage,
-            } => {
-                use fiber_types::payment::PaymentStatus;
-                vec![CchTrackingEvent::PaymentChanged {
-                    payment_hash: *payment_hash,
-                    payment_preimage: Some(*payment_preimage),
-                    status: PaymentStatus::Success,
-                    failure_reason: None,
-                }]
-            }
+            // Preimages are global to a Fiber node and can be learned from unrelated TLCs
+            // that reuse the same payment hash. Only the correlated PaymentSession success
+            // above is authoritative for a CCH outgoing payment.
+            StoreChange::PutPreimage { .. } => vec![],
         }
     }
 }
@@ -1197,6 +1206,10 @@ async fn subscribe_store_changes_ws(
         };
 
         tracing::info!("Successfully subscribed to Fiber node store changes");
+        if let Err(err) = actor.send_message(CchMessage::ReconcileFiberPayments) {
+            tracing::error!("Failed to schedule Fiber payment reconciliation: {}", err);
+            return;
+        }
 
         loop {
             tokio::select! {
@@ -1248,10 +1261,14 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
             payment_hash: *payment_hash,
             has_payment_preimage: false,
         },
-        StoreChange::PutPaymentSession { payment_hash, .. } => RedactedStoreChangeSummary {
+        StoreChange::PutPaymentSession {
+            payment_hash,
+            payment_preimage,
+            ..
+        } => RedactedStoreChangeSummary {
             kind: "PutPaymentSession",
             payment_hash: *payment_hash,
-            has_payment_preimage: false,
+            has_payment_preimage: payment_preimage.is_some(),
         },
         StoreChange::PutAttempt { payment_hash, .. } => RedactedStoreChangeSummary {
             kind: "PutAttempt",

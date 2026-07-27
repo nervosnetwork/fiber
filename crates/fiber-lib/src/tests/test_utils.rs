@@ -788,6 +788,16 @@ impl NetworkNode {
             .expect("get channel")
     }
 
+    pub async fn get_channel_actor(
+        &self,
+        channel_id: Hash256,
+    ) -> Option<ActorRef<ChannelActorMessage>> {
+        let message = |reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::GetChannelActor(channel_id, reply))
+        };
+        call!(self.network_actor, message).expect("network actor alive")
+    }
+
     pub fn get_channel_actor_state_unchecked(
         &self,
         channel_id: Hash256,
