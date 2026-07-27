@@ -93,6 +93,40 @@ pub struct CchOrder {
     pub failure_reason: Option<String>,
 }
 
+/// Durable intent for creating the Lightning incoming invoice of a `receive_btc` order.
+///
+/// The intent is written before calling LND and atomically removed when the final
+/// [`CchOrder`] is persisted. Its payment hash is the idempotency key used to recover
+/// an invoice creation whose RPC result was lost or interrupted by a node restart.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CchReceiveBtcOrderCreation {
+    /// Seconds since epoch when order creation was accepted.
+    #[serde_as(as = "U64Hex")]
+    pub created_at: u64,
+    /// Relative expiry time copied from the CCH configuration at acceptance time.
+    #[serde_as(as = "U64Hex")]
+    pub order_expiry_delta_seconds: u64,
+    /// Original signed Fiber invoice. Exact equality is used to reject conflicting retries.
+    pub fiber_pay_req: String,
+    /// Idempotency key shared by the Fiber invoice, LND invoice, and final CCH order.
+    pub payment_hash: Hash256,
+    /// Outgoing Fiber principal in satoshis.
+    #[serde_as(as = "U128Hex")]
+    pub amount_sats: u128,
+    /// CCH fee in satoshis.
+    #[serde_as(as = "U128Hex")]
+    pub fee_sats: u128,
+    /// Wrapped BTC type script validated when the operation was accepted.
+    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+    /// LND final-hop CLTV delta validated when the operation was accepted.
+    #[serde_as(as = "U64Hex")]
+    pub btc_final_tlc_expiry_delta_blocks: u64,
+    /// Percentage of the collected fee available to the outgoing Fiber payment.
+    #[serde_as(as = "U64Hex")]
+    pub max_outgoing_fee_percentage: u64,
+}
+
 impl CchOrder {
     /// Return the amount required by the incoming invoice, in satoshis.
     ///
