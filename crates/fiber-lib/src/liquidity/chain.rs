@@ -926,13 +926,15 @@ where
                     "cannot watch payout without persisted transaction identity".to_string(),
                 )
             })?;
-        if !matches!(
+        let watchable = matches!(
             record.status,
             fiber_types::LiquidityChainTxStatus::Broadcast
                 | fiber_types::LiquidityChainTxStatus::Confirmed
-        ) {
+        ) || (record.status == fiber_types::LiquidityChainTxStatus::Planned
+            && record.outpoint.is_some());
+        if !watchable {
             return Err(LiquidityLoopOutError::Chain(format!(
-                "cannot watch payout transaction with non-broadcast status {:?}",
+                "cannot watch payout transaction with non-watchable status {:?}",
                 record.status
             )));
         }
@@ -3904,7 +3906,7 @@ mod tests {
             .await
             .expect_err("rejected payout tx is not watchable");
 
-        assert!(error.to_string().contains("non-broadcast status"));
+        assert!(error.to_string().contains("non-watchable status"));
         assert!(events.lock().unwrap().is_empty());
     }
 
@@ -3935,6 +3937,57 @@ mod tests {
                 tx_hash: signed_tx.hash().into(),
                 outpoint: Some(test_outpoint(0)),
                 status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new(ckb_actor, store);
+
+        watcher
+            .watch_payout_lock(swap_id, spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap();
+
+        wait_for_mock_events(&events, 2).await;
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                MockCkbEvent::CreateTxTracer(
+                    CkbTxTracingMask::Committed | CkbTxTracingMask::Rejected,
+                ),
+                MockCkbEvent::CommitFundingTx(signed_tx.hash().into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_watches_planned_payout_record_for_crash_window() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let quote = test_loop_out_quote_terms();
+        let funded_tx = test_funding_transaction_with_script(&quote, 0);
+        let signed_tx = test_funding_transaction_with_script(&quote, 1);
+        let (ckb_actor, _handle) = ractor::Actor::spawn(
+            None,
+            PayoutMockCkbActor,
+            PayoutMockCkbActorArgs {
+                events: events.clone(),
+                funded_tx,
+                signed_tx: signed_tx.clone(),
+                send_error: false,
+            },
+        )
+        .await
+        .unwrap();
+        let store = NoopLiquidityStore::default();
+        let swap_id: Hash256 = [41u8; 32].into();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: signed_tx.hash().into(),
+                outpoint: Some(test_outpoint(41)),
+                status: LiquidityChainTxStatus::Planned,
                 failure_reason: None,
                 created_at: 1,
                 updated_at: 2,
