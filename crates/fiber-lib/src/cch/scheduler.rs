@@ -290,6 +290,9 @@ impl<S: CchOrderStore> SchedulerState<S> {
         order.status = CchOrderStatus::Failed;
         order.failure_reason = Some("Order expired".to_string());
         self.store.update_cch_order(order);
+        let _ = self
+            .lnd_tracker
+            .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
         tracing::info!("Expired order {:x}", payment_hash);
 
         // Schedule prune job for this expired order
@@ -324,6 +327,9 @@ impl<S: CchOrderStore> SchedulerState<S> {
         let _ = self
             .lnd_tracker
             .send_message(LndTrackerMessage::StopTracking(payment_hash));
+        let _ = self
+            .lnd_tracker
+            .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
 
         // Delete order from store
         self.store.delete_cch_order(&payment_hash);

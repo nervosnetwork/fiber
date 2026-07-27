@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use crate::cch::trackers::{LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage};
+use crate::cch::trackers::{
+    LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
+    PaymentTrackingReservationResult, MAX_TRACKED_PAYMENTS,
+};
 use fiber_types::Hash256;
 use ractor::{concurrency::Duration as RactorDuration, Actor, ActorRef, OutputPort};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -41,6 +44,104 @@ async fn create_test_actor() -> (ActorRef<LndTrackerMessage>, tokio::task::JoinH
         .expect("Failed to spawn test actor");
 
     (actor_ref, actor_handle)
+}
+
+async fn reserve_payment_tracking(
+    actor_ref: &ActorRef<LndTrackerMessage>,
+    payment_hash: Hash256,
+) -> PaymentTrackingReservationResult {
+    ractor::call!(actor_ref, |reply| {
+        LndTrackerMessage::ReservePaymentTracking(payment_hash, reply)
+    })
+    .expect("Failed to reserve payment tracking")
+}
+
+struct TestStateSnapshot {
+    payment_queue_len: usize,
+    active_payment_trackers: usize,
+    reserved_payment_trackers: usize,
+    tracked_payment_count: usize,
+}
+
+async fn get_state(actor_ref: &ActorRef<LndTrackerMessage>) -> TestStateSnapshot {
+    let state = actor_ref
+        .call(
+            LndTrackerMessage::GetState,
+            Some(RactorDuration::from_millis(1000)),
+        )
+        .await
+        .expect("Failed to get state")
+        .expect("Failed to get state");
+    TestStateSnapshot {
+        payment_queue_len: state.payment_queue_len,
+        active_payment_trackers: state.active_payment_trackers,
+        reserved_payment_trackers: state.reserved_payment_trackers,
+        tracked_payment_count: state.tracked_payment_count,
+    }
+}
+
+#[tokio::test]
+async fn test_payment_tracking_reservation_enforces_global_limit() {
+    let (actor_ref, _handle) = create_test_actor().await;
+
+    for value in 0..MAX_TRACKED_PAYMENTS {
+        assert_eq!(
+            reserve_payment_tracking(&actor_ref, test_payment_hash(value as u8)).await,
+            PaymentTrackingReservationResult::Reserved
+        );
+    }
+    assert_eq!(
+        reserve_payment_tracking(&actor_ref, test_payment_hash(MAX_TRACKED_PAYMENTS as u8)).await,
+        PaymentTrackingReservationResult::CapacityExceeded
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_payment_trackers, MAX_TRACKED_PAYMENTS);
+    assert_eq!(state.tracked_payment_count, MAX_TRACKED_PAYMENTS);
+    assert_eq!(state.active_payment_trackers, 0);
+}
+
+#[tokio::test]
+async fn test_duplicate_payment_tracking_reservation_is_coalesced() {
+    let (actor_ref, _handle) = create_test_actor().await;
+    let payment_hash = test_payment_hash(1);
+
+    assert_eq!(
+        reserve_payment_tracking(&actor_ref, payment_hash).await,
+        PaymentTrackingReservationResult::Reserved
+    );
+    assert_eq!(
+        reserve_payment_tracking(&actor_ref, payment_hash).await,
+        PaymentTrackingReservationResult::AlreadyTracked
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_payment_trackers, 1);
+    assert_eq!(state.tracked_payment_count, 1);
+}
+
+#[tokio::test]
+async fn test_stopping_payment_reservation_releases_global_capacity() {
+    let (actor_ref, _handle) = create_test_actor().await;
+
+    for value in 0..MAX_TRACKED_PAYMENTS {
+        assert_eq!(
+            reserve_payment_tracking(&actor_ref, test_payment_hash(value as u8)).await,
+            PaymentTrackingReservationResult::Reserved
+        );
+    }
+
+    actor_ref
+        .cast(LndTrackerMessage::StopTrackingPayment(test_payment_hash(0)))
+        .expect("Failed to stop payment tracking");
+    assert_eq!(
+        reserve_payment_tracking(&actor_ref, test_payment_hash(MAX_TRACKED_PAYMENTS as u8)).await,
+        PaymentTrackingReservationResult::Reserved
+    );
+
+    let state = get_state(&actor_ref).await;
+    assert_eq!(state.reserved_payment_trackers, MAX_TRACKED_PAYMENTS);
+    assert_eq!(state.tracked_payment_count, MAX_TRACKED_PAYMENTS);
 }
 
 // Test completion decrements active_invoice_trackers counter
@@ -186,6 +287,10 @@ async fn test_duplicate_payment_tracking_is_idempotent() {
     let (actor_ref, _handle) = create_test_actor().await;
     let payment_hash = test_payment_hash(7);
 
+    assert_eq!(
+        reserve_payment_tracking(&actor_ref, payment_hash).await,
+        PaymentTrackingReservationResult::Reserved
+    );
     actor_ref
         .cast(LndTrackerMessage::TrackPayment(payment_hash))
         .expect("Failed to send first TrackPayment");
@@ -203,6 +308,42 @@ async fn test_duplicate_payment_tracking_is_idempotent() {
         .expect("Failed to get state")
         .expect("Failed to get state");
     assert_eq!(state.active_payment_trackers, 1);
+    assert_eq!(state.reserved_payment_trackers, 0);
+    assert_eq!(state.tracked_payment_count, 1);
+}
+
+#[tokio::test]
+async fn test_restored_payments_above_global_limit_are_queued() {
+    let (actor_ref, _handle) = create_test_actor().await;
+
+    for value in 0..=MAX_TRACKED_PAYMENTS {
+        let payment_hash = test_payment_hash(value as u8);
+        actor_ref
+            .cast(LndTrackerMessage::RestorePaymentTracking(payment_hash))
+            .expect("Failed to restore payment tracking");
+        actor_ref
+            .cast(LndTrackerMessage::TrackPayment(payment_hash))
+            .expect("Failed to track restored payment");
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state_before = get_state(&actor_ref).await;
+    assert_eq!(state_before.active_payment_trackers, MAX_TRACKED_PAYMENTS);
+    assert_eq!(state_before.payment_queue_len, 1);
+    assert_eq!(state_before.tracked_payment_count, MAX_TRACKED_PAYMENTS + 1);
+
+    actor_ref
+        .cast(LndTrackerMessage::PaymentTrackerCompleted {
+            payment_hash: test_payment_hash(0),
+            tracker_id: 0,
+        })
+        .expect("Failed to complete payment tracker");
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let state_after = get_state(&actor_ref).await;
+    assert_eq!(state_after.active_payment_trackers, MAX_TRACKED_PAYMENTS);
+    assert_eq!(state_after.payment_queue_len, 0);
+    assert_eq!(state_after.tracked_payment_count, MAX_TRACKED_PAYMENTS);
 }
 
 #[tokio::test]

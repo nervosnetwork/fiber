@@ -20,7 +20,7 @@ use crate::cch::order::CchOrderStateMachine;
 use crate::cch::scheduler::{CchOrderSchedulerActor, SchedulerArgs, SchedulerMessage};
 use crate::cch::trackers::{
     CchTrackingEvent, LndConnectionInfo, LndTrackerActor, LndTrackerArgs, LndTrackerMessage,
-    RedactedCchTrackingEvent,
+    PaymentTrackingReservationResult, RedactedCchTrackingEvent, MAX_TRACKED_PAYMENTS,
 };
 use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
@@ -276,6 +276,16 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 state.schedule_job_for_final_order(&order);
                 tracing::info!("Marked expired order {:x} as Failed", payment_hash);
                 continue;
+            }
+
+            if matches!(&order.incoming_invoice, CchInvoice::Fiber(_)) {
+                // Restore reservations before dispatching payment tracking. Orders created before
+                // the admission limit remain recoverable even when they exceed the new limit.
+                state
+                    .lnd_tracker
+                    .send_message(LndTrackerMessage::RestorePaymentTracking(
+                        order.payment_hash,
+                    ))?;
             }
 
             // Schedule expiry job for non-final orders
@@ -645,24 +655,49 @@ impl<S: CchOrderStore> CchState<S> {
             invoice_builder.build()
         }?;
 
-        let invoice = self.fiber_agent_ref.call_add_invoice(invoice).await?;
+        let reservation = ractor::call!(self.lnd_tracker, |reply| {
+            LndTrackerMessage::ReservePaymentTracking(payment_hash, reply)
+        })
+        .map_err(|err| CchError::LndPaymentTrackerError(err.to_string()))?;
+        match reservation {
+            PaymentTrackingReservationResult::Reserved => {}
+            PaymentTrackingReservationResult::AlreadyTracked => {
+                return Err(CchError::LndPaymentAlreadyTracked(payment_hash));
+            }
+            PaymentTrackingReservationResult::CapacityExceeded => {
+                return Err(CchError::LndPaymentTrackerCapacityExceeded(
+                    MAX_TRACKED_PAYMENTS,
+                ));
+            }
+        }
 
-        let order = CchOrder {
-            amount_sats: invoice_amount_sats,
-            created_at: order_created_at,
-            expiry_delta_seconds: self.config.order_expiry_delta_seconds,
-            failure_reason: None,
-            incoming_invoice: CchInvoice::Fiber(invoice),
-            outgoing_pay_req: send_btc.btc_pay_req,
-            payment_preimage: None,
-            status: CchOrderStatus::Pending,
-            fee_sats,
-            payment_hash,
-            wrapped_btc_type_script,
+        let result = async {
+            let invoice = self.fiber_agent_ref.call_add_invoice(invoice).await?;
+
+            let order = CchOrder {
+                amount_sats: invoice_amount_sats,
+                created_at: order_created_at,
+                expiry_delta_seconds: self.config.order_expiry_delta_seconds,
+                failure_reason: None,
+                incoming_invoice: CchInvoice::Fiber(invoice),
+                outgoing_pay_req: send_btc.btc_pay_req,
+                payment_preimage: None,
+                status: CchOrderStatus::Pending,
+                fee_sats,
+                payment_hash,
+                wrapped_btc_type_script,
+            };
+
+            self.store.insert_cch_order(order.clone())?;
+            Ok(order)
         };
-
-        self.store.insert_cch_order(order.clone())?;
-        Ok(order)
+        let result = result.await;
+        if result.is_err() {
+            let _ = self
+                .lnd_tracker
+                .send_message(LndTrackerMessage::StopTrackingPayment(payment_hash));
+        }
+        result
     }
 
     async fn receive_btc(&self, receive_btc: ReceiveBTC) -> Result<CchOrder, CchError> {
