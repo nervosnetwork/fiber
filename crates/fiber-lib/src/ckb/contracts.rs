@@ -21,6 +21,7 @@ pub enum Contract {
     CkbAuth,
     FundingLock,
     CommitmentLock,
+    LiquidityLock,
     Secp256k1Lock,
     SimpleUDT,
 }
@@ -371,6 +372,13 @@ impl ContractsContext {
             .build()
     }
 
+    pub(crate) fn try_get_script(&self, contract: Contract, args: &[u8]) -> Option<Script> {
+        self.get_contracts_map()
+            .get(&contract)
+            .cloned()
+            .map(|script| script.as_builder().args(args.pack()).build())
+    }
+
     pub(crate) fn get_udt_info(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
         self.get_udt_whitelist().find_matching_udt(udt_script)
     }
@@ -415,6 +423,10 @@ fn get_contracts_context() -> ContractsContext {
 
 pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
     get_contracts_context().get_script(contract, args)
+}
+
+pub fn try_get_script_by_contract(contract: Contract, args: &[u8]) -> Option<Script> {
+    get_contracts_context().try_get_script(contract, args)
 }
 
 pub async fn get_cell_deps_by_contracts(
@@ -495,4 +507,105 @@ pub fn get_cell_deps_count(contracts: Vec<Contract>, udt_script: &Option<Script>
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use ckb_types::{
+        bytes::Bytes,
+        core::{BlockBuilder, TransactionView},
+        packed,
+    };
+
+    use crate::fiber::config;
+
+    use super::*;
+
+    fn dev_genesis_block() -> BlockView {
+        let type_script = Script::new_builder()
+            .code_hash([1u8; 32].pack())
+            .hash_type(ScriptHashType::Data2)
+            .build();
+        let outputs = (0..9)
+            .map(|index| {
+                let mut builder = CellOutput::new_builder().capacity(100u64);
+                if index == 1 {
+                    builder = builder.type_(Some(type_script.clone()).pack());
+                }
+                builder.build()
+            })
+            .collect::<Vec<_>>();
+        let outputs_data = (0..9)
+            .map(|index| Bytes::from(vec![index as u8]).pack())
+            .collect::<Vec<packed::Bytes>>();
+        let genesis_tx = TransactionView::new_advanced_builder()
+            .set_outputs(outputs)
+            .set_outputs_data(outputs_data)
+            .build();
+        let dep_group_tx = TransactionView::new_advanced_builder().build();
+
+        BlockBuilder::default()
+            .transaction(genesis_tx)
+            .transaction(dep_group_tx)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn try_new_accepts_liquidity_lock_fiber_script_and_exposes_script_and_cell_deps() {
+        let script = Script::new_builder()
+            .code_hash([2u8; 32].pack())
+            .hash_type(ScriptHashType::Data2)
+            .args(Bytes::from_static(b"liquidity-lock").pack())
+            .build();
+        let cell_dep = CellDep::new_builder()
+            .out_point(
+                OutPoint::new_builder()
+                    .tx_hash([3u8; 32].pack())
+                    .index(0u32)
+                    .build(),
+            )
+            .dep_type(DepType::Code)
+            .build();
+        let context = ContractsContext::try_new(
+            dev_genesis_block(),
+            vec![FiberScript {
+                name: Contract::LiquidityLock,
+                script: script.clone().into(),
+                cell_deps: vec![config::ScriptCellDep::with_cell_dep(
+                    cell_dep.clone().into(),
+                )],
+            }],
+            UdtCfgInfos::default(),
+            None,
+        )
+        .await
+        .expect("liquidity lock script is accepted");
+
+        assert_eq!(
+            context
+                .contracts
+                .contract_default_scripts
+                .get(&Contract::LiquidityLock),
+            Some(&script)
+        );
+        let cell_deps = context
+            .get_cell_deps(vec![Contract::LiquidityLock])
+            .await
+            .expect("liquidity lock cell deps are available")
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(cell_deps, vec![cell_dep]);
+    }
+
+    #[tokio::test]
+    async fn try_get_script_returns_none_for_unconfigured_contract() {
+        let context =
+            ContractsContext::try_new(dev_genesis_block(), vec![], UdtCfgInfos::default(), None)
+                .await
+                .expect("dev context is created");
+
+        assert!(context
+            .try_get_script(Contract::LiquidityLock, b"args")
+            .is_none());
+    }
 }
