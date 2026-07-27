@@ -1,6 +1,8 @@
 //! Liquidity persistence traits and records.
 
-use fiber_types::{EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState};
+use fiber_types::{
+    EntityHex, Hash256, LiquidityAsset, LiquidityAssetError, LiquiditySwapState, Pubkey,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use thiserror::Error;
@@ -62,6 +64,7 @@ pub(crate) fn loop_out_quote_record_from_terms(
 ) -> fiber_types::LoopOutQuoteRecord {
     fiber_types::LoopOutQuoteRecord {
         quote_id: quote.quote_id,
+        swap_kind: quote.swap_kind,
         provider: quote.provider,
         asset: quote.asset,
         amount: quote.amount,
@@ -84,6 +87,7 @@ pub(crate) fn loop_out_quote_terms_from_record(
 ) -> LoopOutQuoteTerms {
     LoopOutQuoteTerms {
         quote_id: record.quote_id,
+        swap_kind: record.swap_kind,
         provider: record.provider,
         asset: record.asset,
         amount: record.amount,
@@ -98,6 +102,63 @@ pub(crate) fn loop_out_quote_terms_from_record(
         claimant_lock: record.claimant_lock,
         refund_lock: record.refund_lock,
     }
+}
+
+#[serde_as]
+#[derive(Deserialize, Serialize)]
+struct LegacyLoopOutQuoteRecord {
+    quote_id: Hash256,
+    provider: Pubkey,
+    asset: LiquidityAsset,
+    amount: u128,
+    provider_fee: u128,
+    routing_fee_limit: u128,
+    onchain_fee_estimate_ckb: u64,
+    capacity_requirement_ckb: u64,
+    payment_hash: Hash256,
+    expires_at: u64,
+    payout_deadline: u64,
+    refund_after_lock_time: u64,
+    #[serde_as(as = "EntityHex")]
+    claimant_lock: ckb_types::packed::Script,
+    #[serde_as(as = "EntityHex")]
+    refund_lock: ckb_types::packed::Script,
+    created_at: u64,
+}
+
+impl From<LegacyLoopOutQuoteRecord> for fiber_types::LoopOutQuoteRecord {
+    fn from(record: LegacyLoopOutQuoteRecord) -> Self {
+        Self {
+            quote_id: record.quote_id,
+            swap_kind: fiber_types::LiquiditySwapKind::LoopOut,
+            provider: record.provider,
+            asset: record.asset,
+            amount: record.amount,
+            provider_fee: record.provider_fee,
+            routing_fee_limit: record.routing_fee_limit,
+            onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
+            capacity_requirement_ckb: record.capacity_requirement_ckb,
+            payment_hash: record.payment_hash,
+            expires_at: record.expires_at,
+            payout_deadline: record.payout_deadline,
+            refund_after_lock_time: record.refund_after_lock_time,
+            claimant_lock: record.claimant_lock,
+            refund_lock: record.refund_lock,
+            created_at: record.created_at,
+        }
+    }
+}
+
+pub(crate) fn loop_out_quote_record_from_bytes(
+    value: &[u8],
+) -> Result<fiber_types::LoopOutQuoteRecord, LiquidityStoreError> {
+    bincode::deserialize::<fiber_types::LoopOutQuoteRecord>(value)
+        .or_else(|_| bincode::deserialize::<LegacyLoopOutQuoteRecord>(value).map(Into::into))
+        .map_err(|err| {
+            LiquidityStoreError::Backend(format!(
+                "deserialization of LoopOutQuoteRecord failed: {err}"
+            ))
+        })
 }
 
 /// State transition metadata persisted with each transition.
@@ -252,5 +313,43 @@ mod tests {
             bincode::deserialize(&bytes).expect("deserialize record");
 
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn legacy_loop_out_quote_record_defaults_to_loop_out_kind() {
+        let private_key = secp256k1::SecretKey::from_slice(&[42u8; 32]).unwrap();
+        let record = LegacyLoopOutQuoteRecord {
+            quote_id: [1u8; 32].into(),
+            provider: Pubkey::from(private_key.public_key(secp256k1::SECP256K1)),
+            asset: LiquidityAsset {
+                asset_id: "ckb".to_string(),
+                kind: fiber_types::LiquidityAssetKind::Ckb,
+                udt_type_script: None,
+                min_amount: 1,
+                max_amount: 1_000,
+                available_capacity: 1_000,
+                base_fee: 1,
+                proportional_fee_ppm: 0,
+                enabled: true,
+            },
+            amount: 100,
+            provider_fee: 1,
+            routing_fee_limit: 1,
+            onchain_fee_estimate_ckb: 1_000,
+            capacity_requirement_ckb: 10_000,
+            payment_hash: [2u8; 32].into(),
+            expires_at: 20_000,
+            payout_deadline: 30_000,
+            refund_after_lock_time: 40_000,
+            claimant_lock: Default::default(),
+            refund_lock: Default::default(),
+            created_at: 1_000,
+        };
+        let bytes = bincode::serialize(&record).unwrap();
+
+        let decoded = loop_out_quote_record_from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.swap_kind, LiquiditySwapKind::LoopOut);
+        assert_eq!(decoded.quote_id, record.quote_id);
     }
 }

@@ -1,4 +1,4 @@
-use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, Pubkey};
+use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, LiquiditySwapKind, Pubkey};
 
 use crate::invoice::CkbInvoice;
 use crate::liquidity::types::{
@@ -170,6 +170,7 @@ pub fn build_loop_in_quote_terms(
     };
     let quote = LoopOutQuoteTerms {
         quote_id,
+        swap_kind: LiquiditySwapKind::LoopIn,
         provider,
         asset: asset.clone(),
         amount,

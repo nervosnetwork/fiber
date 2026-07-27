@@ -17,9 +17,10 @@ use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::HoldTlc;
 use crate::liquidity::store::{
-    loop_out_quote_record_from_terms, loop_out_quote_terms_from_record, LiquidityStateTransition,
-    LiquidityStore, LiquidityStoreError, LiquiditySwapFilter, LiquiditySwapPage,
-    LiquiditySwapRecord, LiquiditySwapUpdate,
+    loop_out_quote_record_from_bytes, loop_out_quote_record_from_terms,
+    loop_out_quote_terms_from_record, LiquidityStateTransition, LiquidityStore,
+    LiquidityStoreError, LiquiditySwapFilter, LiquiditySwapPage, LiquiditySwapRecord,
+    LiquiditySwapUpdate,
 };
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
@@ -527,11 +528,12 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             LIQUIDITY_LOOP_OUT_QUOTE_PREFIX => {
-                check_deserialization::<LoopOutQuoteRecord>(
-                    &value,
-                    "LIQUIDITY_LOOP_OUT_QUOTE_PREFIX",
-                    &mut errors,
-                );
+                if let Err(e) = loop_out_quote_record_from_bytes(&value) {
+                    errors.insert(format!(
+                        "Failed to deserialize LIQUIDITY_LOOP_OUT_QUOTE_PREFIX: {:?}",
+                        e
+                    ));
+                }
             }
             LIQUIDITY_CHAIN_TX_PREFIX => {
                 check_deserialization::<LiquidityChainTxRecord>(
@@ -1545,9 +1547,7 @@ impl LiquidityStore for Store {
     ) -> Result<Option<crate::liquidity::types::LoopOutQuoteTerms>, LiquidityStoreError> {
         let key = Self::loop_out_quote_key(quote_id);
         self.get(key)
-            .map(|value| {
-                deserialize_liquidity::<LoopOutQuoteRecord>(value.as_ref(), "LoopOutQuoteRecord")
-            })
+            .map(|value| loop_out_quote_record_from_bytes(value.as_ref()))
             .transpose()
             .map(|record| record.map(loop_out_quote_terms_from_record))
     }

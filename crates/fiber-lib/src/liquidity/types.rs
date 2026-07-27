@@ -1,5 +1,5 @@
 use ckb_types::packed::{OutPoint, Script};
-use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapState, Pubkey};
+use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapKind, LiquiditySwapState, Pubkey};
 use thiserror::Error;
 
 /// Errors returned while validating or executing Loop Out liquidity swaps.
@@ -120,6 +120,8 @@ pub fn loop_out_gross_payment_amount(
 pub struct LoopOutQuoteTerms {
     /// Unique quote identifier used as the initial swap identifier.
     pub quote_id: Hash256,
+    /// Quoted swap direction.
+    pub swap_kind: LiquiditySwapKind,
     /// Provider node public key.
     pub provider: Pubkey,
     /// Asset being swapped out.
