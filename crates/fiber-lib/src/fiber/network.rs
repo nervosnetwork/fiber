@@ -5382,6 +5382,7 @@ where
             }
             // Ban expired — clean up all ban state and resume normal reconnect.
             self.banned_peers.remove(&remote_pubkey);
+            self.invalid_channel_msg_count.remove(&remote_pubkey);
             self.requested_disconnect_peers.remove(&remote_pubkey);
         }
 
@@ -5477,6 +5478,11 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
+        // Keep the counter only if the peer was recently banned, to prevent
+        // reconnection bypass. Otherwise clean up to avoid unbounded growth.
+        if !self.banned_peers.contains_key(&pubkey) {
+            self.invalid_channel_msg_count.remove(&pubkey);
+        }
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
