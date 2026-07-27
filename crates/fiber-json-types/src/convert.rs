@@ -303,6 +303,7 @@ mod cch_conversions {
 
     impl From<fiber_types::CchOrder> for crate::cch::CchOrderResponse {
         fn from(order: fiber_types::CchOrder) -> Self {
+            let amount_sats = order.required_incoming_amount_sats();
             crate::cch::CchOrderResponse {
                 timestamp: order.created_at,
                 expiry_delta_seconds: order.expiry_delta_seconds,
@@ -310,7 +311,7 @@ mod cch_conversions {
                 incoming_invoice: JsonCchInvoice::from(order.incoming_invoice),
                 outgoing_pay_req: order.outgoing_pay_req,
                 payment_hash: order.payment_hash.into(),
-                amount_sats: order.amount_sats,
+                amount_sats,
                 fee_sats: order.fee_sats,
                 status: order.status.into(),
             }

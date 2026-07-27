@@ -94,6 +94,28 @@ pub struct CchOrder {
 }
 
 impl CchOrder {
+    /// Return the amount required by the incoming invoice, in satoshis.
+    ///
+    /// The persisted `amount_sats` field is used as a compatibility fallback for invoices that do
+    /// not encode an amount. Older ReceiveBTC orders stored the outgoing Fiber principal in that
+    /// field, so deriving the value from the incoming invoice also repairs their public amount
+    /// semantics without changing the serialized order format.
+    pub fn required_incoming_amount_sats(&self) -> u128 {
+        match &self.incoming_invoice {
+            CchInvoice::Fiber(invoice) => invoice.amount(),
+            CchInvoice::Lightning(invoice) => invoice
+                .amount_milli_satoshis()
+                .map(u128::from)
+                .map(|amount_msat| amount_msat.div_ceil(1_000)),
+        }
+        .unwrap_or(self.amount_sats)
+    }
+
+    /// Refresh `amount_sats` from the amount encoded in the incoming invoice when available.
+    pub fn normalize_amount_sats(&mut self) {
+        self.amount_sats = self.required_incoming_amount_sats();
+    }
+
     pub fn is_final(&self) -> bool {
         self.status == CchOrderStatus::Success || self.status == CchOrderStatus::Failed
     }
