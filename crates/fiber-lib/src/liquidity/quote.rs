@@ -1,6 +1,8 @@
-use fiber_types::{LiquidityAsset, LiquidityAssetKind};
+use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, Pubkey};
 
-use crate::liquidity::types::{loop_out_gross_payment_amount, LiquidityLoopOutError};
+use crate::liquidity::types::{
+    loop_out_gross_payment_amount, LiquidityLoopOutError, LoopOutQuoteTerms,
+};
 
 /// Quote values accepted for a Loop Out request after provider-side validation.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -84,10 +86,81 @@ pub fn validate_loop_out_quote_request(
     })
 }
 
+/// Compute the gross on-chain amount required for a Loop In swap.
+pub fn loop_in_gross_onchain_amount(
+    quote: &LoopOutQuoteTerms,
+) -> Result<u128, LiquidityLoopOutError> {
+    quote
+        .amount
+        .checked_add(quote.provider_fee)
+        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
+}
+
+/// Build quote terms for a Loop In request after provider-side validation.
+pub fn build_loop_in_quote_terms(
+    quote_id: Hash256,
+    provider: Pubkey,
+    asset: &LiquidityAsset,
+    amount: u128,
+    requested_udt_type_script: Option<&ckb_jsonrpc_types::Script>,
+    client_invoice: String,
+    expires_at: u64,
+    onchain_fee_estimate_ckb: u64,
+) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
+    if !asset.enabled {
+        return Err(LiquidityLoopOutError::AssetDisabled(asset.asset_id.clone()));
+    }
+
+    if amount < asset.min_amount || amount > asset.max_amount {
+        return Err(LiquidityLoopOutError::AmountOutOfRange {
+            amount,
+            min: asset.min_amount,
+            max: asset.max_amount,
+        });
+    }
+
+    let expected_udt_type_script = match asset.kind {
+        LiquidityAssetKind::Ckb => None,
+        LiquidityAssetKind::Udt => asset.udt_type_script.as_ref(),
+    };
+    if expected_udt_type_script != requested_udt_type_script {
+        return Err(LiquidityLoopOutError::UdtTypeMismatch);
+    }
+
+    let provider_fee = compute_provider_fee(asset, amount)?;
+    let payment_hash = Hash256::from(ckb_hash::blake2b_256(client_invoice.as_bytes()));
+    let quote = LoopOutQuoteTerms {
+        quote_id,
+        provider,
+        asset: asset.clone(),
+        amount,
+        provider_fee,
+        routing_fee_limit: 0,
+        onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: 0,
+        payment_hash,
+        expires_at,
+        payout_deadline: expires_at,
+        refund_after_lock_time: expires_at,
+        claimant_lock: Default::default(),
+        refund_lock: Default::default(),
+    };
+
+    let gross_amount = loop_in_gross_onchain_amount(&quote)?;
+    if gross_amount > asset.available_capacity {
+        return Err(LiquidityLoopOutError::CapacityTooLow {
+            available: asset.available_capacity,
+            required: gross_amount,
+        });
+    }
+
+    Ok(quote)
+}
+
 #[cfg(test)]
 mod tests {
     use ckb_jsonrpc_types::Script;
-    use fiber_types::{LiquidityAsset, LiquidityAssetKind};
+    use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, Pubkey};
 
     use super::*;
 
@@ -229,5 +302,72 @@ mod tests {
             compute_provider_fee(&asset, u128::MAX),
             Err(crate::liquidity::types::LiquidityLoopOutError::GrossAmountOverflow)
         ));
+    }
+
+    #[test]
+    fn loop_in_quote_uses_gross_onchain_amount_for_capacity_checks() {
+        let mut asset = ckb_asset(true);
+        asset.available_capacity = 1_050;
+        asset.proportional_fee_ppm = 0;
+
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &asset,
+            1_000,
+            None,
+            "invoice:hash".to_string(),
+            60_000,
+            1,
+        )
+        .expect("loop in quote should fit gross amount");
+
+        assert_eq!(quote.amount, 1_000);
+        assert_eq!(quote.provider_fee, asset.base_fee);
+        assert_eq!(
+            loop_in_gross_onchain_amount(&quote).unwrap(),
+            1_000 + asset.base_fee
+        );
+        assert_eq!(quote.payout_deadline, quote.expires_at);
+    }
+
+    #[test]
+    fn loop_in_quote_rejects_gross_amount_overflow_and_capacity_shortfall() {
+        let mut asset = ckb_asset(true);
+        asset.max_amount = u128::MAX;
+        asset.available_capacity = u128::MAX;
+        asset.base_fee = 2;
+        asset.proportional_fee_ppm = 0;
+
+        let overflow = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &asset,
+            u128::MAX,
+            None,
+            "invoice:hash".to_string(),
+            60_000,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            overflow,
+            crate::liquidity::types::LiquidityLoopOutError::GrossAmountOverflow
+        ));
+
+        asset.max_amount = 1_000;
+        asset.available_capacity = 1_001;
+        let shortfall = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &asset,
+            1_000,
+            None,
+            "invoice:hash".to_string(),
+            60_000,
+            1,
+        )
+        .unwrap_err();
+        assert!(shortfall.to_string().contains("capacity"));
     }
 }
