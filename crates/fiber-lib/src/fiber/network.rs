@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use strum::AsRefStr;
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::service::SessionType;
@@ -92,6 +92,7 @@ use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
     SendPaymentDataBuilder, SendPaymentWithRouterCommand,
 };
+use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
 use crate::fiber::types::{
     pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
     TxSignatures,
@@ -105,7 +106,7 @@ use crate::invoice::{
     SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
-use crate::{now_timestamp_as_millis_u64, unwrap_or_return, Error};
+use crate::{now_timestamp_as_millis_u64, Error};
 use fiber_types::protocol::AnnouncedNodeName;
 pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
@@ -211,6 +212,59 @@ const FUNDING_RETRY_MAX_MILLIS: u64 = 60_000;
 /// rapidly reconnects/reestablishes.
 const CHANNEL_READY_RETRY_DEBOUNCE_MS: u64 = 60_000;
 
+/// An owned permit for one inbound Fiber frame admitted into the NetworkActor.
+///
+/// The permit keeps the frame's message and byte capacity occupied while it is queued or being
+/// processed. Dropping it returns that capacity to the global Fiber ingress budget.
+pub struct FiberIngressPermit {
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
+    bytes: u64,
+}
+
+impl fmt::Debug for FiberIngressPermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FiberIngressPermit")
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for FiberIngressPermit {
+    fn drop(&mut self) {
+        match self.peer_message_policy.lock() {
+            Ok(mut policy) => policy.release_ingress(self.bytes),
+            Err(poisoned) => poisoned.into_inner().release_ingress(self.bytes),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum InboundFiberAdmission {
+    Admitted(FiberIngressPermit),
+    Disconnect,
+    Ban,
+}
+
+fn admit_inbound_fiber_message(
+    peer_message_policy: &Arc<StdMutex<PeerMessagePolicy>>,
+    peer: &Pubkey,
+    bytes: u64,
+    now_ms: u64,
+) -> InboundFiberAdmission {
+    let decision = peer_message_policy
+        .lock()
+        .expect("peer message policy lock")
+        .admit(peer, bytes, now_ms);
+    match decision {
+        PeerMessageAdmission::Allow => InboundFiberAdmission::Admitted(FiberIngressPermit {
+            peer_message_policy: peer_message_policy.clone(),
+            bytes,
+        }),
+        PeerMessageAdmission::Disconnect => InboundFiberAdmission::Disconnect,
+        PeerMessageAdmission::Ban => InboundFiberAdmission::Ban,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelReadyRetryScanDecision {
     ScanNow,
@@ -268,6 +322,60 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expect_admitted(admission: InboundFiberAdmission) -> FiberIngressPermit {
+        match admission {
+            InboundFiberAdmission::Admitted(permit) => permit,
+            other => panic!("expected admitted Fiber message, got {other:?}"),
+        }
+    }
+
+    fn test_peer_message_policy(
+        max_entries: usize,
+        max_in_flight_messages: u32,
+        max_in_flight_bytes: u64,
+    ) -> Arc<StdMutex<PeerMessagePolicy>> {
+        Arc::new(StdMutex::new(PeerMessagePolicy::with_limits(
+            max_entries,
+            max_in_flight_messages,
+            max_in_flight_bytes,
+        )))
+    }
+
+    #[test]
+    fn fiber_ingress_permit_releases_after_malformed_message() {
+        let peer = Privkey::from_slice(&[11u8; 32]).pubkey();
+        let policy = test_peer_message_policy(8, 1, 100);
+
+        let permit = expect_admitted(admit_inbound_fiber_message(&policy, &peer, 1, 0));
+        assert!(FiberMessage::from_molecule_slice(&[0xff]).is_err());
+        drop(permit);
+        assert_eq!(
+            policy.lock().expect("peer message policy lock").in_flight(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn fiber_ingress_permit_releases_when_actor_send_drops_message() {
+        let peer = Privkey::from_slice(&[15u8; 32]).pubkey();
+        let policy = test_peer_message_policy(8, 1, 100);
+        let permit = expect_admitted(admit_inbound_fiber_message(&policy, &peer, 1, 0));
+        let message = NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
+            peer,
+            FiberMessage::init(Init {
+                features: FeatureVector::default(),
+                chain_hash: get_chain_hash(),
+            }),
+            Some(permit),
+        ));
+
+        drop(message);
+        assert_eq!(
+            policy.lock().expect("peer message policy lock").in_flight(),
+            (0, 0)
+        );
+    }
 
     #[test]
     fn channel_ready_retry_debounce_coalesces_pending_trailing_scan() {
@@ -601,6 +709,8 @@ pub enum PeerDisconnectReason {
     InitMessageTimeout,
     /// Chain hash mismatch.
     ChainHashMismatch,
+    /// Duplicate Init message.
+    DuplicateInitMessage,
     /// Gossip peer temporarily banned.
     Banned,
 }
@@ -1079,7 +1189,10 @@ pub enum NetworkActorEvent {
     /// Network events to be processed by this actor.
     PeerConnected(Pubkey, SessionContext),
     PeerDisconnected(Pubkey, SessionContext),
-    FiberMessage(Pubkey, FiberMessage),
+    /// A Fiber protocol message from a peer. Network ingress messages carry a permit that keeps
+    /// their global queue capacity occupied until handling completes; internally injected
+    /// messages do not need one.
+    FiberMessage(Pubkey, FiberMessage, Option<FiberIngressPermit>),
 
     // Some gossip messages have been updated in the gossip message store.
     // Normally we need to propagate these messages to the network graph.
@@ -1529,11 +1642,17 @@ where
                 }
 
                 if !found {
-                    error!(
-                        "Received a channel message for a channel that is not created with peer: {:?}",
-                        channel_id
+                    let banned = state.record_invalid_peer_message(peer_pubkey);
+                    debug!(
+                        peer = format!("{peer_pubkey:?}"),
+                        channel = format!("{channel_id:?}"),
+                        banned,
+                        "Dropping peer message for a channel not associated with the peer"
                     );
-                    return Err(Error::ChannelNotFound(channel_id));
+                    if banned {
+                        state.disconnect_peer_for_message_policy(peer_pubkey).await;
+                    }
+                    return Ok(());
                 }
                 state
                     .send_message_to_channel_actor(
@@ -1686,9 +1805,12 @@ where
                     )
                 );
             }
-            NetworkActorEvent::FiberMessage(pubkey, message) => {
-                self.handle_peer_message(myself, state, pubkey, message)
-                    .await?
+            NetworkActorEvent::FiberMessage(pubkey, message, ingress_permit) => {
+                let result = self
+                    .handle_peer_message(myself, state, pubkey, message)
+                    .await;
+                drop(ingress_permit);
+                result?;
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
                 // Advance the opening record to FundingTxBroadcasted.
@@ -4741,6 +4863,7 @@ pub struct NetworkActorState<S, C> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
     // Cancellation token for the onion service background task.
     #[cfg(not(target_arch = "wasm32"))]
     onion_service_token: Option<tokio_util::sync::CancellationToken>,
@@ -6191,6 +6314,10 @@ where
         }
 
         self.peer_session_map.remove(&pubkey);
+        self.peer_message_policy
+            .lock()
+            .expect("peer message policy lock")
+            .on_disconnected(&pubkey, now_timestamp_as_millis_u64());
         if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
             for channel_id in channel_ids {
                 if let Some(channel) = self.channels.get(&channel_id) {
@@ -6225,6 +6352,37 @@ where
             return;
         }
         self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
+    }
+
+    fn record_invalid_peer_message(&self, pubkey: Pubkey) -> bool {
+        self.peer_message_policy
+            .lock()
+            .expect("peer message policy lock")
+            .record_invalid(&pubkey, now_timestamp_as_millis_u64())
+    }
+
+    async fn disconnect_peer_for_message_policy(&mut self, pubkey: Pubkey) {
+        let Some(session_id) = self
+            .peer_session_map
+            .get(&pubkey)
+            .map(|peer| peer.session_id)
+        else {
+            return;
+        };
+
+        warn!(
+            peer = format!("{pubkey:?}"),
+            session = format!("{session_id:?}"),
+            "Temporarily banning peer after repeated invalid Fiber messages"
+        );
+        if let Err(err) = self.control.disconnect(session_id).await {
+            error!(
+                peer = format!("{pubkey:?}"),
+                session = format!("{session_id:?}"),
+                %err,
+                "Failed to disconnect peer banned by Fiber message policy"
+            );
+        }
     }
 
     pub(crate) fn get_peer_addresses_by_pubkey(&self, pubkey: &Pubkey) -> HashSet<Multiaddr> {
@@ -6443,11 +6601,27 @@ where
         peer_pubkey: Pubkey,
         init_msg: Init,
     ) -> ProcessingChannelResult {
-        if !self.peer_session_map.contains_key(&peer_pubkey) {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Peer {:?} is not connected",
-                &peer_pubkey
-            )));
+        match self.peer_session_map.get(&peer_pubkey) {
+            None => {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} is not connected",
+                    &peer_pubkey
+                )));
+            }
+            Some(info) if info.features.is_some() => {
+                warn!("Peer {peer_pubkey:?} sent a duplicate Init message, disconnecting");
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::DisconnectPeer(
+                            peer_pubkey,
+                            PeerDisconnectReason::DuplicateInitMessage,
+                            None,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                return Ok(());
+            }
+            Some(_) => {}
         }
 
         check_chain_hash(&init_msg.chain_hash).map_err(|e| {
@@ -6714,7 +6888,6 @@ where
     ) {
         match self.channels.get(&channel_id) {
             None => match (message, peer_pubkey) {
-                // TODO: ban the adversary who constantly send messages related to non-existing channels.
                 (
                     ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannel(r)),
                     Some(remote_pubkey),
@@ -6740,7 +6913,7 @@ where
                     }
                 }
                 (message, _) => {
-                    error!(
+                    debug!(
                         "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
                         &channel_id, &message,
                     );
@@ -6831,7 +7004,8 @@ where
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let handle = NetworkServiceHandle::new(myself.clone());
+        let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new()));
+        let handle = NetworkServiceHandle::new(myself.clone(), peer_message_policy.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let peer_channel_index = PeerChannelIndex::build(&self.store);
 
@@ -7087,6 +7261,7 @@ where
             default_shutdown_script,
             network: myself.clone(),
             control,
+            peer_message_policy,
             #[cfg(not(target_arch = "wasm32"))]
             onion_service_token,
             peer_session_map: Default::default(),
@@ -7284,6 +7459,7 @@ where
 #[derive(Clone, Debug)]
 struct FiberProtocolHandle {
     actor: ActorRef<NetworkActorMessage>,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
 }
 
 impl FiberProtocolHandle {
@@ -7312,10 +7488,31 @@ impl ServiceProtocol for FiberProtocolHandle {
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, _version: &str) {
         let _session = context.session;
         if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
+            let pubkey = super::types::pubkey_from_tentacle(remote_pubkey);
+            let banned = self
+                .peer_message_policy
+                .lock()
+                .expect("peer message policy lock")
+                .is_banned(&pubkey, now_timestamp_as_millis_u64());
+            if banned {
+                debug!(
+                    peer = format!("{pubkey:?}"),
+                    session = format!("{:?}", context.session.id),
+                    "Disconnecting peer while its Fiber message ban is active"
+                );
+                if let Err(err) = context.disconnect(context.session.id).await {
+                    error!(
+                        peer = format!("{pubkey:?}"),
+                        %err,
+                        "Failed to disconnect peer with active Fiber message ban"
+                    );
+                }
+                return;
+            }
             try_send_actor_message(
                 &self.actor,
                 NetworkActorMessage::new_event(NetworkActorEvent::PeerConnected(
-                    super::types::pubkey_from_tentacle(remote_pubkey),
+                    pubkey,
                     context.session.clone(),
                 )),
             );
@@ -7345,24 +7542,87 @@ impl ServiceProtocol for FiberProtocolHandle {
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        let msg = unwrap_or_return!(FiberMessage::from_molecule_slice(&data), "parse message");
-        match context.session.remote_pubkey.as_ref() {
-            Some(pubkey) => {
-                try_send_actor_message(
-                    &self.actor,
-                    NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
-                        super::types::pubkey_from_tentacle(pubkey.clone()),
-                        msg,
-                    )),
-                );
-            }
-            None => {
+        let Some(remote_pubkey) = context.session.remote_pubkey.clone() else {
+            debug!(
+                "Received message without remote pubkey {:?}",
+                context.session
+            );
+            return;
+        };
+        let pubkey = super::types::pubkey_from_tentacle(remote_pubkey);
+        let now_ms = now_timestamp_as_millis_u64();
+        let admission = admit_inbound_fiber_message(
+            &self.peer_message_policy,
+            &pubkey,
+            data.len() as u64,
+            now_ms,
+        );
+        let permit = match admission {
+            InboundFiberAdmission::Admitted(permit) => permit,
+            InboundFiberAdmission::Disconnect => {
                 debug!(
-                    "Received message without remote pubkey {:?}",
-                    context.session
+                    peer = format!("{pubkey:?}"),
+                    "Disconnecting Fiber peer after ingress admission overflow"
                 );
+                if let Err(err) = context.disconnect(context.session.id).await {
+                    error!(
+                        peer = format!("{pubkey:?}"),
+                        %err,
+                        "Failed to disconnect Fiber peer after ingress admission overflow"
+                    );
+                }
+                return;
             }
-        }
+            InboundFiberAdmission::Ban => {
+                debug!(
+                    peer = format!("{pubkey:?}"),
+                    "Disconnecting peer after repeated Fiber message rate-limit violations"
+                );
+                if let Err(err) = context.disconnect(context.session.id).await {
+                    error!(
+                        peer = format!("{pubkey:?}"),
+                        %err,
+                        "Failed to disconnect rate-limited Fiber peer"
+                    );
+                }
+                return;
+            }
+        };
+
+        let msg = match FiberMessage::from_molecule_slice(&data) {
+            Ok(msg) => msg,
+            Err(err) => {
+                let banned = self
+                    .peer_message_policy
+                    .lock()
+                    .expect("peer message policy lock")
+                    .record_invalid(&pubkey, now_ms);
+                debug!(
+                    peer = format!("{pubkey:?}"),
+                    %err,
+                    banned,
+                    "Dropping malformed Fiber message"
+                );
+                if banned {
+                    if let Err(disconnect_err) = context.disconnect(context.session.id).await {
+                        error!(
+                            peer = format!("{pubkey:?}"),
+                            %disconnect_err,
+                            "Failed to disconnect peer sending malformed Fiber messages"
+                        );
+                    }
+                }
+                return;
+            }
+        };
+        try_send_actor_message(
+            &self.actor,
+            NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
+                pubkey,
+                msg,
+                Some(permit),
+            )),
+        );
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
@@ -7371,11 +7631,18 @@ impl ServiceProtocol for FiberProtocolHandle {
 #[derive(Clone, Debug)]
 struct NetworkServiceHandle {
     actor: ActorRef<NetworkActorMessage>,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
 }
 
 impl NetworkServiceHandle {
-    fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
-        NetworkServiceHandle { actor }
+    fn new(
+        actor: ActorRef<NetworkActorMessage>,
+        peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
+    ) -> Self {
+        NetworkServiceHandle {
+            actor,
+            peer_message_policy,
+        }
     }
 }
 
@@ -7383,6 +7650,7 @@ impl From<&NetworkServiceHandle> for FiberProtocolHandle {
     fn from(handle: &NetworkServiceHandle) -> Self {
         FiberProtocolHandle {
             actor: handle.actor.clone(),
+            peer_message_policy: handle.peer_message_policy.clone(),
         }
     }
 }

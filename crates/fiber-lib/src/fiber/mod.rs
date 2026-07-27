@@ -17,6 +17,7 @@ pub(crate) mod onchain_tlc_reconcile;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod onion_service;
 mod path;
+mod peer_message_policy;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod proxy;
 mod settle_tlc_set_command;

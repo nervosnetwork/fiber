@@ -502,7 +502,7 @@ pub(crate) struct DiscreteTokenBucket {
 }
 
 impl DiscreteTokenBucket {
-    fn new(interval_ms: u64, capacity: u32) -> Self {
+    pub(crate) fn new(interval_ms: u64, capacity: u32) -> Self {
         Self {
             interval_ms,
             capacity,
@@ -528,7 +528,7 @@ impl DiscreteTokenBucket {
             .saturating_add(u64::from(refill) * self.interval_ms);
     }
 
-    fn try_consume(&mut self, now_ms: u64) -> bool {
+    pub(crate) fn try_consume(&mut self, now_ms: u64) -> bool {
         self.refill(now_ms);
         if self.available == 0 {
             return false;
