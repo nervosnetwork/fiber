@@ -63,6 +63,8 @@ pub struct SessionRoute {
 pub struct GetPaymentCommandResult {
     /// The payment hash of the payment
     pub payment_hash: Hash256,
+    /// The preimage learned from a successful payment attempt.
+    pub payment_preimage: Option<Hash256>,
     /// The status of the payment
     pub status: PaymentStatus,
     #[serde_as(as = "U64Hex")]

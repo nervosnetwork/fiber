@@ -29,6 +29,7 @@ jobs:
           - watchtower/force-close-after-multiple-payments
           - watchtower/force-close-after-open-channel
           - watchtower/force-close-preimage
+          - watchtower/force-close-mpp
           - watchtower/force-close-preimage-multiple
           - watchtower/force-close-remote-with-pending-tlcs-and-stop-watchtower
           - watchtower/force-close-remote-without-pending-tlcs-and-stop-watchtower

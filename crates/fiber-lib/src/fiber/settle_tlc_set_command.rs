@@ -1,6 +1,10 @@
 use crate::{
-    fiber::channel::{ChannelActorStateStore, RemoveTlcCommand},
+    fiber::{
+        channel::{ChannelActorStateStore, RemoveTlcCommand},
+        onchain_tlc_reconcile::onchain_fulfilled_preimage,
+    },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore, PreimageStore},
+    utils::payment::is_invoice_fulfilled,
 };
 use fiber_types::{
     Hash256, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
@@ -11,6 +15,11 @@ pub struct SettleTlcSetCommand<'s, S> {
     is_hold_tlc_set: bool,
     allow_received_invoice: bool,
     tlcs: Vec<TlcSettlementContext>,
+    store: &'s S,
+}
+
+pub struct SettleOnChainFulfilledInvoiceCommand<'s, S> {
+    payment_hash: Hash256,
     store: &'s S,
 }
 
@@ -340,6 +349,82 @@ where
                 .expect("update invoice status failed");
         }
     }
+}
+
+impl<'s, S> SettleOnChainFulfilledInvoiceCommand<'s, S>
+where
+    S: InvoiceStore + ChannelActorStateStore,
+{
+    pub fn new(payment_hash: Hash256, store: &'s S) -> Self {
+        Self {
+            payment_hash,
+            store,
+        }
+    }
+
+    pub fn run(self) -> bool {
+        let Some(invoice) = self.store.get_invoice(&self.payment_hash) else {
+            return false;
+        };
+        if self.store.get_invoice_status(&self.payment_hash) == Some(CkbInvoiceStatus::Paid) {
+            return false;
+        }
+
+        let fulfilled_received_tlcs =
+            collect_onchain_fulfilled_received_tlcs(self.store, self.payment_hash);
+        if invoice.allow_mpp()
+            && fulfilled_received_tlcs.len() > 1
+            && !fulfilled_received_tlcs
+                .windows(2)
+                .all(|w| w[0].total_amount == w[1].total_amount)
+        {
+            tracing::error!(
+                "On-chain fulfilled TLCs have inconsistent total_amount for payment hash {}",
+                self.payment_hash
+            );
+            return false;
+        }
+
+        if is_invoice_fulfilled(&invoice, fulfilled_received_tlcs.iter()) {
+            self.store
+                .update_invoice_status(&self.payment_hash, CkbInvoiceStatus::Paid)
+                .expect("update invoice status failed");
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn collect_onchain_fulfilled_received_tlcs(
+    store: &impl ChannelActorStateStore,
+    payment_hash: Hash256,
+) -> Vec<TlcInfo> {
+    store
+        .get_channel_states(None)
+        .into_iter()
+        .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
+        .flat_map(|state| {
+            let channel_id = state.get_id();
+            state
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .clone()
+                .into_iter()
+                .map(move |tlc| (channel_id, tlc))
+        })
+        .filter_map(|(channel_id, tlc)| {
+            if tlc.payment_hash != payment_hash {
+                return None;
+            }
+            let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+                return None;
+            };
+            let preimage = onchain_fulfilled_preimage(&channel_id, store, &tlc)?;
+            (preimage == fulfill.payment_preimage).then_some(tlc)
+        })
+        .collect()
 }
 
 fn make_sttlement_context<S: ChannelActorStateStore>(

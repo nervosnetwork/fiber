@@ -1,0 +1,35 @@
+meta {
+  name: Node1 sends MPP payment
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "invoice": "{{MPP_INVOICE}}",
+        "max_parts": "0x2"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.payment_hash: eq "{{PAYMENT_HASH}}"
+}

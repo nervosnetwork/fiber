@@ -1,0 +1,59 @@
+meta {
+  name: wait forwarder part LocalRemoved
+  type: http
+  seq: 23
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}",
+        "include_closed": true
+      }
+    ]
+  }
+}
+
+vars:post-response {
+  LOCAL_REMOVED_MAX_ITERATIONS: 60
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const channelId = bru.getVar("FORCE_CLOSED_CHANNEL");
+  const paymentHash = bru.getVar("PAYMENT_HASH");
+  const channel = res.body.result.channels.find(channel => channel.channel_id === channelId);
+  const tlc = channel?.pending_tlcs.find(tlc => tlc.payment_hash === paymentHash);
+  const iteration = Number(bru.getVar("LOCAL_REMOVED_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("LOCAL_REMOVED_MAX_ITERATIONS"));
+
+  if (tlc?.status?.Inbound === "LocalRemoved") {
+    bru.setVar("LOCAL_REMOVED_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("LOCAL_REMOVED_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait forwarder part LocalRemoved");
+    return;
+  }
+  throw new Error(`forwarder part did not reach LocalRemoved, status=${JSON.stringify(tlc?.status)}`);
+}
