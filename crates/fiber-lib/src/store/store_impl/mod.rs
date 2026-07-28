@@ -614,7 +614,7 @@ impl Store {
         .concat()
     }
 
-    fn tlc_on_chain_settled_key(channel_id: &Hash256, tlc_id: TLCId) -> Vec<u8> {
+    fn tlc_on_chain_settled_key(node_id: &NodeId, channel_id: &Hash256, tlc_id: TLCId) -> Vec<u8> {
         let (direction, id) = match tlc_id {
             TLCId::Offered(id) => (0u8, id),
             TLCId::Received(id) => (1u8, id),
@@ -622,8 +622,9 @@ impl Store {
         [
             &[WATCHTOWER_TLC_SETTLED_PREFIX],
             channel_id.as_ref(),
-            &[1u8, direction],
+            &[2u8, direction],
             &id.to_be_bytes(),
+            node_id.as_ref(),
         ]
         .concat()
     }
@@ -683,6 +684,7 @@ impl Store {
 
     fn watch_channel_needs_preimage(
         &self,
+        node_id: &NodeId,
         channel_data: &ChannelData,
         payment_hash: &Hash256,
     ) -> bool {
@@ -709,6 +711,7 @@ impl Store {
                 };
                 let is_exactly_settled = self
                     .get(Self::tlc_on_chain_settled_key(
+                        node_id,
                         &channel_data.channel_id,
                         tlc_id,
                     ))
@@ -762,7 +765,9 @@ impl Store {
     fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
         self.watch_channels_for_node(node_id)
             .iter()
-            .any(|channel_data| self.watch_channel_needs_preimage(channel_data, payment_hash))
+            .any(|channel_data| {
+                self.watch_channel_needs_preimage(node_id, channel_data, payment_hash)
+            })
     }
 
     fn watch_preimage_entries(&self, node_id: Option<&NodeId>) -> Vec<(NodeId, Hash256)> {
@@ -1050,7 +1055,13 @@ impl ChannelActorStateStore for Store {
     ) -> Option<StoredOnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
-            WatchtowerStore::get_onchain_tlc_settlement(self, channel_id, tlc_id, payment_hash)
+            WatchtowerStore::get_onchain_tlc_settlement(
+                self,
+                &NodeId::local(),
+                channel_id,
+                tlc_id,
+                payment_hash,
+            )
         }
         #[cfg(not(feature = "watchtower"))]
         {
@@ -1678,11 +1689,12 @@ impl WatchtowerStore for Store {
 
     fn insert_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     ) {
-        let key = Self::tlc_on_chain_settled_key(channel_id, tlc_id);
+        let key = Self::tlc_on_chain_settled_key(node_id, channel_id, tlc_id);
         if settlement.preimage.is_none() {
             if let Some(existing) = self.get(&key) {
                 let existing: OnChainTlcSettlement =
@@ -1706,11 +1718,13 @@ impl WatchtowerStore for Store {
 
     fn get_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,
     ) -> Option<StoredOnChainTlcSettlement> {
-        if let Some(value) = self.get(Store::tlc_on_chain_settled_key(channel_id, tlc_id)) {
+        if let Some(value) = self.get(Store::tlc_on_chain_settled_key(node_id, channel_id, tlc_id))
+        {
             return Some(StoredOnChainTlcSettlement::Exact(deserialize_from(
                 value.as_ref(),
                 "OnChainTlcSettlement",

@@ -3631,6 +3631,7 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
         .await;
 
     node_1.store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         &channels[1],
         TLCId::Offered(downstream_tlc.id()),
         OnChainTlcSettlement {

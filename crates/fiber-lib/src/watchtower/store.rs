@@ -76,6 +76,7 @@ pub trait WatchtowerStore {
     /// were observed in that witness.
     fn insert_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
@@ -84,6 +85,7 @@ pub trait WatchtowerStore {
     /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
     fn get_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
         tlc_id: TLCId,
         payment_hash: &Hash256,

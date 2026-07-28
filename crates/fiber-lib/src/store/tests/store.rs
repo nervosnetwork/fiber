@@ -564,6 +564,7 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
     );
 
     store.insert_onchain_tlc_settlement(
+        &node_id,
         &channel_id,
         TLCId::Offered(0),
         OnChainTlcSettlement {
@@ -627,6 +628,7 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
     store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
 
     store.insert_onchain_tlc_settlement(
+        &node_id,
         &channel_id,
         TLCId::Offered(0),
         OnChainTlcSettlement {
@@ -642,6 +644,69 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         store.get_watch_preimage(&node_id, &payment_hash),
         Some(preimage),
         "the sibling TLC with the same payment hash still needs the preimage"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
+    let path = TempDir::new("test-watchtower-preimage-gc-tenant-scope");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 42,
+            payment_hash,
+            expiry: now_timestamp_as_millis_u64() + 60_000,
+            local_key: Privkey::from(&[5; 32]),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
+
+    for node_id in [&node_id_a, &node_id_b] {
+        store.insert_watch_channel(
+            node_id.clone(),
+            channel_id,
+            None,
+            Privkey::from(&[1; 32]),
+            Privkey::from(&[2; 32]).pubkey(),
+            Privkey::from(&[3; 32]).pubkey(),
+            Privkey::from(&[4; 32]).pubkey(),
+            settlement_data.clone(),
+        );
+        store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
+    }
+
+    // This settlement belongs to node A's watched channel. Node B still needs its independently
+    // scoped preimage for a TLC with the same endpoint-local identity and complete payment hash.
+    store.insert_onchain_tlc_settlement(
+        &node_id_a,
+        &channel_id,
+        TLCId::Offered(0),
+        OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: None,
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
+        },
+    );
+
+    assert_eq!(store.get_watch_preimage(&node_id_a, &payment_hash), None);
+    assert_eq!(
+        store.get_watch_preimage(&node_id_b, &payment_hash),
+        Some(preimage),
+        "one tenant's settlement must not garbage-collect another tenant's preimage"
     );
 }
 
@@ -711,9 +776,16 @@ fn test_onchain_tlc_settlement_roundtrip() {
     let other_channel_id = Hash256::from([2u8; 32]);
     let payment_hash = Hash256::from([3u8; 32]);
     let tlc_id = TLCId::Received(42);
+    let node_id = NodeId::local();
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
         None
     );
 
@@ -724,15 +796,22 @@ fn test_onchain_tlc_settlement_roundtrip() {
         tx_hash: Hash256::from([7u8; 32]),
         tlc_index: 2,
     };
-    store.insert_onchain_tlc_settlement(&channel_id, tlc_id, settlement.clone());
+    store.insert_onchain_tlc_settlement(&node_id, &channel_id, tlc_id, settlement.clone());
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
         Some(StoredOnChainTlcSettlement::Exact(settlement))
     );
     assert_eq!(
         WatchtowerStore::get_onchain_tlc_settlement(
             &store,
+            &node_id,
             &other_channel_id,
             tlc_id,
             &payment_hash,
@@ -754,6 +833,7 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
     let second_hash = Hash256::from(second_hash_bytes);
     let first_id = TLCId::Offered(0);
     let second_id = TLCId::Offered(1);
+    let node_id = NodeId::local();
     let first = OnChainTlcSettlement {
         payment_hash: first_hash,
         hash_algorithm: HashAlgorithm::CkbHash,
@@ -769,15 +849,27 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
         tlc_index: 1,
     };
 
-    store.insert_onchain_tlc_settlement(&channel_id, first_id, first.clone());
-    store.insert_onchain_tlc_settlement(&channel_id, second_id, second.clone());
+    store.insert_onchain_tlc_settlement(&node_id, &channel_id, first_id, first.clone());
+    store.insert_onchain_tlc_settlement(&node_id, &channel_id, second_id, second.clone());
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, first_id, &first_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            first_id,
+            &first_hash,
+        ),
         Some(StoredOnChainTlcSettlement::Exact(first))
     );
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, second_id, &second_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            second_id,
+            &second_hash,
+        ),
         Some(StoredOnChainTlcSettlement::Exact(second))
     );
 }
@@ -791,6 +883,7 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
     let channel_id = Hash256::from([1u8; 32]);
     let payment_hash = Hash256::from([3u8; 32]);
     let tlc_id = TLCId::Offered(0);
+    let node_id = NodeId::local();
 
     let with_preimage = OnChainTlcSettlement {
         payment_hash,
@@ -799,8 +892,9 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
         tx_hash: Hash256::from([7u8; 32]),
         tlc_index: 0,
     };
-    store.insert_onchain_tlc_settlement(&channel_id, tlc_id, with_preimage.clone());
+    store.insert_onchain_tlc_settlement(&node_id, &channel_id, tlc_id, with_preimage.clone());
     store.insert_onchain_tlc_settlement(
+        &node_id,
         &channel_id,
         tlc_id,
         OnChainTlcSettlement {
@@ -813,8 +907,85 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
     );
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
         Some(StoredOnChainTlcSettlement::Exact(with_preimage))
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_onchain_tlc_settlements_are_isolated_between_watchtower_tenants() {
+    let path = TempDir::new("test-onchain-tlc-settlement-tenant-scope");
+    let store = open_store(path).expect("created store failed");
+    let channel_id = Hash256::from([1u8; 32]);
+    let payment_hash = Hash256::from([3u8; 32]);
+    let tlc_id = TLCId::Offered(0);
+    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
+    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
+
+    store.insert_onchain_tlc_settlement(
+        &node_id_a,
+        &channel_id,
+        tlc_id,
+        OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: Some(Hash256::from([9u8; 32])),
+            tx_hash: Hash256::from([7u8; 32]),
+            tlc_index: 0,
+        },
+    );
+    store.insert_onchain_tlc_settlement(
+        &node_id_b,
+        &channel_id,
+        tlc_id,
+        OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: None,
+            tx_hash: Hash256::from([8u8; 32]),
+            tlc_index: 0,
+        },
+    );
+
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id_a,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
+        Some(StoredOnChainTlcSettlement::Exact(OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: Some(Hash256::from([9u8; 32])),
+            tx_hash: Hash256::from([7u8; 32]),
+            tlc_index: 0,
+        }))
+    );
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id_b,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
+        Some(StoredOnChainTlcSettlement::Exact(OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: None,
+            tx_hash: Hash256::from([8u8; 32]),
+            tlc_index: 0,
+        }))
     );
 }
 
@@ -836,9 +1007,16 @@ fn test_onchain_tlc_settlement_legacy_empty_value() {
 
     store.put(key, []);
     let tlc_id = TLCId::Offered(0);
+    let node_id = NodeId::local();
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
         Some(StoredOnChainTlcSettlement::Legacy(
             LegacyOnChainTlcSettlement {
                 preimage: None,
@@ -855,9 +1033,15 @@ fn test_onchain_tlc_settlement_legacy_empty_value() {
         tx_hash: Hash256::from([7u8; 32]),
         tlc_index: 0,
     };
-    store.insert_onchain_tlc_settlement(&channel_id, tlc_id, exact.clone());
+    store.insert_onchain_tlc_settlement(&node_id, &channel_id, tlc_id, exact.clone());
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &node_id,
+            &channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
         Some(StoredOnChainTlcSettlement::Exact(exact)),
         "the unified lookup must prefer an exact record over the legacy prefix fallback"
     );

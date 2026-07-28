@@ -81,6 +81,7 @@ fn insert_onchain_preimage<S: WatchtowerStore + ChannelActorStateStore>(
         .expect("TLC with payment hash exists");
     store.insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, preimage);
     store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         channel_id,
         tlc.tlc_id,
         OnChainTlcSettlement {
@@ -5041,6 +5042,7 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
         .await;
 
     node_1.store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         &channels[1],
         TLCId::Offered(downstream_tlc.id()),
         OnChainTlcSettlement {
@@ -6909,6 +6911,7 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
         .await;
 
     node_1.store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         &channels[1],
         TLCId::Offered(downstream_tlc.id()),
         OnChainTlcSettlement {

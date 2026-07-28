@@ -1031,10 +1031,8 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
 
     let tx_hash: Hash256 = tx.calc_tx_hash().into();
     let mut settled_indices = HashSet::new();
-    let mut final_party_unlock = false;
     for unlock in settlement_witness.unlocks {
         if unlock.unlock_type >= 0xFE {
-            final_party_unlock = true;
             debug!(
                 "watchtower observed final party unlock 0x{:02x} for channel {:?} with {} pending TLCs tx {:?}",
                 unlock.unlock_type,
@@ -1077,6 +1075,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
             }
         }
         store.insert_onchain_tlc_settlement(
+            self_node_id,
             channel_id,
             tlc.tlc_id,
             OnChainTlcSettlement {
@@ -1087,26 +1086,6 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
                 tlc_index: unlock.unlock_type,
             },
         );
-    }
-
-    if final_party_unlock {
-        for (index, tlc) in tracked_tlcs.iter().enumerate() {
-            if settled_indices.contains(&index) {
-                continue;
-            }
-            store.insert_onchain_tlc_settlement(
-                channel_id,
-                tlc.tlc_id,
-                OnChainTlcSettlement {
-                    payment_hash: tlc.payment_hash,
-                    hash_algorithm: tlc.hash_algorithm,
-                    preimage: None,
-                    tx_hash,
-                    tlc_index: index as u8,
-                },
-            );
-        }
-        return Some(Vec::new());
     }
 
     Some(
@@ -2417,6 +2396,7 @@ mod tests {
 
         fn insert_onchain_tlc_settlement(
             &self,
+            _node_id: &NodeId,
             channel_id: &Hash256,
             tlc_id: TLCId,
             settlement: OnChainTlcSettlement,
@@ -2429,6 +2409,7 @@ mod tests {
 
         fn get_onchain_tlc_settlement(
             &self,
+            _node_id: &NodeId,
             channel_id: &Hash256,
             tlc_id: TLCId,
             _payment_hash: &Hash256,
@@ -2885,7 +2866,7 @@ mod tests {
     }
 
     #[test]
-    fn final_party_unlock_marks_pending_tlcs_without_preimage() {
+    fn final_party_unlock_keeps_pending_tlcs_tracked() {
         let lock_prefix = commitment_lock_prefix();
         let channel_id: Hash256 = [9u8; 32].into();
         let payment_hashes = [[41u8; 20], [42u8; 20]];
@@ -2915,39 +2896,71 @@ mod tests {
         );
 
         assert_eq!(processed, Some(0));
-        assert_eq!(
-            store.settled_tlcs(),
-            vec![
-                (channel_id, payment_hashes[0]),
-                (channel_id, payment_hashes[1])
-            ]
+        assert!(
+            store.settlements().is_empty(),
+            "a party-balance unlock is not a settlement proof for any pending TLC"
         );
         assert_eq!(
-            store.settlements(),
-            vec![
-                (
-                    channel_id,
-                    TLCId::Offered(0),
-                    OnChainTlcSettlement {
-                        payment_hash: tracked[0].payment_hash,
-                        hash_algorithm: HashAlgorithm::CkbHash,
+            watched_outpoints.get(&OutPoint::new(tx.calc_tx_hash(), 0)),
+            Some(&tracked.to_vec()),
+            "the successor witness still contains every pending TLC"
+        );
+    }
+
+    #[test]
+    fn final_party_unlock_only_removes_explicitly_unlocked_tlc() {
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let tx = tx_with_input_output_and_witness(
+            first_commitment_out_point.clone(),
+            settlement_lock(&lock_prefix),
+            Some(settlement_witness_with_unlocks(
+                &payment_hashes,
+                vec![
+                    Unlock {
+                        unlock_type: 0xFE,
+                        with_preimage: false,
+                        signature: [0u8; 65],
                         preimage: None,
-                        tx_hash: tx.calc_tx_hash().into(),
-                        tlc_index: 0,
                     },
-                ),
-                (
-                    channel_id,
-                    TLCId::Offered(1),
-                    OnChainTlcSettlement {
-                        payment_hash: tracked[1].payment_hash,
-                        hash_algorithm: HashAlgorithm::CkbHash,
+                    Unlock {
+                        unlock_type: 1,
+                        with_preimage: false,
+                        signature: [0u8; 65],
                         preimage: None,
-                        tx_hash: tx.calc_tx_hash().into(),
-                        tlc_index: 1,
                     },
-                ),
-            ]
+                ],
+            )),
+        );
+        let tracked = [
+            tracked_tlc(payment_hashes[0], 0),
+            tracked_tlc(payment_hashes[1], 1),
+        ];
+        let mut watched_outpoints = HashMap::from([(first_commitment_out_point, tracked.to_vec())]);
+        let mut processed_tx_hashes = HashSet::new();
+        let store = TestWatchtowerStore::default();
+
+        let processed = process_watched_settlement_tx(
+            &tx,
+            &mut watched_outpoints,
+            &mut processed_tx_hashes,
+            &lock_prefix,
+            &channel_id,
+            &store,
+            &NodeId::local(),
+        );
+
+        assert_eq!(processed, Some(0));
+        let settlements = store.settlements();
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0].1, TLCId::Offered(1));
+        assert_eq!(settlements[0].2.payment_hash, tracked[1].payment_hash);
+        assert_eq!(
+            watched_outpoints.get(&OutPoint::new(tx.calc_tx_hash(), 0)),
+            Some(&tracked[..1].to_vec()),
+            "only the explicitly index-unlocked TLC leaves the successor witness"
         );
     }
 
