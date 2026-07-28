@@ -3,7 +3,7 @@ use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
 use fiber_types::TLCId;
 use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
@@ -84,19 +84,13 @@ pub trait WatchtowerStore {
         settlement: OnChainTlcSettlement,
     );
 
-    /// Returns the channel-scoped on-chain settlement proof for a TLC, if any.
+    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
-    ) -> Option<OnChainTlcSettlement>;
-
-    /// Returns a prefix-keyed settlement record written by an older version.
-    fn get_legacy_onchain_tlc_settlement(
-        &self,
-        channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<LegacyOnChainTlcSettlement>;
+    ) -> Option<StoredOnChainTlcSettlement>;
 }
 
 /// Compute the x-only aggregated public key for a channel.

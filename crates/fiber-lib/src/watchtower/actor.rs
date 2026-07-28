@@ -2252,6 +2252,8 @@ mod tests {
 
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
 
+    use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
+
     use super::*;
 
     #[derive(Default)]
@@ -2366,22 +2368,16 @@ mod tests {
             &self,
             channel_id: &Hash256,
             tlc_id: TLCId,
-        ) -> Option<OnChainTlcSettlement> {
+            _payment_hash: &Hash256,
+        ) -> Option<StoredOnChainTlcSettlement> {
             self.settlements
                 .lock()
                 .expect("lock poisoned")
                 .iter()
                 .find_map(|(id, stored_tlc_id, settlement)| {
-                    (id == channel_id && *stored_tlc_id == tlc_id).then(|| settlement.clone())
+                    (id == channel_id && *stored_tlc_id == tlc_id)
+                        .then(|| StoredOnChainTlcSettlement::Exact(settlement.clone()))
                 })
-        }
-
-        fn get_legacy_onchain_tlc_settlement(
-            &self,
-            _channel_id: &Hash256,
-            _payment_hash: &Hash256,
-        ) -> Option<crate::fiber::onchain_tlc_reconcile::LegacyOnChainTlcSettlement> {
-            None
         }
     }
 

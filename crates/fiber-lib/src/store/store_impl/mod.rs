@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
+use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
+#[cfg(feature = "watchtower")]
 use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
@@ -702,14 +704,16 @@ impl Store {
                 deserialize_from::<OnChainTlcSettlement>(kv.value.as_ref(), "OnChainTlcSettlement")
             })
             .any(|settlement| &settlement.payment_hash == payment_hash);
-        if has_exact_settlement
-            || WatchtowerStore::get_legacy_onchain_tlc_settlement(
-                self,
+        let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
+            .try_into()
+            .expect("payment hash prefix");
+        let has_legacy_settlement = self
+            .get(Self::legacy_tlc_on_chain_settled_key(
                 &channel_data.channel_id,
-                payment_hash,
-            )
-            .is_some()
-        {
+                &payment_hash_prefix,
+            ))
+            .is_some();
+        if has_exact_settlement || has_legacy_settlement {
             return false;
         }
 
@@ -1025,30 +1029,15 @@ impl ChannelActorStateStore for Store {
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
-    ) -> Option<OnChainTlcSettlement> {
-        #[cfg(feature = "watchtower")]
-        {
-            WatchtowerStore::get_onchain_tlc_settlement(self, channel_id, tlc_id)
-        }
-        #[cfg(not(feature = "watchtower"))]
-        {
-            let _ = (channel_id, tlc_id);
-            None
-        }
-    }
-
-    fn get_legacy_onchain_tlc_settlement(
-        &self,
-        channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<LegacyOnChainTlcSettlement> {
+    ) -> Option<StoredOnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
-            WatchtowerStore::get_legacy_onchain_tlc_settlement(self, channel_id, payment_hash)
+            WatchtowerStore::get_onchain_tlc_settlement(self, channel_id, tlc_id, payment_hash)
         }
         #[cfg(not(feature = "watchtower"))]
         {
-            let _ = (channel_id, payment_hash);
+            let _ = (channel_id, tlc_id, payment_hash);
             None
         }
     }
@@ -1717,16 +1706,15 @@ impl WatchtowerStore for Store {
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
-    ) -> Option<OnChainTlcSettlement> {
-        self.get(Store::tlc_on_chain_settled_key(channel_id, tlc_id))
-            .map(|value| deserialize_from(value.as_ref(), "OnChainTlcSettlement"))
-    }
-
-    fn get_legacy_onchain_tlc_settlement(
-        &self,
-        channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<LegacyOnChainTlcSettlement> {
+    ) -> Option<StoredOnChainTlcSettlement> {
+        if let Some(value) = self.get(Store::tlc_on_chain_settled_key(channel_id, tlc_id)) {
+            return Some(StoredOnChainTlcSettlement::Exact(deserialize_from(
+                value.as_ref(),
+                "OnChainTlcSettlement",
+            )));
+        }
+
         let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
             .try_into()
             .expect("payment hash prefix");
@@ -1735,16 +1723,18 @@ impl WatchtowerStore for Store {
             &payment_hash_prefix,
         ))?;
         if value.is_empty() {
-            return Some(LegacyOnChainTlcSettlement {
-                preimage: None,
-                tx_hash: None,
-                tlc_index: None,
-            });
+            return Some(StoredOnChainTlcSettlement::Legacy(
+                LegacyOnChainTlcSettlement {
+                    preimage: None,
+                    tx_hash: None,
+                    tlc_index: None,
+                },
+            ));
         }
-        Some(deserialize_from(
+        Some(StoredOnChainTlcSettlement::Legacy(deserialize_from(
             value.as_ref(),
             "LegacyOnChainTlcSettlement",
-        ))
+        )))
     }
 }
 

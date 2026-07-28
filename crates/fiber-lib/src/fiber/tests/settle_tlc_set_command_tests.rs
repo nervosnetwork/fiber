@@ -3,7 +3,9 @@
 use crate::fiber::channel::{
     has_pending_tlc_for_payment_hash, ChannelActorState, ChannelActorStateStore, CommitDiff,
 };
-use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::{
+    LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
+};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
@@ -282,18 +284,16 @@ impl ChannelActorStateStore for MockStore {
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
-    ) -> Option<OnChainTlcSettlement> {
-        self.onchain_settlements
+        payment_hash: &Hash256,
+    ) -> Option<StoredOnChainTlcSettlement> {
+        if let Some(settlement) = self
+            .onchain_settlements
             .borrow()
             .get(&(*channel_id, tlc_id))
             .cloned()
-    }
-
-    fn get_legacy_onchain_tlc_settlement(
-        &self,
-        channel_id: &Hash256,
-        payment_hash: &Hash256,
-    ) -> Option<LegacyOnChainTlcSettlement> {
+        {
+            return Some(StoredOnChainTlcSettlement::Exact(settlement));
+        }
         let prefix = payment_hash.as_ref()[..20]
             .try_into()
             .expect("payment hash prefix");
@@ -301,6 +301,7 @@ impl ChannelActorStateStore for MockStore {
             .borrow()
             .get(&(*channel_id, prefix))
             .cloned()
+            .map(StoredOnChainTlcSettlement::Legacy)
     }
 
     fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {

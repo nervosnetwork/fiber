@@ -18,7 +18,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
-    OnChainTimeoutTlcRole, OnChainTlcSettlement,
+    OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -10187,18 +10187,13 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    /// Returns the channel-scoped confirmed on-chain settlement proof for this TLC.
+    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
-    ) -> Option<OnChainTlcSettlement>;
-    /// Returns a prefix-keyed settlement record written by an older version.
-    fn get_legacy_onchain_tlc_settlement(
-        &self,
-        channel_id: &Hash256,
         payment_hash: &Hash256,
-    ) -> Option<crate::fiber::onchain_tlc_reconcile::LegacyOnChainTlcSettlement>;
+    ) -> Option<StoredOnChainTlcSettlement>;
 
     /// Store a pending CommitDiff for channel reestablishment
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);

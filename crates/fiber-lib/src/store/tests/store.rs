@@ -2,7 +2,9 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
-use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::{
+    LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
+};
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
@@ -648,7 +650,7 @@ fn test_onchain_tlc_settlement_roundtrip() {
     let tlc_id = TLCId::Received(42);
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id),
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
         None
     );
 
@@ -662,11 +664,16 @@ fn test_onchain_tlc_settlement_roundtrip() {
     store.insert_onchain_tlc_settlement(&channel_id, tlc_id, settlement.clone());
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id),
-        Some(settlement)
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        Some(StoredOnChainTlcSettlement::Exact(settlement))
     );
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &other_channel_id, tlc_id),
+        WatchtowerStore::get_onchain_tlc_settlement(
+            &store,
+            &other_channel_id,
+            tlc_id,
+            &payment_hash,
+        ),
         None
     );
 }
@@ -703,12 +710,12 @@ fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
     store.insert_onchain_tlc_settlement(&channel_id, second_id, second.clone());
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, first_id),
-        Some(first)
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, first_id, &first_hash,),
+        Some(StoredOnChainTlcSettlement::Exact(first))
     );
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, second_id),
-        Some(second)
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, second_id, &second_hash,),
+        Some(StoredOnChainTlcSettlement::Exact(second))
     );
 }
 
@@ -743,8 +750,8 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
     );
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id),
-        Some(with_preimage)
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        Some(StoredOnChainTlcSettlement::Exact(with_preimage))
     );
 }
 
@@ -765,14 +772,31 @@ fn test_onchain_tlc_settlement_legacy_empty_value() {
     .concat();
 
     store.put(key, []);
+    let tlc_id = TLCId::Offered(0);
 
     assert_eq!(
-        WatchtowerStore::get_legacy_onchain_tlc_settlement(&store, &channel_id, &payment_hash,),
-        Some(LegacyOnChainTlcSettlement {
-            preimage: None,
-            tx_hash: None,
-            tlc_index: None,
-        })
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        Some(StoredOnChainTlcSettlement::Legacy(
+            LegacyOnChainTlcSettlement {
+                preimage: None,
+                tx_hash: None,
+                tlc_index: None,
+            }
+        ))
+    );
+
+    let exact = OnChainTlcSettlement {
+        payment_hash,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        preimage: None,
+        tx_hash: Hash256::from([7u8; 32]),
+        tlc_index: 0,
+    };
+    store.insert_onchain_tlc_settlement(&channel_id, tlc_id, exact.clone());
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id, &payment_hash,),
+        Some(StoredOnChainTlcSettlement::Exact(exact)),
+        "the unified lookup must prefer an exact record over the legacy prefix fallback"
     );
 }
 
