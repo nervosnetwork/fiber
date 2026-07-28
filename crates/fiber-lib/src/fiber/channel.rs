@@ -10191,8 +10191,14 @@ pub trait ChannelActorStateStore {
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
-        payment_hash: &Hash256,
+        tlc_id: TLCId,
     ) -> Option<OnChainTlcSettlement>;
+    /// Returns a prefix-keyed settlement record written by an older version.
+    fn get_legacy_onchain_tlc_settlement(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<crate::fiber::onchain_tlc_reconcile::LegacyOnChainTlcSettlement>;
 
     /// Store a pending CommitDiff for channel reestablishment
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);

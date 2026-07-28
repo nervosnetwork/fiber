@@ -3,7 +3,8 @@ use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
+use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
+use fiber_types::TLCId;
 use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 pub trait WatchtowerStore {
@@ -72,13 +73,14 @@ pub trait WatchtowerStore {
 
     /// Insert the only valid on-chain settlement proof for a TLC.
     ///
-    /// This must only be written from an observed settlement witness scoped by channel id and
-    /// payment-hash prefix. Locally-known preimages may be stored as watchtower preimages, but
-    /// must not be written here unless they were observed in that witness.
+    /// This must only be written after resolving an observed witness index against the immutable
+    /// settlement snapshot committed by the force-closed commitment transaction. Locally-known
+    /// preimages may be stored as watchtower preimages, but must not be written here unless they
+    /// were observed in that witness.
     fn insert_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
-        payment_hash_prefix: [u8; 20],
+        tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     );
 
@@ -86,8 +88,15 @@ pub trait WatchtowerStore {
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
-        payment_hash: &Hash256,
+        tlc_id: TLCId,
     ) -> Option<OnChainTlcSettlement>;
+
+    /// Returns a prefix-keyed settlement record written by an older version.
+    fn get_legacy_onchain_tlc_settlement(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<LegacyOnChainTlcSettlement>;
 }
 
 /// Compute the x-only aggregated public key for a channel.

@@ -3,7 +3,7 @@
 use crate::fiber::channel::{
     has_pending_tlc_for_payment_hash, ChannelActorState, ChannelActorStateStore, CommitDiff,
 };
-use crate::fiber::onchain_tlc_reconcile::{payment_hash_prefix, OnChainTlcSettlement};
+use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
@@ -32,7 +32,8 @@ pub(crate) struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
-    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, [u8; 20]), OnChainTlcSettlement>>,
+    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), OnChainTlcSettlement>>,
+    legacy_onchain_settlements: RefCell<HashMap<(Hash256, [u8; 20]), LegacyOnChainTlcSettlement>>,
 }
 
 impl MockStore {
@@ -44,6 +45,7 @@ impl MockStore {
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
             onchain_settlements: RefCell::new(HashMap::new()),
+            legacy_onchain_settlements: RefCell::new(HashMap::new()),
         }
     }
 
@@ -83,23 +85,31 @@ impl MockStore {
     pub(crate) fn with_onchain_settlement(
         self,
         channel_id: Hash256,
-        payment_hash: Hash256,
+        tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     ) -> Self {
         self.onchain_settlements
             .borrow_mut()
-            .insert((channel_id, payment_hash_prefix(&payment_hash)), settlement);
+            .insert((channel_id, tlc_id), settlement);
         self
     }
 
-    pub(crate) fn with_onchain_settled(self, channel_id: Hash256, payment_hash: Hash256) -> Self {
+    pub(crate) fn with_onchain_settled(
+        self,
+        channel_id: Hash256,
+        tlc_id: TLCId,
+        payment_hash: Hash256,
+        hash_algorithm: HashAlgorithm,
+    ) -> Self {
         self.with_onchain_settlement(
             channel_id,
-            payment_hash,
+            tlc_id,
             OnChainTlcSettlement {
+                payment_hash,
+                hash_algorithm,
                 preimage: None,
-                tx_hash: None,
-                tlc_index: None,
+                tx_hash: gen_rand_sha256_hash(),
+                tlc_index: 0,
             },
         )
     }
@@ -107,18 +117,37 @@ impl MockStore {
     pub(crate) fn with_onchain_preimage(
         self,
         channel_id: Hash256,
+        tlc_id: TLCId,
         payment_hash: Hash256,
+        hash_algorithm: HashAlgorithm,
         preimage: Hash256,
     ) -> Self {
         self.with_onchain_settlement(
             channel_id,
-            payment_hash,
+            tlc_id,
             OnChainTlcSettlement {
+                payment_hash,
+                hash_algorithm,
                 preimage: Some(preimage),
-                tx_hash: None,
-                tlc_index: None,
+                tx_hash: gen_rand_sha256_hash(),
+                tlc_index: 0,
             },
         )
+    }
+
+    pub(crate) fn with_legacy_onchain_settlement(
+        self,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+        settlement: LegacyOnChainTlcSettlement,
+    ) -> Self {
+        let prefix = payment_hash.as_ref()[..20]
+            .try_into()
+            .expect("payment hash prefix");
+        self.legacy_onchain_settlements
+            .borrow_mut()
+            .insert((channel_id, prefix), settlement);
+        self
     }
 }
 
@@ -252,11 +281,25 @@ impl ChannelActorStateStore for MockStore {
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
-        payment_hash: &Hash256,
+        tlc_id: TLCId,
     ) -> Option<OnChainTlcSettlement> {
         self.onchain_settlements
             .borrow()
-            .get(&(*channel_id, payment_hash_prefix(payment_hash)))
+            .get(&(*channel_id, tlc_id))
+            .cloned()
+    }
+
+    fn get_legacy_onchain_tlc_settlement(
+        &self,
+        channel_id: &Hash256,
+        payment_hash: &Hash256,
+    ) -> Option<LegacyOnChainTlcSettlement> {
+        let prefix = payment_hash.as_ref()[..20]
+            .try_into()
+            .expect("payment hash prefix");
+        self.legacy_onchain_settlements
+            .borrow()
+            .get(&(*channel_id, prefix))
             .cloned()
     }
 

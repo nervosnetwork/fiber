@@ -2,7 +2,7 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
-use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
+use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::new_channel_update_unsigned;
 use crate::fiber::types::*;
 #[allow(unused)]
@@ -619,14 +619,15 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
         "preimage is retained while a watched TLC still references it"
     );
 
-    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20].try_into().unwrap();
     store.insert_onchain_tlc_settlement(
         &channel_id,
-        payment_hash_prefix,
+        TLCId::Offered(0),
         OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
         },
     );
     assert!(
@@ -644,27 +645,70 @@ fn test_onchain_tlc_settlement_roundtrip() {
     let channel_id = Hash256::from([1u8; 32]);
     let other_channel_id = Hash256::from([2u8; 32]);
     let payment_hash = Hash256::from([3u8; 32]);
-    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
+    let tlc_id = TLCId::Received(42);
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id),
         None
     );
 
     let settlement = OnChainTlcSettlement {
+        payment_hash,
+        hash_algorithm: HashAlgorithm::Sha256,
         preimage: Some(Hash256::from([9u8; 32])),
-        tx_hash: Some(Hash256::from([7u8; 32])),
-        tlc_index: Some(2),
+        tx_hash: Hash256::from([7u8; 32]),
+        tlc_index: 2,
     };
-    store.insert_onchain_tlc_settlement(&channel_id, prefix, settlement.clone());
+    store.insert_onchain_tlc_settlement(&channel_id, tlc_id, settlement.clone());
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id),
         Some(settlement)
     );
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &other_channel_id, &payment_hash),
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &other_channel_id, tlc_id),
         None
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_onchain_tlc_settlements_with_shared_prefix_are_independent() {
+    let path = TempDir::new("test-onchain-tlc-settlement-shared-prefix");
+    let store = open_store(path).expect("created store failed");
+    let channel_id = Hash256::from([1u8; 32]);
+    let first_hash = Hash256::from([3u8; 32]);
+    let mut second_hash_bytes = [3u8; 32];
+    second_hash_bytes[31] = 4;
+    let second_hash = Hash256::from(second_hash_bytes);
+    let first_id = TLCId::Offered(0);
+    let second_id = TLCId::Offered(1);
+    let first = OnChainTlcSettlement {
+        payment_hash: first_hash,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        preimage: None,
+        tx_hash: Hash256::from([7u8; 32]),
+        tlc_index: 0,
+    };
+    let second = OnChainTlcSettlement {
+        payment_hash: second_hash,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        preimage: None,
+        tx_hash: Hash256::from([8u8; 32]),
+        tlc_index: 1,
+    };
+
+    store.insert_onchain_tlc_settlement(&channel_id, first_id, first.clone());
+    store.insert_onchain_tlc_settlement(&channel_id, second_id, second.clone());
+
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, first_id),
+        Some(first)
+    );
+    assert_eq!(
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, second_id),
+        Some(second)
     );
 }
 
@@ -676,26 +720,30 @@ fn test_onchain_tlc_settlement_no_preimage_does_not_downgrade() {
     let store = open_store(path).expect("created store failed");
     let channel_id = Hash256::from([1u8; 32]);
     let payment_hash = Hash256::from([3u8; 32]);
-    let prefix: [u8; 20] = payment_hash.as_ref()[0..20].try_into().unwrap();
+    let tlc_id = TLCId::Offered(0);
 
     let with_preimage = OnChainTlcSettlement {
+        payment_hash,
+        hash_algorithm: HashAlgorithm::CkbHash,
         preimage: Some(Hash256::from([9u8; 32])),
-        tx_hash: Some(Hash256::from([7u8; 32])),
-        tlc_index: Some(0),
+        tx_hash: Hash256::from([7u8; 32]),
+        tlc_index: 0,
     };
-    store.insert_onchain_tlc_settlement(&channel_id, prefix, with_preimage.clone());
+    store.insert_onchain_tlc_settlement(&channel_id, tlc_id, with_preimage.clone());
     store.insert_onchain_tlc_settlement(
         &channel_id,
-        prefix,
+        tlc_id,
         OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
-            tx_hash: Some(Hash256::from([8u8; 32])),
-            tlc_index: Some(0),
+            tx_hash: Hash256::from([8u8; 32]),
+            tlc_index: 0,
         },
     );
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
+        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, tlc_id),
         Some(with_preimage)
     );
 }
@@ -719,8 +767,8 @@ fn test_onchain_tlc_settlement_legacy_empty_value() {
     store.put(key, []);
 
     assert_eq!(
-        WatchtowerStore::get_onchain_tlc_settlement(&store, &channel_id, &payment_hash),
-        Some(OnChainTlcSettlement {
+        WatchtowerStore::get_legacy_onchain_tlc_settlement(&store, &channel_id, &payment_hash,),
+        Some(LegacyOnChainTlcSettlement {
             preimage: None,
             tx_hash: None,
             tlc_index: None,
