@@ -69,7 +69,6 @@ pub struct Store {
 enum WatchtowerPreimageCleanupTarget<'a> {
     Exact(&'a Hash256),
     ExactSet(&'a HashSet<Hash256>),
-    TlcPaymentHash(&'a [u8; 20]),
 }
 
 #[cfg(feature = "watchtower")]
@@ -78,9 +77,6 @@ impl WatchtowerPreimageCleanupTarget<'_> {
         match self {
             WatchtowerPreimageCleanupTarget::Exact(target) => payment_hash == target,
             WatchtowerPreimageCleanupTarget::ExactSet(targets) => targets.contains(payment_hash),
-            WatchtowerPreimageCleanupTarget::TlcPaymentHash(target) => {
-                payment_hash.as_ref()[..20] == target[..]
-            }
         }
     }
 }
@@ -690,45 +686,66 @@ impl Store {
         channel_data: &ChannelData,
         payment_hash: &Hash256,
     ) -> bool {
-        let exact_key_prefix = [
-            &[WATCHTOWER_TLC_SETTLED_PREFIX],
-            channel_data.channel_id.as_ref(),
-            &[1u8],
-        ]
-        .concat();
-        let has_exact_settlement = self
-            .collect_by_prefix(&exact_key_prefix)
-            .into_iter()
-            .filter(|kv| kv.key.len() == 1 + 32 + 2 + 8)
-            .map(|kv| {
-                deserialize_from::<OnChainTlcSettlement>(kv.value.as_ref(), "OnChainTlcSettlement")
-            })
-            .any(|settlement| &settlement.payment_hash == payment_hash);
-        let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-            .try_into()
-            .expect("payment hash prefix");
-        let has_legacy_settlement = self
-            .get(Self::legacy_tlc_on_chain_settled_key(
-                &channel_data.channel_id,
-                &payment_hash_prefix,
-            ))
-            .is_some();
-        if has_exact_settlement || has_legacy_settlement {
-            return false;
-        }
-
-        [
-            &channel_data.remote_settlement_data,
-            &channel_data.pending_remote_settlement_data,
-            &channel_data.local_settlement_data,
+        let snapshot_statuses = [
+            (&channel_data.remote_settlement_data, true),
+            (&channel_data.pending_remote_settlement_data, true),
+            (&channel_data.local_settlement_data, false),
         ]
         .into_iter()
-        .any(|settlement_data| {
-            settlement_data
+        .filter_map(|(settlement_data, for_remote)| {
+            let mut has_matching_tlc = false;
+            let mut has_exact_settlement = false;
+            let mut has_unsettled_tlc = false;
+            for tlc in settlement_data
                 .tlcs
                 .iter()
-                .any(|tlc| &tlc.payment_hash == payment_hash)
+                .filter(|tlc| &tlc.payment_hash == payment_hash)
+            {
+                has_matching_tlc = true;
+                let tlc_id = if for_remote {
+                    tlc.tlc_id
+                } else {
+                    tlc.tlc_id.flip()
+                };
+                let is_exactly_settled = self
+                    .get(Self::tlc_on_chain_settled_key(
+                        &channel_data.channel_id,
+                        tlc_id,
+                    ))
+                    .map(|value| {
+                        deserialize_from::<OnChainTlcSettlement>(
+                            value.as_ref(),
+                            "OnChainTlcSettlement",
+                        )
+                    })
+                    .is_some_and(|settlement| {
+                        settlement.payment_hash == tlc.payment_hash
+                            && settlement.hash_algorithm == tlc.hash_algorithm
+                    });
+                has_exact_settlement |= is_exactly_settled;
+                has_unsettled_tlc |= !is_exactly_settled;
+            }
+            has_matching_tlc.then_some((has_exact_settlement, has_unsettled_tlc))
         })
+        .collect::<Vec<_>>();
+
+        // ChannelData retains several candidate commitment snapshots. Once an exact settlement
+        // exists, only snapshots containing exact evidence can represent the active on-chain
+        // chain. Within those candidates every same-hash TLC must be settled before its shared
+        // preimage can be removed. Prefix-keyed legacy records intentionally provide no evidence
+        // here because they cannot identify a specific TLC.
+        if snapshot_statuses
+            .iter()
+            .any(|(has_exact_settlement, _)| *has_exact_settlement)
+        {
+            snapshot_statuses
+                .iter()
+                .any(|(has_exact_settlement, has_unsettled_tlc)| {
+                    *has_exact_settlement && *has_unsettled_tlc
+                })
+        } else {
+            !snapshot_statuses.is_empty()
+        }
     }
 
     fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
@@ -1659,18 +1676,6 @@ impl WatchtowerStore for Store {
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
 
-    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256> {
-        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        self.collect_by_prefix(prefix.as_slice())
-            .into_iter()
-            .find(|kv| {
-                let key = &kv.key;
-                let node_offset = 1 + 32;
-                key.len() >= node_offset && key[node_offset..] == node_id.as_ref()[..]
-            })
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
-    }
-
     fn insert_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
@@ -1692,12 +1697,9 @@ impl WatchtowerStore for Store {
         batch.put(key, serialize_to_vec(&settlement, "OnChainTlcSettlement"));
         batch.commit();
         if settlement.preimage.is_none() {
-            let payment_hash_prefix: [u8; 20] = settlement.payment_hash.as_ref()[0..20]
-                .try_into()
-                .expect("payment hash prefix");
             self.cleanup_unused_watch_preimages(
                 None,
-                WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash_prefix),
+                WatchtowerPreimageCleanupTarget::Exact(&settlement.payment_hash),
             );
         }
     }

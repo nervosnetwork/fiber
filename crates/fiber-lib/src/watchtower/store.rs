@@ -68,9 +68,6 @@ pub trait WatchtowerStore {
     /// Get a watch preimage owned by the given node.
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256>;
 
-    /// Search for the stored preimage with the given payment hash prefix, should be the first 20 bytes of the payment hash.
-    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256>;
-
     /// Insert the only valid on-chain settlement proof for a TLC.
     ///
     /// This must only be written after resolving an observed witness index against the immutable

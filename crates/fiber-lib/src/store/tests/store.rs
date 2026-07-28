@@ -497,27 +497,6 @@ fn test_store_watchtower_preimage() {
         "query non exist watch preimage"
     );
 
-    assert!(
-        store
-            .search_preimage(&node_id_a, &payment_hash_c.as_ref()[..20])
-            .is_none(),
-        "search a non exist watch preimage"
-    );
-    // search preimage only returns watch preimage
-    assert_eq!(
-        store
-            .search_preimage(&node_id_a, &payment_hash_a.as_ref()[..20])
-            .unwrap(),
-        preimage_a,
-        "search"
-    );
-    assert!(
-        store
-            .search_preimage(&node_id_b, &payment_hash_a.as_ref()[..20])
-            .is_none(),
-        "search should not cross node scope"
-    );
-
     // delete preimage with wrong node
     store.remove_watch_preimage(node_id_a, payment_hash_b);
     assert!(
@@ -533,43 +512,6 @@ fn test_store_watchtower_preimage() {
             .get_watch_preimage(&node_id_b, &payment_hash_b)
             .is_none(),
         "removed"
-    );
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_store_watchtower_preimage_search_is_node_scoped_with_same_prefix() {
-    let path = TempDir::new("test-watchtower-store-same-prefix");
-    let store = open_store(path).expect("created store failed");
-
-    let node_id_a = NodeId::from_bytes(PeerId::random().into_bytes());
-    let node_id_b = NodeId::from_bytes(PeerId::random().into_bytes());
-
-    let preimage_a = gen_rand_sha256_hash();
-    let preimage_b = gen_rand_sha256_hash();
-
-    let mut payment_hash_bytes = [7u8; 32];
-    payment_hash_bytes[31] = 1;
-    let payment_hash_a: Hash256 = payment_hash_bytes.into();
-
-    payment_hash_bytes[31] = 2;
-    let payment_hash_b: Hash256 = payment_hash_bytes.into();
-
-    let payment_hash_prefix = &payment_hash_a.as_ref()[..20];
-
-    store.insert_watch_preimage(node_id_b.clone(), payment_hash_b, preimage_b);
-    store.insert_watch_preimage(node_id_a.clone(), payment_hash_a, preimage_a);
-
-    assert_eq!(
-        store.search_preimage(&node_id_a, payment_hash_prefix),
-        Some(preimage_a),
-        "search should skip another node's preimage with the same prefix"
-    );
-    assert_eq!(
-        store.search_preimage(&node_id_b, payment_hash_prefix),
-        Some(preimage_b),
-        "search should still find the matching node's preimage"
     );
 }
 
@@ -635,6 +577,127 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
     assert!(
         store.get_watch_preimage(&node_id, &payment_hash).is_none(),
         "watchtower GC removes the preimage after the watched TLC is settled"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
+    let path = TempDir::new("test-watchtower-preimage-gc-same-hash-sibling");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let local_settlement_key = Privkey::from(&[1; 32]);
+    let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+    let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
+    let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
+    let first_tlc = SettlementTlc {
+        tlc_id: TLCId::Offered(0),
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_amount: 21,
+        payment_hash,
+        expiry: now_timestamp_as_millis_u64() + 60_000,
+        local_key: Privkey::from(&[5; 32]),
+        remote_key: Privkey::from(&[6; 32]).pubkey(),
+    };
+    let mut second_tlc = first_tlc.clone();
+    second_tlc.tlc_id = TLCId::Offered(1);
+    second_tlc.local_key = Privkey::from(&[7; 32]);
+    second_tlc.remote_key = Privkey::from(&[8; 32]).pubkey();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![first_tlc, second_tlc],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        local_settlement_key,
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        settlement_data,
+    );
+    store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
+
+    store.insert_onchain_tlc_settlement(
+        &channel_id,
+        TLCId::Offered(0),
+        OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            preimage: None,
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
+        },
+    );
+
+    assert_eq!(
+        store.get_watch_preimage(&node_id, &payment_hash),
+        Some(preimage),
+        "the sibling TLC with the same payment hash still needs the preimage"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
+    let path = TempDir::new("test-watchtower-preimage-gc-legacy-ambiguous");
+    let store = open_store(path).expect("created store failed");
+
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 42,
+            payment_hash,
+            expiry: now_timestamp_as_millis_u64() + 60_000,
+            local_key: Privkey::from(&[5; 32]),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        Privkey::from(&[1; 32]),
+        Privkey::from(&[2; 32]).pubkey(),
+        Privkey::from(&[3; 32]).pubkey(),
+        Privkey::from(&[4; 32]).pubkey(),
+        settlement_data,
+    );
+    store.insert_watch_preimage(node_id.clone(), payment_hash, preimage);
+
+    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20]
+        .try_into()
+        .expect("payment hash prefix");
+    let legacy_key = [
+        &[WATCHTOWER_TLC_SETTLED_PREFIX],
+        channel_id.as_ref(),
+        payment_hash_prefix.as_ref(),
+    ]
+    .concat();
+    store.put(legacy_key, []);
+    store.remove_watch_preimage(node_id.clone(), payment_hash);
+
+    assert_eq!(
+        store.get_watch_preimage(&node_id, &payment_hash),
+        Some(preimage),
+        "a prefix-keyed legacy record cannot prove that this TLC no longer needs the preimage"
     );
 }
 
