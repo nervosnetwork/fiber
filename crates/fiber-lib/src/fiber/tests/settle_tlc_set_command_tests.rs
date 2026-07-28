@@ -34,8 +34,7 @@ pub(crate) struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
-    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), OnChainTlcSettlement>>,
-    legacy_onchain_settlements: RefCell<HashMap<(Hash256, [u8; 20]), LegacyOnChainTlcSettlement>>,
+    pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
 }
 
 impl MockStore {
@@ -47,7 +46,6 @@ impl MockStore {
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
             onchain_settlements: RefCell::new(HashMap::new()),
-            legacy_onchain_settlements: RefCell::new(HashMap::new()),
         }
     }
 
@@ -90,9 +88,10 @@ impl MockStore {
         tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     ) -> Self {
-        self.onchain_settlements
-            .borrow_mut()
-            .insert((channel_id, tlc_id), settlement);
+        self.onchain_settlements.borrow_mut().insert(
+            (channel_id, tlc_id),
+            StoredOnChainTlcSettlement::Exact(settlement),
+        );
         self
     }
 
@@ -140,15 +139,13 @@ impl MockStore {
     pub(crate) fn with_legacy_onchain_settlement(
         self,
         channel_id: Hash256,
-        payment_hash: Hash256,
+        tlc_id: TLCId,
         settlement: LegacyOnChainTlcSettlement,
     ) -> Self {
-        let prefix = payment_hash.as_ref()[..20]
-            .try_into()
-            .expect("payment hash prefix");
-        self.legacy_onchain_settlements
-            .borrow_mut()
-            .insert((channel_id, prefix), settlement);
+        self.onchain_settlements.borrow_mut().insert(
+            (channel_id, tlc_id),
+            StoredOnChainTlcSettlement::Legacy(settlement),
+        );
         self
     }
 }
@@ -284,24 +281,12 @@ impl ChannelActorStateStore for MockStore {
         &self,
         channel_id: &Hash256,
         tlc_id: TLCId,
-        payment_hash: &Hash256,
+        _payment_hash: &Hash256,
     ) -> Option<StoredOnChainTlcSettlement> {
-        if let Some(settlement) = self
-            .onchain_settlements
+        self.onchain_settlements
             .borrow()
             .get(&(*channel_id, tlc_id))
             .cloned()
-        {
-            return Some(StoredOnChainTlcSettlement::Exact(settlement));
-        }
-        let prefix = payment_hash.as_ref()[..20]
-            .try_into()
-            .expect("payment hash prefix");
-        self.legacy_onchain_settlements
-            .borrow()
-            .get(&(*channel_id, prefix))
-            .cloned()
-            .map(StoredOnChainTlcSettlement::Legacy)
     }
 
     fn store_pending_commit_diff(&self, _channel_id: &Hash256, _diff: &CommitDiff) {

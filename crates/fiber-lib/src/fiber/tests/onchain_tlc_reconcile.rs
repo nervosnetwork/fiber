@@ -114,7 +114,7 @@ fn legacy_no_preimage_record_is_not_attributed_to_a_tlc() {
     let payment_hash = gen_rand_sha256_hash();
     let store = MockStore::new().with_legacy_onchain_settlement(
         channel_id,
-        payment_hash,
+        TLCId::Offered(0),
         LegacyOnChainTlcSettlement {
             preimage: None,
             tx_hash: Some(gen_rand_sha256_hash()),
@@ -142,7 +142,7 @@ fn legacy_preimage_record_requires_a_full_hash_match() {
     let payment_hash = payment_hash_for(preimage, hash_algorithm);
     let store = MockStore::new().with_legacy_onchain_settlement(
         channel_id,
-        payment_hash,
+        TLCId::Offered(0),
         LegacyOnChainTlcSettlement {
             preimage: Some(preimage),
             tx_hash: Some(gen_rand_sha256_hash()),
