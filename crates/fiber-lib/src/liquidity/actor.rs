@@ -265,17 +265,9 @@ where
                 state.prune_recovery_guards(swap_id);
             }
             LiquidityActorMessage::LoopInLockConfirmed(swap_id) => {
-                let now_ms = now_ms();
-                if let Err(error) = state.store.update_liquidity_chain_tx_status(
-                    &swap_id,
-                    LiquidityChainTxRole::Payout,
-                    LiquidityChainTxStatus::Confirmed,
-                    None,
-                    now_ms,
-                ) {
-                    tracing::warn!(?swap_id, %error, "failed to mark loop in lock tx confirmed");
-                } else if let Err(error) =
-                    mark_loop_in_lock_confirmed(&state.store, swap_id, now_ms)
+                if let Err(error) = state
+                    .handle_loop_in_lock_confirmed(swap_id, myself.clone())
+                    .await
                 {
                     tracing::warn!(?swap_id, %error, "ignoring loop in lock continuation");
                 }
@@ -527,6 +519,32 @@ where
                 .ok_or_else(|| {
                     LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
                 })?;
+            if swap.role == LiquiditySwapRole::Provider
+                && swap.swap_kind == LiquiditySwapKind::LoopIn
+            {
+                LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
+                persist_provider_loop_in_payment_preimage(
+                    &self.store,
+                    swap_id,
+                    preimage,
+                    now_ms(),
+                )?;
+                self.active_payment_swaps.remove(&swap_id);
+                claim_provider_loop_in(
+                    &self.store,
+                    &mut self.chain,
+                    swap_id,
+                    now_ms(),
+                    myself.clone(),
+                )
+                .await?;
+                self.chain
+                    .watch_claim(swap_id, myself)
+                    .await
+                    .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                self.watched_claim_swaps.insert(swap_id);
+                return Ok(());
+            }
             if swap.role == LiquiditySwapRole::Provider {
                 LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
                 mark_provider_payment_settled(&self.store, swap_id, now_ms())?;
@@ -556,6 +574,36 @@ where
             self.active_payment_swaps.remove(&swap_id);
         }
         result
+    }
+
+    async fn handle_loop_in_lock_confirmed(
+        &mut self,
+        swap_id: Hash256,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let now = now_ms();
+        self.store
+            .update_liquidity_chain_tx_status(
+                &swap_id,
+                LiquidityChainTxRole::Payout,
+                LiquidityChainTxStatus::Confirmed,
+                None,
+                now,
+            )
+            .map_err(map_store_error)?;
+        mark_loop_in_lock_confirmed(&self.store, swap_id, now)?;
+
+        let swap = self
+            .store
+            .get_liquidity_swap(&swap_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        if swap.swap_kind == LiquiditySwapKind::LoopIn && swap.role == LiquiditySwapRole::Provider {
+            self.start_provider_loop_in_payment(swap, myself).await?;
+        }
+        Ok(())
     }
 
     async fn handle_provider_accept_loop_out(
@@ -606,7 +654,13 @@ where
             ClaimPending,
             RefundPending,
         ];
-        let loop_in_states = [OnchainLockPending, OnchainLocked];
+        let loop_in_states = [
+            OnchainLockPending,
+            OnchainLocked,
+            PaymentInFlight,
+            PaymentSettled,
+            ClaimPending,
+        ];
         let mut swaps = self
             .store
             .list_liquidity_swaps_by_states(&loop_out_states, LiquiditySwapKind::LoopOut)
@@ -852,6 +906,10 @@ where
         swap: LiquiditySwapRecord,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<bool, LiquidityLoopOutError> {
+        if swap.role == LiquiditySwapRole::Provider {
+            return self.resume_provider_loop_in_swap(swap, myself).await;
+        }
+
         if swap.state == LiquiditySwapState::OnchainLockPending {
             let has_watchable_lock = self
                 .store
@@ -874,6 +932,115 @@ where
             }
         }
         Ok(false)
+    }
+
+    async fn resume_provider_loop_in_swap(
+        &mut self,
+        swap: LiquiditySwapRecord,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<bool, LiquidityLoopOutError> {
+        match swap.state {
+            LiquiditySwapState::OnchainLocked => {
+                if self.active_payment_swaps.contains(&swap.swap_id) {
+                    return Ok(false);
+                }
+                self.start_provider_loop_in_payment(swap, myself).await?;
+                Ok(true)
+            }
+            LiquiditySwapState::PaymentInFlight => {
+                if self.active_payment_swaps.contains(&swap.swap_id) {
+                    return Ok(false);
+                }
+                self.active_payment_swaps.insert(swap.swap_id);
+                let payment = self.payment.clone();
+                let store = self.store.clone();
+                let actor = myself.clone();
+                let swap_id = swap.swap_id;
+                let payment_hash = swap.payment_hash;
+                tokio::spawn(async move {
+                    reconcile_loop_out_payment(
+                        store,
+                        payment,
+                        actor,
+                        swap_id,
+                        payment_hash,
+                        LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
+                    )
+                    .await;
+                });
+                Ok(true)
+            }
+            LiquiditySwapState::PaymentSettled | LiquiditySwapState::ClaimPending => {
+                if self.watched_claim_swaps.contains(&swap.swap_id) {
+                    return Ok(false);
+                }
+                let has_watchable_claim = self
+                    .store
+                    .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Claim)
+                    .map_err(map_store_error)?
+                    .is_some_and(|record| {
+                        matches!(
+                            record.status,
+                            LiquidityChainTxStatus::Broadcast | LiquidityChainTxStatus::Confirmed
+                        )
+                    });
+                if has_watchable_claim {
+                    self.chain
+                        .watch_claim(swap.swap_id, myself.clone())
+                        .await
+                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                } else {
+                    claim_provider_loop_in(
+                        &self.store,
+                        &mut self.chain,
+                        swap.swap_id,
+                        now_ms(),
+                        myself.clone(),
+                    )
+                    .await?;
+                    self.chain
+                        .watch_claim(swap.swap_id, myself.clone())
+                        .await
+                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                }
+                self.watched_claim_swaps.insert(swap.swap_id);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn start_provider_loop_in_payment(
+        &mut self,
+        swap: LiquiditySwapRecord,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let quote = self.quote_terms(&swap.quote_id)?;
+        ensure_loop_in_quote_terms(&quote)?;
+        let request = start_provider_loop_in_payment(&self.store, quote, now_ms())?;
+        let payment_hash = request.payment_hash;
+        self.active_payment_swaps.insert(swap.swap_id);
+        let mut payment = self.payment.clone();
+        let store = self.store.clone();
+        let swap_id = swap.swap_id;
+        tokio::spawn(async move {
+            match payment.send_loop_out_payment(request).await {
+                Ok(preimage) => send_payment_settled(&myself, swap_id, preimage),
+                Err(error) => {
+                    tracing::warn!(?swap_id, %error, "loop in provider payment remains in flight after send failure");
+                    reconcile_loop_out_payment(
+                        store,
+                        payment,
+                        myself,
+                        swap_id,
+                        payment_hash,
+                        LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
+                    )
+                    .await;
+                }
+            }
+        });
+        Ok(())
     }
 
     fn prune_recovery_guards(&mut self, swap_id: Hash256) {
@@ -1450,6 +1617,46 @@ where
     Ok(request)
 }
 
+/// Persist that the provider Loop In payment has started after client lock confirmation.
+pub fn start_provider_loop_in_payment<S>(
+    store: &S,
+    quote: LoopOutQuoteTerms,
+    now_ms: u64,
+) -> Result<crate::liquidity::payment::LoopOutPaymentRequest, LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    let swap_id = quote.quote_id;
+    ensure_loop_in_quote_terms(&quote)?;
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if swap.swap_kind != LiquiditySwapKind::LoopIn || swap.role != LiquiditySwapRole::Provider {
+        return Err(LiquidityLoopOutError::Store(
+            "cannot start provider loop in payment for non-provider loop in swap".to_string(),
+        ));
+    }
+    if swap.state != LiquiditySwapState::OnchainLocked {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::PaymentInFlight,
+        });
+    }
+    let request = crate::liquidity::payment::LoopOutPaymentRequest::new(
+        quote.payment_hash,
+        quote.provider,
+        quote.amount,
+        quote.provider_fee,
+        quote.routing_fee_limit,
+    )?;
+
+    transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
+    Ok(request)
+}
+
 /// Persist a settled client payment preimage and transition the swap to payment settled.
 pub fn persist_client_loop_out_payment_preimage<S>(
     store: &S,
@@ -1466,6 +1673,50 @@ where
         .ok_or_else(|| {
             LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
         })?;
+    if !swap
+        .state
+        .can_transition_to(LiquiditySwapState::PaymentSettled)
+    {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::PaymentSettled,
+        });
+    }
+    store
+        .update_liquidity_swap(
+            &swap_id,
+            LiquiditySwapUpdate {
+                payment_preimage: Some(preimage),
+                updated_at: now_ms,
+                ..Default::default()
+            },
+        )
+        .map_err(map_store_error)?;
+    transition_swap(store, &swap_id, LiquiditySwapState::PaymentSettled, now_ms)?;
+    Ok(())
+}
+
+/// Persist a settled provider Loop In payment preimage before broadcasting the claim.
+pub fn persist_provider_loop_in_payment_preimage<S>(
+    store: &S,
+    swap_id: Hash256,
+    preimage: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if swap.swap_kind != LiquiditySwapKind::LoopIn || swap.role != LiquiditySwapRole::Provider {
+        return Err(LiquidityLoopOutError::Store(
+            "cannot settle provider loop in payment for non-provider loop in swap".to_string(),
+        ));
+    }
     if !swap
         .state
         .can_transition_to(LiquiditySwapState::PaymentSettled)
@@ -1508,6 +1759,57 @@ where
         .ok_or_else(|| {
             LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
         })?;
+    if !client_can_claim(swap.state) && swap.state != LiquiditySwapState::ClaimPending {
+        return Err(LiquidityLoopOutError::InvalidStateTransition {
+            from: swap.state,
+            to: LiquiditySwapState::ClaimPending,
+        });
+    }
+    let claim_plan = LoopOutClaimPlan::from_record(&swap).map_err(|error| {
+        if swap.payment_preimage.is_none() {
+            LiquidityLoopOutError::InvalidStateTransition {
+                from: swap.state,
+                to: LiquiditySwapState::ClaimPending,
+            }
+        } else {
+            error
+        }
+    })?;
+
+    if swap.state == LiquiditySwapState::PaymentSettled {
+        transition_swap(store, &swap_id, LiquiditySwapState::ClaimPending, now_ms)?;
+    }
+    chain
+        .broadcast_claim(claim_plan.into(), myself)
+        .await
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+    Ok(())
+}
+
+/// Claim the on-chain Loop In client lock after the provider payment settles.
+pub async fn claim_provider_loop_in<S, C>(
+    store: &S,
+    chain: &mut C,
+    swap_id: Hash256,
+    now_ms: u64,
+    myself: ActorRef<LiquidityActorMessage>,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+    C: LoopOutChainAdapter,
+    C::Error: Display,
+{
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if swap.swap_kind != LiquiditySwapKind::LoopIn || swap.role != LiquiditySwapRole::Provider {
+        return Err(LiquidityLoopOutError::Store(
+            "cannot claim provider loop in for non-provider loop in swap".to_string(),
+        ));
+    }
     if !client_can_claim(swap.state) && swap.state != LiquiditySwapState::ClaimPending {
         return Err(LiquidityLoopOutError::InvalidStateTransition {
             from: swap.state,
@@ -4077,6 +4379,168 @@ mod tests {
                 .unwrap()
                 .status,
             LiquidityChainTxStatus::Confirmed
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_loop_in_payment_waits_for_onchain_lock_confirmation() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        store
+            .insert_liquidity_swap(loop_in_record(
+                &quote,
+                LiquiditySwapRole::Provider,
+                now_ms(),
+            ))
+            .unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [40u8; 32].into(),
+                outpoint: Some(OutPoint::new(Byte32::from_slice(&[40u8; 32]).unwrap(), 40)),
+                status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let (payment, _settle) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(events.clone(), vec![]);
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            payment,
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(event_count(&events, "send_payment"), 0);
+
+        actor
+            .send_message(LiquidityActorMessage::LoopInLockConfirmed(quote.quote_id))
+            .unwrap();
+        wait_for_event(&events, "send_payment").await;
+
+        let events = events.borrow().clone();
+        let locked = events
+            .iter()
+            .position(|event| *event == "transition_other")
+            .expect("on-chain lock transition");
+        let in_flight = events
+            .iter()
+            .position(|event| *event == "provider_transition_payment_in_flight")
+            .expect("payment in-flight transition");
+        let send = events
+            .iter()
+            .position(|event| *event == "send_payment")
+            .expect("payment send");
+        assert!(locked < in_flight);
+        assert!(in_flight < send);
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::PaymentInFlight
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_loop_in_claim_persists_preimage_before_chain_claim() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let mut swap = loop_in_record(&quote, LiquiditySwapRole::Provider, now_ms());
+        swap.state = LiquiditySwapState::PaymentInFlight;
+        store.insert_liquidity_swap(swap).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider")
+                .with_store(store.clone()),
+        )
+        .await;
+
+        actor
+            .send_message(LiquidityActorMessage::PaymentSettled(
+                quote.quote_id,
+                [4u8; 32].into(),
+            ))
+            .unwrap();
+        wait_for_event(&events, "broadcast_claim").await;
+
+        let persisted = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        assert_eq!(persisted.payment_preimage, Some([4u8; 32].into()));
+        assert_eq!(persisted.state, LiquiditySwapState::ClaimPending);
+        let events = events.borrow().clone();
+        let preimage = events
+            .iter()
+            .position(|event| *event == "persist_preimage")
+            .expect("preimage persisted");
+        let claim = events
+            .iter()
+            .position(|event| *event == "broadcast_claim")
+            .expect("claim broadcast");
+        assert!(preimage < claim);
+    }
+
+    #[tokio::test]
+    async fn provider_loop_in_claim_confirmation_marks_success_and_claim_tx_confirmed() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        let mut swap = loop_in_record(&quote, LiquiditySwapRole::Provider, now_ms());
+        swap.state = LiquiditySwapState::ClaimPending;
+        swap.payment_preimage = Some([4u8; 32].into());
+        store.insert_liquidity_swap(swap).unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Claim,
+                tx_hash: [41u8; 32].into(),
+                outpoint: None,
+                status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new(events.clone()),
+        )
+        .await;
+
+        actor
+            .send_message(LiquidityActorMessage::ClaimConfirmed(quote.quote_id))
+            .unwrap();
+        wait_for_event(&events, "provider_transition_success").await;
+
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Claim)
+                .unwrap()
+                .unwrap()
+                .status,
+            LiquidityChainTxStatus::Confirmed
+        );
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::Success
         );
     }
 
