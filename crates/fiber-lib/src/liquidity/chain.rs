@@ -230,16 +230,25 @@ pub struct LoopOutRefundTxPlan {
 }
 
 impl LoopOutRefundTxPlan {
-    /// Build a refund transaction plan from a persisted provider refund-pending swap record.
+    /// Build a refund transaction plan from a persisted refund-pending swap record.
     pub fn from_record(record: &LiquiditySwapRecord) -> Result<Self, LiquidityLoopOutError> {
-        if record.role != LiquiditySwapRole::Provider {
-            return Err(LiquidityLoopOutError::Chain(
-                "cannot build refund for non-provider loop out record".to_string(),
-            ));
+        match (record.swap_kind, record.role) {
+            (LiquiditySwapKind::LoopOut, LiquiditySwapRole::Provider)
+            | (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Client) => {}
+            (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Provider) => {
+                return Err(LiquidityLoopOutError::Chain(
+                    "cannot build refund for loop in provider record".to_string(),
+                ));
+            }
+            (LiquiditySwapKind::LoopOut, LiquiditySwapRole::Client) => {
+                return Err(LiquidityLoopOutError::Chain(
+                    "cannot build refund for non-provider loop out record".to_string(),
+                ));
+            }
         }
         if record.state != LiquiditySwapState::RefundPending {
             return Err(LiquidityLoopOutError::Chain(
-                "cannot build refund unless provider swap is refund pending".to_string(),
+                "cannot build refund unless swap is refund pending".to_string(),
             ));
         }
         let payout_outpoint = record.onchain_outpoint.clone().ok_or_else(|| {
@@ -1389,12 +1398,22 @@ where
             })?;
             refund_cell_deps.extend(udt_cell_deps.into_iter());
         }
-        let tx = build_loop_out_refund_transaction(
-            &quote,
-            &plan.payout_outpoint,
-            plan.refund_after_lock_time,
-            &refund_cell_deps,
-        )?;
+        let tx = match (record.swap_kind, record.role) {
+            (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Client) => {
+                build_loop_in_client_refund_transaction(
+                    &quote,
+                    &plan.payout_outpoint,
+                    plan.refund_after_lock_time,
+                    &refund_cell_deps,
+                )?
+            }
+            _ => build_loop_out_refund_transaction(
+                &quote,
+                &plan.payout_outpoint,
+                plan.refund_after_lock_time,
+                &refund_cell_deps,
+            )?,
+        };
         let tx_hash: Hash256 = tx.hash().into();
         let now = now_timestamp_as_millis_u64();
         if let Some(existing) = self
@@ -2164,6 +2183,36 @@ mod tests {
                         .push(MockCkbEvent::CreateTxTracer(mask));
                 }
                 _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct TxCapturingCkbActor;
+
+    #[async_trait::async_trait]
+    impl Actor for TxCapturingCkbActor {
+        type Msg = CkbChainMessage;
+        type State = Arc<Mutex<Vec<TransactionView>>>;
+        type Arguments = Arc<Mutex<Vec<TransactionView>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            txs: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(txs)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            txs: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let CkbChainMessage::SendTx(tx, reply) = message {
+                txs.lock().unwrap().push(tx);
+                let _ = reply.send(Ok(()));
             }
             Ok(())
         }
@@ -3881,6 +3930,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ckb_watcher_broadcast_loop_in_client_refund_persists_tx_identity_before_send_tx() {
+        let sent_txs = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) =
+            ractor::Actor::spawn(None, TxCapturingCkbActor, sent_txs.clone())
+                .await
+                .unwrap();
+        let quote = test_loop_in_quote_terms();
+        let mut swap = test_swap_record_with_outpoint(test_outpoint(28));
+        swap.swap_id = quote.quote_id;
+        swap.quote_id = quote.quote_id;
+        swap.swap_kind = LiquiditySwapKind::LoopIn;
+        swap.role = LiquiditySwapRole::Client;
+        swap.state = LiquiditySwapState::RefundPending;
+        swap.refund_after_lock_time = quote.refund_after_lock_time;
+        let cell_dep = packed::CellDep::new_builder()
+            .out_point(test_outpoint(29))
+            .dep_type(ckb_types::core::DepType::Code)
+            .build();
+        let store = NoopLiquidityStore::default();
+        store.insert_loop_out_quote(quote.clone(), 1).unwrap();
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_script(
+            ckb_actor,
+            store.clone(),
+            loop_in_lock_script_for_quote(&quote),
+            vec![cell_dep.clone()],
+        );
+
+        watcher.broadcast_refund(&swap).await.unwrap();
+
+        let record = store
+            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Refund)
+            .unwrap()
+            .expect("refund tx record is persisted");
+        let txs = sent_txs.lock().unwrap();
+        assert_eq!(txs.len(), 1);
+        let tx = &txs[0];
+        assert_eq!(record.tx_hash, tx.hash().into());
+        assert_eq!(record.role, LiquidityChainTxRole::Refund);
+        assert_eq!(record.status, LiquidityChainTxStatus::Broadcast);
+        assert!(record.outpoint.is_none());
+        let input = tx.inputs().get(0).unwrap();
+        assert_eq!(input.previous_output(), swap.onchain_outpoint.unwrap());
+        assert_eq!(u64::from(input.since()), quote.refund_after_lock_time);
+        assert_eq!(tx.outputs().get(0).unwrap().lock(), quote.refund_lock);
+        assert_eq!(
+            tx.cell_deps().into_iter().collect::<Vec<_>>(),
+            vec![cell_dep]
+        );
+        assert_eq!(
+            tx.witnesses().get(0).unwrap(),
+            build_liquidity_lock_refund_witness()
+        );
+    }
+
+    #[tokio::test]
     async fn ckb_watcher_refund_send_error_marks_rejected_and_allows_rebroadcast() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let (ckb_actor, _handle) = ractor::Actor::spawn(None, SendErrorCkbActor, events.clone())
@@ -4224,5 +4329,18 @@ mod tests {
         let error = LoopOutRefundTxPlan::from_record(&record).unwrap_err();
 
         assert!(error.to_string().contains("provider"));
+    }
+
+    #[test]
+    fn refund_plan_rejects_loop_in_provider_refund() {
+        let record = LiquiditySwapRecord {
+            swap_kind: LiquiditySwapKind::LoopIn,
+            role: LiquiditySwapRole::Provider,
+            ..test_provider_refund_pending_record(test_outpoint(8))
+        };
+
+        let error = LoopOutRefundTxPlan::from_record(&record).unwrap_err();
+
+        assert!(error.to_string().contains("loop in provider"));
     }
 }
