@@ -109,6 +109,9 @@ pub struct LoopOutQuoteRecord {
     /// Provider refund lock used if the swap is not paid and claimed.
     #[serde_as(as = "EntityHex")]
     pub refund_lock: ckb_types::packed::Script,
+    /// Client invoice to pay for Loop In provider execution.
+    #[serde(default)]
+    pub client_invoice: Option<String>,
     /// Creation timestamp in milliseconds.
     pub created_at: u64,
 }

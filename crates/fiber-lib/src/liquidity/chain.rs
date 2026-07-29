@@ -2350,12 +2350,14 @@ mod tests {
             refund_after_lock_time: 40_000,
             claimant_lock: script("claimant"),
             refund_lock: script("refund"),
+            client_invoice: None,
         }
     }
 
     fn test_loop_in_quote_terms() -> LoopOutQuoteTerms {
         LoopOutQuoteTerms {
             swap_kind: LiquiditySwapKind::LoopIn,
+            client_invoice: Some("lnbc-client-invoice".to_string()),
             ..test_loop_out_quote_terms()
         }
     }

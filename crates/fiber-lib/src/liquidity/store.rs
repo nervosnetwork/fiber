@@ -78,6 +78,7 @@ pub(crate) fn loop_out_quote_record_from_terms(
         refund_after_lock_time: quote.refund_after_lock_time,
         claimant_lock: quote.claimant_lock,
         refund_lock: quote.refund_lock,
+        client_invoice: quote.client_invoice,
         created_at,
     }
 }
@@ -101,6 +102,59 @@ pub(crate) fn loop_out_quote_terms_from_record(
         refund_after_lock_time: record.refund_after_lock_time,
         claimant_lock: record.claimant_lock,
         refund_lock: record.refund_lock,
+        client_invoice: record.client_invoice,
+    }
+}
+
+#[serde_as]
+#[derive(Deserialize, Serialize)]
+struct QuoteRecordWithoutClientInvoice {
+    quote_id: Hash256,
+    #[serde(default = "default_loop_out_swap_kind_for_store")]
+    swap_kind: fiber_types::LiquiditySwapKind,
+    provider: Pubkey,
+    asset: LiquidityAsset,
+    amount: u128,
+    provider_fee: u128,
+    routing_fee_limit: u128,
+    onchain_fee_estimate_ckb: u64,
+    capacity_requirement_ckb: u64,
+    payment_hash: Hash256,
+    expires_at: u64,
+    payout_deadline: u64,
+    refund_after_lock_time: u64,
+    #[serde_as(as = "EntityHex")]
+    claimant_lock: ckb_types::packed::Script,
+    #[serde_as(as = "EntityHex")]
+    refund_lock: ckb_types::packed::Script,
+    created_at: u64,
+}
+
+fn default_loop_out_swap_kind_for_store() -> fiber_types::LiquiditySwapKind {
+    fiber_types::LiquiditySwapKind::LoopOut
+}
+
+impl From<QuoteRecordWithoutClientInvoice> for fiber_types::LoopOutQuoteRecord {
+    fn from(record: QuoteRecordWithoutClientInvoice) -> Self {
+        Self {
+            quote_id: record.quote_id,
+            swap_kind: record.swap_kind,
+            provider: record.provider,
+            asset: record.asset,
+            amount: record.amount,
+            provider_fee: record.provider_fee,
+            routing_fee_limit: record.routing_fee_limit,
+            onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
+            capacity_requirement_ckb: record.capacity_requirement_ckb,
+            payment_hash: record.payment_hash,
+            expires_at: record.expires_at,
+            payout_deadline: record.payout_deadline,
+            refund_after_lock_time: record.refund_after_lock_time,
+            claimant_lock: record.claimant_lock,
+            refund_lock: record.refund_lock,
+            client_invoice: None,
+            created_at: record.created_at,
+        }
     }
 }
 
@@ -144,6 +198,7 @@ impl From<LegacyLoopOutQuoteRecord> for fiber_types::LoopOutQuoteRecord {
             refund_after_lock_time: record.refund_after_lock_time,
             claimant_lock: record.claimant_lock,
             refund_lock: record.refund_lock,
+            client_invoice: None,
             created_at: record.created_at,
         }
     }
@@ -153,6 +208,7 @@ pub(crate) fn loop_out_quote_record_from_bytes(
     value: &[u8],
 ) -> Result<fiber_types::LoopOutQuoteRecord, LiquidityStoreError> {
     bincode::deserialize::<fiber_types::LoopOutQuoteRecord>(value)
+        .or_else(|_| bincode::deserialize::<QuoteRecordWithoutClientInvoice>(value).map(Into::into))
         .or_else(|_| bincode::deserialize::<LegacyLoopOutQuoteRecord>(value).map(Into::into))
         .map_err(|err| {
             LiquidityStoreError::Backend(format!(
@@ -351,5 +407,43 @@ mod tests {
 
         assert_eq!(decoded.swap_kind, LiquiditySwapKind::LoopOut);
         assert_eq!(decoded.quote_id, record.quote_id);
+    }
+
+    #[test]
+    fn loop_in_quote_record_round_trips_client_invoice() {
+        let private_key = secp256k1::SecretKey::from_slice(&[42u8; 32]).unwrap();
+        let terms = LoopOutQuoteTerms {
+            quote_id: [1u8; 32].into(),
+            swap_kind: LiquiditySwapKind::LoopIn,
+            provider: Pubkey::from(private_key.public_key(secp256k1::SECP256K1)),
+            asset: LiquidityAsset {
+                asset_id: "ckb".to_string(),
+                kind: fiber_types::LiquidityAssetKind::Ckb,
+                udt_type_script: None,
+                min_amount: 1,
+                max_amount: 1_000,
+                available_capacity: 1_000,
+                base_fee: 1,
+                proportional_fee_ppm: 0,
+                enabled: true,
+            },
+            amount: 100,
+            provider_fee: 1,
+            routing_fee_limit: 0,
+            onchain_fee_estimate_ckb: 1_000,
+            capacity_requirement_ckb: 10_000,
+            payment_hash: [2u8; 32].into(),
+            expires_at: 20_000,
+            payout_deadline: 20_000,
+            refund_after_lock_time: 40_000,
+            claimant_lock: Default::default(),
+            refund_lock: Default::default(),
+            client_invoice: Some("lnbc-client-invoice".to_string()),
+        };
+
+        let record = loop_out_quote_record_from_terms(terms.clone(), 1_000);
+        let decoded = loop_out_quote_terms_from_record(record);
+
+        assert_eq!(decoded.client_invoice, terms.client_invoice);
     }
 }

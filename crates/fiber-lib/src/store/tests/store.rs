@@ -212,6 +212,7 @@ fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
         refund_after_lock_time: 40_000,
         claimant_lock: mock_script("claimant-store-round-trip"),
         refund_lock: mock_script("refund-store-round-trip"),
+        client_invoice: None,
     }
 }
 
