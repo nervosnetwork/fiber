@@ -132,6 +132,7 @@ pub fn build_loop_in_quote_terms(
     amount: u128,
     requested_udt_type_script: Option<&ckb_jsonrpc_types::Script>,
     client_invoice: String,
+    routing_fee_limit: u128,
     expires_at: u64,
     onchain_fee_estimate_ckb: u64,
 ) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
@@ -175,7 +176,7 @@ pub fn build_loop_in_quote_terms(
         asset: asset.clone(),
         amount,
         provider_fee,
-        routing_fee_limit: 0,
+        routing_fee_limit,
         onchain_fee_estimate_ckb,
         capacity_requirement_ckb,
         payment_hash: *invoice.payment_hash(),
@@ -383,6 +384,7 @@ mod tests {
             1_000,
             None,
             ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            0,
             60_000,
             1,
         )
@@ -409,6 +411,7 @@ mod tests {
             1_000,
             None,
             ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            0,
             60_000,
             1,
         )
@@ -435,6 +438,7 @@ mod tests {
             0,
             None,
             client_invoice(Hash256::from([3; 32]), Some(0), None).to_string(),
+            0,
             60_000,
             1,
         )
@@ -456,6 +460,7 @@ mod tests {
             1_000,
             None,
             client_invoice.to_string(),
+            0,
             60_000,
             1,
         )
@@ -476,12 +481,31 @@ mod tests {
             1_000,
             None,
             client_invoice.clone(),
+            0,
             60_000,
             1,
         )
         .expect("loop in quote");
 
         assert_eq!(quote.client_invoice, Some(client_invoice));
+    }
+
+    #[test]
+    fn loop_in_quote_preserves_requested_routing_fee_limit() {
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            23,
+            60_000,
+            1,
+        )
+        .expect("loop in quote");
+
+        assert_eq!(quote.routing_fee_limit, 23);
     }
 
     #[test]
@@ -493,6 +517,7 @@ mod tests {
             1_000,
             None,
             client_invoice(Hash256::from([3; 32]), Some(999), None).to_string(),
+            0,
             60_000,
             1,
         )
@@ -506,6 +531,7 @@ mod tests {
             1_000,
             None,
             client_invoice(Hash256::from([3; 32]), None, None).to_string(),
+            0,
             60_000,
             1,
         )
@@ -527,6 +553,7 @@ mod tests {
                 Some(udt_script("0x01").into()),
             )
             .to_string(),
+            0,
             60_000,
             1,
         )
@@ -549,6 +576,7 @@ mod tests {
                 Some(udt_script("0x02").into()),
             )
             .to_string(),
+            0,
             60_000,
             1,
         )
@@ -574,6 +602,7 @@ mod tests {
             u128::MAX,
             None,
             client_invoice(Hash256::from([3; 32]), Some(u128::MAX), None).to_string(),
+            0,
             60_000,
             1,
         )
@@ -592,6 +621,7 @@ mod tests {
             1_000,
             None,
             ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            0,
             60_000,
             1,
         )
