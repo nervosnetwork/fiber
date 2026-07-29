@@ -56,6 +56,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `list_swaps`](#liquidity-list_swaps)
         * [Method `provider_quote_loop_out`](#liquidity-provider_quote_loop_out)
         * [Method `provider_accept_loop_out`](#liquidity-provider_accept_loop_out)
+        * [Method `provider_accept_loop_in`](#liquidity-provider_accept_loop_in)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -823,6 +824,8 @@ Request a Loop Out quote from a provider.
 * `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
 * `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
 * `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
+* `claimant_lock` - <em>`Option<String>`</em>, Claimant lock script bytes encoded for the liquidity-lock output.
+* `refund_lock` - <em>`Option<String>`</em>, Refund lock script bytes encoded for the liquidity-lock output.
 
 ---
 
@@ -861,6 +864,8 @@ Request a Loop In quote from a provider.
 * `asset_id` - <em>`String`</em>, Provider asset registry identifier.
 * `amount` - <em>`u128`</em>, Raw Fiber destination amount before routing fees.
 * `client_invoice` - <em>`String`</em>, Client invoice the provider should pay.
+* `claimant_lock` - <em>`String`</em>, Provider claim lock script bytes encoded for the client lock.
+* `refund_lock` - <em>`String`</em>, Client refund lock script bytes encoded for the client lock.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
 * `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
@@ -879,6 +884,8 @@ Request a Loop In quote from a provider.
 * `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
 * `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
 * `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
+* `claimant_lock` - <em>`Option<String>`</em>, Claimant lock script bytes encoded for the liquidity-lock output.
+* `refund_lock` - <em>`Option<String>`</em>, Refund lock script bytes encoded for the liquidity-lock output.
 
 ---
 
@@ -971,6 +978,8 @@ Provider-side quote endpoint for a Loop Out request.
 * `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
 * `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
 * `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
+* `claimant_lock` - <em>`Option<String>`</em>, Claimant lock script bytes encoded for the liquidity-lock output.
+* `refund_lock` - <em>`Option<String>`</em>, Refund lock script bytes encoded for the liquidity-lock output.
 
 ---
 
@@ -986,6 +995,28 @@ Provider-side accept endpoint for a Loop Out quote.
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
 * `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
+
+##### Returns
+
+* `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
+* `state` - <em>`String`</em>, Initial persisted state name.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
+
+---
+
+
+
+<a id="liquidity-provider_accept_loop_in"></a>
+#### Method `provider_accept_loop_in`
+
+Provider-side accept endpoint for an observed Loop In lock.
+
+##### Params
+
+* `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
+* `lock_tx_hash` - <em>[Hash256](#type-hash256)</em>, Confirmable client lock transaction hash.
+* `lock_output_index` - <em>`u32`</em>, Output index of the liquidity-lock cell in `lock_tx_hash`.
 
 ##### Returns
 

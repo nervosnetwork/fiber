@@ -5,7 +5,8 @@ use std::time::Duration;
 use fiber_json_types::{
     GetSwapParams, LiquidityQuoteResponse, LiquiditySwapRecord as JsonLiquiditySwapRecord,
     LiquiditySwapResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
-    ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
+    ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
+    QuoteLoopInParams, QuoteLoopOutParams,
 };
 use fiber_types::LiquiditySwapState;
 #[cfg(not(target_arch = "wasm32"))]
@@ -86,6 +87,13 @@ trait LiquidityRpc {
         &self,
         params: ProviderAcceptLoopOutParams,
     ) -> Result<LiquiditySwapResponse, ErrorObjectOwned>;
+
+    /// Provider-side accept endpoint for an observed Loop In lock.
+    #[method(name = "provider_accept_loop_in")]
+    async fn provider_accept_loop_in(
+        &self,
+        params: ProviderAcceptLoopInParams,
+    ) -> Result<LiquiditySwapResponse, ErrorObjectOwned>;
 }
 
 /// Server implementation for the liquidity RPC module.
@@ -105,6 +113,7 @@ pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
         "list_swaps",
         "provider_quote_loop_out",
         "provider_accept_loop_out",
+        "provider_accept_loop_in",
     ]
 }
 
@@ -175,6 +184,13 @@ where
         params: ProviderAcceptLoopOutParams,
     ) -> Result<LiquiditySwapResponse, ErrorObjectOwned> {
         self.provider_accept_loop_out(params).await
+    }
+
+    async fn provider_accept_loop_in(
+        &self,
+        params: ProviderAcceptLoopInParams,
+    ) -> Result<LiquiditySwapResponse, ErrorObjectOwned> {
+        self.provider_accept_loop_in(params).await
     }
 }
 
@@ -307,6 +323,21 @@ where
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
         let log_params = params.clone();
         let message = move |reply| LiquidityActorMessage::ProviderAcceptLoopOut(params, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Provider-side accept endpoint for an observed Loop In lock.
+    pub async fn provider_accept_loop_in(
+        &self,
+        params: ProviderAcceptLoopInParams,
+    ) -> Result<LiquiditySwapResponse, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::ProviderAcceptLoopIn(params, reply);
 
         call_liquidity_actor(actor.clone(), message, &log_params).await
     }
@@ -656,6 +687,13 @@ mod tests {
                         .push("provider_accept_loop_out");
                     let _ = reply.send(Ok(liquidity_swap_response()));
                 }
+                LiquidityActorMessage::ProviderAcceptLoopIn(_params, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("provider_accept_loop_in");
+                    let _ = reply.send(Ok(liquidity_swap_response()));
+                }
                 _ => {}
             }
             Ok(())
@@ -748,6 +786,8 @@ mod tests {
             asset_id: "ckb".to_string(),
             amount: 100,
             client_invoice: "invoice".to_string(),
+            claimant_lock: "0x".to_string(),
+            refund_lock: "0x".to_string(),
             max_provider_fee: 10,
             max_routing_fee: 5,
             expires_after_seconds: 60,
@@ -780,6 +820,14 @@ mod tests {
         }
     }
 
+    fn provider_accept_loop_in_params() -> ProviderAcceptLoopInParams {
+        ProviderAcceptLoopInParams {
+            quote_id: JsonHash256([1u8; 32]),
+            lock_tx_hash: JsonHash256([9u8; 32]),
+            lock_output_index: 0,
+        }
+    }
+
     fn liquidity_quote_response() -> LiquidityQuoteResponse {
         LiquidityQuoteResponse {
             quote_id: JsonHash256([1u8; 32]),
@@ -794,6 +842,8 @@ mod tests {
             expires_at: 1000,
             payout_deadline: Some(2000),
             refund_after_lock_time: 3000,
+            claimant_lock: None,
+            refund_lock: None,
         }
     }
 
@@ -1040,6 +1090,11 @@ mod tests {
                 .await
                 .err(),
         );
+        assert_not_placeholder_unavailable(
+            rpc.provider_accept_loop_in(provider_accept_loop_in_params())
+                .await
+                .err(),
+        );
 
         assert_eq!(
             actor.take_events(),
@@ -1050,6 +1105,7 @@ mod tests {
                 "loop_in",
                 "provider_quote_loop_out",
                 "provider_accept_loop_out",
+                "provider_accept_loop_in",
             ]
         );
     }

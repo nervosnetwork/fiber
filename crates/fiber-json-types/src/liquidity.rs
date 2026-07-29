@@ -169,6 +169,12 @@ pub struct LiquidityQuoteResponse {
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub refund_after_lock_time: u64,
+    /// Claimant lock script bytes encoded for the liquidity-lock output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimant_lock: Option<String>,
+    /// Refund lock script bytes encoded for the liquidity-lock output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refund_lock: Option<String>,
 }
 
 /// Parameters for requesting a Loop In quote.
@@ -185,6 +191,10 @@ pub struct QuoteLoopInParams {
     pub amount: u128,
     /// Client invoice the provider should pay.
     pub client_invoice: String,
+    /// Provider claim lock script bytes encoded for the client lock.
+    pub claimant_lock: String,
+    /// Client refund lock script bytes encoded for the client lock.
+    pub refund_lock: String,
     /// Maximum provider fee accepted by the client.
     #[serde_as(as = "U128Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
@@ -222,6 +232,17 @@ pub struct LoopInParams {
     pub quote_id: Hash256,
     /// Funding transaction hash or wallet funding descriptor.
     pub funding_tx: String,
+}
+
+/// Provider-side parameters for accepting an observed Loop In client lock.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderAcceptLoopInParams {
+    /// Provider-generated quote identifier.
+    pub quote_id: Hash256,
+    /// Confirmable client lock transaction hash.
+    pub lock_tx_hash: Hash256,
+    /// Output index of the liquidity-lock cell in `lock_tx_hash`.
+    pub lock_output_index: u32,
 }
 
 /// Response returned when a liquidity swap is created.
@@ -374,11 +395,15 @@ mod tests {
             expires_at: 6,
             payout_deadline: Some(7),
             refund_after_lock_time: 8,
+            claimant_lock: None,
+            refund_lock: None,
         };
 
         let value = serde_json::to_value(response).expect("json");
         assert_eq!(value["payout_deadline"], "0x7");
         assert_eq!(value["refund_after_lock_time"], "0x8");
+        assert!(value.get("claimant_lock").is_none());
+        assert!(value.get("refund_lock").is_none());
     }
 
     #[test]
