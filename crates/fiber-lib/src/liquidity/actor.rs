@@ -390,6 +390,7 @@ where
             params.amount,
             asset.udt_type_script.as_ref(),
             params.client_invoice,
+            params.max_routing_fee,
             expires_at,
             1_000,
         )?;
@@ -2090,12 +2091,15 @@ mod tests {
         LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState, Pubkey,
     };
     use ractor::concurrency::Duration;
-    use secp256k1::{SecretKey, SECP256K1};
+    use secp256k1::{Secp256k1, SecretKey, SECP256K1};
     use tokio::sync::oneshot;
 
     use crate::liquidity::store::{
         LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
         LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapUpdate,
+    };
+    use crate::{
+        gen_deterministic_secp256k1_keypair_tuple, invoice::Currency, invoice::InvoiceBuilder,
     };
 
     use super::*;
@@ -2988,6 +2992,17 @@ mod tests {
         ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
             ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopOut(
+                params, reply
+            ))
+            .unwrap()
+        }
+
+        async fn call_quote_loop_in(
+            &self,
+            params: QuoteLoopInParams,
+        ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+            let actor = self.spawn_actor().await;
+            ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopIn(
                 params, reply
             ))
             .unwrap()
@@ -3957,6 +3972,17 @@ mod tests {
         format!("0x{}", hex::encode(script.as_slice()))
     }
 
+    fn valid_client_invoice(amount: u128, payment_hash: Hash256) -> String {
+        let (private_key, public_key) = gen_deterministic_secp256k1_keypair_tuple();
+        InvoiceBuilder::new(Currency::Fibb)
+            .amount(Some(amount))
+            .payment_hash(payment_hash)
+            .payee_pub_key(public_key)
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .expect("invoice")
+            .to_string()
+    }
+
     fn test_loop_out_quote(expires_at: u64) -> LoopOutQuoteTerms {
         let sk = SecretKey::from_slice(&[42; 32]).unwrap();
         LoopOutQuoteTerms {
@@ -4505,6 +4531,7 @@ mod tests {
         let store = TestLiquidityStore::new(events.clone(), "provider");
         let mut quote = test_loop_in_quote(now_ms() + 60_000);
         quote.client_invoice = Some("lnbc-client-invoice".to_string());
+        quote.routing_fee_limit = 19;
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
             .unwrap();
@@ -4526,6 +4553,7 @@ mod tests {
         let request = payment.requests().pop().expect("payment request");
         assert_eq!(request.invoice, Some("lnbc-client-invoice".to_string()));
         assert_ne!(request.target_pubkey, Some(quote.provider));
+        assert_eq!(request.max_fee_amount, 19);
     }
 
     #[tokio::test]
@@ -4841,6 +4869,33 @@ mod tests {
             .get_loop_out_quote(&quote.quote_id.into())
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn quote_loop_in_persists_and_returns_requested_routing_fee_limit() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let client_invoice = valid_client_invoice(100, [44u8; 32].into());
+
+        let quote = harness
+            .call_quote_loop_in(QuoteLoopInParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                client_invoice,
+                max_provider_fee: 100,
+                max_routing_fee: 17,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(quote.routing_fee_limit, 17);
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.routing_fee_limit, 17);
     }
 
     #[tokio::test]
