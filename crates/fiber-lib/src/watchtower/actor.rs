@@ -253,6 +253,7 @@ fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_ur
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
+    store.cleanup_expired_watch_preimages();
     let mut cell_collector = new_default_cell_collector(&rpc_url);
 
     for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
@@ -2266,6 +2267,8 @@ mod tests {
                         .then(|| settlement.clone())
                 })
         }
+
+        fn cleanup_expired_watch_preimages(&self) {}
     }
 
     fn commitment_lock_prefix() -> Script {
