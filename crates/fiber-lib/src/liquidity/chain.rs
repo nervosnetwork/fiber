@@ -19,7 +19,9 @@ use crate::ckb::{
 };
 use crate::liquidity::actor::LiquidityActorMessage;
 use crate::liquidity::quote::loop_in_gross_onchain_amount;
-use crate::liquidity::store::{LiquidityStore, LiquiditySwapRecord, LiquiditySwapRole};
+use crate::liquidity::store::{
+    LiquidityStore, LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole,
+};
 use crate::liquidity::tx::{
     build_liquidity_lock_claim_witness, build_liquidity_lock_output,
     build_liquidity_lock_refund_witness, build_liquidity_lock_script, LiquidityLockBuildError,
@@ -175,6 +177,42 @@ impl LoopOutClaimTxPlan {
         Ok(Self {
             swap_id: claim.swap_id,
             payout_outpoint,
+            payment_preimage: claim.payment_preimage,
+        })
+    }
+}
+
+/// Pure transaction plan for a provider claim of a Loop In client lock.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LoopInProviderClaimTxPlan {
+    /// Local swap identifier being claimed.
+    pub swap_id: Hash256,
+    /// Persisted client lock outpoint to spend.
+    pub client_lock_outpoint: packed::OutPoint,
+    /// Validated payment preimage required by the claim path.
+    pub payment_preimage: Hash256,
+}
+
+impl LoopInProviderClaimTxPlan {
+    /// Build a Loop In provider claim transaction plan from a persisted swap record.
+    pub fn from_record(record: &LiquiditySwapRecord) -> Result<Self, LiquidityLoopOutError> {
+        if record.swap_kind != LiquiditySwapKind::LoopIn
+            || record.role != LiquiditySwapRole::Provider
+        {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot build loop in provider claim for non-provider loop in record".to_string(),
+            ));
+        }
+        let claim = LoopOutClaimPlan::from_record(record)?;
+        let client_lock_outpoint = record.onchain_outpoint.clone().ok_or_else(|| {
+            LiquidityLoopOutError::Chain(
+                "cannot build loop in provider claim without client lock outpoint".to_string(),
+            )
+        })?;
+
+        Ok(Self {
+            swap_id: claim.swap_id,
+            client_lock_outpoint,
             payment_preimage: claim.payment_preimage,
         })
     }
@@ -1158,8 +1196,13 @@ where
                     swap.quote_id
                 ))
             })?;
-        let plan = LoopOutClaimTxPlan::from_record(&swap)?;
-        if plan.payment_preimage != request.payment_preimage {
+        let payment_preimage = match (swap.swap_kind, swap.role) {
+            (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Provider) => {
+                LoopInProviderClaimTxPlan::from_record(&swap)?.payment_preimage
+            }
+            _ => LoopOutClaimTxPlan::from_record(&swap)?.payment_preimage,
+        };
+        if payment_preimage != request.payment_preimage {
             return Err(LiquidityLoopOutError::Chain(
                 "claim request preimage does not match persisted swap preimage".to_string(),
             ));
@@ -1174,12 +1217,26 @@ where
             })?;
             claim_cell_deps.extend(udt_cell_deps.into_iter());
         }
-        let tx = build_loop_out_claim_transaction(
-            &quote,
-            &plan.payout_outpoint,
-            plan.payment_preimage,
-            &claim_cell_deps,
-        )?;
+        let tx = match (swap.swap_kind, swap.role) {
+            (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Provider) => {
+                let plan = LoopInProviderClaimTxPlan::from_record(&swap)?;
+                build_loop_in_provider_claim_transaction(
+                    &quote,
+                    &plan.client_lock_outpoint,
+                    plan.payment_preimage,
+                    &claim_cell_deps,
+                )?
+            }
+            _ => {
+                let plan = LoopOutClaimTxPlan::from_record(&swap)?;
+                build_loop_out_claim_transaction(
+                    &quote,
+                    &plan.payout_outpoint,
+                    plan.payment_preimage,
+                    &claim_cell_deps,
+                )?
+            }
+        };
         let tx_hash: Hash256 = tx.hash().into();
         let now = now_timestamp_as_millis_u64();
         if let Some(existing) = self
@@ -2946,6 +3003,23 @@ mod tests {
         let error = LoopOutClaimPlan::from_record(&record).unwrap_err();
 
         assert!(error.to_string().contains("payment hash"));
+    }
+
+    #[test]
+    fn chain_watcher_loop_in_provider_claim_plan_uses_client_lock_outpoint() {
+        let preimage: Hash256 = [4u8; 32].into();
+        let outpoint = test_outpoint(42);
+        let mut record = test_swap_record_with_preimage(preimage);
+        record.role = LiquiditySwapRole::Provider;
+        record.swap_kind = LiquiditySwapKind::LoopIn;
+        record.state = LiquiditySwapState::ClaimPending;
+        record.onchain_outpoint = Some(outpoint.clone());
+
+        let plan = LoopInProviderClaimTxPlan::from_record(&record).unwrap();
+
+        assert_eq!(plan.swap_id, record.swap_id);
+        assert_eq!(plan.client_lock_outpoint, outpoint);
+        assert_eq!(plan.payment_preimage, preimage);
     }
 
     #[test]
