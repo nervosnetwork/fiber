@@ -226,9 +226,7 @@ where
                     now_ms(),
                 ) {
                     tracing::warn!(?swap_id, %error, "failed to mark loop out refund tx confirmed");
-                } else if let Err(error) =
-                    mark_provider_refund_confirmed(&state.store, swap_id, now_ms())
-                {
+                } else if let Err(error) = mark_refund_confirmed(&state.store, swap_id, now_ms()) {
                     tracing::warn!(?swap_id, %error, "ignoring loop out refund continuation");
                 } else {
                     state.prune_recovery_guards(swap_id);
@@ -680,6 +678,7 @@ where
             PaymentInFlight,
             PaymentSettled,
             ClaimPending,
+            RefundPending,
         ];
         let mut swaps = self
             .store
@@ -878,44 +877,7 @@ where
                 Ok(true)
             }
             Some(RecoveryAction::RefundProviderPayout) => {
-                if self.active_refund_swaps.contains(&swap.swap_id) {
-                    return Ok(false);
-                }
-                if swap.onchain_outpoint.is_none() {
-                    persist_loop_out_payment_failure_context(
-                        &self.store,
-                        swap.swap_id,
-                        "refund recovery missing persisted outpoint".to_string(),
-                    );
-                    return Ok(false);
-                }
-                let should_broadcast_refund = match self
-                    .store
-                    .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Refund)
-                    .map_err(map_store_error)?
-                {
-                    Some(record)
-                        if matches!(
-                            record.status,
-                            LiquidityChainTxStatus::Broadcast | LiquidityChainTxStatus::Confirmed
-                        ) =>
-                    {
-                        false
-                    }
-                    _ => true,
-                };
-                if should_broadcast_refund {
-                    self.chain
-                        .broadcast_refund(&swap)
-                        .await
-                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
-                }
-                self.chain
-                    .watch_refund(swap.swap_id, myself.clone())
-                    .await
-                    .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
-                self.active_refund_swaps.insert(swap.swap_id);
-                Ok(true)
+                self.resume_refund_pending_swap(swap, myself.clone()).await
             }
             None => Ok(false),
         }
@@ -951,7 +913,55 @@ where
                 return Ok(true);
             }
         }
+        if swap.state == LiquiditySwapState::RefundPending {
+            return self.resume_refund_pending_swap(swap, myself).await;
+        }
         Ok(false)
+    }
+
+    async fn resume_refund_pending_swap(
+        &mut self,
+        swap: LiquiditySwapRecord,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<bool, LiquidityLoopOutError> {
+        if self.active_refund_swaps.contains(&swap.swap_id) {
+            return Ok(false);
+        }
+        if swap.onchain_outpoint.is_none() {
+            persist_loop_out_payment_failure_context(
+                &self.store,
+                swap.swap_id,
+                "refund recovery missing persisted outpoint".to_string(),
+            );
+            return Ok(false);
+        }
+        let should_broadcast_refund = match self
+            .store
+            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Refund)
+            .map_err(map_store_error)?
+        {
+            Some(record)
+                if matches!(
+                    record.status,
+                    LiquidityChainTxStatus::Broadcast | LiquidityChainTxStatus::Confirmed
+                ) =>
+            {
+                false
+            }
+            _ => true,
+        };
+        if should_broadcast_refund {
+            self.chain
+                .broadcast_refund(&swap)
+                .await
+                .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+        }
+        self.chain
+            .watch_refund(swap.swap_id, myself)
+            .await
+            .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+        self.active_refund_swaps.insert(swap.swap_id);
+        Ok(true)
     }
 
     async fn resume_provider_loop_in_swap(
@@ -1984,6 +1994,33 @@ where
     S: LiquidityStore,
 {
     transition_swap(store, &swap_id, LiquiditySwapState::Refunded, now_ms)
+}
+
+/// Mark a supported refund owner as confirmed on-chain.
+pub fn mark_refund_confirmed<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    match (swap.swap_kind, swap.role) {
+        (LiquiditySwapKind::LoopOut, LiquiditySwapRole::Provider)
+        | (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Client) => {
+            transition_swap(store, &swap_id, LiquiditySwapState::Refunded, now_ms)
+        }
+        _ => Err(LiquidityLoopOutError::Chain(format!(
+            "unsupported refund confirmation for {:?} {:?}",
+            swap.swap_kind, swap.role
+        ))),
+    }
 }
 
 fn loop_out_record(
@@ -3466,6 +3503,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loop_in_client_refund_pending_recovery_broadcasts_refund_and_schedules_watch() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut refund_pending = recovery_swap(16, LiquiditySwapState::RefundPending);
+        refund_pending.swap_kind = LiquiditySwapKind::LoopIn;
+        refund_pending.role = LiquiditySwapRole::Client;
+        store.insert_liquidity_swap(refund_pending).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 1);
+        assert_eq!(event_count(&events, "broadcast_refund"), 1);
+        assert_eq!(event_count(&events, "watch_refund"), 1);
+    }
+
+    #[tokio::test]
     async fn refund_confirmed_marks_refund_tx_record_confirmed_and_swap_refunded() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "provider");
@@ -3488,6 +3547,58 @@ mod tests {
             store.clone(),
             TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
             TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        actor
+            .send_message(LiquidityActorMessage::RefundConfirmed(
+                refund_pending.swap_id,
+            ))
+            .unwrap();
+        call_resume_non_terminal_result(actor).await.unwrap();
+
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&refund_pending.swap_id, LiquidityChainTxRole::Refund)
+                .unwrap()
+                .unwrap()
+                .status,
+            LiquidityChainTxStatus::Confirmed
+        );
+        assert_eq!(
+            store
+                .get_liquidity_swap(&refund_pending.swap_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::Refunded
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_in_client_refund_confirmed_marks_refund_tx_confirmed_and_swap_refunded() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut refund_pending = recovery_swap(20, LiquiditySwapState::RefundPending);
+        refund_pending.swap_kind = LiquiditySwapKind::LoopIn;
+        refund_pending.role = LiquiditySwapRole::Client;
+        store.insert_liquidity_swap(refund_pending.clone()).unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: refund_pending.swap_id,
+                role: LiquidityChainTxRole::Refund,
+                tx_hash: [13u8; 32].into(),
+                outpoint: None,
+                status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
         )
         .await;
 
