@@ -294,6 +294,13 @@ pub trait LiquidityChainWatcher {
     /// Validate Loop In lock broadcast availability before durable swap creation.
     fn ensure_loop_in_lock_available(&mut self, funding_tx: &str) -> Result<(), Self::Error>;
 
+    /// Validate that an observed Loop In lock cell matches the accepted quote.
+    async fn validate_observed_loop_in_lock(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+        outpoint: &packed::OutPoint,
+    ) -> Result<(), Self::Error>;
+
     /// Schedule payout lock watching and report completion back to `myself`.
     async fn watch_payout_lock(
         &mut self,
@@ -1134,6 +1141,17 @@ where
         Ok(())
     }
 
+    async fn validate_observed_loop_in_lock(
+        &mut self,
+        _quote: &LoopOutQuoteTerms,
+        _outpoint: &packed::OutPoint,
+    ) -> Result<(), Self::Error> {
+        Err(LiquidityLoopOutError::Chain(
+            "provider loop in observed lock validation is not available for the CKB actor"
+                .to_string(),
+        ))
+    }
+
     async fn watch_loop_in_lock(
         &mut self,
         swap_id: Hash256,
@@ -1831,6 +1849,14 @@ mod tests {
         }
 
         fn ensure_loop_in_lock_available(&mut self, _funding_tx: &str) -> Result<(), Self::Error> {
+            Err(LiquidityLoopOutError::Chain("unused".to_string()))
+        }
+
+        async fn validate_observed_loop_in_lock(
+            &mut self,
+            _quote: &LoopOutQuoteTerms,
+            _outpoint: &packed::OutPoint,
+        ) -> Result<(), Self::Error> {
             Err(LiquidityLoopOutError::Chain("unused".to_string()))
         }
 
