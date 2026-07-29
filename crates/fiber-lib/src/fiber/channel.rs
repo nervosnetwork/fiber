@@ -7433,6 +7433,7 @@ impl ChannelActorState {
         self.tlc_state.waiting_ack
             || self.remote_revocation_nonce_for_send.is_none()
             || self.remote_revocation_nonce_for_verify.is_none()
+                && self.remote_revocation_nonce_for_next.is_none()
     }
 
     fn check_tlc_limits(&self, add_amount: u128, is_sent: bool) -> ProcessingChannelResult {
@@ -9140,7 +9141,7 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         validate_commit_diff_for_replay_inputs(
             self.get_id(),
-            self.is_waiting_tlc_ack(),
+            self.tlc_state.waiting_ack,
             self.get_local_commitment_number(),
             self.get_remote_commitment_number(),
             reestablish_channel,
