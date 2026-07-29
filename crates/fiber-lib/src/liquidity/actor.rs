@@ -960,6 +960,28 @@ where
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<bool, LiquidityLoopOutError> {
         match swap.state {
+            LiquiditySwapState::OnchainLockPending => {
+                let has_watchable_lock = self
+                    .store
+                    .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Payout)
+                    .map_err(map_store_error)?
+                    .is_some_and(|record| {
+                        matches!(
+                            record.status,
+                            LiquidityChainTxStatus::Planned
+                                | LiquidityChainTxStatus::Broadcast
+                                | LiquidityChainTxStatus::Confirmed
+                        ) && record.outpoint.is_some()
+                    });
+                if has_watchable_lock {
+                    self.chain
+                        .watch_loop_in_lock(swap.swap_id, myself)
+                        .await
+                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                    return Ok(true);
+                }
+                Ok(false)
+            }
             LiquiditySwapState::OnchainLocked => {
                 if self.active_payment_swaps.contains(&swap.swap_id) {
                     return Ok(false);
@@ -4358,6 +4380,42 @@ mod tests {
 
         assert_eq!(resumed, 1);
         assert_eq!(event_count(&events, "watch_loop_in_lock"), 1);
+        assert_eq!(event_count(&events, "watch_payout"), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_loop_in_lock_pending_recovery_watches_existing_lock_record() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut swap = recovery_swap(37, LiquiditySwapState::OnchainLockPending);
+        swap.swap_kind = LiquiditySwapKind::LoopIn;
+        swap.role = LiquiditySwapRole::Provider;
+        swap.onchain_outpoint = Some(OutPoint::new(Byte32::from_slice(&[37u8; 32]).unwrap(), 37));
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: swap.swap_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [38u8; 32].into(),
+                outpoint: swap.onchain_outpoint.clone(),
+                status: LiquidityChainTxStatus::Broadcast,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 1);
+        assert_eq!(event_count(&events, "watch_loop_in_lock"), 1);
+        assert_eq!(event_count(&events, "broadcast_loop_in_lock"), 0);
         assert_eq!(event_count(&events, "watch_payout"), 0);
     }
 
