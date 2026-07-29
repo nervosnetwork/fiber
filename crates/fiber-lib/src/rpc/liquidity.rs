@@ -1,5 +1,7 @@
 //! JSON-RPC surface for liquidity quote and swap operations.
 
+use std::time::Duration;
+
 use fiber_json_types::{
     GetSwapParams, LiquidityQuoteResponse, LiquiditySwapRecord as JsonLiquiditySwapRecord,
     LiquiditySwapResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
@@ -9,15 +11,21 @@ use fiber_types::LiquiditySwapState;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
-use ractor::{call, ActorRef};
+use ractor::{call, ActorRef, RpcReplyPort};
+use serde::Serialize;
 
 use crate::liquidity::actor::LiquidityActorMessage;
 use crate::liquidity::store::{
     LiquidityStore, LiquiditySwapFilter, LiquiditySwapKind,
     LiquiditySwapRecord as StoreLiquiditySwapRecord,
 };
+use crate::log_and_error;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
-use crate::{handle_actor_call, log_and_error};
+
+#[cfg(not(test))]
+const LIQUIDITY_RPC_ACTOR_CALL_TIMEOUT_MS: u64 = 30_000;
+#[cfg(test)]
+const LIQUIDITY_RPC_ACTOR_CALL_TIMEOUT_MS: u64 = 10;
 
 /// RPC module for liquidity management.
 #[cfg(not(target_arch = "wasm32"))]
@@ -183,9 +191,10 @@ where
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
-        let message = |reply| LiquidityActorMessage::QuoteLoopOut(params.clone(), reply);
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::QuoteLoopOut(params, reply);
 
-        handle_actor_call!(actor.clone(), message, params)
+        call_liquidity_actor(actor.clone(), message, &log_params).await
     }
 
     /// Execute a Loop Out swap after quote acceptance.
@@ -197,9 +206,10 @@ where
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
-        let message = |reply| LiquidityActorMessage::LoopOut(params.clone(), reply);
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::LoopOut(params, reply);
 
-        handle_actor_call!(actor.clone(), message, params)
+        call_liquidity_actor(actor.clone(), message, &log_params).await
     }
 
     /// Request a Loop In quote from a provider.
@@ -211,9 +221,10 @@ where
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
-        let message = |reply| LiquidityActorMessage::QuoteLoopIn(params.clone(), reply);
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::QuoteLoopIn(params, reply);
 
-        handle_actor_call!(actor.clone(), message, params)
+        call_liquidity_actor(actor.clone(), message, &log_params).await
     }
 
     /// Execute a Loop In swap after quote acceptance.
@@ -225,9 +236,10 @@ where
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
-        let message = |reply| LiquidityActorMessage::LoopIn(params.clone(), reply);
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::LoopIn(params, reply);
 
-        handle_actor_call!(actor.clone(), message, params)
+        call_liquidity_actor(actor.clone(), message, &log_params).await
     }
 
     /// Return one persisted liquidity swap.
@@ -278,9 +290,10 @@ where
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
-        let message = |reply| LiquidityActorMessage::ProviderQuoteLoopOut(params.clone(), reply);
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::ProviderQuoteLoopOut(params, reply);
 
-        handle_actor_call!(actor.clone(), message, params)
+        call_liquidity_actor(actor.clone(), message, &log_params).await
     }
 
     /// Provider-side accept endpoint for a Loop Out quote.
@@ -292,9 +305,36 @@ where
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
-        let message = |reply| LiquidityActorMessage::ProviderAcceptLoopOut(params.clone(), reply);
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::ProviderAcceptLoopOut(params, reply);
 
-        handle_actor_call!(actor.clone(), message, params)
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+}
+
+async fn call_liquidity_actor<T, E, F, P>(
+    actor: ActorRef<LiquidityActorMessage>,
+    message: F,
+    params: &P,
+) -> Result<T, ErrorObjectOwned>
+where
+    T: Send + 'static,
+    E: ToString + Send + 'static,
+    F: FnOnce(RpcReplyPort<Result<T, E>>) -> LiquidityActorMessage + Send + 'static,
+    P: Serialize,
+{
+    match tokio::time::timeout(
+        Duration::from_millis(LIQUIDITY_RPC_ACTOR_CALL_TIMEOUT_MS),
+        async move { call!(actor, message) },
+    )
+    .await
+    {
+        Ok(Ok(result)) => match result {
+            Ok(response) => Ok(response),
+            Err(error) => log_and_error!(params, error.to_string()),
+        },
+        Ok(Err(error)) => log_and_error!(params, error.to_string()),
+        Err(_) => log_and_error!(params, "liquidity actor call timed out"),
     }
 }
 
@@ -361,7 +401,9 @@ fn liquidity_swap_state_to_string(state: LiquiditySwapState) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::future::pending;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use fiber_json_types::{
         GetSwapParams, Hash256 as JsonHash256, ListSwapsParams, LoopInParams, QuoteLoopInParams,
@@ -620,6 +662,38 @@ mod tests {
         }
     }
 
+    struct StalledLiquidityRpcMock;
+
+    #[async_trait::async_trait]
+    impl Actor for StalledLiquidityRpcMock {
+        type Msg = LiquidityActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                LiquidityActorMessage::QuoteLoopIn(_, _) | LiquidityActorMessage::LoopIn(_, _) => {
+                    pending::<()>().await;
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
     struct SpawnedLiquidityRpcMock {
         ref_: ActorRef<LiquidityActorMessage>,
         events: Arc<Mutex<Vec<&'static str>>>,
@@ -638,6 +712,14 @@ mod tests {
             .expect("spawn liquidity rpc mock");
 
         SpawnedLiquidityRpcMock { ref_, events }
+    }
+
+    async fn spawn_stalled_liquidity_rpc_mock() -> ActorRef<LiquidityActorMessage> {
+        let (ref_, _handle) = ractor::Actor::spawn(None, StalledLiquidityRpcMock, ())
+            .await
+            .expect("spawn stalled liquidity rpc mock");
+
+        ref_
     }
 
     fn quote_loop_out_params() -> QuoteLoopOutParams {
@@ -906,6 +988,36 @@ mod tests {
 
         assert_eq!(response.swap_id, JsonHash256([1u8; 32]));
         assert_eq!(actor.take_events(), vec!["loop_in"]);
+    }
+
+    #[tokio::test]
+    async fn quote_loop_in_rpc_times_out_when_actor_stalls() {
+        let actor = spawn_stalled_liquidity_rpc_mock().await;
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            rpc.quote_loop_in(quote_loop_in_params()),
+        )
+        .await
+        .expect("rpc call should time out internally");
+        let error = result.expect_err("stalled actor");
+
+        assert!(error.message().contains("liquidity actor call timed out"));
+    }
+
+    #[tokio::test]
+    async fn loop_in_rpc_times_out_when_actor_stalls() {
+        let actor = spawn_stalled_liquidity_rpc_mock().await;
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor));
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), rpc.loop_in(loop_in_params()))
+                .await
+                .expect("rpc call should time out internally");
+        let error = result.expect_err("stalled actor");
+
+        assert!(error.message().contains("liquidity actor call timed out"));
     }
 
     #[tokio::test]
