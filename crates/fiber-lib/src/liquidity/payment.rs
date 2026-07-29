@@ -17,7 +17,9 @@ pub struct LoopOutPaymentRequest {
     /// Payment hash identifying the HTLC/conditional payment.
     pub payment_hash: Hash256,
     /// Node pubkey receiving the Fiber payment.
-    pub target_pubkey: Pubkey,
+    pub target_pubkey: Option<Pubkey>,
+    /// Invoice to pay when the receiver is encoded by the invoice.
+    pub invoice: Option<String>,
     /// Gross Fiber payment amount including provider and routing fee budgets.
     pub amount: u128,
     /// Maximum Fiber routing fee the client accepts for this payment.
@@ -35,10 +37,27 @@ impl LoopOutPaymentRequest {
     ) -> Result<Self, LiquidityLoopOutError> {
         Ok(Self {
             payment_hash,
-            target_pubkey,
+            target_pubkey: Some(target_pubkey),
+            invoice: None,
             amount: loop_out_gross_payment_amount(amount, provider_fee, routing_fee_limit)?,
             max_fee_amount: routing_fee_limit,
         })
+    }
+
+    /// Build an invoice-based payment request for provider-side Loop In execution.
+    pub fn new_invoice(
+        payment_hash: Hash256,
+        invoice: String,
+        amount: u128,
+        max_fee_amount: u128,
+    ) -> Self {
+        Self {
+            payment_hash,
+            target_pubkey: None,
+            invoice: Some(invoice),
+            amount,
+            max_fee_amount,
+        }
     }
 }
 
@@ -152,13 +171,14 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
         request: LoopOutPaymentRequest,
     ) -> Result<Hash256, Self::Error> {
         let payment_hash = request.payment_hash;
+        let invoice = request.invoice.clone();
         let response = call!(self.network_actor, |reply| {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
-                    target_pubkey: Some(request.target_pubkey),
+                    target_pubkey: request.target_pubkey,
                     amount: Some(request.amount),
-                    payment_hash: Some(payment_hash),
-                    invoice: None,
+                    payment_hash: invoice.is_none().then_some(payment_hash),
+                    invoice,
                     final_tlc_expiry_delta: None,
                     tlc_expiry_limit: None,
                     timeout: None,
@@ -179,7 +199,9 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?
         .map_err(LiquidityLoopOutError::PaymentFailed)?;
 
-        self.wait_for_settled_preimage(payment_hash, response).await
+        let response_payment_hash = response.payment_hash;
+        self.wait_for_settled_preimage(response_payment_hash, response)
+            .await
     }
 
     async fn reload_loop_out_payment(
@@ -256,7 +278,8 @@ mod tests {
 
         assert_eq!(request.amount, 105);
         assert_eq!(request.max_fee_amount, 3);
-        assert_eq!(request.target_pubkey, test_pubkey());
+        assert_eq!(request.target_pubkey, Some(test_pubkey()));
+        assert_eq!(request.invoice, None);
     }
 
     #[tokio::test]
@@ -285,6 +308,31 @@ mod tests {
         assert_eq!(command.custom_records, None);
         assert!(command.hop_hints.is_none());
         assert!(!command.dry_run);
+    }
+
+    #[tokio::test]
+    async fn network_loop_out_payment_adapter_sends_invoice_payment_without_provider_target() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([7u8; 32].into())).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+        let invoice = "lnbc-client-invoice".to_string();
+
+        let preimage = adapter
+            .send_loop_out_payment(LoopOutPaymentRequest::new_invoice(
+                [3u8; 32].into(),
+                invoice.clone(),
+                100,
+                0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(preimage, [7u8; 32].into());
+        let command = network.take_send_commands().pop().unwrap();
+        assert_eq!(command.invoice, Some(invoice));
+        assert_eq!(command.target_pubkey, None);
+        assert_eq!(command.payment_hash, None);
+        assert_eq!(command.amount, Some(100));
+        assert_eq!(command.max_fee_amount, Some(0));
     }
 
     #[tokio::test]

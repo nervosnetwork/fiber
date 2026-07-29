@@ -148,6 +148,8 @@ pub struct LoopOutQuoteTerms {
     pub claimant_lock: Script,
     /// Provider refund lock used if the swap is not paid and claimed.
     pub refund_lock: Script,
+    /// Client invoice paid by the provider in Loop In swaps.
+    pub client_invoice: Option<String>,
 }
 
 /// On-chain payout lock location and confirmation metadata.

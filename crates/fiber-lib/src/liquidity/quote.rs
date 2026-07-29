@@ -184,6 +184,7 @@ pub fn build_loop_in_quote_terms(
         refund_after_lock_time: expires_at,
         claimant_lock: Default::default(),
         refund_lock: Default::default(),
+        client_invoice: Some(client_invoice),
     };
 
     if gross_amount > asset.available_capacity {
@@ -461,6 +462,26 @@ mod tests {
         .expect("loop in quote");
 
         assert_eq!(quote.payment_hash, *client_invoice.payment_hash());
+    }
+
+    #[test]
+    fn loop_in_quote_persists_client_invoice_for_provider_payment_recovery() {
+        let payment_hash = Hash256::from([8; 32]);
+        let client_invoice = ckb_client_invoice(payment_hash).to_string();
+
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            client_invoice.clone(),
+            60_000,
+            1,
+        )
+        .expect("loop in quote");
+
+        assert_eq!(quote.client_invoice, Some(client_invoice));
     }
 
     #[test]

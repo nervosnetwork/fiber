@@ -204,18 +204,8 @@ where
                 }
             }
             LiquidityActorMessage::ClaimConfirmed(swap_id) => {
-                if let Err(error) = state.store.update_liquidity_chain_tx_status(
-                    &swap_id,
-                    LiquidityChainTxRole::Claim,
-                    LiquidityChainTxStatus::Confirmed,
-                    None,
-                    now_ms(),
-                ) {
-                    tracing::warn!(?swap_id, %error, "failed to mark loop out claim tx confirmed");
-                } else if let Err(error) =
-                    mark_client_claim_confirmed(&state.store, swap_id, now_ms())
-                {
-                    tracing::warn!(?swap_id, %error, "ignoring loop out claim continuation");
+                if let Err(error) = state.handle_claim_confirmed(swap_id).await {
+                    tracing::warn!(?swap_id, %error, "ignoring liquidity claim continuation");
                 } else {
                     state.prune_recovery_guards(swap_id);
                 }
@@ -374,6 +364,7 @@ where
             refund_after_lock_time: validated.expires_at.saturating_add(20_000),
             claimant_lock: Default::default(),
             refund_lock: Default::default(),
+            client_invoice: None,
         };
         self.store
             .insert_loop_out_quote(terms.clone(), now_ms)
@@ -604,6 +595,34 @@ where
             self.start_provider_loop_in_payment(swap, myself).await?;
         }
         Ok(())
+    }
+
+    async fn handle_claim_confirmed(
+        &mut self,
+        swap_id: Hash256,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let now = now_ms();
+        self.store
+            .update_liquidity_chain_tx_status(
+                &swap_id,
+                LiquidityChainTxRole::Claim,
+                LiquidityChainTxStatus::Confirmed,
+                None,
+                now,
+            )
+            .map_err(map_store_error)?;
+        let swap = self
+            .store
+            .get_liquidity_swap(&swap_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        if swap.swap_kind == LiquiditySwapKind::LoopIn && swap.role == LiquiditySwapRole::Provider {
+            mark_loop_in_provider_claim_confirmed(&self.store, swap_id, now)
+        } else {
+            mark_client_claim_confirmed(&self.store, swap_id, now)
+        }
     }
 
     async fn handle_provider_accept_loop_out(
@@ -1645,13 +1664,17 @@ where
             to: LiquiditySwapState::PaymentInFlight,
         });
     }
-    let request = crate::liquidity::payment::LoopOutPaymentRequest::new(
+    let invoice = quote.client_invoice.clone().ok_or_else(|| {
+        LiquidityLoopOutError::PaymentFailed(
+            "cannot start provider loop in payment without client invoice".to_string(),
+        )
+    })?;
+    let request = crate::liquidity::payment::LoopOutPaymentRequest::new_invoice(
         quote.payment_hash,
-        quote.provider,
+        invoice,
         quote.amount,
-        quote.provider_fee,
         quote.routing_fee_limit,
-    )?;
+    );
 
     transition_swap(store, &swap_id, LiquiditySwapState::PaymentInFlight, now_ms)?;
     Ok(request)
@@ -1846,6 +1869,29 @@ pub fn mark_client_claim_confirmed<S>(
 where
     S: LiquidityStore,
 {
+    transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
+}
+
+/// Mark the provider-side Loop In claim as confirmed on-chain.
+pub fn mark_loop_in_provider_claim_confirmed<S>(
+    store: &S,
+    swap_id: Hash256,
+    now_ms: u64,
+) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    let swap = store
+        .get_liquidity_swap(&swap_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+        })?;
+    if swap.swap_kind != LiquiditySwapKind::LoopIn || swap.role != LiquiditySwapRole::Provider {
+        return Err(LiquidityLoopOutError::Store(
+            "cannot confirm loop in provider claim for non-provider loop in swap".to_string(),
+        ));
+    }
     transition_swap(store, &swap_id, LiquiditySwapState::Success, now_ms)
 }
 
@@ -3939,6 +3985,7 @@ mod tests {
             refund_after_lock_time: expires_at + 20_000,
             claimant_lock: Default::default(),
             refund_lock: Default::default(),
+            client_invoice: None,
         }
     }
 
@@ -3949,6 +3996,7 @@ mod tests {
             routing_fee_limit: 0,
             payout_deadline: expires_at,
             refund_after_lock_time: expires_at + 20_000,
+            client_invoice: Some("lnbc-client-invoice".to_string()),
             ..test_loop_out_quote(expires_at)
         }
     }
@@ -4452,6 +4500,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_loop_in_payment_uses_persisted_client_invoice_not_provider_target() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut quote = test_loop_in_quote(now_ms() + 60_000);
+        quote.client_invoice = Some("lnbc-client-invoice".to_string());
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let mut swap = loop_in_record(&quote, LiquiditySwapRole::Provider, now_ms());
+        swap.state = LiquiditySwapState::OnchainLocked;
+        store.insert_liquidity_swap(swap).unwrap();
+        let (payment, _settle) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(events.clone(), vec![]);
+        let actor = spawn_test_liquidity_actor(
+            store,
+            payment.clone(),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        call_resume_non_terminal(actor).await;
+        wait_for_event(&events, "send_payment").await;
+
+        let request = payment.requests().pop().expect("payment request");
+        assert_eq!(request.invoice, Some("lnbc-client-invoice".to_string()));
+        assert_ne!(request.target_pubkey, Some(quote.provider));
+    }
+
+    #[tokio::test]
+    async fn provider_loop_in_onchain_locked_recovery_fails_closed_without_client_invoice() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut quote = test_loop_in_quote(now_ms() + 60_000);
+        quote.client_invoice = None;
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let mut swap = loop_in_record(&quote, LiquiditySwapRole::Provider, now_ms());
+        swap.state = LiquiditySwapState::OnchainLocked;
+        store.insert_liquidity_swap(swap).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        call_resume_non_terminal(actor).await;
+
+        assert_eq!(event_count(&events, "send_payment"), 0);
+        let failure_reason = store
+            .get_liquidity_swap(&quote.quote_id)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .unwrap();
+        assert!(failure_reason.contains("client invoice"));
+    }
+
+    #[tokio::test]
     async fn provider_loop_in_claim_persists_preimage_before_chain_claim() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "provider");
@@ -4534,6 +4642,27 @@ mod tests {
                 .status,
             LiquidityChainTxStatus::Confirmed
         );
+        assert_eq!(
+            store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            LiquiditySwapState::Success
+        );
+    }
+
+    #[test]
+    fn loop_in_provider_claim_confirmation_uses_direction_aware_helper() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events, "provider");
+        let quote = test_loop_in_quote(now_ms() + 60_000);
+        let mut swap = loop_in_record(&quote, LiquiditySwapRole::Provider, now_ms());
+        swap.state = LiquiditySwapState::ClaimPending;
+        store.insert_liquidity_swap(swap).unwrap();
+
+        mark_loop_in_provider_claim_confirmed(&store, quote.quote_id, now_ms()).unwrap();
+
         assert_eq!(
             store
                 .get_liquidity_swap(&quote.quote_id)
@@ -6177,7 +6306,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(payment.requests().len(), 1);
-        assert_eq!(payment.requests()[0].target_pubkey, quote.provider);
+        assert_eq!(payment.requests()[0].target_pubkey, Some(quote.provider));
     }
 
     #[test]
