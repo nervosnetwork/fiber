@@ -8615,7 +8615,9 @@ impl ChannelActorState {
 
         // update the remote_revocation_nonce_for_send and remote_revocation_nonce_for_verify for next round if needed
         self.remote_revocation_nonce_for_next = Some(next_revocation_nonce);
-        if self.remote_revocation_nonce_for_send.is_none() {
+        if self.remote_revocation_nonce_for_send.is_none()
+            || self.remote_revocation_nonce_for_verify.is_none()
+        {
             self.remote_revocation_nonce_for_send = self.remote_revocation_nonce_for_next.clone();
             self.remote_revocation_nonce_for_verify = self.remote_revocation_nonce_for_next.clone();
         } else {
