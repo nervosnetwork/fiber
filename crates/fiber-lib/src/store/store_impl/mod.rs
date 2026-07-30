@@ -11,8 +11,6 @@ use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
-#[cfg(feature = "watchtower")]
-use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::types::HoldTlc;
@@ -671,6 +669,31 @@ impl Store {
             .collect()
     }
 
+    fn watch_channel_needs_preimage(
+        &self,
+        channel_data: &ChannelData,
+        payment_hash: &Hash256,
+    ) -> bool {
+        if WatchtowerStore::get_onchain_tlc_settlement(self, &channel_data.channel_id, payment_hash)
+            .is_some()
+        {
+            return false;
+        }
+
+        [
+            &channel_data.remote_settlement_data,
+            &channel_data.pending_remote_settlement_data,
+            &channel_data.local_settlement_data,
+        ]
+        .into_iter()
+        .any(|settlement_data| {
+            settlement_data
+                .tlcs
+                .iter()
+                .any(|tlc| &tlc.payment_hash == payment_hash)
+        })
+    }
+
     fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
         [
             &channel_data.remote_settlement_data,
@@ -682,81 +705,10 @@ impl Store {
         .collect()
     }
 
-    fn watch_preimage_delete_after(&self, node_id: &NodeId, payment_hash: &Hash256) -> u64 {
-        let latest_expiry = self
-            .watch_channels_for_node(node_id)
+    fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
+        self.watch_channels_for_node(node_id)
             .iter()
-            .flat_map(|channel_data| {
-                [
-                    &channel_data.remote_settlement_data,
-                    &channel_data.pending_remote_settlement_data,
-                    &channel_data.local_settlement_data,
-                ]
-                .into_iter()
-                .flat_map(|settlement_data| settlement_data.tlcs.iter())
-            })
-            .filter(|tlc| &tlc.payment_hash == payment_hash)
-            .map(|tlc| tlc.expiry)
-            .max()
-            .unwrap_or_else(fiber_types::now_timestamp_as_millis_u64);
-
-        latest_expiry.saturating_add(MIN_TLC_EXPIRY_DELTA)
-    }
-
-    fn extend_scheduled_watch_preimage_deletions(
-        &self,
-        node_id: &NodeId,
-        channel_data: &ChannelData,
-    ) {
-        let mut batch = self.batch();
-        let mut has_change = false;
-        for payment_hash in Self::watch_channel_payment_hashes(channel_data) {
-            let key = Self::watchtower_node_payment_hash_key(node_id, &payment_hash);
-            let Some(value) = self.get(&key) else {
-                continue;
-            };
-            if value.is_empty() {
-                continue;
-            }
-
-            let existing_delete_after = deserialize_from::<u64>(&value, "WatchPreimageDeleteAfter");
-            let delete_after = self.watch_preimage_delete_after(node_id, &payment_hash);
-            if delete_after > existing_delete_after {
-                batch.put(
-                    key,
-                    serialize_to_vec(&delete_after, "WatchPreimageDeleteAfter"),
-                );
-                has_change = true;
-            }
-        }
-        if has_change {
-            batch.commit();
-        }
-    }
-
-    fn cleanup_expired_watch_preimages_at(&self, now: u64) {
-        let mut batch = self.batch();
-        let mut has_change = false;
-        for kv in self.collect_by_prefix(&[WATCHTOWER_NODE_PAYMENTHASH_PREFIX]) {
-            if kv.value.is_empty() {
-                continue;
-            }
-            let delete_after = deserialize_from::<u64>(&kv.value, "WatchPreimageDeleteAfter");
-            if delete_after > now {
-                continue;
-            }
-            let Some((node_id, payment_hash)) =
-                Self::parse_watchtower_scoped_payment_hash_key(&kv.key)
-            else {
-                continue;
-            };
-            batch.delete(Self::watchtower_preimage_key(&node_id, &payment_hash));
-            batch.delete(kv.key);
-            has_change = true;
-        }
-        if has_change {
-            batch.commit();
-        }
+            .any(|channel_data| self.watch_channel_needs_preimage(channel_data, payment_hash))
     }
 
     fn watch_preimage_entries(&self, node_id: Option<&NodeId>) -> Vec<(NodeId, Hash256)> {
@@ -769,7 +721,7 @@ impl Store {
             .collect()
     }
 
-    fn schedule_watch_preimage_cleanup(
+    fn cleanup_unused_watch_preimages(
         &self,
         node_id: Option<&NodeId>,
         target: WatchtowerPreimageCleanupTarget<'_>,
@@ -786,18 +738,14 @@ impl Store {
                 continue;
             }
 
-            let key = Self::watchtower_node_payment_hash_key(&node_id, &payment_hash);
-            let delete_after = self
-                .get(&key)
-                .filter(|value| !value.is_empty())
-                .map(|value| deserialize_from::<u64>(&value, "WatchPreimageDeleteAfter"))
-                .unwrap_or_default()
-                .max(self.watch_preimage_delete_after(&node_id, &payment_hash));
-            batch.put(
-                key,
-                serialize_to_vec(&delete_after, "WatchPreimageDeleteAfter"),
-            );
-            has_change = true;
+            if !self.watch_preimage_in_use(&node_id, &payment_hash) {
+                batch.delete(Self::watchtower_preimage_key(&node_id, &payment_hash));
+                batch.delete(Self::watchtower_node_payment_hash_key(
+                    &node_id,
+                    &payment_hash,
+                ));
+                has_change = true;
+            }
         }
         if has_change {
             batch.commit();
@@ -1571,11 +1519,11 @@ impl WatchtowerStore for Store {
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
             .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
             .unwrap_or_default();
-        self.schedule_watch_preimage_cleanup(
+        self.delete(key);
+        self.cleanup_unused_watch_preimages(
             Some(&node_id),
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
         );
-        self.delete(key);
     }
 
     fn update_revocation(
@@ -1598,10 +1546,9 @@ impl WatchtowerStore for Store {
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
-            let kv = KeyValue::WatchtowerChannel(node_id.clone(), channel_id, channel_data.clone());
+            let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             batch.commit();
-            self.extend_scheduled_watch_preimage_deletions(&node_id, &channel_data);
         }
     }
 
@@ -1623,10 +1570,9 @@ impl WatchtowerStore for Store {
         {
             channel_data.pending_remote_settlement_data = pending_remote_settlement_data;
             let mut batch = self.batch();
-            let kv = KeyValue::WatchtowerChannel(node_id.clone(), channel_id, channel_data.clone());
+            let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             batch.commit();
-            self.extend_scheduled_watch_preimage_deletions(&node_id, &channel_data);
         }
     }
 
@@ -1648,10 +1594,9 @@ impl WatchtowerStore for Store {
         {
             channel_data.local_settlement_data = local_settlement_data;
             let mut batch = self.batch();
-            let kv = KeyValue::WatchtowerChannel(node_id.clone(), channel_id, channel_data.clone());
+            let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             batch.commit();
-            self.extend_scheduled_watch_preimage_deletions(&node_id, &channel_data);
         }
     }
 
@@ -1660,14 +1605,12 @@ impl WatchtowerStore for Store {
         let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
         batch.put(kv.key(), kv.value());
         let kv = KeyValue::WatchtowerNodePaymentHash(node_id, payment_hash);
-        let key = kv.key();
-        let cleanup_deadline = self.get(&key).unwrap_or_else(|| kv.value());
-        batch.put(key, cleanup_deadline);
+        batch.put(kv.key(), kv.value());
         batch.commit();
     }
 
     fn remove_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256) {
-        self.schedule_watch_preimage_cleanup(
+        self.cleanup_unused_watch_preimages(
             Some(&node_id),
             WatchtowerPreimageCleanupTarget::Exact(&payment_hash),
         );
@@ -1718,7 +1661,7 @@ impl WatchtowerStore for Store {
         batch.put(key, serialize_to_vec(&settlement, "OnChainTlcSettlement"));
         batch.commit();
         if settlement.preimage.is_none() {
-            self.schedule_watch_preimage_cleanup(
+            self.cleanup_unused_watch_preimages(
                 None,
                 WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash_prefix),
             );
@@ -1745,10 +1688,6 @@ impl WatchtowerStore for Store {
             });
         }
         Some(deserialize_from(value.as_ref(), "OnChainTlcSettlement"))
-    }
-
-    fn cleanup_expired_watch_preimages(&self) {
-        self.cleanup_expired_watch_preimages_at(fiber_types::now_timestamp_as_millis_u64());
     }
 }
 

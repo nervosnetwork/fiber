@@ -88,9 +88,6 @@ pub trait WatchtowerStore {
         channel_id: &Hash256,
         payment_hash: &Hash256,
     ) -> Option<OnChainTlcSettlement>;
-
-    /// Remove watch preimages whose TLC expiry and on-chain safety window have elapsed.
-    fn cleanup_expired_watch_preimages(&self);
 }
 
 /// Compute the x-only aggregated public key for a channel.

@@ -526,11 +526,11 @@ fn test_store_watchtower_preimage() {
     );
 
     store.remove_watch_preimage(node_id_b.clone(), payment_hash_b);
-    store.cleanup_expired_watch_preimages();
-    assert_eq!(
-        store.get_watch_preimage(&node_id_b, &payment_hash_b),
-        Some(preimage_b),
-        "remove schedules deletion after the on-chain safety window"
+    assert!(
+        store
+            .get_watch_preimage(&node_id_b, &payment_hash_b)
+            .is_none(),
+        "removed"
     );
 }
 
@@ -574,7 +574,7 @@ fn test_store_watchtower_preimage_search_is_node_scoped_with_same_prefix() {
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_store_watchtower_preimage_gc_waits_until_expiry_safety_window() {
+fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
     let path = TempDir::new("test-watchtower-preimage-gc-waits");
     let store = open_store(path).expect("created store failed");
 
@@ -586,9 +586,6 @@ fn test_store_watchtower_preimage_gc_waits_until_expiry_safety_window() {
     let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
     let local_funding_pubkey = Privkey::from(&[3; 32]).pubkey();
     let remote_funding_pubkey = Privkey::from(&[4; 32]).pubkey();
-    let expiry = now_timestamp_as_millis_u64()
-        .saturating_sub(crate::fiber::config::MIN_TLC_EXPIRY_DELTA)
-        .saturating_sub(1);
     let settlement_data = SettlementData {
         local_amount: 100,
         remote_amount: 200,
@@ -597,7 +594,7 @@ fn test_store_watchtower_preimage_gc_waits_until_expiry_safety_window() {
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_amount: 42,
             payment_hash,
-            expiry,
+            expiry: now_timestamp_as_millis_u64() + 60_000,
             local_key: Privkey::from(&[5; 32]),
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
@@ -619,7 +616,7 @@ fn test_store_watchtower_preimage_gc_waits_until_expiry_safety_window() {
     assert_eq!(
         store.get_watch_preimage(&node_id, &payment_hash),
         Some(preimage),
-        "remove request only schedules preimage deletion"
+        "preimage is retained while a watched TLC still references it"
     );
 
     let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[..20].try_into().unwrap();
@@ -632,15 +629,9 @@ fn test_store_watchtower_preimage_gc_waits_until_expiry_safety_window() {
             tlc_index: Some(0),
         },
     );
-    assert_eq!(
-        store.get_watch_preimage(&node_id, &payment_hash),
-        Some(preimage),
-        "settlement only schedules preimage deletion"
-    );
-    store.cleanup_expired_watch_preimages();
     assert!(
         store.get_watch_preimage(&node_id, &payment_hash).is_none(),
-        "watchtower GC removes the preimage after TLC expiry plus the safety window"
+        "watchtower GC removes the preimage after the watched TLC is settled"
     );
 }
 
