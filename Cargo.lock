@@ -2303,9 +2303,12 @@ version = "0.9.0-rc7"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
+ "fiber-store",
  "fnn",
  "jsonrpsee",
+ "nix 0.29.0",
  "ractor",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
