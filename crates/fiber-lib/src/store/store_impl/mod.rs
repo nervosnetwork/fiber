@@ -60,6 +60,8 @@ use tracing::warn;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+    #[cfg(feature = "watchtower")]
+    watchtower_write_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 #[cfg(feature = "watchtower")]
@@ -189,6 +191,8 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
     Ok(Store {
         inner: db,
         watcher: None,
+        #[cfg(feature = "watchtower")]
+        watchtower_write_lock: Arc::new(parking_lot::Mutex::new(())),
     })
 }
 
@@ -209,6 +213,8 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let store = Store {
         inner: db,
         watcher: None,
+        #[cfg(feature = "watchtower")]
+        watchtower_write_lock: Arc::new(parking_lot::Mutex::new(())),
     };
     let mut errors = HashSet::new();
 
@@ -726,6 +732,18 @@ impl Store {
         node_id: Option<&NodeId>,
         target: WatchtowerPreimageCleanupTarget<'_>,
     ) {
+        self.cleanup_unused_watch_preimages_with_hook(node_id, target, || {});
+    }
+
+    fn cleanup_unused_watch_preimages_with_hook(
+        &self,
+        node_id: Option<&NodeId>,
+        target: WatchtowerPreimageCleanupTarget<'_>,
+        before_commit: impl FnOnce(),
+    ) {
+        // Serialize the liveness reads and delete commit with every watchtower
+        // write that can make a preimage live again.
+        let _guard = self.watchtower_write_lock.lock();
         let preimages = self.watch_preimage_entries(node_id);
         if preimages.is_empty() {
             return;
@@ -748,8 +766,65 @@ impl Store {
             }
         }
         if has_change {
+            before_commit();
             batch.commit();
         }
+    }
+}
+
+#[cfg(all(test, feature = "watchtower", not(target_arch = "wasm32")))]
+mod watchtower_preimage_gc_tests {
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
+
+    use fiber_types::{Hash256, NodeId};
+    use tempfile::tempdir;
+
+    use crate::watchtower::WatchtowerStore;
+
+    use super::{open_store, WatchtowerPreimageCleanupTarget};
+
+    #[test]
+    fn concurrent_preimage_insert_is_not_deleted_by_stale_gc_decision() {
+        let path = tempdir().expect("temp directory");
+        let store = open_store(path.path()).expect("open store");
+        let node_id = NodeId::local();
+        let payment_hash = Hash256::from([1; 32]);
+        let old_preimage = Hash256::from([2; 32]);
+        let new_preimage = Hash256::from([3; 32]);
+        store.insert_watch_preimage(node_id.clone(), payment_hash, old_preimage);
+
+        let concurrent_store = store.clone();
+        let concurrent_node_id = node_id.clone();
+        let before_insert = Arc::new(Barrier::new(2));
+        let concurrent_before_insert = Arc::clone(&before_insert);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let insert = std::thread::spawn(move || {
+            concurrent_before_insert.wait();
+            concurrent_store.insert_watch_preimage(concurrent_node_id, payment_hash, new_preimage);
+            finished_tx.send(()).expect("signal insert finish");
+        });
+
+        store.cleanup_unused_watch_preimages_with_hook(
+            Some(&node_id),
+            WatchtowerPreimageCleanupTarget::Exact(&payment_hash),
+            || {
+                before_insert.wait();
+                assert!(
+                    finished_rx
+                        .recv_timeout(Duration::from_millis(100))
+                        .is_err(),
+                    "concurrent insert must wait for the GC delete commit"
+                );
+            },
+        );
+        insert.join().expect("concurrent insert thread");
+
+        assert_eq!(
+            store.get_watch_preimage(&node_id, &payment_hash),
+            Some(new_preimage),
+            "GC must not delete a preimage committed after its liveness decision"
+        );
     }
 }
 
@@ -1468,6 +1543,7 @@ impl WatchtowerStore for Store {
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
     ) {
+        let _guard = self.watchtower_write_lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1514,12 +1590,16 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
-        let payment_hashes = self
-            .get(key.clone())
-            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
-            .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
-            .unwrap_or_default();
-        self.delete(key);
+        let payment_hashes = {
+            let _guard = self.watchtower_write_lock.lock();
+            let payment_hashes = self
+                .get(key.clone())
+                .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+                .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
+                .unwrap_or_default();
+            self.delete(key);
+            payment_hashes
+        };
         self.cleanup_unused_watch_preimages(
             Some(&node_id),
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
@@ -1533,6 +1613,7 @@ impl WatchtowerStore for Store {
         revocation_data: RevocationData,
         remote_settlement_data: SettlementData,
     ) {
+        let _guard = self.watchtower_write_lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1558,6 +1639,7 @@ impl WatchtowerStore for Store {
         channel_id: Hash256,
         pending_remote_settlement_data: SettlementData,
     ) {
+        let _guard = self.watchtower_write_lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1582,6 +1664,7 @@ impl WatchtowerStore for Store {
         channel_id: Hash256,
         local_settlement_data: SettlementData,
     ) {
+        let _guard = self.watchtower_write_lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1601,6 +1684,7 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
+        let _guard = self.watchtower_write_lock.lock();
         let mut batch = self.batch();
         let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
         batch.put(kv.key(), kv.value());
@@ -1639,6 +1723,7 @@ impl WatchtowerStore for Store {
         payment_hash_prefix: [u8; 20],
         settlement: OnChainTlcSettlement,
     ) {
+        let _guard = self.watchtower_write_lock.lock();
         let key = Self::tlc_on_chain_settled_key(channel_id, &payment_hash_prefix);
         if settlement.preimage.is_none() {
             if let Some(existing) = self.get(&key) {
@@ -1660,6 +1745,7 @@ impl WatchtowerStore for Store {
         let mut batch = self.batch();
         batch.put(key, serialize_to_vec(&settlement, "OnChainTlcSettlement"));
         batch.commit();
+        drop(_guard);
         if settlement.preimage.is_none() {
             self.cleanup_unused_watch_preimages(
                 None,
