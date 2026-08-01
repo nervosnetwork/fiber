@@ -485,6 +485,10 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
+                    // The peer's reestablish message can overtake our paced
+                    // PeerReconnected event. Claim and send our side of the handshake
+                    // before processing theirs so neither side is left waiting.
+                    state.on_peer_reconnected();
                     let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
                     state
                         .handle_reestablish_channel_message(
@@ -5681,7 +5685,7 @@ impl ChannelActorState {
     }
 
     fn on_peer_reconnected(&mut self) {
-        if self.reestablishing {
+        if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
             self.send_reestablish_message();
         }
