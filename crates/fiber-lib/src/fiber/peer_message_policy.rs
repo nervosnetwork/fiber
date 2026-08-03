@@ -332,6 +332,11 @@ impl Default for PeerMessagePolicy {
 mod tests {
     use fiber_types::Privkey;
 
+    use crate::fiber::{
+        network::CHANNEL_REESTABLISH_INTERVAL,
+        types::{FiberMessage, ReestablishChannel},
+    };
+
     use super::*;
 
     fn expect_allowed(policy: &mut PeerMessagePolicy, peer: &Pubkey, bytes: u64, now_ms: u64) {
@@ -411,6 +416,34 @@ mod tests {
         assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Ban);
 
         expect_allowed(&mut policy, &peer, 1, PEER_MESSAGE_BAN_DURATION_MS);
+    }
+
+    #[test]
+    fn paced_reestablishment_allows_more_channels_than_peer_burst() {
+        const PERSISTED_CHANNELS: u32 = 540;
+        let peer = Privkey::from_slice(&[21u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new();
+        let frame_bytes = FiberMessage::reestablish_channel(ReestablishChannel {
+            channel_id: Default::default(),
+            local_commitment_number: 0,
+            remote_commitment_number: 0,
+        })
+        .to_molecule_bytes()
+        .len() as u64;
+        assert_eq!(frame_bytes, 68);
+        for index in 0..PERSISTED_CHANNELS {
+            expect_allowed(
+                &mut policy,
+                &peer,
+                frame_bytes,
+                u64::from(index).saturating_mul(CHANNEL_REESTABLISH_INTERVAL.as_millis() as u64),
+            );
+        }
+        assert!(!policy.is_banned(
+            &peer,
+            u64::from(PERSISTED_CHANNELS)
+                .saturating_mul(CHANNEL_REESTABLISH_INTERVAL.as_millis() as u64)
+        ));
     }
 
     #[test]
