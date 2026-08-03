@@ -62,6 +62,10 @@ use tracing::warn;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+    #[cfg(feature = "watchtower")]
+    watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
+    #[cfg(feature = "watchtower")]
+    onchain_tlc_settlement_write_lock: Arc<parking_lot::Mutex<()>>,
 }
 
 #[cfg(feature = "watchtower")]
@@ -107,6 +111,15 @@ impl Store {
             .is_some_and(|channel_state| {
                 channel_state.owns_payment_attempt(attempt.payment_hash, attempt.id)
             })
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn watchtower_write_lock(&self, node_id: &NodeId) -> Arc<parking_lot::Mutex<()>> {
+        self.watchtower_write_locks
+            .lock()
+            .entry(node_id.clone())
+            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
+            .clone()
     }
 }
 
@@ -187,6 +200,10 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
     Ok(Store {
         inner: db,
         watcher: None,
+        #[cfg(feature = "watchtower")]
+        watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        #[cfg(feature = "watchtower")]
+        onchain_tlc_settlement_write_lock: Arc::new(parking_lot::Mutex::new(())),
     })
 }
 
@@ -207,6 +224,10 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let store = Store {
         inner: db,
         watcher: None,
+        #[cfg(feature = "watchtower")]
+        watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        #[cfg(feature = "watchtower")]
+        onchain_tlc_settlement_write_lock: Arc::new(parking_lot::Mutex::new(())),
     };
     let mut errors = HashSet::new();
 
@@ -672,7 +693,8 @@ impl Store {
     }
 
     fn watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
-        self.collect_by_prefix(&[WATCHTOWER_CHANNEL_PREFIX])
+        let prefix = [&[WATCHTOWER_CHANNEL_PREFIX], node_id.as_ref()].concat();
+        self.collect_by_prefix(&prefix)
             .into_iter()
             .filter_map(|kv| {
                 let (channel_node_id, _) = Self::parse_watchtower_channel_key(&kv.key)?;
@@ -771,7 +793,11 @@ impl Store {
     }
 
     fn watch_preimage_entries(&self, node_id: Option<&NodeId>) -> Vec<(NodeId, Hash256)> {
-        self.collect_by_prefix(&[WATCHTOWER_NODE_PAYMENTHASH_PREFIX])
+        let prefix = match node_id {
+            Some(node_id) => [&[WATCHTOWER_NODE_PAYMENTHASH_PREFIX], node_id.as_ref()].concat(),
+            None => vec![WATCHTOWER_NODE_PAYMENTHASH_PREFIX],
+        };
+        self.collect_by_prefix(&prefix)
             .into_iter()
             .filter_map(|kv| Self::parse_watchtower_scoped_payment_hash_key(&kv.key))
             .filter(|(preimage_node_id, _)| {
@@ -785,7 +811,59 @@ impl Store {
         node_id: Option<&NodeId>,
         target: WatchtowerPreimageCleanupTarget<'_>,
     ) {
-        let preimages = self.watch_preimage_entries(node_id);
+        match node_id {
+            Some(node_id) => {
+                self.cleanup_unused_watch_preimages_with_hook(node_id, target, || {});
+            }
+            None => {
+                let node_ids: HashSet<_> = self
+                    .watch_preimage_entries(None)
+                    .into_iter()
+                    .filter(|(_, payment_hash)| target.matches(payment_hash))
+                    .map(|(node_id, _)| node_id)
+                    .collect();
+                for node_id in node_ids {
+                    let lock = self.watchtower_write_lock(&node_id);
+                    let _guard = lock.lock();
+                    self.cleanup_unused_watch_preimages_locked(&node_id, target, || {});
+                }
+            }
+        }
+    }
+
+    fn cleanup_unused_watch_preimages_with_hook(
+        &self,
+        node_id: &NodeId,
+        target: WatchtowerPreimageCleanupTarget<'_>,
+        before_commit: impl FnOnce(),
+    ) {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        self.cleanup_unused_watch_preimages_locked(node_id, target, before_commit);
+    }
+
+    fn cleanup_unused_watch_preimages_locked(
+        &self,
+        node_id: &NodeId,
+        target: WatchtowerPreimageCleanupTarget<'_>,
+        before_commit: impl FnOnce(),
+    ) {
+        let preimages = match target {
+            WatchtowerPreimageCleanupTarget::Exact(payment_hash) => {
+                if self
+                    .get(Self::watchtower_node_payment_hash_key(
+                        node_id,
+                        payment_hash,
+                    ))
+                    .is_some()
+                {
+                    vec![(node_id.clone(), *payment_hash)]
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => self.watch_preimage_entries(Some(node_id)),
+        };
         if preimages.is_empty() {
             return;
         }
@@ -807,6 +885,7 @@ impl Store {
             }
         }
         if has_change {
+            before_commit();
             batch.commit();
         }
     }
@@ -1534,6 +1613,8 @@ impl WatchtowerStore for Store {
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
     ) {
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1580,15 +1661,18 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
         let payment_hashes = self
             .get(key.clone())
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
             .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
             .unwrap_or_default();
         self.delete(key);
-        self.cleanup_unused_watch_preimages(
-            Some(&node_id),
+        self.cleanup_unused_watch_preimages_locked(
+            &node_id,
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
+            || {},
         );
     }
 
@@ -1599,6 +1683,8 @@ impl WatchtowerStore for Store {
         revocation_data: RevocationData,
         remote_settlement_data: SettlementData,
     ) {
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1624,6 +1710,8 @@ impl WatchtowerStore for Store {
         channel_id: Hash256,
         pending_remote_settlement_data: SettlementData,
     ) {
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1648,6 +1736,8 @@ impl WatchtowerStore for Store {
         channel_id: Hash256,
         local_settlement_data: SettlementData,
     ) {
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),
@@ -1667,6 +1757,8 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_preimage(&self, node_id: NodeId, payment_hash: Hash256, preimage: Hash256) {
+        let lock = self.watchtower_write_lock(&node_id);
+        let _guard = lock.lock();
         let mut batch = self.batch();
         let kv = KeyValue::WatchtowerPreimage(payment_hash, node_id.clone(), preimage);
         batch.put(kv.key(), kv.value());
@@ -1694,6 +1786,7 @@ impl WatchtowerStore for Store {
         tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     ) {
+        let _guard = self.onchain_tlc_settlement_write_lock.lock();
         let key = Self::tlc_on_chain_settled_key(node_id, channel_id, tlc_id);
         if settlement.preimage.is_none() {
             if let Some(existing) = self.get(&key) {
@@ -1708,6 +1801,7 @@ impl WatchtowerStore for Store {
         let mut batch = self.batch();
         batch.put(key, serialize_to_vec(&settlement, "OnChainTlcSettlement"));
         batch.commit();
+        drop(_guard);
         if settlement.preimage.is_none() {
             self.cleanup_unused_watch_preimages(
                 None,
@@ -2202,4 +2296,109 @@ fn update_channel_timestamp(
         .unwrap_or([0u8; 24]);
     timestamps[offset..offset + 8].copy_from_slice(&timestamp.to_be_bytes());
     batch.put(timestamp_key, timestamps);
+}
+
+#[cfg(all(test, feature = "watchtower", not(target_arch = "wasm32")))]
+mod watchtower_preimage_gc_tests {
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
+
+    use fiber_types::{Hash256, NodeId};
+    use tempfile::tempdir;
+
+    use crate::watchtower::WatchtowerStore;
+
+    use super::{open_store, WatchtowerPreimageCleanupTarget};
+
+    #[test]
+    fn concurrent_preimage_insert_is_not_deleted_by_stale_gc_decision() {
+        let path = tempdir().expect("temp directory");
+        let store = open_store(path.path()).expect("open store");
+        let node_id = NodeId::local();
+        let payment_hash = Hash256::from([1; 32]);
+        let old_preimage = Hash256::from([2; 32]);
+        let new_preimage = Hash256::from([3; 32]);
+        store.insert_watch_preimage(node_id.clone(), payment_hash, old_preimage);
+
+        let concurrent_store = store.clone();
+        let concurrent_node_id = node_id.clone();
+        let before_insert = Arc::new(Barrier::new(2));
+        let concurrent_before_insert = Arc::clone(&before_insert);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let insert = std::thread::spawn(move || {
+            concurrent_before_insert.wait();
+            concurrent_store.insert_watch_preimage(concurrent_node_id, payment_hash, new_preimage);
+            finished_tx.send(()).expect("signal insert finish");
+        });
+
+        store.cleanup_unused_watch_preimages_with_hook(
+            &node_id,
+            WatchtowerPreimageCleanupTarget::Exact(&payment_hash),
+            || {
+                before_insert.wait();
+                assert!(
+                    finished_rx
+                        .recv_timeout(Duration::from_millis(100))
+                        .is_err(),
+                    "concurrent insert must wait for the GC delete commit"
+                );
+            },
+        );
+        insert.join().expect("concurrent insert thread");
+
+        assert_eq!(
+            store.get_watch_preimage(&node_id, &payment_hash),
+            Some(new_preimage),
+            "GC must not delete a preimage committed after its liveness decision"
+        );
+    }
+
+    #[test]
+    fn one_node_preimage_gc_does_not_block_another_node_writer() {
+        let path = tempdir().expect("temp directory");
+        let store = open_store(path.path()).expect("open store");
+        let cleanup_node_id = NodeId::from_bytes(vec![1]);
+        let writer_node_id = NodeId::from_bytes(vec![2]);
+        let cleanup_payment_hash = Hash256::from([4; 32]);
+        let writer_payment_hash = Hash256::from([5; 32]);
+        let writer_preimage = Hash256::from([6; 32]);
+        store.insert_watch_preimage(
+            cleanup_node_id.clone(),
+            cleanup_payment_hash,
+            Hash256::from([7; 32]),
+        );
+
+        let concurrent_store = store.clone();
+        let concurrent_writer_node_id = writer_node_id.clone();
+        let before_insert = Arc::new(Barrier::new(2));
+        let concurrent_before_insert = Arc::clone(&before_insert);
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let insert = std::thread::spawn(move || {
+            concurrent_before_insert.wait();
+            concurrent_store.insert_watch_preimage(
+                concurrent_writer_node_id,
+                writer_payment_hash,
+                writer_preimage,
+            );
+            finished_tx.send(()).expect("signal insert finish");
+        });
+
+        store.cleanup_unused_watch_preimages_with_hook(
+            &cleanup_node_id,
+            WatchtowerPreimageCleanupTarget::Exact(&cleanup_payment_hash),
+            || {
+                before_insert.wait();
+                finished_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("another node's writer must not wait for this node's GC");
+            },
+        );
+        insert.join().expect("concurrent insert thread");
+
+        assert_eq!(
+            store.get_watch_preimage(&writer_node_id, &writer_payment_hash),
+            Some(writer_preimage),
+            "another node's preimage write must complete independently"
+        );
+    }
 }
