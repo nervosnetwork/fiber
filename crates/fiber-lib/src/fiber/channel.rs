@@ -18,7 +18,7 @@ use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
-    OnChainTimeoutTlcRole, OnChainTlcSettlement,
+    OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -485,6 +485,10 @@ where
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
+                    // The peer's reestablish message can overtake our paced
+                    // PeerReconnected event. Claim and send our side of the handshake
+                    // before processing theirs so neither side is left waiting.
+                    state.on_peer_reconnected();
                     let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
                     state
                         .handle_reestablish_channel_message(
@@ -5681,7 +5685,7 @@ impl ChannelActorState {
     }
 
     fn on_peer_reconnected(&mut self) {
-        if self.reestablishing {
+        if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
             self.send_reestablish_message();
         }
@@ -10187,12 +10191,13 @@ pub trait ChannelActorStateStore {
     fn remove_payment_hold_tlc(&self, payment_hash: &Hash256, channel_id: &Hash256, tlc_id: u64);
     fn get_payment_hold_tlcs(&self, payment_hash: Hash256) -> Vec<HoldTlc>;
     fn get_node_hold_tlcs(&self) -> HashMap<Hash256, Vec<HoldTlc>>;
-    /// Returns the channel-scoped confirmed on-chain settlement proof for this TLC.
+    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
+        tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<OnChainTlcSettlement>;
+    ) -> Option<StoredOnChainTlcSettlement>;
 
     /// Store a pending CommitDiff for channel reestablishment
     fn store_pending_commit_diff(&self, channel_id: &Hash256, diff: &CommitDiff);

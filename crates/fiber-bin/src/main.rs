@@ -62,8 +62,24 @@ fn cli_progress(progress: MigrationProgress) {
     );
 }
 
-#[tokio::main]
-pub async fn main() -> Result<(), ExitMessage> {
+pub fn main() -> Result<(), ExitMessage> {
+    // Set the process-wide policy before Tokio starts any worker threads. RocksDB creates
+    // files from background threads throughout the lifetime of the node.
+    #[cfg(unix)]
+    {
+        use nix::sys::stat::{umask, Mode};
+
+        umask(Mode::from_bits_truncate(0o077));
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| ExitMessage(format!("failed to initialize Tokio runtime: {}", err)))?;
+    runtime.block_on(run())
+}
+
+async fn run() -> Result<(), ExitMessage> {
     // ractor will set "id" for each actor:
     // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
     // here we map it with the node prefix

@@ -12,7 +12,9 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::cch::{CchOrderStore, CchStoreError};
 use crate::fiber::gossip::GossipMessageStore;
-use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
+use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
+#[cfg(feature = "watchtower")]
+use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::HoldTlc;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
@@ -35,7 +37,7 @@ use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
     Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TimedResult, CURSOR_SIZE,
+    PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation};
@@ -71,7 +73,6 @@ pub struct Store {
 enum WatchtowerPreimageCleanupTarget<'a> {
     Exact(&'a Hash256),
     ExactSet(&'a HashSet<Hash256>),
-    TlcPaymentHash(&'a [u8; 20]),
 }
 
 #[cfg(feature = "watchtower")]
@@ -80,9 +81,6 @@ impl WatchtowerPreimageCleanupTarget<'_> {
         match self {
             WatchtowerPreimageCleanupTarget::Exact(target) => payment_hash == target,
             WatchtowerPreimageCleanupTarget::ExactSet(targets) => targets.contains(payment_hash),
-            WatchtowerPreimageCleanupTarget::TlcPaymentHash(target) => {
-                payment_hash.as_ref()[..20] == target[..]
-            }
         }
     }
 }
@@ -628,11 +626,26 @@ impl StoreKeyValue for KeyValue {
 
 #[cfg(feature = "watchtower")]
 impl Store {
-    fn tlc_on_chain_settled_key(channel_id: &Hash256, payment_hash: &[u8; 20]) -> Vec<u8> {
+    fn legacy_tlc_on_chain_settled_key(channel_id: &Hash256, payment_hash: &[u8; 20]) -> Vec<u8> {
         [
             &[WATCHTOWER_TLC_SETTLED_PREFIX],
             channel_id.as_ref(),
             payment_hash.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn tlc_on_chain_settled_key(node_id: &NodeId, channel_id: &Hash256, tlc_id: TLCId) -> Vec<u8> {
+        let (direction, id) = match tlc_id {
+            TLCId::Offered(id) => (0u8, id),
+            TLCId::Received(id) => (1u8, id),
+        };
+        [
+            &[WATCHTOWER_TLC_SETTLED_PREFIX],
+            channel_id.as_ref(),
+            &[2u8, direction],
+            &id.to_be_bytes(),
+            node_id.as_ref(),
         ]
         .concat()
     }
@@ -693,27 +706,71 @@ impl Store {
 
     fn watch_channel_needs_preimage(
         &self,
+        node_id: &NodeId,
         channel_data: &ChannelData,
         payment_hash: &Hash256,
     ) -> bool {
-        if WatchtowerStore::get_onchain_tlc_settlement(self, &channel_data.channel_id, payment_hash)
-            .is_some()
-        {
-            return false;
-        }
-
-        [
-            &channel_data.remote_settlement_data,
-            &channel_data.pending_remote_settlement_data,
-            &channel_data.local_settlement_data,
+        let snapshot_statuses = [
+            (&channel_data.remote_settlement_data, true),
+            (&channel_data.pending_remote_settlement_data, true),
+            (&channel_data.local_settlement_data, false),
         ]
         .into_iter()
-        .any(|settlement_data| {
-            settlement_data
+        .filter_map(|(settlement_data, for_remote)| {
+            let mut has_matching_tlc = false;
+            let mut has_exact_settlement = false;
+            let mut has_unsettled_tlc = false;
+            for tlc in settlement_data
                 .tlcs
                 .iter()
-                .any(|tlc| &tlc.payment_hash == payment_hash)
+                .filter(|tlc| &tlc.payment_hash == payment_hash)
+            {
+                has_matching_tlc = true;
+                let tlc_id = if for_remote {
+                    tlc.tlc_id
+                } else {
+                    tlc.tlc_id.flip()
+                };
+                let is_exactly_settled = self
+                    .get(Self::tlc_on_chain_settled_key(
+                        node_id,
+                        &channel_data.channel_id,
+                        tlc_id,
+                    ))
+                    .map(|value| {
+                        deserialize_from::<OnChainTlcSettlement>(
+                            value.as_ref(),
+                            "OnChainTlcSettlement",
+                        )
+                    })
+                    .is_some_and(|settlement| {
+                        settlement.payment_hash == tlc.payment_hash
+                            && settlement.hash_algorithm == tlc.hash_algorithm
+                    });
+                has_exact_settlement |= is_exactly_settled;
+                has_unsettled_tlc |= !is_exactly_settled;
+            }
+            has_matching_tlc.then_some((has_exact_settlement, has_unsettled_tlc))
         })
+        .collect::<Vec<_>>();
+
+        // ChannelData retains several candidate commitment snapshots. Once an exact settlement
+        // exists, only snapshots containing exact evidence can represent the active on-chain
+        // chain. Within those candidates every same-hash TLC must be settled before its shared
+        // preimage can be removed. Prefix-keyed legacy records intentionally provide no evidence
+        // here because they cannot identify a specific TLC.
+        if snapshot_statuses
+            .iter()
+            .any(|(has_exact_settlement, _)| *has_exact_settlement)
+        {
+            snapshot_statuses
+                .iter()
+                .any(|(has_exact_settlement, has_unsettled_tlc)| {
+                    *has_exact_settlement && *has_unsettled_tlc
+                })
+        } else {
+            !snapshot_statuses.is_empty()
+        }
     }
 
     fn watch_channel_payment_hashes(channel_data: &ChannelData) -> HashSet<Hash256> {
@@ -730,7 +787,9 @@ impl Store {
     fn watch_preimage_in_use(&self, node_id: &NodeId, payment_hash: &Hash256) -> bool {
         self.watch_channels_for_node(node_id)
             .iter()
-            .any(|channel_data| self.watch_channel_needs_preimage(channel_data, payment_hash))
+            .any(|channel_data| {
+                self.watch_channel_needs_preimage(node_id, channel_data, payment_hash)
+            })
     }
 
     fn watch_preimage_entries(&self, node_id: Option<&NodeId>) -> Vec<(NodeId, Hash256)> {
@@ -1070,15 +1129,22 @@ impl ChannelActorStateStore for Store {
     fn get_onchain_tlc_settlement(
         &self,
         channel_id: &Hash256,
+        tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<OnChainTlcSettlement> {
+    ) -> Option<StoredOnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
-            WatchtowerStore::get_onchain_tlc_settlement(self, channel_id, payment_hash)
+            WatchtowerStore::get_onchain_tlc_settlement(
+                self,
+                &NodeId::local(),
+                channel_id,
+                tlc_id,
+                payment_hash,
+            )
         }
         #[cfg(not(feature = "watchtower"))]
         {
-            let _ = (channel_id, payment_hash);
+            let _ = (channel_id, tlc_id, payment_hash);
             None
         }
     }
@@ -1713,37 +1779,19 @@ impl WatchtowerStore for Store {
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
     }
 
-    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256> {
-        let prefix = [&[WATCHTOWER_PREIMAGE_PREFIX], payment_hash_prefix].concat();
-        self.collect_by_prefix(prefix.as_slice())
-            .into_iter()
-            .find(|kv| {
-                let key = &kv.key;
-                let node_offset = 1 + 32;
-                key.len() >= node_offset && key[node_offset..] == node_id.as_ref()[..]
-            })
-            .map(|kv| deserialize_from(kv.value.as_ref(), "Preimage"))
-    }
-
     fn insert_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
-        payment_hash_prefix: [u8; 20],
+        tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     ) {
         let _guard = self.onchain_tlc_settlement_write_lock.lock();
-        let key = Self::tlc_on_chain_settled_key(channel_id, &payment_hash_prefix);
+        let key = Self::tlc_on_chain_settled_key(node_id, channel_id, tlc_id);
         if settlement.preimage.is_none() {
             if let Some(existing) = self.get(&key) {
-                let existing = if existing.is_empty() {
-                    OnChainTlcSettlement {
-                        preimage: None,
-                        tx_hash: None,
-                        tlc_index: None,
-                    }
-                } else {
-                    deserialize_from(existing.as_ref(), "OnChainTlcSettlement")
-                };
+                let existing: OnChainTlcSettlement =
+                    deserialize_from(existing.as_ref(), "OnChainTlcSettlement");
                 if existing.preimage.is_some() {
                     return;
                 }
@@ -1757,31 +1805,46 @@ impl WatchtowerStore for Store {
         if settlement.preimage.is_none() {
             self.cleanup_unused_watch_preimages(
                 None,
-                WatchtowerPreimageCleanupTarget::TlcPaymentHash(&payment_hash_prefix),
+                WatchtowerPreimageCleanupTarget::Exact(&settlement.payment_hash),
             );
         }
     }
 
     fn get_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
+        tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<OnChainTlcSettlement> {
+    ) -> Option<StoredOnChainTlcSettlement> {
+        if let Some(value) = self.get(Store::tlc_on_chain_settled_key(node_id, channel_id, tlc_id))
+        {
+            return Some(StoredOnChainTlcSettlement::Exact(deserialize_from(
+                value.as_ref(),
+                "OnChainTlcSettlement",
+            )));
+        }
+
         let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
             .try_into()
             .expect("payment hash prefix");
-        let value = self.get(Store::tlc_on_chain_settled_key(
+        let value = self.get(Store::legacy_tlc_on_chain_settled_key(
             channel_id,
             &payment_hash_prefix,
         ))?;
         if value.is_empty() {
-            return Some(OnChainTlcSettlement {
-                preimage: None,
-                tx_hash: None,
-                tlc_index: None,
-            });
+            return Some(StoredOnChainTlcSettlement::Legacy(
+                LegacyOnChainTlcSettlement {
+                    preimage: None,
+                    tx_hash: None,
+                    tlc_index: None,
+                },
+            ));
         }
-        Some(deserialize_from(value.as_ref(), "OnChainTlcSettlement"))
+        Some(StoredOnChainTlcSettlement::Legacy(deserialize_from(
+            value.as_ref(),
+            "LegacyOnChainTlcSettlement",
+        )))
     }
 }
 

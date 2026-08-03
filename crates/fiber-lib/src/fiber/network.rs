@@ -48,6 +48,8 @@ use tokio_util::codec::length_delimited;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
+pub(crate) const CHANNEL_REESTABLISH_INTERVAL: Duration = Duration::from_millis(10);
+
 use super::channel::{
     get_funding_and_reserved_amount, AcceptChannelParameter, ChannelActor, ChannelActorMessage,
     ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
@@ -904,6 +906,9 @@ pub enum NetworkActorCommand {
     InstallTestChannelActor(Hash256, ActorRef<ChannelActorMessage>, RpcReplyPort<()>),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(Pubkey, SessionId),
+    // Pace persisted channel reestablishment without blocking the NetworkActor. The channel ids
+    // stay in one heap allocation while each continuation only moves the Vec header.
+    ReestablishChannels(Pubkey, SessionId, Vec<Hash256>),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -2494,6 +2499,35 @@ where
                             ))
                             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                     }
+                }
+            }
+            NetworkActorCommand::ReestablishChannels(pubkey, session_id, mut channel_ids) => {
+                if !matches!(
+                    state.peer_session_map.get(&pubkey),
+                    Some(peer) if peer.session_id == session_id && peer.features.is_some()
+                ) {
+                    debug!(
+                        peer = format!("{pubkey:?}"),
+                        session = format!("{session_id:?}"),
+                        "Dropping stale channel reestablishment continuation"
+                    );
+                    return Ok(());
+                }
+
+                if let Some(channel_id) = channel_ids.pop() {
+                    if let Err(err) = state.reestablish_channel(channel_id).await {
+                        error!("Failed to reestablish channel {:x}: {:?}", channel_id, err);
+                    }
+                }
+
+                if !channel_ids.is_empty() {
+                    myself.send_after(CHANNEL_REESTABLISH_INTERVAL, move || {
+                        NetworkActorMessage::new_command(NetworkActorCommand::ReestablishChannels(
+                            pubkey,
+                            session_id,
+                            channel_ids,
+                        ))
+                    });
                 }
             }
             NetworkActorCommand::CheckChannelsShutdown => {
@@ -6597,7 +6631,7 @@ where
 
     pub async fn on_init_msg(
         &mut self,
-        _myself: ActorRef<NetworkActorMessage>,
+        myself: ActorRef<NetworkActorMessage>,
         peer_pubkey: Pubkey,
         init_msg: Init,
     ) -> ProcessingChannelResult {
@@ -6650,12 +6684,24 @@ where
                 &peer_pubkey
             )));
         }
-        debug_event!(_myself, "PeerInit");
+        debug_event!(myself, "PeerInit");
         if let Some(channels) = self.peer_channel_index.get_channels(&peer_pubkey) {
-            for channel_id in channels {
-                if let Err(e) = self.reestablish_channel(channel_id).await {
-                    error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
-                }
+            let channel_ids = channels.into_iter().collect::<Vec<_>>();
+            if !channel_ids.is_empty() {
+                let session_id = self
+                    .peer_session_map
+                    .get(&peer_pubkey)
+                    .expect("peer session checked above")
+                    .session_id;
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ReestablishChannels(
+                            peer_pubkey,
+                            session_id,
+                            channel_ids,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
         }
 

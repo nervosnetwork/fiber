@@ -1,10 +1,7 @@
 //! On-chain identity invariant: a settlement witness only exposes a 20-byte payment-hash
-//! prefix and an unlock index, so on-chain resolution maps to TLCs via
-//! `(channel_id, payment_hash[0..20])`. Fulfillment with a preimage is additionally
-//! validated against the full 32-byte payment hash; timeout/no-preimage resolution is
-//! only sound while a channel has at most one pending TLC per prefix.
-
-use std::collections::{HashMap, HashSet};
+//! prefix and an unlock index. The watchtower must resolve that index against the immutable
+//! settlement snapshot committed by the force-closed commitment transaction before persisting
+//! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fiber_types::{
@@ -15,13 +12,41 @@ use tracing::warn;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnChainTlcSettlement {
+    /// The full payment hash from the commitment's immutable settlement snapshot.
+    pub payment_hash: Hash256,
+    /// The hash algorithm committed for this TLC.
+    pub hash_algorithm: HashAlgorithm,
     /// Preimage revealed by the settlement witness, when the TLC was claimed with one.
     pub preimage: Option<Hash256>,
-    /// The settlement transaction that consumed this TLC's output. `None` for legacy
-    /// empty-value markers that carry no audit evidence.
+    /// The settlement transaction that consumed this TLC's output.
+    pub tx_hash: Hash256,
+    /// The pending-HTLC index inside that settlement witness.
+    pub tlc_index: u8,
+}
+
+/// Prefix-keyed settlement records written by older versions.
+///
+/// These records are retained for database compatibility. A matching preimage can still safely
+/// prove fulfillment after validating the complete hash, but a no-preimage record cannot prove
+/// which TLC sharing the prefix was consumed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyOnChainTlcSettlement {
+    /// Preimage observed in the old prefix-keyed settlement record.
+    pub preimage: Option<Hash256>,
+    /// Settlement transaction hash when recorded by a newer legacy writer.
     pub tx_hash: Option<Hash256>,
-    /// The pending-HTLC index inside the settlement witness. `None` for legacy markers.
+    /// Witness index when recorded by a newer legacy writer.
     pub tlc_index: Option<u8>,
+}
+
+/// A settlement record decoded from either the exact current key format or the legacy
+/// payment-hash-prefix key format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredOnChainTlcSettlement {
+    /// An exact record keyed by `(channel_id, TLCId)`.
+    Exact(OnChainTlcSettlement),
+    /// A prefix-keyed record written by an older version.
+    Legacy(LegacyOnChainTlcSettlement),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,27 +112,55 @@ pub(crate) fn resolve_onchain_tlc(
     payment_hash: Hash256,
     hash_algorithm: HashAlgorithm,
 ) -> OnChainTlcResolution {
-    let Some(settlement) = store.get_onchain_tlc_settlement(channel_id, &payment_hash) else {
+    let Some(settlement) = store.get_onchain_tlc_settlement(channel_id, tlc_id, &payment_hash)
+    else {
         return OnChainTlcResolution::Unknown;
     };
-
-    let Some(preimage) = settlement.preimage else {
-        return OnChainTlcResolution::SettledWithoutPreimage;
-    };
-
-    let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
-    if discovered_payment_hash == payment_hash {
-        return OnChainTlcResolution::Fulfilled(preimage);
+    match settlement {
+        StoredOnChainTlcSettlement::Exact(settlement) => {
+            if settlement.payment_hash != payment_hash
+                || settlement.hash_algorithm != hash_algorithm
+            {
+                warn!(
+                    "Ignoring mismatched on-chain settlement identity for channel {:?} tlc {:?} tx {:?}: stored hash {:?}/{:?}, expected {:?}/{:?}",
+                    channel_id,
+                    tlc_id,
+                    settlement.tx_hash,
+                    settlement.payment_hash,
+                    settlement.hash_algorithm,
+                    payment_hash,
+                    hash_algorithm
+                );
+                return OnChainTlcResolution::Unknown;
+            }
+            let Some(preimage) = settlement.preimage else {
+                return OnChainTlcResolution::SettledWithoutPreimage;
+            };
+            let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+            if discovered_payment_hash == payment_hash {
+                return OnChainTlcResolution::Fulfilled(preimage);
+            }
+            warn!(
+                "Ignoring invalid on-chain preimage for channel {:?} tlc {:?} tx {:?}: derived hash {:?}, expected {:?}",
+                channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
+            );
+            OnChainTlcResolution::Unknown
+        }
+        StoredOnChainTlcSettlement::Legacy(legacy) => {
+            let Some(preimage) = legacy.preimage else {
+                return OnChainTlcResolution::Unknown;
+            };
+            let discovered_payment_hash: Hash256 = hash_algorithm.hash(preimage).into();
+            if discovered_payment_hash == payment_hash {
+                return OnChainTlcResolution::Fulfilled(preimage);
+            }
+            warn!(
+                "Ignoring legacy prefix-keyed settlement for channel {:?} tlc {:?} tx {:?}: preimage hash {:?}, expected {:?}",
+                channel_id, tlc_id, legacy.tx_hash, discovered_payment_hash, payment_hash
+            );
+            OnChainTlcResolution::Unknown
+        }
     }
-
-    // The channel-scoped settlement record proves the TLC output was consumed on-chain.
-    // If the stored preimage does not validate against the full hash, do not fulfill
-    // upstream, but still finalize this local TLC as settled without a usable preimage.
-    warn!(
-        "On-chain settlement record for channel {:?} tlc {:?} tx {:?} has preimage hash {:?}, expected {:?}; treating as settled without preimage",
-        channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
-    );
-    OnChainTlcResolution::SettledWithoutPreimage
 }
 
 pub(crate) fn onchain_fulfilled_preimage(
@@ -200,15 +253,11 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
     expect_expiry: u64,
 ) -> Vec<OnChainTimeoutSettledTlc> {
     let channel_id = state.get_id();
-    let non_unique_prefixes = non_unique_onchain_settlement_prefixes(state);
     state
         .tlc_state
         .get_expired_offered_tlcs(expect_expiry)
         .filter(|tlc| tlc.removed_reason.is_none())
         .filter_map(|tlc| {
-            if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
-                return None;
-            }
             if !matches!(
                 resolve_onchain_tlc(
                     &channel_id,
@@ -249,17 +298,13 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
     store: &impl ChannelActorStateStore,
 ) -> Vec<OnChainReceivedTimeoutSettledTlc> {
     let channel_id = state.get_id();
-    let non_unique_prefixes = non_unique_onchain_settlement_prefixes(state);
     state
         .tlc_state
         .received_tlcs
         .tlcs
         .iter()
         .filter(|tlc| can_reconcile_onchain_fulfillment(tlc))
-        .filter_map(|tlc| {
-            if has_non_unique_onchain_settlement_key(&channel_id, &non_unique_prefixes, tlc) {
-                return None;
-            }
+        .filter(|tlc| {
             matches!(
                 resolve_onchain_tlc(
                     &channel_id,
@@ -270,12 +315,12 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
                 ),
                 OnChainTlcResolution::SettledWithoutPreimage
             )
-            .then(|| {
-                let TLCId::Received(tlc_id) = tlc.tlc_id else {
-                    unreachable!("received TLC list contains only received TLCs");
-                };
-                OnChainReceivedTimeoutSettledTlc { tlc_id }
-            })
+        })
+        .map(|tlc| {
+            let TLCId::Received(tlc_id) = tlc.tlc_id else {
+                unreachable!("received TLC list contains only received TLCs");
+            };
+            OnChainReceivedTimeoutSettledTlc { tlc_id }
         })
         .collect()
 }
@@ -300,56 +345,4 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
             InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
         )
     }
-}
-
-/// Returns payment-hash prefixes whose current on-chain settlement key is shared by more than one
-/// reconcilable TLC on this channel.
-///
-/// Settlement records are currently looked up by `(channel_id, payment_hash[0..20])`, not by full
-/// payment hash or witness TLC index. When multiple pending TLCs share that lookup key, the record
-/// cannot be safely attributed to exactly one local TLC.
-pub(crate) fn non_unique_onchain_settlement_prefixes(
-    state: &ChannelActorState,
-) -> HashSet<[u8; 20]> {
-    let mut counts_by_prefix: HashMap<[u8; 20], u32> = HashMap::new();
-    for tlc in state
-        .tlc_state
-        .all_tlcs()
-        .filter(|tlc| can_reconcile_onchain_fulfillment(tlc))
-    {
-        *counts_by_prefix
-            .entry(payment_hash_prefix(&tlc.payment_hash))
-            .or_default() += 1;
-    }
-    counts_by_prefix
-        .into_iter()
-        .filter_map(|(prefix, count)| (count > 1).then_some(prefix))
-        .collect()
-}
-
-pub(crate) fn payment_hash_prefix(payment_hash: &Hash256) -> [u8; 20] {
-    payment_hash.as_ref()[0..20]
-        .try_into()
-        .expect("payment hash prefix")
-}
-
-/// Returns true when this TLC's current settlement lookup key is not unique within the channel.
-///
-/// No-preimage callers skip such TLCs because applying a prefix-keyed settlement record could
-/// otherwise mutate the wrong TLC, relay the wrong upstream remove, or complete the wrong
-/// payment/invoice state.
-pub(crate) fn has_non_unique_onchain_settlement_key(
-    channel_id: &Hash256,
-    non_unique_prefixes: &HashSet<[u8; 20]>,
-    tlc: &TlcInfo,
-) -> bool {
-    let prefix = payment_hash_prefix(&tlc.payment_hash);
-    if non_unique_prefixes.contains(&prefix) {
-        warn!(
-            "Skipping on-chain reconciliation for channel {:?} tlc {:?}: on-chain settlement key is shared by multiple pending TLCs",
-            channel_id, tlc.tlc_id
-        );
-        return true;
-    }
-    false
 }

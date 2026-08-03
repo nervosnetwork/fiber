@@ -3,7 +3,8 @@ use ckb_types::packed::Script;
 use musig2::{secp::Point, KeyAggContext};
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
-use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
+use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
+use fiber_types::TLCId;
 use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
 
 pub trait WatchtowerStore {
@@ -67,27 +68,28 @@ pub trait WatchtowerStore {
     /// Get a watch preimage owned by the given node.
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256>;
 
-    /// Search for the stored preimage with the given payment hash prefix, should be the first 20 bytes of the payment hash.
-    fn search_preimage(&self, node_id: &NodeId, payment_hash_prefix: &[u8]) -> Option<Hash256>;
-
     /// Insert the only valid on-chain settlement proof for a TLC.
     ///
-    /// This must only be written from an observed settlement witness scoped by channel id and
-    /// payment-hash prefix. Locally-known preimages may be stored as watchtower preimages, but
-    /// must not be written here unless they were observed in that witness.
+    /// This must only be written after resolving an observed witness index against the immutable
+    /// settlement snapshot committed by the force-closed commitment transaction. Locally-known
+    /// preimages may be stored as watchtower preimages, but must not be written here unless they
+    /// were observed in that witness.
     fn insert_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
-        payment_hash_prefix: [u8; 20],
+        tlc_id: TLCId,
         settlement: OnChainTlcSettlement,
     );
 
-    /// Returns the channel-scoped on-chain settlement proof for a TLC, if any.
+    /// Returns an exact settlement proof for this TLC, or a legacy prefix-keyed record.
     fn get_onchain_tlc_settlement(
         &self,
+        node_id: &NodeId,
         channel_id: &Hash256,
+        tlc_id: TLCId,
         payment_hash: &Hash256,
-    ) -> Option<OnChainTlcSettlement>;
+    ) -> Option<StoredOnChainTlcSettlement>;
 }
 
 /// Compute the x-only aggregated public key for a channel.

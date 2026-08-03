@@ -3630,16 +3630,16 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
         )
         .await;
 
-    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-        .try_into()
-        .expect("20-byte payment hash prefix");
     node_1.store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         &channels[1],
-        payment_hash_prefix,
+        TLCId::Offered(downstream_tlc.id()),
         OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
         },
     );
 
