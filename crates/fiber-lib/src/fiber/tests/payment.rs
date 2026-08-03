@@ -65,23 +65,31 @@ use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info};
 
 #[cfg(feature = "watchtower")]
-fn insert_onchain_preimage<S: WatchtowerStore>(
+fn insert_onchain_preimage<S: WatchtowerStore + ChannelActorStateStore>(
     store: &S,
     channel_id: &Hash256,
     payment_hash: Hash256,
     preimage: Hash256,
 ) {
-    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-        .try_into()
-        .expect("20-byte payment hash prefix");
+    let channel_state = store
+        .get_channel_actor_state(channel_id)
+        .expect("channel state exists");
+    let tlc = channel_state
+        .tlc_state
+        .all_tlcs()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .expect("TLC with payment hash exists");
     store.insert_watch_preimage(fiber_types::NodeId::local(), payment_hash, preimage);
     store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         channel_id,
-        payment_hash_prefix,
+        tlc.tlc_id,
         OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: tlc.hash_algorithm,
             preimage: Some(preimage),
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
         },
     );
 }
@@ -5033,16 +5041,16 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
         )
         .await;
 
-    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-        .try_into()
-        .expect("20-byte payment hash prefix");
     node_1.store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         &channels[1],
-        payment_hash_prefix,
+        TLCId::Offered(downstream_tlc.id()),
         OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
         },
     );
 
@@ -6902,16 +6910,16 @@ async fn test_onchain_settlement_restart_restores_upstream_waiting_commitment_ac
         )
         .await;
 
-    let payment_hash_prefix: [u8; 20] = payment_hash.as_ref()[0..20]
-        .try_into()
-        .expect("20-byte payment hash prefix");
     node_1.store.insert_onchain_tlc_settlement(
+        &fiber_types::NodeId::local(),
         &channels[1],
-        payment_hash_prefix,
+        TLCId::Offered(downstream_tlc.id()),
         OnChainTlcSettlement {
+            payment_hash,
+            hash_algorithm: HashAlgorithm::CkbHash,
             preimage: None,
-            tx_hash: Some(gen_rand_sha256_hash()),
-            tlc_index: Some(0),
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
         },
     );
 
