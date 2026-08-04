@@ -503,10 +503,37 @@ fn test_config_validate_rejects_out_of_range() {
 }
 
 #[test]
-fn test_config_default_percentage_is_full() {
-    use crate::cch::CchConfig;
-    // The default must be a valid, full-budget percentage so existing deployments keep working.
+fn test_config_default_percentage_reserves_operator_margin() {
+    use crate::cch::{config::DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE, CchConfig};
+
     let config = CchConfig::default();
-    assert_eq!(config.max_outgoing_fee_percentage, 100);
+    assert_eq!(
+        config.max_outgoing_fee_percentage,
+        DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE
+    );
+    assert!(config.max_outgoing_fee_percentage < 100);
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_default_cch_fee_budget_covers_a_default_fiber_intermediate_hop() {
+    use crate::cch::{
+        actions::send_outgoing_payment::outgoing_fee_budget_from_fee_sats, CchConfig,
+    };
+    use crate::fiber::config::DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS;
+
+    const ORDER_AMOUNT_SATS: u128 = 1_000_000;
+    let config = CchConfig::default();
+    let collected_fee_sats =
+        ORDER_AMOUNT_SATS.saturating_mul(config.fee_rate_per_million_sats as u128) / 1_000_000
+            + config.base_fee_sats as u128;
+    let outgoing_budget_sats =
+        outgoing_fee_budget_from_fee_sats(collected_fee_sats, config.max_outgoing_fee_percentage);
+    let one_hop_fee_sats =
+        ORDER_AMOUNT_SATS.saturating_mul(DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS) / 1_000_000;
+
+    assert!(
+        outgoing_budget_sats >= one_hop_fee_sats,
+        "default CCH outgoing budget {outgoing_budget_sats} sats must cover one default Fiber intermediate-hop fee of {one_hop_fee_sats} sats"
+    );
 }
