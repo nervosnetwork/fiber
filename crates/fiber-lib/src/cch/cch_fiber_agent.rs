@@ -121,6 +121,7 @@ pub enum CchFiberAgentMessage {
 }
 
 const FIBER_HTTP_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+const FIBER_AGENT_CALL_TIMEOUT_MILLIS: u64 = 61_000;
 pub(crate) const FIBER_HTTP_INVOICE_CREATION_MARGIN_SECONDS: u64 =
     FIBER_HTTP_REQUEST_TIMEOUT.as_secs() + 1;
 
@@ -623,7 +624,7 @@ impl CchFiberAgentRef {
                         tx,
                     ))
                 };
-                call!(network_actor, msg)
+                ractor::call_t!(network_actor, msg, FIBER_AGENT_CALL_TIMEOUT_MILLIS)
                     .map_err(to_fiber_err)?
                     .map_err(|err| match err {
                         crate::invoice::InvoiceError::InvoiceAlreadyExists => {
@@ -633,14 +634,18 @@ impl CchFiberAgentRef {
                     })?;
                 Ok(invoice_cloned)
             }
-            Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
-                CchFiberAgentMessage::AddInvoice(
-                    invoice.clone(),
-                    deadline_seconds,
-                    min_expiry_seconds,
-                    port,
-                )
-            })
+            Self::Rpc(rpc_actor) => ractor::call_t!(
+                rpc_actor,
+                |port| {
+                    CchFiberAgentMessage::AddInvoice(
+                        invoice.clone(),
+                        deadline_seconds,
+                        min_expiry_seconds,
+                        port,
+                    )
+                },
+                FIBER_AGENT_CALL_TIMEOUT_MILLIS
+            )
             .map_err(to_fiber_err)?
             .map_err(|err| {
                 if err
@@ -663,12 +668,16 @@ impl CchFiberAgentRef {
     ) -> Result<Option<FiberInvoiceInfo>, CchError> {
         match self {
             Self::InProcess(network_actor) => {
-                let result = call!(network_actor, |port| {
-                    NetworkActorMessage::Command(NetworkActorCommand::GetInvoice(
-                        payment_hash,
-                        port,
-                    ))
-                })
+                let result = ractor::call_t!(
+                    network_actor,
+                    |port| {
+                        NetworkActorMessage::Command(NetworkActorCommand::GetInvoice(
+                            payment_hash,
+                            port,
+                        ))
+                    },
+                    FIBER_AGENT_CALL_TIMEOUT_MILLIS
+                )
                 .map_err(to_fiber_err)?;
                 match result {
                     Ok((invoice, status)) => Ok(Some(FiberInvoiceInfo { invoice, status })),
@@ -676,9 +685,11 @@ impl CchFiberAgentRef {
                     Err(err) => Err(to_fiber_err(err)),
                 }
             }
-            Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
-                CchFiberAgentMessage::GetInvoice(payment_hash, port)
-            })
+            Self::Rpc(rpc_actor) => ractor::call_t!(
+                rpc_actor,
+                |port| CchFiberAgentMessage::GetInvoice(payment_hash, port),
+                FIBER_AGENT_CALL_TIMEOUT_MILLIS
+            )
             .map_err(to_fiber_err)?
             .map(Some)
             .or_else(|err| {

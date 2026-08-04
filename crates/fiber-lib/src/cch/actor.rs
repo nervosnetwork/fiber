@@ -8,7 +8,7 @@ use ractor::{
 };
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tentacle::secio::SecioKeyPair;
@@ -166,6 +166,18 @@ pub enum CchMessage {
         retry_count: u32,
     },
 
+    SendBTCWorkerCompleted {
+        payment_hash: Hash256,
+        result: Result<(CchOrder, bool), CchError>,
+        port: RpcReplyPort<Result<CchOrder, CchError>>,
+    },
+
+    ResumeSendBTCOrderCreationWorkerCompleted {
+        payment_hash: Hash256,
+        retry_count: u32,
+        result: Result<Option<CchOrder>, CchError>,
+    },
+
     /// Expire an active order after its configured expiry window elapses.
     ExpireOrder(Hash256),
 
@@ -208,6 +220,7 @@ pub struct CchArgs<S> {
     pub(crate) lnd_invoice_client: Option<Arc<dyn LndInvoiceClient>>,
 }
 
+#[derive(Clone)]
 pub struct CchState<S> {
     pub(super) config: CchConfig,
     pub(super) fiber_agent_ref: CchFiberAgentRef,
@@ -217,8 +230,11 @@ pub struct CchState<S> {
     pub(super) lnd_tracker: ActorRef<LndTrackerMessage>,
     pub(super) scheduler: ActorRef<SchedulerMessage>,
     pub(super) store: S,
+    task_tracker: TaskTracker,
     pending_receive_btc_creation_retries: HashSet<Hash256>,
     pending_send_btc_creation_retries: HashSet<Hash256>,
+    active_send_btc_creation_workers: HashSet<Hash256>,
+    active_send_btc_requests: HashMap<Hash256, String>,
     /// The CKB network currency this node is configured for.
     pub(super) currency: Currency,
 }
@@ -348,9 +364,12 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             lnd_invoice_client,
             lnd_tracker,
             scheduler,
+            task_tracker: args.tracker,
             currency: args.currency,
             pending_receive_btc_creation_retries: HashSet::new(),
             pending_send_btc_creation_retries: HashSet::new(),
+            active_send_btc_creation_workers: HashSet::new(),
+            active_send_btc_requests: HashMap::new(),
         };
 
         Ok(state)
@@ -466,46 +485,84 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     let _ = port.send(Err(err));
                     return Ok(());
                 }
-                let payment_hash = Bolt11Invoice::from_str(&send_btc.btc_pay_req)
-                    .ok()
-                    .map(|invoice| Hash256::from(*invoice.payment_hash()));
-                let pending_error = match payment_hash {
-                    Some(payment_hash)
-                        if state
-                            .pending_send_btc_creation_retries
-                            .contains(&payment_hash) =>
-                    {
-                        match state.get_send_btc_order_creation_or_none(&payment_hash) {
-                            Ok(Some(creation)) => Some(
-                                state
-                                    .ensure_send_btc_request_matches_creation(
-                                        &send_btc.btc_pay_req,
-                                        &creation,
-                                    )
-                                    .err()
-                                    .unwrap_or(CchError::SendBTCOrderCreationInProgress(
-                                        payment_hash,
-                                    )),
-                            ),
-                            Ok(None) => None,
-                            Err(err) => Some(err),
-                        }
+                let payment_hash = match Bolt11Invoice::from_str(&send_btc.btc_pay_req) {
+                    Ok(invoice) => Hash256::from(*invoice.payment_hash()),
+                    Err(err) => {
+                        let _ = port.send(Err(err.into()));
+                        return Ok(());
                     }
-                    _ => None,
                 };
-                let result = match pending_error {
-                    Some(err) => Err(err),
-                    None => state.send_btc(send_btc).await,
-                };
-                if let Ok((order, true)) = &result {
+                if state
+                    .active_send_btc_creation_workers
+                    .contains(&payment_hash)
+                    || state
+                        .pending_send_btc_creation_retries
+                        .contains(&payment_hash)
+                {
+                    let pending_error = match state
+                        .get_send_btc_order_creation_or_none(&payment_hash)
+                    {
+                        Ok(Some(creation)) => Some(
+                            state
+                                .ensure_send_btc_request_matches_creation(
+                                    &send_btc.btc_pay_req,
+                                    &creation,
+                                )
+                                .err()
+                                .unwrap_or(CchError::SendBTCOrderCreationInProgress(payment_hash)),
+                        ),
+                        Ok(None) => match state.active_send_btc_requests.get(&payment_hash) {
+                            Some(btc_pay_req) if btc_pay_req != &send_btc.btc_pay_req => {
+                                Some(CchError::ConflictingSendBTCRequest(payment_hash))
+                            }
+                            Some(_) => Some(CchError::SendBTCOrderCreationInProgress(payment_hash)),
+                            None => None,
+                        },
+                        Err(err) => Some(err),
+                    };
+                    if let Some(err) = pending_error {
+                        let _ = port.send(Err(err));
+                        return Ok(());
+                    }
                     state
                         .pending_send_btc_creation_retries
-                        .remove(&order.payment_hash);
+                        .remove(&payment_hash);
+                    state.active_send_btc_creation_workers.remove(&payment_hash);
+                    state.active_send_btc_requests.remove(&payment_hash);
+                }
+
+                let worker_state = state.clone();
+                state.active_send_btc_creation_workers.insert(payment_hash);
+                state
+                    .active_send_btc_requests
+                    .insert(payment_hash, send_btc.btc_pay_req.clone());
+                let myself = myself.clone();
+                state.task_tracker.spawn(async move {
+                    let result = worker_state.send_btc(send_btc).await;
+                    let _ = myself.send_message(CchMessage::SendBTCWorkerCompleted {
+                        payment_hash,
+                        result,
+                        port,
+                    });
+                });
+                Ok(())
+            }
+            CchMessage::SendBTCWorkerCompleted {
+                payment_hash,
+                result,
+                port,
+            } => {
+                state.active_send_btc_creation_workers.remove(&payment_hash);
+                state.active_send_btc_requests.remove(&payment_hash);
+                state
+                    .pending_send_btc_creation_retries
+                    .remove(&payment_hash);
+                if let Ok((order, true)) = &result {
                     // Schedule jobs for new order
                     state.schedule_job_on_entering(order);
                     let actions = ActionDispatcher::on_starting(order);
-                    append_actions(myself, order.payment_hash, actions)?;
-                } else if let (Some(payment_hash), Err(err)) = (payment_hash, &result) {
+                    append_actions(myself.clone(), order.payment_hash, actions)?;
+                } else if let Err(err) = &result {
                     if state
                         .get_send_btc_order_creation_or_none(&payment_hash)?
                         .is_some()
@@ -528,7 +585,6 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     }
                 }
                 if !port.is_closed() {
-                    // ignore error
                     let _ = port.send(result.map(|(order, _)| order));
                 }
                 Ok(())
@@ -753,11 +809,36 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 state
                     .pending_send_btc_creation_retries
                     .remove(&payment_hash);
-                match state.resume_send_btc_order_creation(payment_hash).await {
+                if !state.active_send_btc_creation_workers.insert(payment_hash) {
+                    return Ok(());
+                }
+                let worker_state = state.clone();
+                let myself = myself.clone();
+                state.task_tracker.spawn(async move {
+                    let result = worker_state
+                        .resume_send_btc_order_creation(payment_hash)
+                        .await;
+                    let _ = myself.send_message(
+                        CchMessage::ResumeSendBTCOrderCreationWorkerCompleted {
+                            payment_hash,
+                            retry_count,
+                            result,
+                        },
+                    );
+                });
+                Ok(())
+            }
+            CchMessage::ResumeSendBTCOrderCreationWorkerCompleted {
+                payment_hash,
+                retry_count,
+                result,
+            } => {
+                state.active_send_btc_creation_workers.remove(&payment_hash);
+                match result {
                     Ok(Some(order)) => {
                         state.schedule_job_on_entering(&order);
                         let actions = ActionDispatcher::on_starting(&order);
-                        append_actions(myself, order.payment_hash, actions)?;
+                        append_actions(myself.clone(), order.payment_hash, actions)?;
                     }
                     Ok(None) => {}
                     Err(err) if is_retryable_send_btc_creation_error(&err) => {

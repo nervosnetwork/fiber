@@ -1248,7 +1248,7 @@ async fn test_send_btc_releases_reservation_when_invoice_creation_fails() {
 }
 
 #[tokio::test]
-async fn test_send_btc_does_not_execute_queued_request_after_rpc_timeout() {
+async fn test_send_btc_request_started_before_rpc_timeout_completes_durably() {
     let store = MockCchOrderStore::new();
     let harness = setup_test_harness_with_store(store.clone()).await;
     harness.set_add_invoice_delay(Duration::from_millis(100));
@@ -1306,12 +1306,102 @@ async fn test_send_btc_does_not_execute_queued_request_after_rpc_timeout() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    assert!(store.get_cch_order(&second_payment_hash).is_err());
+    assert!(store.get_cch_order(&second_payment_hash).is_ok());
     assert_eq!(
         store.get_cch_order_keys_iter().into_iter().count(),
-        1,
-        "a timed-out queued send_btc must not create an order"
+        2,
+        "requests accepted before their RPC timeout must complete durably"
     );
+}
+
+#[tokio::test]
+async fn test_send_btc_invoice_creation_does_not_block_actor_mailbox() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, 1);
+    let existing_payment_hash = test_payment_hash(0);
+    let harness = setup_test_harness_with_store(store).await;
+    harness.set_add_invoice_delay(Duration::from_millis(200));
+    let actor = harness.actor.clone();
+    let slow_payment_hash = create_valid_preimage_pair(216).1;
+    let slow_btc_pay_req =
+        create_test_lightning_invoice_with_payment_hash(slow_payment_hash).to_string();
+
+    let slow_creation = tokio::spawn(async move {
+        actor
+            .call(
+                |reply| {
+                    CchMessage::SendBTC(
+                        crate::cch::SendBTC {
+                            btc_pay_req: slow_btc_pay_req,
+                            currency: Currency::Fibb,
+                        },
+                        reply,
+                    )
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let existing_order = harness
+        .actor
+        .call(
+            |reply| CchMessage::GetCchOrder(existing_payment_hash, reply),
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .expect("get order message should be sent")
+        .expect("CchActor mailbox must remain responsive")
+        .expect("existing order");
+
+    assert_eq!(existing_order.payment_hash, existing_payment_hash);
+    slow_creation
+        .await
+        .expect("slow creation task")
+        .expect("send_btc message should be sent")
+        .expect("slow creation should finish")
+        .expect("send_btc order");
+}
+
+#[tokio::test]
+async fn test_send_btc_recovery_does_not_block_actor_mailbox() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, 1);
+    let existing_payment_hash = test_payment_hash(0);
+    let harness = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    harness.set_add_invoice_delay(Duration::from_millis(200));
+    let recovery_payment_hash = create_valid_preimage_pair(217).1;
+    store
+        .insert_send_btc_order_creation(create_send_btc_order_creation(
+            &config,
+            recovery_payment_hash,
+        ))
+        .expect("insert recovery intent");
+
+    harness
+        .actor
+        .send_message(CchMessage::ResumeSendBTCOrderCreation {
+            payment_hash: recovery_payment_hash,
+            retry_count: 0,
+        })
+        .expect("start send_btc recovery");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let existing_order = harness
+        .actor
+        .call(
+            |reply| CchMessage::GetCchOrder(existing_payment_hash, reply),
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .expect("get order message should be sent")
+        .expect("CchActor mailbox must remain responsive during recovery")
+        .expect("existing order");
+
+    assert_eq!(existing_order.payment_hash, existing_payment_hash);
+    wait_for_mock_order(&store, recovery_payment_hash).await;
 }
 
 #[tokio::test]
