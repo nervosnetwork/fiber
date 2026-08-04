@@ -31,7 +31,7 @@ use crate::cch::{CchConfig, CchError, CchOrderStore, CchStoreError, OutgoingFeeL
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::NetworkActorMessage;
-use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
+use crate::invoice::{Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::now_timestamp_as_millis_u64;
 use crate::store::store_impl::StoreChange;
 use crate::time::Duration;
@@ -460,6 +460,10 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 // A timed-out RPC leaves its message in the mailbox. Do not begin a new
                 // state-changing operation when its caller is no longer waiting for the result.
                 if port.is_closed() {
+                    return Ok(());
+                }
+                if let Err(err) = state.ensure_send_btc_currency(send_btc.currency) {
+                    let _ = port.send(Err(err));
                     return Ok(());
                 }
                 let payment_hash = Bolt11Invoice::from_str(&send_btc.btc_pay_req)
@@ -979,6 +983,7 @@ impl<S: CchOrderStore> CchState<S> {
     }
 
     async fn send_btc(&self, send_btc: SendBTC) -> Result<(CchOrder, bool), CchError> {
+        self.ensure_send_btc_currency(send_btc.currency)?;
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
         tracing::debug!(
             "BTC invoice parsed payment_hash={:x} currency={:?} has_amount={}",
@@ -1003,14 +1008,6 @@ impl<S: CchOrderStore> CchState<S> {
         }
 
         let order_created_at = now_timestamp_as_millis_u64() / 1000;
-
-        // Validate that the currency matches the configured CKB network (#981)
-        if send_btc.currency != self.currency {
-            return Err(CchError::CKBInvoiceNetworkMismatch {
-                expected: self.currency,
-                actual: send_btc.currency,
-            });
-        }
 
         // Validate that the BTC invoice network matches the expected BTC network (#978)
         let expected_ln_currency = expected_ln_currency(self.currency);
@@ -1070,11 +1067,13 @@ impl<S: CchOrderStore> CchState<S> {
             .checked_add(fee_sats)
             .ok_or(CchError::SendBTCOrderAmountTooLarge)?;
 
+        let incoming_invoice_deadline = order_created_at
+            .checked_add(incoming_invoice_expiry_delta_seconds)
+            .ok_or(CchError::SendBTCOrderCreationExpired(payment_hash))?;
         let invoice_builder = InvoiceBuilder::new(send_btc.currency)
             .amount(Some(invoice_amount_sats))
             .payment_hash(payment_hash)
             .hash_algorithm(HashAlgorithm::Sha256)
-            .expiry_time(Duration::from_secs(incoming_invoice_expiry_delta_seconds))
             .final_expiry_delta(
                 self.config
                     .ckb_final_tlc_expiry_delta_seconds
@@ -1087,14 +1086,11 @@ impl<S: CchOrderStore> CchState<S> {
                     })?,
             )
             .udt_type_script(wrapped_btc_type_script.clone().into());
-
-        let incoming_invoice = if let Some((public_key, secret_key)) = &self.node_keypair {
-            invoice_builder
-                .payee_pub_key(*public_key)
-                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, secret_key))
-        } else {
-            invoice_builder.build()
-        }?;
+        let incoming_invoice = self.build_send_btc_fiber_invoice_until(
+            invoice_builder,
+            payment_hash,
+            incoming_invoice_deadline,
+        )?;
 
         // Reserve tracker capacity before persisting the intent. The intent is the durable
         // boundary: after this point a lost RPC response can be reconciled by payment hash.
@@ -1157,6 +1153,17 @@ impl<S: CchOrderStore> CchState<S> {
             Err(CchStoreError::NotFound(_)) => Ok(None),
             Err(err) => Err(err.into()),
             Ok(creation) => Ok(Some(creation)),
+        }
+    }
+
+    fn ensure_send_btc_currency(&self, currency: Currency) -> Result<(), CchError> {
+        if currency == self.currency {
+            Ok(())
+        } else {
+            Err(CchError::CKBInvoiceNetworkMismatch {
+                expected: self.currency,
+                actual: currency,
+            })
         }
     }
 
@@ -1226,7 +1233,16 @@ impl<S: CchOrderStore> CchState<S> {
             Some(info) => info,
             None => {
                 let invoice = self.refresh_send_btc_fiber_invoice(&creation)?;
-                match self.fiber_agent_ref.call_add_invoice(invoice).await {
+                let deadline_seconds = self.send_btc_creation_deadline(&creation)?;
+                match self
+                    .fiber_agent_ref
+                    .call_add_invoice(
+                        invoice,
+                        deadline_seconds,
+                        self.config.min_outgoing_invoice_expiry_delta_seconds,
+                    )
+                    .await
+                {
                     Ok(invoice) => crate::cch::cch_fiber_agent::FiberInvoiceInfo {
                         invoice,
                         status: CkbInvoiceStatus::Open,
@@ -1342,37 +1358,62 @@ impl<S: CchOrderStore> CchState<S> {
         &self,
         creation: &CchSendBtcOrderCreation,
     ) -> Result<CkbInvoice, CchError> {
-        let now_millis = now_timestamp_as_millis_u64();
-        let now_seconds_ceiling = now_millis
-            .checked_add(999)
-            .ok_or(CchError::SendBTCOrderCreationExpired(creation.payment_hash))?
-            / 1_000;
-        let remaining_seconds = self
-            .send_btc_creation_deadline(creation)?
-            .checked_sub(now_seconds_ceiling)
-            .ok_or(CchError::SendBTCOrderCreationExpired(creation.payment_hash))?;
-        if remaining_seconds < self.config.min_outgoing_invoice_expiry_delta_seconds {
-            return Err(CchError::SendBTCOrderCreationExpired(creation.payment_hash));
-        }
-
         let template = &creation.incoming_invoice;
         let mut builder = InvoiceBuilder::new(template.currency)
             .amount(template.amount)
             .payment_hash(creation.payment_hash)
             .hash_algorithm(template.hash_algorithm().copied().unwrap_or_default())
-            .expiry_time(Duration::from_secs(remaining_seconds))
             .final_expiry_delta(template.final_tlc_minimum_expiry_delta_or_default());
         if let Some(script) = template.udt_type_script() {
             builder = builder.udt_type_script(script.clone());
         }
-        if let Some((public_key, secret_key)) = &self.node_keypair {
-            builder
-                .payee_pub_key(*public_key)
-                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, secret_key))
-                .map_err(Into::into)
-        } else {
-            builder.build().map_err(Into::into)
+        self.build_send_btc_fiber_invoice_until(
+            builder,
+            creation.payment_hash,
+            self.send_btc_creation_deadline(creation)?,
+        )
+    }
+
+    fn build_send_btc_fiber_invoice_until(
+        &self,
+        mut builder: InvoiceBuilder,
+        payment_hash: Hash256,
+        deadline_seconds: u64,
+    ) -> Result<CkbInvoice, CchError> {
+        if let Some((public_key, _)) = &self.node_keypair {
+            builder = builder.payee_pub_key(*public_key);
         }
+
+        // Invoice timestamps are millisecond-precise while expiry attributes contain whole
+        // seconds. Fix the timestamp first, then round the remaining lifetime down so the
+        // resulting absolute expiry can never extend past the BTC/order deadline.
+        let mut invoice = builder.build()?;
+        let deadline_millis = u128::from(deadline_seconds)
+            .checked_mul(1_000)
+            .ok_or(CchError::SendBTCOrderCreationExpired(payment_hash))?;
+        let remaining_seconds = deadline_millis
+            .checked_sub(invoice.data.timestamp)
+            .and_then(|remaining| u64::try_from(remaining / 1_000).ok())
+            .ok_or(CchError::SendBTCOrderCreationExpired(payment_hash))?;
+        let required_expiry_seconds = self
+            .config
+            .min_outgoing_invoice_expiry_delta_seconds
+            .checked_add(self.fiber_agent_ref.add_invoice_expiry_margin_seconds())
+            .ok_or(CchError::SendBTCOrderCreationExpired(payment_hash))?;
+        if remaining_seconds < required_expiry_seconds {
+            return Err(CchError::SendBTCOrderCreationExpired(payment_hash));
+        }
+        invoice
+            .data
+            .attrs
+            .push(Attribute::ExpiryTime(Duration::from_secs(
+                remaining_seconds,
+            )));
+
+        if let Some((_, secret_key)) = &self.node_keypair {
+            invoice.update_signature(|hash| SECP256K1.sign_ecdsa_recoverable(hash, secret_key))?;
+        }
+        Ok(invoice)
     }
 
     fn remaining_outgoing_invoice_expiry_seconds(

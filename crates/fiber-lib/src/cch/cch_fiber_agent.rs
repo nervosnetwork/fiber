@@ -6,7 +6,7 @@ use jsonrpsee::{
     rpc_params,
 };
 use ractor::{call, forward, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
-use std::str::FromStr as _;
+use std::{str::FromStr as _, time::Duration as StdDuration};
 
 use fiber_types::payment::PaymentStatus;
 use fiber_types::Hash256;
@@ -21,6 +21,7 @@ use crate::fiber::{
     NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::invoice::{CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, SettleInvoiceError};
+use crate::now_timestamp_as_millis_u64;
 use crate::rpc::{
     invoice::{
         GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, SettleInvoiceParams,
@@ -91,7 +92,7 @@ impl From<CancelInvoiceError> for CchFiberCancelInvoiceError {
 
 /// Messages for the fiber agent actor. Each variant carries an RpcReplyPort for the response.
 pub enum CchFiberAgentMessage {
-    AddInvoice(CkbInvoice, RpcReplyPort<Result<CkbInvoice>>),
+    AddInvoice(CkbInvoice, u64, u64, RpcReplyPort<Result<CkbInvoice>>),
     GetInvoice(Hash256, RpcReplyPort<Result<FiberInvoiceInfo>>),
     SendPayment(
         String,
@@ -117,6 +118,31 @@ pub enum CchFiberAgentMessage {
         Hash256,
         RpcReplyPort<Result<(), CchFiberCancelInvoiceError>>,
     ),
+}
+
+const FIBER_HTTP_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+pub(crate) const FIBER_HTTP_INVOICE_CREATION_MARGIN_SECONDS: u64 =
+    FIBER_HTTP_REQUEST_TIMEOUT.as_secs() + 1;
+
+fn bounded_http_invoice_expiry_seconds(
+    deadline_seconds: u64,
+    min_expiry_seconds: u64,
+    now_millis: u64,
+) -> Result<u64> {
+    let now_seconds_ceiling = now_millis
+        .checked_add(999)
+        .ok_or_else(|| anyhow!("current time overflow while creating CCH Fiber invoice"))?
+        / 1_000;
+    let expiry_seconds = deadline_seconds
+        .checked_sub(now_seconds_ceiling)
+        .and_then(|remaining| remaining.checked_sub(FIBER_HTTP_INVOICE_CREATION_MARGIN_SECONDS))
+        .ok_or_else(|| anyhow!("CCH Fiber invoice deadline is too close for an HTTP request"))?;
+    if expiry_seconds < min_expiry_seconds {
+        return Err(anyhow!(
+            "CCH Fiber invoice has only {expiry_seconds}s after reserving the HTTP request window; at least {min_expiry_seconds}s is required"
+        ));
+    }
+    Ok(expiry_seconds)
 }
 
 /// Http-only backend state for the fiber agent actor.
@@ -152,8 +178,15 @@ impl Actor for CchFiberAgentActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            CchFiberAgentMessage::AddInvoice(invoice, port) => {
-                let result = state.add_invoice(invoice).await;
+            CchFiberAgentMessage::AddInvoice(
+                invoice,
+                deadline_seconds,
+                min_expiry_seconds,
+                port,
+            ) => {
+                let result = state
+                    .add_invoice(invoice, deadline_seconds, min_expiry_seconds)
+                    .await;
                 let _ = port.send(result);
             }
             CchFiberAgentMessage::GetInvoice(payment_hash, port) => {
@@ -210,18 +243,33 @@ impl Actor for CchFiberAgentActor {
 impl CchFiberAgentHttpBackend {
     /// Build the Http backend from a Fiber RPC URL. Used when spawning [CchFiberAgentActor].
     pub fn try_new(url: &str) -> Result<Self> {
-        let client = HttpClientBuilder::default().build(url)?;
+        let client = HttpClientBuilder::default()
+            .request_timeout(FIBER_HTTP_REQUEST_TIMEOUT)
+            .build(url)?;
         Ok(Self { client })
     }
 
-    pub async fn add_invoice(&self, invoice: CkbInvoice) -> Result<CkbInvoice> {
+    pub async fn add_invoice(
+        &self,
+        invoice: CkbInvoice,
+        deadline_seconds: u64,
+        min_expiry_seconds: u64,
+    ) -> Result<CkbInvoice> {
+        let expiry_seconds = bounded_http_invoice_expiry_seconds(
+            deadline_seconds,
+            min_expiry_seconds,
+            now_timestamp_as_millis_u64(),
+        )?;
         let invoice_params = NewInvoiceParams {
             amount: invoice
                 .amount
                 .ok_or_else(|| anyhow!("cch invoice requires amount"))?,
             payment_hash: Some((*invoice.payment_hash()).into()),
             hash_algorithm: invoice.hash_algorithm().copied().map(Into::into),
-            expiry: invoice.expiry_time().map(|duration| duration.as_secs()),
+            // The HTTP Fiber node rebuilds the invoice with a new timestamp. Reserve the full
+            // request timeout so that timestamp plus this relative expiry remains bounded by the
+            // CCH order's absolute deadline.
+            expiry: Some(expiry_seconds),
             final_expiry_delta: Some(invoice.final_tlc_minimum_expiry_delta_or_default()),
             udt_type_script: invoice
                 .udt_type_script()
@@ -550,8 +598,20 @@ fn to_fiber_err(e: impl std::fmt::Display) -> CchError {
 }
 
 impl CchFiberAgentRef {
+    pub(crate) fn add_invoice_expiry_margin_seconds(&self) -> u64 {
+        match self {
+            Self::InProcess(_) => 0,
+            Self::Rpc(_) => FIBER_HTTP_INVOICE_CREATION_MARGIN_SECONDS,
+        }
+    }
+
     /// Add invoice; returns the (possibly updated) invoice.
-    pub async fn call_add_invoice(&self, invoice: CkbInvoice) -> Result<CkbInvoice, CchError> {
+    pub async fn call_add_invoice(
+        &self,
+        invoice: CkbInvoice,
+        deadline_seconds: u64,
+        min_expiry_seconds: u64,
+    ) -> Result<CkbInvoice, CchError> {
         match self {
             Self::InProcess(network_actor) => {
                 let invoice_cloned = invoice.clone();
@@ -574,7 +634,12 @@ impl CchFiberAgentRef {
                 Ok(invoice_cloned)
             }
             Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
-                CchFiberAgentMessage::AddInvoice(invoice.clone(), port)
+                CchFiberAgentMessage::AddInvoice(
+                    invoice.clone(),
+                    deadline_seconds,
+                    min_expiry_seconds,
+                    port,
+                )
             })
             .map_err(to_fiber_err)?
             .map_err(|err| {
@@ -936,6 +1001,38 @@ fn map_get_payment_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_invoice_expiry_reserves_the_request_timeout_before_deadline() {
+        let request_started_millis = 10_250;
+        let deadline_seconds = 100;
+        let expiry_seconds =
+            bounded_http_invoice_expiry_seconds(deadline_seconds, 10, request_started_millis)
+                .expect("enough time remains");
+        let latest_remote_timestamp_millis =
+            u128::from(request_started_millis) + FIBER_HTTP_REQUEST_TIMEOUT.as_millis() - 1;
+
+        assert!(
+            latest_remote_timestamp_millis + u128::from(expiry_seconds) * 1_000
+                <= u128::from(deadline_seconds) * 1_000
+        );
+    }
+
+    #[test]
+    fn http_invoice_expiry_rejects_an_insufficient_request_window() {
+        let now_millis = 10_250;
+        let now_seconds_ceiling = 11;
+        let min_expiry_seconds = 10;
+        let deadline_seconds =
+            now_seconds_ceiling + FIBER_HTTP_REQUEST_TIMEOUT.as_secs() + min_expiry_seconds - 1;
+
+        assert!(bounded_http_invoice_expiry_seconds(
+            deadline_seconds,
+            min_expiry_seconds,
+            now_millis,
+        )
+        .is_err());
+    }
 
     #[test]
     fn cancel_invoice_error_classification_uses_error_type() {

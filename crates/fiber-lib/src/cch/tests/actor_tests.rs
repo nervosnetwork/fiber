@@ -1370,6 +1370,158 @@ async fn test_send_btc_rpc_timeout_is_idempotent_on_retry() {
 }
 
 #[tokio::test]
+async fn test_send_btc_idempotent_order_rejects_currency_mismatch() {
+    let harness = setup_test_harness().await;
+    let (order, _) = harness
+        .create_send_btc_order_with_seed(212)
+        .await
+        .expect("create send_btc order");
+
+    let error = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req: order.outgoing_pay_req,
+            currency: Currency::Fibd,
+        }
+    )
+    .expect("actor call failed")
+    .expect_err("an idempotent retry must still validate currency");
+
+    assert!(matches!(
+        error,
+        CchError::CKBInvoiceNetworkMismatch {
+            expected: Currency::Fibb,
+            actual: Currency::Fibd,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_idempotent_creation_rejects_currency_mismatch() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    let payment_hash = create_valid_preimage_pair(213).1;
+    let creation = create_send_btc_order_creation(&config, payment_hash);
+    let btc_pay_req = creation.btc_pay_req.clone();
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    let error = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibd,
+        }
+    )
+    .expect("actor call failed")
+    .expect_err("a persisted creation retry must still validate currency");
+
+    assert!(matches!(
+        error,
+        CchError::CKBInvoiceNetworkMismatch {
+            expected: Currency::Fibb,
+            actual: Currency::Fibd,
+        }
+    ));
+    assert!(store.get_cch_order(&payment_hash).is_err());
+}
+
+#[tokio::test]
+async fn test_send_btc_pending_recovery_rejects_currency_mismatch() {
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_store(store).await;
+    harness.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(214).1;
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+
+    call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req: btc_pay_req.clone(),
+            currency: Currency::Fibb,
+        }
+    )
+    .expect("actor call failed")
+    .expect_err("mocked invoice creation must fail");
+
+    let error = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req,
+            currency: Currency::Fibd,
+        }
+    )
+    .expect("actor call failed")
+    .expect_err("pending recovery retry must still validate currency");
+
+    assert!(matches!(
+        error,
+        CchError::CKBInvoiceNetworkMismatch {
+            expected: Currency::Fibb,
+            actual: Currency::Fibd,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_persisted_invoice_respects_absolute_deadline() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_config_and_store(config, store.clone()).await;
+    harness.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(215).1;
+    let btc_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+
+    while !(100..=800).contains(
+        &SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .subsec_millis(),
+    ) {
+        tokio::task::yield_now().await;
+    }
+
+    call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req: btc_invoice.to_string(),
+            currency: Currency::Fibb,
+        }
+    )
+    .expect("actor call failed")
+    .expect_err("mocked invoice creation must fail");
+
+    let creation = store
+        .get_send_btc_order_creation(&payment_hash)
+        .expect("durable send_btc creation");
+    let absolute_deadline_millis = u128::from(
+        btc_invoice
+            .expires_at()
+            .expect("BTC invoice expiry")
+            .as_secs()
+            .min(
+                creation
+                    .created_at
+                    .checked_add(creation.order_expiry_delta_seconds)
+                    .expect("order deadline"),
+            ),
+    ) * 1_000;
+    let persisted_invoice_deadline_millis = creation.incoming_invoice.data.timestamp
+        + creation
+            .incoming_invoice
+            .expiry_time()
+            .expect("Fiber invoice expiry")
+            .as_millis();
+
+    assert!(persisted_invoice_deadline_millis <= absolute_deadline_millis);
+}
+
+#[tokio::test]
 async fn test_send_btc_client_retries_share_one_recovery_chain() {
     let store = MockCchOrderStore::new();
     let harness = setup_test_harness_with_store(store.clone()).await;
