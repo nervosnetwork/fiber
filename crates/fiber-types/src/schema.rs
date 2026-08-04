@@ -19,6 +19,7 @@
 //! | 201          | Hash256              | ChannelOpenRecord           |
 //! | 232          | Payment_hash         | CchOrder                    |
 //! | 233          | Payment_hash         | CchReceiveBtcOrderCreation  |
+//! | 234          | Payment_hash         | CchSendBtcOrderCreation    |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -54,3 +55,5 @@ pub use watchtower::*;
 pub const CCH_ORDER_PREFIX: u8 = 232;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_RECEIVE_BTC_ORDER_CREATION_PREFIX: u8 = 233;
+#[cfg(not(target_arch = "wasm32"))]
+pub const CCH_SEND_BTC_ORDER_CREATION_PREFIX: u8 = 234;

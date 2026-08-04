@@ -20,7 +20,7 @@ use crate::fiber::{
     network::SendPaymentResponse, payment::SendPaymentCommand, NetworkActorCommand,
     NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
-use crate::invoice::{CancelInvoiceError, CkbInvoice, SettleInvoiceError};
+use crate::invoice::{CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, SettleInvoiceError};
 use crate::rpc::{
     invoice::{
         GetInvoiceResult, InvoiceParams, InvoiceResult, NewInvoiceParams, SettleInvoiceParams,
@@ -36,6 +36,13 @@ use crate::rpc::{
 pub struct OutgoingFeeLimit {
     pub max_fee_amount: u128,
     pub max_fee_rate: u64,
+}
+
+/// Authoritative Fiber invoice data used to reconcile an interrupted CCH creation.
+#[derive(Clone)]
+pub struct FiberInvoiceInfo {
+    pub invoice: CkbInvoice,
+    pub status: CkbInvoiceStatus,
 }
 
 #[derive(Debug, Error)]
@@ -85,6 +92,7 @@ impl From<CancelInvoiceError> for CchFiberCancelInvoiceError {
 /// Messages for the fiber agent actor. Each variant carries an RpcReplyPort for the response.
 pub enum CchFiberAgentMessage {
     AddInvoice(CkbInvoice, RpcReplyPort<Result<CkbInvoice>>),
+    GetInvoice(Hash256, RpcReplyPort<Result<FiberInvoiceInfo>>),
     SendPayment(
         String,
         Option<u64>,
@@ -146,6 +154,10 @@ impl Actor for CchFiberAgentActor {
         match message {
             CchFiberAgentMessage::AddInvoice(invoice, port) => {
                 let result = state.add_invoice(invoice).await;
+                let _ = port.send(result);
+            }
+            CchFiberAgentMessage::GetInvoice(payment_hash, port) => {
+                let result = state.get_invoice(payment_hash).await;
                 let _ = port.send(result);
             }
             CchFiberAgentMessage::SendPayment(
@@ -226,6 +238,25 @@ impl CchFiberAgentHttpBackend {
             .request::<InvoiceResult, _>("new_invoice", rpc_params![invoice_params])
             .await?;
         CkbInvoice::from_str(&response.invoice_address).map_err(Into::into)
+    }
+
+    async fn get_invoice(&self, payment_hash: Hash256) -> Result<FiberInvoiceInfo> {
+        let invoice_params = InvoiceParams {
+            payment_hash: payment_hash.into(),
+        };
+        let response = self
+            .client
+            .request::<GetInvoiceResult, _>("get_invoice", rpc_params![invoice_params])
+            .await?;
+        let invoice = CkbInvoice::from_str(&response.invoice_address)?;
+        let status = match response.status {
+            fiber_json_types::CkbInvoiceStatus::Open => CkbInvoiceStatus::Open,
+            fiber_json_types::CkbInvoiceStatus::Cancelled => CkbInvoiceStatus::Cancelled,
+            fiber_json_types::CkbInvoiceStatus::Expired => CkbInvoiceStatus::Expired,
+            fiber_json_types::CkbInvoiceStatus::Received => CkbInvoiceStatus::Received,
+            fiber_json_types::CkbInvoiceStatus::Paid => CkbInvoiceStatus::Paid,
+        };
+        Ok(FiberInvoiceInfo { invoice, status })
     }
 
     pub async fn send_payment(
@@ -524,6 +555,7 @@ impl CchFiberAgentRef {
         match self {
             Self::InProcess(network_actor) => {
                 let invoice_cloned = invoice.clone();
+                let payment_hash = *invoice.payment_hash();
                 let msg = move |tx: RpcReplyPort<Result<(), crate::invoice::InvoiceError>>| {
                     NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
                         invoice.clone(),
@@ -533,14 +565,68 @@ impl CchFiberAgentRef {
                 };
                 call!(network_actor, msg)
                     .map_err(to_fiber_err)?
-                    .map_err(to_fiber_err)?;
+                    .map_err(|err| match err {
+                        crate::invoice::InvoiceError::InvoiceAlreadyExists => {
+                            CchError::FiberInvoiceAlreadyExists(payment_hash)
+                        }
+                        err => to_fiber_err(err),
+                    })?;
                 Ok(invoice_cloned)
             }
             Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
                 CchFiberAgentMessage::AddInvoice(invoice.clone(), port)
             })
             .map_err(to_fiber_err)?
-            .map_err(CchError::FiberNodeError),
+            .map_err(|err| {
+                if err
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("invoice already exists")
+                {
+                    CchError::FiberInvoiceAlreadyExists(*invoice.payment_hash())
+                } else {
+                    CchError::FiberNodeError(err)
+                }
+            }),
+        }
+    }
+
+    /// Retrieve authoritative Fiber invoice data for recovery.
+    pub async fn call_get_invoice(
+        &self,
+        payment_hash: Hash256,
+    ) -> Result<Option<FiberInvoiceInfo>, CchError> {
+        match self {
+            Self::InProcess(network_actor) => {
+                let result = call!(network_actor, |port| {
+                    NetworkActorMessage::Command(NetworkActorCommand::GetInvoice(
+                        payment_hash,
+                        port,
+                    ))
+                })
+                .map_err(to_fiber_err)?;
+                match result {
+                    Ok((invoice, status)) => Ok(Some(FiberInvoiceInfo { invoice, status })),
+                    Err(crate::invoice::InvoiceError::InvoiceNotFound) => Ok(None),
+                    Err(err) => Err(to_fiber_err(err)),
+                }
+            }
+            Self::Rpc(rpc_actor) => call!(rpc_actor, |port| {
+                CchFiberAgentMessage::GetInvoice(payment_hash, port)
+            })
+            .map_err(to_fiber_err)?
+            .map(Some)
+            .or_else(|err| {
+                if err
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("invoice not found")
+                {
+                    Ok(None)
+                } else {
+                    Err(CchError::FiberNodeError(err))
+                }
+            }),
         }
     }
 
