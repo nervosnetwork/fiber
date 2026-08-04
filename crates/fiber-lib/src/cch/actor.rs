@@ -235,6 +235,7 @@ pub struct CchState<S> {
     pending_send_btc_creation_retries: HashSet<Hash256>,
     active_send_btc_creation_workers: HashSet<Hash256>,
     active_send_btc_requests: HashMap<Hash256, String>,
+    deferred_send_btc_invoice_events: HashMap<Hash256, CchTrackingEvent>,
     /// The CKB network currency this node is configured for.
     pub(super) currency: Currency,
 }
@@ -370,6 +371,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             pending_send_btc_creation_retries: HashSet::new(),
             active_send_btc_creation_workers: HashSet::new(),
             active_send_btc_requests: HashMap::new(),
+            deferred_send_btc_invoice_events: HashMap::new(),
         };
 
         Ok(state)
@@ -549,20 +551,30 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             }
             CchMessage::SendBTCWorkerCompleted {
                 payment_hash,
-                result,
+                mut result,
                 port,
             } => {
-                state.active_send_btc_creation_workers.remove(&payment_hash);
-                state.active_send_btc_requests.remove(&payment_hash);
                 state
                     .pending_send_btc_creation_retries
                     .remove(&payment_hash);
-                if let Ok((order, true)) = &result {
-                    // Schedule jobs for new order
-                    state.schedule_job_on_entering(order);
-                    let actions = ActionDispatcher::on_starting(order);
-                    append_actions(myself.clone(), order.payment_hash, actions)?;
-                } else if let Err(err) = &result {
+                if let Ok((_, is_new)) = &result {
+                    match state.reconcile_deferred_send_btc_invoice_event(payment_hash) {
+                        Ok((order, event_applied)) => {
+                            if *is_new || event_applied {
+                                state.schedule_job_on_entering(&order);
+                                let actions = if *is_new {
+                                    ActionDispatcher::on_starting(&order)
+                                } else {
+                                    ActionDispatcher::on_entering(&order)
+                                };
+                                append_actions(myself.clone(), order.payment_hash, actions)?;
+                            }
+                            result = Ok((order, *is_new));
+                        }
+                        Err(err) => result = Err(err),
+                    }
+                }
+                if let Err(err) = &result {
                     if state
                         .get_send_btc_order_creation_or_none(&payment_hash)?
                         .is_some()
@@ -575,15 +587,22 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                                 0,
                                 &err.to_string(),
                             );
-                        } else if !matches!(err, CchError::SendBTCOrderCreationInProgress(_)) {
-                            tracing::error!(
-                                "Permanently failed to complete send_btc creation {:x}: {}. The durable intent is retained for operator inspection",
-                                payment_hash,
-                                err
-                            );
+                        } else {
+                            if !matches!(err, CchError::SendBTCOrderCreationInProgress(_)) {
+                                tracing::error!(
+                                    "Permanently failed to complete send_btc creation {:x}: {}. The durable intent is retained for operator inspection",
+                                    payment_hash,
+                                    err
+                                );
+                            }
+                            state.deferred_send_btc_invoice_events.remove(&payment_hash);
                         }
+                    } else {
+                        state.deferred_send_btc_invoice_events.remove(&payment_hash);
                     }
                 }
+                state.active_send_btc_creation_workers.remove(&payment_hash);
+                state.active_send_btc_requests.remove(&payment_hash);
                 if !port.is_closed() {
                     let _ = port.send(result.map(|(order, _)| order));
                 }
@@ -833,14 +852,17 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 retry_count,
                 result,
             } => {
-                state.active_send_btc_creation_workers.remove(&payment_hash);
                 match result {
-                    Ok(Some(order)) => {
+                    Ok(Some(_)) => {
+                        let (order, _) =
+                            state.reconcile_deferred_send_btc_invoice_event(payment_hash)?;
                         state.schedule_job_on_entering(&order);
                         let actions = ActionDispatcher::on_starting(&order);
                         append_actions(myself.clone(), order.payment_hash, actions)?;
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        state.deferred_send_btc_invoice_events.remove(&payment_hash);
+                    }
                     Err(err) if is_retryable_send_btc_creation_error(&err) => {
                         schedule_send_btc_creation_retry(
                             &myself,
@@ -856,8 +878,10 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                             payment_hash,
                             err
                         );
+                        state.deferred_send_btc_invoice_events.remove(&payment_hash);
                     }
                 }
+                state.active_send_btc_creation_workers.remove(&payment_hash);
                 Ok(())
             }
             CchMessage::ExpireOrder(payment_hash) => {
@@ -2017,12 +2041,11 @@ impl<S: CchOrderStore> CchState<S> {
         Ok(invoice)
     }
 
-    async fn handle_tracking_event(&self, event: CchTrackingEvent) -> Result<Vec<CchOrderAction>> {
-        let mut order = match self.get_active_order_or_none(event.payment_hash())? {
-            None => return Ok(vec![]),
-            Some(order) => order,
-        };
-
+    fn apply_tracking_event_to_order(
+        &self,
+        mut order: CchOrder,
+        event: CchTrackingEvent,
+    ) -> std::result::Result<Option<CchOrder>, CchError> {
         if order.status == CchOrderStatus::Pending
             && matches!(
                 &event,
@@ -2035,17 +2058,63 @@ impl<S: CchOrderStore> CchState<S> {
             let current_time = now_timestamp_as_millis_u64() / 1000;
             if order.update_if_expired_with_reason(current_time, "Order expired") {
                 self.store.update_cch_order(order.clone());
-                self.schedule_job_on_entering(&order);
                 tracing::info!(
                     "Rejected incoming invoice event for expired pending order {:x}",
                     order.payment_hash
                 );
-                return Ok(vec![]);
+                return Ok(Some(order));
             }
         }
 
         if CchOrderStateMachine::apply(&mut order, event.into())?.is_some() {
             self.store.update_cch_order(order.clone());
+            Ok(Some(order))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn reconcile_deferred_send_btc_invoice_event(
+        &mut self,
+        payment_hash: Hash256,
+    ) -> Result<(CchOrder, bool), CchError> {
+        let order = self
+            .get_order_or_none(&payment_hash)?
+            .ok_or(CchStoreError::NotFound(payment_hash))?;
+        let Some(event) = self.deferred_send_btc_invoice_events.remove(&payment_hash) else {
+            return Ok((order, false));
+        };
+
+        match self.apply_tracking_event_to_order(order.clone(), event)? {
+            Some(updated_order) => Ok((updated_order, true)),
+            None => Ok((order, false)),
+        }
+    }
+
+    async fn handle_tracking_event(
+        &mut self,
+        event: CchTrackingEvent,
+    ) -> Result<Vec<CchOrderAction>> {
+        let payment_hash = *event.payment_hash();
+        if matches!(&event, CchTrackingEvent::InvoiceChanged { .. })
+            && (self
+                .active_send_btc_creation_workers
+                .contains(&payment_hash)
+                || self
+                    .pending_send_btc_creation_retries
+                    .contains(&payment_hash))
+        {
+            self.deferred_send_btc_invoice_events
+                .insert(payment_hash, event);
+            return Ok(vec![]);
+        }
+
+        let order = match self.get_active_order_or_none(&payment_hash)? {
+            None => return Ok(vec![]),
+            Some(order) => order,
+        };
+
+        if let Some(order) = self.apply_tracking_event_to_order(order, event)? {
             self.schedule_job_on_entering(&order);
             Ok(ActionDispatcher::on_entering(&order))
         } else {
