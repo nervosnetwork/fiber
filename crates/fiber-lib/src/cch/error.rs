@@ -87,6 +87,8 @@ pub enum CchError {
     ConflictingSendBTCRequest(Hash256),
     #[error("receive_btc order creation for payment hash {0} is already being recovered")]
     ReceiveBTCOrderCreationInProgress(Hash256),
+    #[error("send_btc order creation for payment hash {0} is already being recovered")]
+    SendBTCOrderCreationInProgress(Hash256),
     #[error("receive_btc order creation for payment hash {0} has expired")]
     ReceiveBTCOrderCreationExpired(Hash256),
     #[error("send_btc order creation for payment hash {0} has expired")]

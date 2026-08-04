@@ -465,8 +465,38 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 let payment_hash = Bolt11Invoice::from_str(&send_btc.btc_pay_req)
                     .ok()
                     .map(|invoice| Hash256::from(*invoice.payment_hash()));
-                let result = state.send_btc(send_btc).await;
+                let pending_error = match payment_hash {
+                    Some(payment_hash)
+                        if state
+                            .pending_send_btc_creation_retries
+                            .contains(&payment_hash) =>
+                    {
+                        match state.get_send_btc_order_creation_or_none(&payment_hash) {
+                            Ok(Some(creation)) => Some(
+                                state
+                                    .ensure_send_btc_request_matches_creation(
+                                        &send_btc.btc_pay_req,
+                                        &creation,
+                                    )
+                                    .err()
+                                    .unwrap_or(CchError::SendBTCOrderCreationInProgress(
+                                        payment_hash,
+                                    )),
+                            ),
+                            Ok(None) => None,
+                            Err(err) => Some(err),
+                        }
+                    }
+                    _ => None,
+                };
+                let result = match pending_error {
+                    Some(err) => Err(err),
+                    None => state.send_btc(send_btc).await,
+                };
                 if let Ok((order, true)) = &result {
+                    state
+                        .pending_send_btc_creation_retries
+                        .remove(&order.payment_hash);
                     // Schedule jobs for new order
                     state.schedule_job_on_entering(order);
                     let actions = ActionDispatcher::on_starting(order);
@@ -475,15 +505,22 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     if state
                         .get_send_btc_order_creation_or_none(&payment_hash)?
                         .is_some()
-                        && is_retryable_send_btc_creation_error(err)
                     {
-                        schedule_send_btc_creation_retry(
-                            &myself,
-                            &mut state.pending_send_btc_creation_retries,
-                            payment_hash,
-                            0,
-                            &err.to_string(),
-                        );
+                        if is_retryable_send_btc_creation_error(err) {
+                            schedule_send_btc_creation_retry(
+                                &myself,
+                                &mut state.pending_send_btc_creation_retries,
+                                payment_hash,
+                                0,
+                                &err.to_string(),
+                            );
+                        } else if !matches!(err, CchError::SendBTCOrderCreationInProgress(_)) {
+                            tracing::error!(
+                                "Permanently failed to complete send_btc creation {:x}: {}. The durable intent is retained for operator inspection",
+                                payment_hash,
+                                err
+                            );
+                        }
                     }
                 }
                 if !port.is_closed() {
@@ -714,7 +751,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     .remove(&payment_hash);
                 match state.resume_send_btc_order_creation(payment_hash).await {
                     Ok(Some(order)) => {
-                        state.schedule_job_for_non_final_order(&order);
+                        state.schedule_job_on_entering(&order);
                         let actions = ActionDispatcher::on_starting(&order);
                         append_actions(myself, order.payment_hash, actions)?;
                     }

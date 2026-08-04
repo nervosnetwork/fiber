@@ -1370,6 +1370,65 @@ async fn test_send_btc_rpc_timeout_is_idempotent_on_retry() {
 }
 
 #[tokio::test]
+async fn test_send_btc_client_retries_share_one_recovery_chain() {
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_store(store.clone()).await;
+    harness.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(209).1;
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+
+    let first_error = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req: btc_pay_req.clone(),
+            currency: Currency::Fibb,
+        }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(first_error, CchError::FiberNodeError(_)));
+
+    let retry_error = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req: btc_pay_req.clone(),
+            currency: Currency::Fibb,
+        }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(
+        retry_error,
+        CchError::SendBTCOrderCreationInProgress(hash) if hash == payment_hash
+    ));
+
+    let conflicting_error = call!(
+        harness.actor,
+        CchMessage::SendBTC,
+        crate::cch::SendBTC {
+            btc_pay_req: create_test_lightning_invoice_with_payment_hash_and_amount(
+                payment_hash,
+                100_001,
+            )
+            .to_string(),
+            currency: Currency::Fibb,
+        }
+    )
+    .expect("actor call failed")
+    .unwrap_err();
+    assert!(matches!(
+        conflicting_error,
+        CchError::ConflictingSendBTCRequest(hash) if hash == payment_hash
+    ));
+
+    harness.set_add_invoice_failure(false);
+    let recovered = wait_for_mock_order(&store, payment_hash).await;
+    assert_eq!(recovered.outgoing_pay_req, btc_pay_req);
+}
+
+#[tokio::test]
 async fn test_send_btc_creation_resumes_after_actor_restart() {
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
@@ -1519,6 +1578,37 @@ async fn test_send_btc_recovers_received_fiber_invoice_status() {
 }
 
 #[tokio::test]
+async fn test_send_btc_final_recovery_releases_payment_tracking_capacity() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS - 1);
+    let harness = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    let payment_hash = create_valid_preimage_pair(210).1;
+    let creation = create_send_btc_order_creation(&config, payment_hash);
+    harness.insert_fiber_invoice(
+        creation.incoming_invoice.clone(),
+        CkbInvoiceStatus::Cancelled,
+    );
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness
+        .actor
+        .send_message(CchMessage::ResumeSendBTCOrderCreation {
+            payment_hash,
+            retry_count: 0,
+        })
+        .expect("actor should accept send_btc recovery");
+    let recovered = wait_for_mock_order(&store, payment_hash).await;
+    assert_eq!(recovered.status, CchOrderStatus::Failed);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    harness
+        .create_send_btc_order_with_seed(211)
+        .await
+        .expect("final recovery must release its payment tracking reservation");
+}
+
+#[tokio::test]
 async fn test_send_btc_recovery_preserves_absolute_btc_expiry() {
     let config = receive_btc_recovery_test_config();
     let store = MockCchOrderStore::new();
@@ -1538,16 +1628,14 @@ async fn test_send_btc_recovery_preserves_absolute_btc_expiry() {
     let btc_deadline_millis = u128::from(btc_invoice.expires_at().unwrap().as_secs()) * 1_000;
     store.insert_send_btc_order_creation(creation).unwrap();
 
-    call!(
-        harness.actor,
-        CchMessage::SendBTC,
-        crate::cch::SendBTC {
-            btc_pay_req: btc_invoice.to_string(),
-            currency: Currency::Fibb,
-        }
-    )
-    .expect("actor call failed")
-    .expect("retry should complete the persisted creation");
+    harness
+        .actor
+        .send_message(CchMessage::ResumeSendBTCOrderCreation {
+            payment_hash,
+            retry_count: 0,
+        })
+        .expect("actor should accept send_btc recovery");
+    wait_for_mock_order(&store, payment_hash).await;
     let (fiber_invoice, _) = harness
         .fiber_invoice(payment_hash)
         .expect("recovery should create the Fiber invoice");
