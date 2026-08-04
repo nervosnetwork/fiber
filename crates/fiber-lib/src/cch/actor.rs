@@ -221,6 +221,20 @@ pub struct CchArgs<S> {
 }
 
 #[derive(Clone)]
+struct DeferredInvoiceStatus {
+    status: CkbInvoiceStatus,
+    failure_reason: Option<String>,
+}
+
+impl DeferredInvoiceStatus {
+    fn merge(&mut self, newer: Self) {
+        if invoice_status_rank(newer.status) >= invoice_status_rank(self.status) {
+            *self = newer;
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct CchState<S> {
     pub(super) config: CchConfig,
     pub(super) fiber_agent_ref: CchFiberAgentRef,
@@ -235,7 +249,7 @@ pub struct CchState<S> {
     pending_send_btc_creation_retries: HashSet<Hash256>,
     active_send_btc_creation_workers: HashSet<Hash256>,
     active_send_btc_requests: HashMap<Hash256, String>,
-    deferred_send_btc_invoice_events: HashMap<Hash256, CchTrackingEvent>,
+    deferred_send_btc_invoice_statuses: HashMap<Hash256, DeferredInvoiceStatus>,
     /// The CKB network currency this node is configured for.
     pub(super) currency: Currency,
 }
@@ -371,7 +385,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             pending_send_btc_creation_retries: HashSet::new(),
             active_send_btc_creation_workers: HashSet::new(),
             active_send_btc_requests: HashMap::new(),
-            deferred_send_btc_invoice_events: HashMap::new(),
+            deferred_send_btc_invoice_statuses: HashMap::new(),
         };
 
         Ok(state)
@@ -558,7 +572,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     .pending_send_btc_creation_retries
                     .remove(&payment_hash);
                 if let Ok((_, is_new)) = &result {
-                    match state.reconcile_deferred_send_btc_invoice_event(payment_hash) {
+                    match state.reconcile_deferred_send_btc_invoice_status(payment_hash) {
                         Ok((order, event_applied)) => {
                             if *is_new || event_applied {
                                 state.schedule_job_on_entering(&order);
@@ -595,10 +609,14 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                                     err
                                 );
                             }
-                            state.deferred_send_btc_invoice_events.remove(&payment_hash);
+                            state
+                                .deferred_send_btc_invoice_statuses
+                                .remove(&payment_hash);
                         }
                     } else {
-                        state.deferred_send_btc_invoice_events.remove(&payment_hash);
+                        state
+                            .deferred_send_btc_invoice_statuses
+                            .remove(&payment_hash);
                     }
                 }
                 state.active_send_btc_creation_workers.remove(&payment_hash);
@@ -855,13 +873,15 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 match result {
                     Ok(Some(_)) => {
                         let (order, _) =
-                            state.reconcile_deferred_send_btc_invoice_event(payment_hash)?;
+                            state.reconcile_deferred_send_btc_invoice_status(payment_hash)?;
                         state.schedule_job_on_entering(&order);
                         let actions = ActionDispatcher::on_starting(&order);
                         append_actions(myself.clone(), order.payment_hash, actions)?;
                     }
                     Ok(None) => {
-                        state.deferred_send_btc_invoice_events.remove(&payment_hash);
+                        state
+                            .deferred_send_btc_invoice_statuses
+                            .remove(&payment_hash);
                     }
                     Err(err) if is_retryable_send_btc_creation_error(&err) => {
                         schedule_send_btc_creation_retry(
@@ -878,7 +898,9 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                             payment_hash,
                             err
                         );
-                        state.deferred_send_btc_invoice_events.remove(&payment_hash);
+                        state
+                            .deferred_send_btc_invoice_statuses
+                            .remove(&payment_hash);
                     }
                 }
                 state.active_send_btc_creation_workers.remove(&payment_hash);
@@ -941,6 +963,30 @@ fn receive_btc_order_creation_is_expired(
     {
         Some(expiry_time) => expiry_time <= current_time,
         None => true,
+    }
+}
+
+fn deferred_invoice_status_advances_order(
+    order_status: CchOrderStatus,
+    invoice_status: CkbInvoiceStatus,
+) -> bool {
+    match invoice_status {
+        CkbInvoiceStatus::Open => false,
+        CkbInvoiceStatus::Received => order_status == CchOrderStatus::Pending,
+        CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired => matches!(
+            order_status,
+            CchOrderStatus::Pending | CchOrderStatus::IncomingAccepted
+        ),
+        CkbInvoiceStatus::Paid => order_status == CchOrderStatus::OutgoingSuccess,
+    }
+}
+
+fn invoice_status_rank(status: CkbInvoiceStatus) -> u8 {
+    match status {
+        CkbInvoiceStatus::Open => 0,
+        CkbInvoiceStatus::Received => 1,
+        CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired => 2,
+        CkbInvoiceStatus::Paid => 3,
     }
 }
 
@@ -2074,17 +2120,28 @@ impl<S: CchOrderStore> CchState<S> {
         }
     }
 
-    fn reconcile_deferred_send_btc_invoice_event(
+    fn reconcile_deferred_send_btc_invoice_status(
         &mut self,
         payment_hash: Hash256,
     ) -> Result<(CchOrder, bool), CchError> {
         let order = self
             .get_order_or_none(&payment_hash)?
             .ok_or(CchStoreError::NotFound(payment_hash))?;
-        let Some(event) = self.deferred_send_btc_invoice_events.remove(&payment_hash) else {
+        let Some(deferred) = self
+            .deferred_send_btc_invoice_statuses
+            .remove(&payment_hash)
+        else {
             return Ok((order, false));
         };
 
+        if !deferred_invoice_status_advances_order(order.status, deferred.status) {
+            return Ok((order, false));
+        }
+        let event = CchTrackingEvent::InvoiceChanged {
+            payment_hash,
+            status: deferred.status,
+            failure_reason: deferred.failure_reason,
+        };
         match self.apply_tracking_event_to_order(order.clone(), event)? {
             Some(updated_order) => Ok((updated_order, true)),
             None => Ok((order, false)),
@@ -2096,17 +2153,29 @@ impl<S: CchOrderStore> CchState<S> {
         event: CchTrackingEvent,
     ) -> Result<Vec<CchOrderAction>> {
         let payment_hash = *event.payment_hash();
-        if matches!(&event, CchTrackingEvent::InvoiceChanged { .. })
-            && (self
-                .active_send_btc_creation_workers
+        if self
+            .active_send_btc_creation_workers
+            .contains(&payment_hash)
+            || self
+                .pending_send_btc_creation_retries
                 .contains(&payment_hash)
-                || self
-                    .pending_send_btc_creation_retries
-                    .contains(&payment_hash))
         {
-            self.deferred_send_btc_invoice_events
-                .insert(payment_hash, event);
-            return Ok(vec![]);
+            if let CchTrackingEvent::InvoiceChanged {
+                status,
+                failure_reason,
+                ..
+            } = &event
+            {
+                let deferred = DeferredInvoiceStatus {
+                    status: *status,
+                    failure_reason: failure_reason.clone(),
+                };
+                self.deferred_send_btc_invoice_statuses
+                    .entry(payment_hash)
+                    .and_modify(|current| current.merge(deferred.clone()))
+                    .or_insert(deferred);
+                return Ok(vec![]);
+            }
         }
 
         let order = match self.get_active_order_or_none(&payment_hash)? {
@@ -2453,7 +2522,23 @@ pub(crate) fn redacted_store_change_summary(change: &StoreChange) -> RedactedSto
 
 #[cfg(test)]
 mod tests {
-    use super::{is_lnd_invoice_not_found, LND_NO_INVOICES_CREATED_ERROR};
+    use super::{is_lnd_invoice_not_found, DeferredInvoiceStatus, LND_NO_INVOICES_CREATED_ERROR};
+    use crate::invoice::CkbInvoiceStatus;
+
+    #[test]
+    fn test_deferred_invoice_status_merge_does_not_regress() {
+        let mut deferred = DeferredInvoiceStatus {
+            status: CkbInvoiceStatus::Received,
+            failure_reason: None,
+        };
+
+        deferred.merge(DeferredInvoiceStatus {
+            status: CkbInvoiceStatus::Open,
+            failure_reason: None,
+        });
+
+        assert_eq!(deferred.status, CkbInvoiceStatus::Received);
+    }
 
     #[test]
     fn test_lnd_invoice_not_found_status_classification() {

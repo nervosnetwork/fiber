@@ -419,6 +419,9 @@ struct MockNetworkState {
     add_invoice_delay: Arc<Mutex<Duration>>,
     /// Optional invoice status emitted after AddInvoice stores the invoice but before it replies.
     add_invoice_status_before_reply: Arc<Mutex<Option<CkbInvoiceStatus>>>,
+    /// Simulates a lost AddInvoice response followed by authoritative GetInvoice recovery.
+    add_invoice_reconciliation_before_reply:
+        Arc<Mutex<Option<(CkbInvoiceStatus, CkbInvoiceStatus)>>>,
     /// Authoritative Fiber invoices returned by GetInvoice during recovery.
     fiber_invoices: Arc<Mutex<std::collections::HashMap<Hash256, (CkbInvoice, CkbInvoiceStatus)>>>,
     /// Durable Fiber store used by store-backed recovery tests.
@@ -454,6 +457,26 @@ impl Actor for MockNetworkActor {
             NetworkActorMessage::Command(cmd) => match cmd {
                 NetworkActorCommand::AddInvoice(invoice, _opt_hash, reply) => {
                     let delay = *state.add_invoice_delay.lock().unwrap();
+                    let reconciliation = *state
+                        .add_invoice_reconciliation_before_reply
+                        .lock()
+                        .unwrap();
+                    if let Some((event_status, authoritative_status)) = reconciliation {
+                        let payment_hash = *invoice.payment_hash();
+                        state
+                            .fiber_invoices
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash, (invoice, authoritative_status));
+                        state.event_port.send(CchTrackingEvent::InvoiceChanged {
+                            payment_hash,
+                            status: event_status,
+                            failure_reason: None,
+                        });
+                        tokio::time::sleep(delay).await;
+                        let _ = reply.send(Err(InvoiceError::InvoiceAlreadyExists));
+                        return Ok(());
+                    }
                     let status_before_reply =
                         *state.add_invoice_status_before_reply.lock().unwrap();
                     if status_before_reply.is_none() {
@@ -862,6 +885,18 @@ impl TestHarness {
             .unwrap() = Some(status);
     }
 
+    fn reconcile_invoice_after_add_invoice_response_loss(
+        &self,
+        event_status: CkbInvoiceStatus,
+        authoritative_status: CkbInvoiceStatus,
+    ) {
+        *self
+            .mock_state
+            .add_invoice_reconciliation_before_reply
+            .lock()
+            .unwrap() = Some((event_status, authoritative_status));
+    }
+
     fn insert_fiber_invoice(&self, invoice: CkbInvoice, status: CkbInvoiceStatus) {
         self.mock_state
             .fiber_invoices
@@ -991,6 +1026,7 @@ async fn setup_test_harness_with_config_store_and_lnd(
         add_invoice_already_exists: Arc::new(AtomicBool::new(false)),
         add_invoice_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         add_invoice_status_before_reply: Arc::new(Mutex::new(None)),
+        add_invoice_reconciliation_before_reply: Arc::new(Mutex::new(None)),
         fiber_invoices: Arc::new(Mutex::new(std::collections::HashMap::new())),
         payment_store: None,
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
@@ -1057,6 +1093,7 @@ async fn setup_store_backed_test_harness_with_store(
         add_invoice_already_exists: Arc::new(AtomicBool::new(false)),
         add_invoice_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
         add_invoice_status_before_reply: Arc::new(Mutex::new(None)),
+        add_invoice_reconciliation_before_reply: Arc::new(Mutex::new(None)),
         fiber_invoices: Arc::new(Mutex::new(std::collections::HashMap::new())),
         payment_store: Some(store.clone()),
         settle_invoice_already_paid: Arc::new(Mutex::new(false)),
@@ -1424,6 +1461,23 @@ async fn test_send_btc_preserves_invoice_status_cancelled_before_order_is_persis
         CchOrderStatus::Failed,
         "a cancellation consumed while creation is active must be reflected in the new order"
     );
+}
+
+#[tokio::test]
+async fn test_send_btc_ignores_stale_deferred_status_after_authoritative_recovery() {
+    let harness = setup_test_harness().await;
+    harness.set_add_invoice_delay(Duration::from_millis(100));
+    harness.reconcile_invoice_after_add_invoice_response_loss(
+        CkbInvoiceStatus::Open,
+        CkbInvoiceStatus::Received,
+    );
+
+    let (order, _) = harness
+        .create_send_btc_order_with_seed(220)
+        .await
+        .expect("stale deferred status must not fail send_btc completion");
+
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
 }
 
 #[tokio::test]
