@@ -2924,7 +2924,10 @@ async fn test_scheduled_expiry_cancels_fiber_incoming_invoice() {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 1,
-        order_expiry_delta_seconds: 2,
+        // Leave enough headroom for invoice creation. The order deadline is second-based while
+        // the Fiber invoice timestamp is millisecond-based, so a two-second deadline can expire
+        // during setup when the test starts near a second boundary.
+        order_expiry_delta_seconds: 5,
         ..Default::default()
     };
     let harness = setup_test_harness_with_config(config).await;
@@ -2933,7 +2936,7 @@ async fn test_scheduled_expiry_cancels_fiber_incoming_invoice() {
     let payment_hash = order.payment_hash;
 
     harness
-        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 3500)
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 6500)
         .await;
     harness
         .wait_for_fiber_invoice_cancelled(payment_hash, 1000)
