@@ -32,6 +32,7 @@ assert {
   res.status: eq 200
   res.body.error: isUndefined
   res.body.result.incoming_invoice.Lightning: isDefined
+  res.body.result.fee_sats: eq "0xfa"
 }
 
 script:post-response {

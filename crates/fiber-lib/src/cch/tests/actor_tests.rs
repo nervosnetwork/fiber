@@ -1866,7 +1866,14 @@ async fn dispatch_fiber_outgoing_and_capture_fee(
 /// route fee far larger than the fee the operator charged.
 #[tokio::test]
 async fn test_receive_btc_outgoing_fiber_fee_capped_at_collected_fee() {
-    let harness = setup_test_harness().await;
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        max_outgoing_fee_percentage: 100,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
 
     // Pick economics where the default Fiber cap (0.5% * amount = 5000) vastly exceeds the
     // tiny collected CCH fee (100). Without binding, the route could spend up to 5000.
@@ -1916,7 +1923,14 @@ async fn test_receive_btc_outgoing_fiber_fee_scaled_by_percentage() {
 /// (`amount_sats == principal`) and fixed orders (`amount_sats == principal + CCH fee`).
 #[tokio::test]
 async fn test_receive_btc_outgoing_fiber_fee_rate_uses_outgoing_principal() {
-    let harness = setup_test_harness().await;
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        max_outgoing_fee_percentage: 100,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config(config).await;
     let principal_sats = 100_000;
     let fee_sats = 30_000;
     let expected_rate = 300; // ceil(30_000 * 1000 / 100_000)

@@ -10,8 +10,12 @@ pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_DELTA_BLOCKS: u64 = 360; // 60 hours (~10
 pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA_SECONDS: u64 = 60 * 60 * 60; // 60 hours
 /// Default minimum outgoing invoice relative expiry time in seconds.
 pub const DEFAULT_MIN_OUTGOING_INVOICE_EXPIRY_DELTA_SECONDS: u64 = 6 * 60 * 60; // 6 hours
+/// Default fixed fee charged for each cross-chain order, in satoshis.
+pub const DEFAULT_BASE_FEE_SATS: u64 = 100;
+/// Default proportional fee charged per million satoshis of order value.
+pub const DEFAULT_FEE_RATE_PER_MILLION_SATS: u64 = 3000;
 /// Default percentage of the collected CCH fee that may be spent on outgoing routing fees.
-pub const DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE: u64 = 100;
+pub const DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE: u64 = 80;
 
 // Use prefix `cch-`/`CCH_`
 #[derive(ClapSerde, Debug, Clone)]
@@ -69,21 +73,21 @@ pub struct CchConfig {
     )]
     pub order_expiry_delta_seconds: u64,
 
-    #[default(0)]
+    #[default(DEFAULT_BASE_FEE_SATS)]
     #[arg(
         name = "CCH_BASE_FEE_SATS",
         long = "cch-base-fee-sats",
         env,
-        help = "The base fee charged for each cross-chain order, default is 0"
+        help = format!("The base fee charged for each cross-chain order, default is {}", DEFAULT_BASE_FEE_SATS)
     )]
     pub base_fee_sats: u64,
 
-    #[default(1)]
+    #[default(DEFAULT_FEE_RATE_PER_MILLION_SATS)]
     #[arg(
         name = "CCH_FEE_RATE_PER_MILLION_SATS",
         long = "cch-fee-rate-per-million-sats",
         env,
-        help = "The proportional fee charged per million satoshis based on the cross-chain order value, default is 1"
+        help = format!("The proportional fee charged per million satoshis based on the cross-chain order value, default is {}", DEFAULT_FEE_RATE_PER_MILLION_SATS)
     )]
     pub fee_rate_per_million_sats: u64,
 
@@ -92,8 +96,8 @@ pub struct CchConfig {
     ///
     /// The outgoing payment fee is capped at `fee_sats * max_outgoing_fee_percentage / 100`,
     /// where `fee_sats` is the fee charged on the incoming/order leg. This guarantees the
-    /// outgoing route fee never exceeds the fee the operator collected. Defaults to 100,
-    /// i.e. the entire collected fee may be spent on the outgoing route.
+    /// outgoing route fee never exceeds the fee the operator collected. Defaults to 80,
+    /// leaving at least 20% of the collected fee for the operator.
     #[default(DEFAULT_MAX_OUTGOING_FEE_PERCENTAGE)]
     #[arg(
         name = "CCH_MAX_OUTGOING_FEE_PERCENTAGE",
