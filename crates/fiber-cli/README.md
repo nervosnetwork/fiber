@@ -72,7 +72,7 @@ $ fnn-cli -u http://54.178.252.1:8227
  | |    _| || |_\| |____| | \ \
  |_|   |___|____/|______|_|  \_\
 
-[  fnn-cli version ]: 0.9.0-rc7
+[  fnn-cli version ]: 0.9.0
 [              url ]: http://54.178.252.1:8227
 [    output format ]: yaml
 [           status ]: Connected
