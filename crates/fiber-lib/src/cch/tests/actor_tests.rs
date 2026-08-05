@@ -234,6 +234,7 @@ struct MockLndInvoiceClient {
 struct MockLndInvoiceClientState {
     invoices: HashMap<Hash256, lnrpc::Invoice>,
     add_calls: usize,
+    last_add_expiry: Option<i64>,
     lookup_calls: usize,
     lookup_failures_remaining: usize,
     add_delay: Duration,
@@ -244,6 +245,10 @@ struct MockLndInvoiceClientState {
 impl MockLndInvoiceClient {
     fn add_calls(&self) -> usize {
         self.state.lock().unwrap().add_calls
+    }
+
+    fn last_add_expiry(&self) -> Option<i64> {
+        self.state.lock().unwrap().last_add_expiry
     }
 
     fn lookup_calls(&self) -> usize {
@@ -303,6 +308,7 @@ impl LndInvoiceClient for MockLndInvoiceClient {
 
         let mut state = self.state.lock().unwrap();
         state.add_calls += 1;
+        state.last_add_expiry = Some(request.expiry);
         if state.fail_before_create {
             return Err(CchError::LndRpcError(
                 "mock AddHoldInvoice unavailable".to_string(),
@@ -3599,6 +3605,54 @@ async fn test_receive_btc_rechecks_order_expiry_after_preflight() {
         Err(CchError::ReceiveBTCOrderCreationExpired(hash)) if hash == payment_hash
     ));
     assert_eq!(lnd.add_calls(), 0);
+}
+
+#[tokio::test]
+async fn test_receive_btc_caps_lnd_invoice_expiry_at_order_deadline() {
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 1,
+        order_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    let lnd = Arc::new(MockLndInvoiceClient::default());
+    let harness = setup_test_harness_with_config_store_and_lnd(
+        config,
+        MockCchOrderStore::new(),
+        Some(lnd.clone()),
+    )
+    .await;
+    let (_, payment_hash) = create_valid_preimage_pair(192);
+    let invoice = create_receive_btc_fiber_invoice_at(
+        payment_hash,
+        100_000,
+        "order expiry caps LND invoice",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        Some(Duration::from_secs(3600)),
+    );
+
+    let result = call!(
+        harness.actor,
+        CchMessage::ReceiveBTC,
+        crate::cch::ReceiveBTC {
+            fiber_pay_req: invoice.to_string(),
+        }
+    )
+    .expect("actor call failed")
+    .expect("receive_btc should succeed");
+
+    assert_eq!(result.payment_hash, payment_hash);
+    let lnd_expiry = lnd
+        .last_add_expiry()
+        .expect("receive_btc should create an LND hold invoice");
+    assert!(
+        lnd_expiry > 0 && lnd_expiry <= 60,
+        "LND expiry should be bounded by the order TTL, got {lnd_expiry}s"
+    );
 }
 
 /// Tests that the send_btc proxy Fiber invoice includes the fee in its amount.
