@@ -40,7 +40,7 @@ use fiber_types::{
     PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use fiber_types::{CchOrder, CchReceiveBtcOrderCreation};
+use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 
@@ -324,6 +324,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            CCH_SEND_BTC_ORDER_CREATION_PREFIX => {
+                check_deserialization::<CchSendBtcOrderCreation>(
+                    &value,
+                    "CCH_SEND_BTC_ORDER_CREATION_PREFIX",
+                    &mut errors,
+                );
+            }
             #[cfg(feature = "watchtower")]
             WATCHTOWER_CHANNEL_PREFIX => {
                 check_deserialization::<ChannelData>(
@@ -438,6 +446,8 @@ pub enum KeyValue {
     CchOrder(Hash256, CchOrder),
     #[cfg(not(target_arch = "wasm32"))]
     CchReceiveBtcOrderCreation(Hash256, CchReceiveBtcOrderCreation),
+    #[cfg(not(target_arch = "wasm32"))]
+    CchSendBtcOrderCreation(Hash256, CchSendBtcOrderCreation),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
 }
 
@@ -571,6 +581,10 @@ impl StoreKeyValue for KeyValue {
                 payment_hash.as_ref(),
             ]
             .concat(),
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyValue::CchSendBtcOrderCreation(payment_hash, _data) => {
+                [&[CCH_SEND_BTC_ORDER_CREATION_PREFIX], payment_hash.as_ref()].concat()
+            }
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
@@ -618,6 +632,10 @@ impl StoreKeyValue for KeyValue {
             #[cfg(not(target_arch = "wasm32"))]
             KeyValue::CchReceiveBtcOrderCreation(_, creation) => {
                 serialize_to_vec(creation, "CchReceiveBtcOrderCreation")
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyValue::CchSendBtcOrderCreation(_, creation) => {
+                serialize_to_vec(creation, "CchSendBtcOrderCreation")
             }
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
         }
@@ -2257,6 +2275,70 @@ impl CchOrderStore for Store {
             payment_hash.as_ref(),
         ]
         .concat();
+        let mut batch = self.batch();
+        batch.delete(key);
+        batch.commit();
+    }
+
+    fn get_send_btc_order_creation(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<CchSendBtcOrderCreation, CchStoreError> {
+        let key = [&[CCH_SEND_BTC_ORDER_CREATION_PREFIX], payment_hash.as_ref()].concat();
+        self.get(key)
+            .map(|value| deserialize_from(&value, "CchSendBtcOrderCreation"))
+            .ok_or(CchStoreError::NotFound(*payment_hash))
+    }
+
+    fn insert_send_btc_order_creation(
+        &self,
+        creation: CchSendBtcOrderCreation,
+    ) -> Result<(), CchStoreError> {
+        let key = [
+            &[CCH_SEND_BTC_ORDER_CREATION_PREFIX],
+            creation.payment_hash.as_ref(),
+        ]
+        .concat();
+        if self.get(&key).is_some() {
+            return Err(CchStoreError::Duplicated(creation.payment_hash));
+        }
+        let mut batch = self.batch();
+        let kv = KeyValue::CchSendBtcOrderCreation(creation.payment_hash, creation);
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_send_btc_order_creation_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
+        const PREFIX_LEN: usize = 1;
+        const PREFIX: [u8; PREFIX_LEN] = [CCH_SEND_BTC_ORDER_CREATION_PREFIX];
+        self.collect_by_prefix(&PREFIX).into_iter().map(|kv| {
+            Hash256::try_from(&kv.key[PREFIX_LEN..])
+                .expect("CchSendBtcOrderCreation key must be Hash256")
+        })
+    }
+
+    fn complete_send_btc_order_creation(&self, order: CchOrder) -> Result<(), CchStoreError> {
+        let order_key = [&[CCH_ORDER_PREFIX], order.payment_hash.as_ref()].concat();
+        if self.get(&order_key).is_some() {
+            return Err(CchStoreError::Duplicated(order.payment_hash));
+        }
+
+        let creation_key = [
+            &[CCH_SEND_BTC_ORDER_CREATION_PREFIX],
+            order.payment_hash.as_ref(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        let kv = KeyValue::CchOrder(order.payment_hash, order);
+        batch.put(kv.key(), kv.value());
+        batch.delete(creation_key);
+        batch.commit();
+        Ok(())
+    }
+
+    fn delete_send_btc_order_creation(&self, payment_hash: &Hash256) {
+        let key = [&[CCH_SEND_BTC_ORDER_CREATION_PREFIX], payment_hash.as_ref()].concat();
         let mut batch = self.batch();
         batch.delete(key);
         batch.commit();

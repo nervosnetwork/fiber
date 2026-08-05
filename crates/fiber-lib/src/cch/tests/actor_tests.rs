@@ -34,8 +34,8 @@ use crate::store::{store_impl::StoreChange, Store};
 use crate::tests::test_utils::{generate_store, TempDir};
 use crate::time::{Duration, SystemTime, UNIX_EPOCH};
 use fiber_types::{
-    AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation, Hash256,
-    HashAlgorithm, PaymentHopData, PaymentStatus,
+    AttemptStatus, CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation,
+    CchSendBtcOrderCreation, Hash256, HashAlgorithm, PaymentHopData, PaymentStatus,
 };
 use lnd_grpc_tonic_client::{invoicesrpc, lnrpc};
 use ractor::{call, port::OutputPortSubscriberTrait, Actor, ActorRef, OutputPort};
@@ -61,6 +61,7 @@ pub struct MockCchOrderStore {
 struct MockCchOrderStoreState {
     orders: HashMap<Hash256, CchOrder>,
     receive_btc_order_creations: HashMap<Hash256, CchReceiveBtcOrderCreation>,
+    send_btc_order_creations: HashMap<Hash256, CchSendBtcOrderCreation>,
 }
 
 impl MockCchOrderStore {
@@ -163,6 +164,63 @@ impl CchOrderStore for MockCchOrderStore {
             .lock()
             .unwrap()
             .receive_btc_order_creations
+            .remove(payment_hash);
+    }
+
+    fn get_send_btc_order_creation(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<CchSendBtcOrderCreation, CchStoreError> {
+        self.state
+            .lock()
+            .unwrap()
+            .send_btc_order_creations
+            .get(payment_hash)
+            .cloned()
+            .ok_or(CchStoreError::NotFound(*payment_hash))
+    }
+
+    fn insert_send_btc_order_creation(
+        &self,
+        creation: CchSendBtcOrderCreation,
+    ) -> Result<(), CchStoreError> {
+        let mut state = self.state.lock().unwrap();
+        let payment_hash = creation.payment_hash;
+        match state
+            .send_btc_order_creations
+            .insert(payment_hash, creation)
+        {
+            Some(_) => Err(CchStoreError::Duplicated(payment_hash)),
+            None => Ok(()),
+        }
+    }
+
+    fn get_send_btc_order_creation_keys_iter(&self) -> impl IntoIterator<Item = Hash256> {
+        self.state
+            .lock()
+            .unwrap()
+            .send_btc_order_creations
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
+    fn complete_send_btc_order_creation(&self, order: CchOrder) -> Result<(), CchStoreError> {
+        let mut state = self.state.lock().unwrap();
+        let payment_hash = order.payment_hash;
+        if state.orders.contains_key(&payment_hash) {
+            return Err(CchStoreError::Duplicated(payment_hash));
+        }
+        state.orders.insert(payment_hash, order);
+        state.send_btc_order_creations.remove(&payment_hash);
+        Ok(())
+    }
+
+    fn delete_send_btc_order_creation(&self, payment_hash: &Hash256) {
+        self.state
+            .lock()
+            .unwrap()
+            .send_btc_order_creations
             .remove(payment_hash);
     }
 }
@@ -355,10 +413,46 @@ struct MockNetworkState {
     send_payment_status: Arc<Mutex<PaymentStatus>>,
     /// Makes mocked Fiber invoice creation fail after payment tracking was reserved.
     fail_add_invoice: Arc<AtomicBool>,
+    /// Makes mocked Fiber invoice creation report an existing invoice.
+    add_invoice_already_exists: Arc<AtomicBool>,
+    /// Artificial delay before returning the Fiber invoice creation response.
+    add_invoice_delay: Arc<Mutex<Duration>>,
+    /// Optional invoice status emitted after AddInvoice stores the invoice but before it replies.
+    add_invoice_status_before_reply: Arc<Mutex<Option<CkbInvoiceStatus>>>,
+    /// Simulates a lost AddInvoice response followed by authoritative GetInvoice recovery.
+    add_invoice_reconciliation_before_reply:
+        Arc<Mutex<Option<(CkbInvoiceStatus, CkbInvoiceStatus)>>>,
+    /// Authoritative Fiber invoices returned by GetInvoice during recovery.
+    fiber_invoices: Arc<Mutex<std::collections::HashMap<Hash256, (CkbInvoice, CkbInvoiceStatus)>>>,
     /// Durable Fiber store used by store-backed recovery tests.
     payment_store: Option<Store>,
     /// Whether mocked Fiber SettleInvoice should return an already-paid error.
     settle_invoice_already_paid: Arc<Mutex<bool>>,
+}
+
+impl MockNetworkState {
+    fn new(event_port: Arc<OutputPort<CchTrackingEvent>>, payment_store: Option<Store>) -> Self {
+        Self {
+            cch_actor: Arc::new(Mutex::new(None)),
+            event_port,
+            sent_fiber_payments: Default::default(),
+            cancelled_fiber_invoices: Default::default(),
+            preflighted_fiber_payments: Default::default(),
+            fiber_preflight_error: Default::default(),
+            fiber_preflight_delay: Default::default(),
+            sent_fiber_payment_fees: Default::default(),
+            sent_fiber_payment_fee_rates: Default::default(),
+            send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
+            fail_add_invoice: Default::default(),
+            add_invoice_already_exists: Default::default(),
+            add_invoice_delay: Default::default(),
+            add_invoice_status_before_reply: Default::default(),
+            add_invoice_reconciliation_before_reply: Default::default(),
+            fiber_invoices: Default::default(),
+            payment_store,
+            settle_invoice_already_paid: Default::default(),
+        }
+    }
 }
 
 /// Mock network actor that handles commands from action executors
@@ -386,12 +480,65 @@ impl Actor for MockNetworkActor {
     ) -> Result<(), ractor::ActorProcessingErr> {
         match message {
             NetworkActorMessage::Command(cmd) => match cmd {
-                NetworkActorCommand::AddInvoice(_invoice, _opt_hash, reply) => {
+                NetworkActorCommand::AddInvoice(invoice, _opt_hash, reply) => {
+                    let delay = *state.add_invoice_delay.lock().unwrap();
+                    let reconciliation = *state
+                        .add_invoice_reconciliation_before_reply
+                        .lock()
+                        .unwrap();
+                    if let Some((event_status, authoritative_status)) = reconciliation {
+                        let payment_hash = *invoice.payment_hash();
+                        state
+                            .fiber_invoices
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash, (invoice, authoritative_status));
+                        state.event_port.send(CchTrackingEvent::InvoiceChanged {
+                            payment_hash,
+                            status: event_status,
+                            failure_reason: None,
+                        });
+                        tokio::time::sleep(delay).await;
+                        let _ = reply.send(Err(InvoiceError::InvoiceAlreadyExists));
+                        return Ok(());
+                    }
+                    let status_before_reply =
+                        *state.add_invoice_status_before_reply.lock().unwrap();
+                    if status_before_reply.is_none() {
+                        tokio::time::sleep(delay).await;
+                    }
                     if state.fail_add_invoice.load(Ordering::SeqCst) {
+                        let _ = reply.send(Err(InvoiceError::InvoiceNotFound));
+                    } else if state.add_invoice_already_exists.load(Ordering::SeqCst) {
                         let _ = reply.send(Err(InvoiceError::InvoiceAlreadyExists));
                     } else {
+                        let payment_hash = *invoice.payment_hash();
+                        let status = status_before_reply.unwrap_or(CkbInvoiceStatus::Open);
+                        state
+                            .fiber_invoices
+                            .lock()
+                            .unwrap()
+                            .insert(payment_hash, (invoice, status));
+                        if status_before_reply.is_some() {
+                            state.event_port.send(CchTrackingEvent::InvoiceChanged {
+                                payment_hash,
+                                status,
+                                failure_reason: None,
+                            });
+                            tokio::time::sleep(delay).await;
+                        }
                         let _ = reply.send(Ok(()));
                     }
+                }
+                NetworkActorCommand::GetInvoice(payment_hash, reply) => {
+                    let result = state
+                        .fiber_invoices
+                        .lock()
+                        .unwrap()
+                        .get(&payment_hash)
+                        .cloned()
+                        .ok_or(InvoiceError::InvoiceNotFound);
+                    let _ = reply.send(result);
                 }
                 NetworkActorCommand::SendPayment(cmd, reply) => {
                     // Extract payment hash from invoice
@@ -732,23 +879,81 @@ impl TestHarness {
         let lightning_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
         let btc_pay_req = lightning_invoice.to_string();
 
-        let order = call!(
+        let order = self.send_btc(btc_pay_req, Currency::Fibb).await?;
+
+        Ok((order, preimage))
+    }
+
+    async fn send_btc(
+        &self,
+        btc_pay_req: String,
+        currency: Currency,
+    ) -> Result<CchOrder, CchError> {
+        call!(
             self.actor,
             CchMessage::SendBTC,
             crate::cch::actor::SendBTC {
                 btc_pay_req,
-                currency: Currency::Fibb,
+                currency,
             }
         )
-        .expect("actor call failed")?;
+        .expect("actor call failed")
+    }
 
-        Ok((order, preimage))
+    fn resume_send_btc_creation(&self, payment_hash: Hash256) {
+        self.actor
+            .send_message(CchMessage::ResumeSendBTCOrderCreation {
+                payment_hash,
+                retry_count: 0,
+            })
+            .expect("actor should accept send_btc recovery");
     }
 
     fn set_add_invoice_failure(&self, fail: bool) {
         self.mock_state
             .fail_add_invoice
             .store(fail, Ordering::SeqCst);
+    }
+
+    fn set_add_invoice_delay(&self, delay: Duration) {
+        *self.mock_state.add_invoice_delay.lock().unwrap() = delay;
+    }
+
+    fn emit_invoice_status_before_add_invoice_reply(&self, status: CkbInvoiceStatus) {
+        *self
+            .mock_state
+            .add_invoice_status_before_reply
+            .lock()
+            .unwrap() = Some(status);
+    }
+
+    fn reconcile_invoice_after_add_invoice_response_loss(
+        &self,
+        event_status: CkbInvoiceStatus,
+        authoritative_status: CkbInvoiceStatus,
+    ) {
+        *self
+            .mock_state
+            .add_invoice_reconciliation_before_reply
+            .lock()
+            .unwrap() = Some((event_status, authoritative_status));
+    }
+
+    fn insert_fiber_invoice(&self, invoice: CkbInvoice, status: CkbInvoiceStatus) {
+        self.mock_state
+            .fiber_invoices
+            .lock()
+            .unwrap()
+            .insert(*invoice.payment_hash(), (invoice, status));
+    }
+
+    fn fiber_invoice(&self, payment_hash: Hash256) -> Option<(CkbInvoice, CkbInvoiceStatus)> {
+        self.mock_state
+            .fiber_invoices
+            .lock()
+            .unwrap()
+            .get(&payment_hash)
+            .cloned()
     }
 
     /// Insert an order directly into the database (for testing without LND)
@@ -848,21 +1053,7 @@ async fn setup_test_harness_with_config_store_and_lnd(
 ) -> TestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
-    let mock_state = MockNetworkState {
-        cch_actor: Arc::new(Mutex::new(None)),
-        event_port: event_port.clone(),
-        sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        cancelled_fiber_invoices: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        fiber_preflight_error: Arc::new(Mutex::new(None)),
-        fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
-        sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        sent_fiber_payment_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
-        fail_add_invoice: Arc::new(AtomicBool::new(false)),
-        payment_store: None,
-        settle_invoice_already_paid: Arc::new(Mutex::new(false)),
-    };
+    let mock_state = MockNetworkState::new(event_port.clone(), None);
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
         .await
@@ -910,21 +1101,7 @@ async fn setup_store_backed_test_harness_with_store(
         store_change_port_clone.send(change);
     }));
 
-    let mock_state = MockNetworkState {
-        cch_actor: Arc::new(Mutex::new(None)),
-        event_port: event_port.clone(),
-        sent_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        cancelled_fiber_invoices: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        preflighted_fiber_payments: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        fiber_preflight_error: Arc::new(Mutex::new(None)),
-        fiber_preflight_delay: Arc::new(Mutex::new(Duration::from_secs(0))),
-        sent_fiber_payment_fees: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        sent_fiber_payment_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        send_payment_status: Arc::new(Mutex::new(PaymentStatus::Inflight)),
-        fail_add_invoice: Arc::new(AtomicBool::new(false)),
-        payment_store: Some(store.clone()),
-        settle_invoice_already_paid: Arc::new(Mutex::new(false)),
-    };
+    let mock_state = MockNetworkState::new(event_port.clone(), Some(store.clone()));
 
     let (network_actor, _) = Actor::spawn(None, MockNetworkActor, mock_state.clone())
         .await
@@ -1031,11 +1208,19 @@ fn create_test_lightning_invoice_with_payment_hash_amount_and_timestamp(
 
 /// Create a test Fiber invoice for testing
 fn create_test_fiber_invoice(payment_hash: Hash256) -> CkbInvoice {
-    create_test_fiber_invoice_with_amount(payment_hash, 100000)
+    create_test_fiber_invoice_with_amount_and_expiry(payment_hash, 100000, 3600)
 }
 
 /// Create a test Fiber invoice with a specific amount
 fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) -> CkbInvoice {
+    create_test_fiber_invoice_with_amount_and_expiry(payment_hash, amount, 3600)
+}
+
+fn create_test_fiber_invoice_with_amount_and_expiry(
+    payment_hash: Hash256,
+    amount: u128,
+    expiry_seconds: u64,
+) -> CkbInvoice {
     // Create a deterministic keypair for tests
     let private_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
     let public_key = secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &private_key);
@@ -1054,7 +1239,7 @@ fn create_test_fiber_invoice_with_amount(payment_hash: Hash256, amount: u128) ->
             attrs: vec![
                 Attribute::FinalHtlcMinimumExpiryDelta(default_expiry_delta_ms),
                 Attribute::Description("test".to_string()),
-                Attribute::ExpiryTime(Duration::from_secs(3600)),
+                Attribute::ExpiryTime(Duration::from_secs(expiry_seconds)),
                 Attribute::PayeePublicKey(public_key),
             ],
         },
@@ -1127,6 +1312,554 @@ async fn test_send_btc_releases_reservation_when_invoice_creation_fails() {
         .create_send_btc_order_with_seed(201)
         .await
         .expect("failed invoice creation must release payment tracking capacity");
+}
+
+#[tokio::test]
+async fn test_send_btc_request_started_before_rpc_timeout_completes_durably() {
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_store(store.clone()).await;
+    harness.set_add_invoice_delay(Duration::from_millis(100));
+
+    let first_invoice =
+        create_test_lightning_invoice_with_payment_hash(create_valid_preimage_pair(200).1)
+            .to_string();
+    let second_payment_hash = create_valid_preimage_pair(201).1;
+    let second_invoice =
+        create_test_lightning_invoice_with_payment_hash(second_payment_hash).to_string();
+
+    let first_call = harness
+        .actor
+        .call(
+            |reply| {
+                CchMessage::SendBTC(
+                    crate::cch::SendBTC {
+                        btc_pay_req: first_invoice,
+                        currency: Currency::Fibb,
+                    },
+                    reply,
+                )
+            },
+            Some(Duration::from_millis(10)),
+        )
+        .await;
+    assert!(
+        first_call
+            .expect("first actor message should be sent")
+            .is_timeout(),
+        "the first RPC should time out while Fiber invoice creation is delayed"
+    );
+
+    let second_call = harness
+        .actor
+        .call(
+            |reply| {
+                CchMessage::SendBTC(
+                    crate::cch::SendBTC {
+                        btc_pay_req: second_invoice,
+                        currency: Currency::Fibb,
+                    },
+                    reply,
+                )
+            },
+            Some(Duration::from_millis(10)),
+        )
+        .await;
+    assert!(
+        second_call
+            .expect("second actor message should be sent")
+            .is_timeout(),
+        "the queued RPC should time out before the actor is available"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(store.get_cch_order(&second_payment_hash).is_ok());
+    assert_eq!(
+        store.get_cch_order_keys_iter().into_iter().count(),
+        2,
+        "requests accepted before their RPC timeout must complete durably"
+    );
+}
+
+#[tokio::test]
+async fn test_send_btc_invoice_creation_does_not_block_actor_mailbox() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, 1);
+    let existing_payment_hash = test_payment_hash(0);
+    let harness = setup_test_harness_with_store(store).await;
+    harness.set_add_invoice_delay(Duration::from_millis(200));
+    let actor = harness.actor.clone();
+    let slow_payment_hash = create_valid_preimage_pair(216).1;
+    let slow_btc_pay_req =
+        create_test_lightning_invoice_with_payment_hash(slow_payment_hash).to_string();
+
+    let slow_creation = tokio::spawn(async move {
+        actor
+            .call(
+                |reply| {
+                    CchMessage::SendBTC(
+                        crate::cch::SendBTC {
+                            btc_pay_req: slow_btc_pay_req,
+                            currency: Currency::Fibb,
+                        },
+                        reply,
+                    )
+                },
+                Some(Duration::from_secs(1)),
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let existing_order = harness
+        .actor
+        .call(
+            |reply| CchMessage::GetCchOrder(existing_payment_hash, reply),
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .expect("get order message should be sent")
+        .expect("CchActor mailbox must remain responsive")
+        .expect("existing order");
+
+    assert_eq!(existing_order.payment_hash, existing_payment_hash);
+    slow_creation
+        .await
+        .expect("slow creation task")
+        .expect("send_btc message should be sent")
+        .expect("slow creation should finish")
+        .expect("send_btc order");
+}
+
+#[tokio::test]
+async fn test_send_btc_preserves_invoice_status_before_order_is_persisted() {
+    for (seed, invoice_status, expected_order_status) in [
+        (
+            218,
+            CkbInvoiceStatus::Received,
+            CchOrderStatus::IncomingAccepted,
+        ),
+        (219, CkbInvoiceStatus::Cancelled, CchOrderStatus::Failed),
+    ] {
+        let harness = setup_test_harness().await;
+        harness.set_add_invoice_delay(Duration::from_millis(100));
+        harness.emit_invoice_status_before_add_invoice_reply(invoice_status);
+
+        let (order, _) = harness
+            .create_send_btc_order_with_seed(seed)
+            .await
+            .expect("send_btc order");
+
+        assert_eq!(order.status, expected_order_status, "{invoice_status:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_send_btc_ignores_stale_deferred_status_after_authoritative_recovery() {
+    let harness = setup_test_harness().await;
+    harness.set_add_invoice_delay(Duration::from_millis(100));
+    harness.reconcile_invoice_after_add_invoice_response_loss(
+        CkbInvoiceStatus::Open,
+        CkbInvoiceStatus::Received,
+    );
+
+    let (order, _) = harness
+        .create_send_btc_order_with_seed(220)
+        .await
+        .expect("stale deferred status must not fail send_btc completion");
+
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+}
+
+#[tokio::test]
+async fn test_send_btc_recovery_does_not_block_actor_mailbox() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, 1);
+    let existing_payment_hash = test_payment_hash(0);
+    let harness = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    harness.set_add_invoice_delay(Duration::from_millis(200));
+    let recovery_payment_hash = create_valid_preimage_pair(217).1;
+    store
+        .insert_send_btc_order_creation(create_send_btc_order_creation(
+            &config,
+            recovery_payment_hash,
+        ))
+        .expect("insert recovery intent");
+
+    harness.resume_send_btc_creation(recovery_payment_hash);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let existing_order = harness
+        .actor
+        .call(
+            |reply| CchMessage::GetCchOrder(existing_payment_hash, reply),
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .expect("get order message should be sent")
+        .expect("CchActor mailbox must remain responsive during recovery")
+        .expect("existing order");
+
+    assert_eq!(existing_order.payment_hash, existing_payment_hash);
+    wait_for_mock_order(&store, recovery_payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_send_btc_rpc_timeout_is_idempotent_on_retry() {
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_store(store.clone()).await;
+    harness.set_add_invoice_delay(Duration::from_millis(100));
+
+    let payment_hash = create_valid_preimage_pair(202).1;
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+    let timed_out = harness
+        .actor
+        .call(
+            |reply| {
+                CchMessage::SendBTC(
+                    crate::cch::SendBTC {
+                        btc_pay_req: btc_pay_req.clone(),
+                        currency: Currency::Fibb,
+                    },
+                    reply,
+                )
+            },
+            Some(Duration::from_millis(10)),
+        )
+        .await;
+    assert!(
+        timed_out
+            .expect("actor message should be sent")
+            .is_timeout(),
+        "the first RPC should time out"
+    );
+
+    let created = loop {
+        if let Ok(order) = store.get_cch_order(&payment_hash) {
+            break order;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let retried = harness
+        .send_btc(btc_pay_req, Currency::Fibb)
+        .await
+        .expect("retry should return the already-created order");
+
+    assert_eq!(retried.payment_hash, created.payment_hash);
+    assert_eq!(
+        store.get_cch_order_keys_iter().into_iter().count(),
+        1,
+        "retrying a timed-out send_btc must not create a second order"
+    );
+}
+
+#[tokio::test]
+async fn test_send_btc_idempotent_order_rejects_currency_mismatch() {
+    let harness = setup_test_harness().await;
+    let (order, _) = harness
+        .create_send_btc_order_with_seed(212)
+        .await
+        .expect("create send_btc order");
+
+    let error = harness
+        .send_btc(order.outgoing_pay_req, Currency::Fibd)
+        .await
+        .expect_err("an idempotent retry must still validate currency");
+
+    assert!(matches!(
+        error,
+        CchError::CKBInvoiceNetworkMismatch {
+            expected: Currency::Fibb,
+            actual: Currency::Fibd,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_idempotent_creation_rejects_currency_mismatch() {
+    let (harness, store, creation) = setup_send_btc_recovery_test(213).await;
+    let payment_hash = creation.payment_hash;
+    let btc_pay_req = creation.btc_pay_req.clone();
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    let error = harness
+        .send_btc(btc_pay_req, Currency::Fibd)
+        .await
+        .expect_err("a persisted creation retry must still validate currency");
+
+    assert!(matches!(
+        error,
+        CchError::CKBInvoiceNetworkMismatch {
+            expected: Currency::Fibb,
+            actual: Currency::Fibd,
+        }
+    ));
+    assert!(store.get_cch_order(&payment_hash).is_err());
+}
+
+#[tokio::test]
+async fn test_send_btc_pending_recovery_rejects_currency_mismatch() {
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_store(store).await;
+    harness.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(214).1;
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+
+    harness
+        .send_btc(btc_pay_req.clone(), Currency::Fibb)
+        .await
+        .expect_err("mocked invoice creation must fail");
+
+    let error = harness
+        .send_btc(btc_pay_req, Currency::Fibd)
+        .await
+        .expect_err("pending recovery retry must still validate currency");
+
+    assert!(matches!(
+        error,
+        CchError::CKBInvoiceNetworkMismatch {
+            expected: Currency::Fibb,
+            actual: Currency::Fibd,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_persisted_invoice_respects_absolute_deadline() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_config_and_store(config, store.clone()).await;
+    harness.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(215).1;
+    let btc_invoice = create_test_lightning_invoice_with_payment_hash(payment_hash);
+
+    while !(100..=800).contains(
+        &SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .subsec_millis(),
+    ) {
+        tokio::task::yield_now().await;
+    }
+
+    harness
+        .send_btc(btc_invoice.to_string(), Currency::Fibb)
+        .await
+        .expect_err("mocked invoice creation must fail");
+
+    let creation = store
+        .get_send_btc_order_creation(&payment_hash)
+        .expect("durable send_btc creation");
+    let absolute_deadline_millis = u128::from(
+        btc_invoice
+            .expires_at()
+            .expect("BTC invoice expiry")
+            .as_secs()
+            .min(
+                creation
+                    .created_at
+                    .checked_add(creation.order_expiry_delta_seconds)
+                    .expect("order deadline"),
+            ),
+    ) * 1_000;
+    let persisted_invoice_deadline_millis = creation.incoming_invoice.data.timestamp
+        + creation
+            .incoming_invoice
+            .expiry_time()
+            .expect("Fiber invoice expiry")
+            .as_millis();
+
+    assert!(persisted_invoice_deadline_millis <= absolute_deadline_millis);
+}
+
+#[tokio::test]
+async fn test_send_btc_client_retries_share_one_recovery_chain() {
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_store(store.clone()).await;
+    harness.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(209).1;
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+
+    let first_error = harness
+        .send_btc(btc_pay_req.clone(), Currency::Fibb)
+        .await
+        .unwrap_err();
+    assert!(matches!(first_error, CchError::FiberNodeError(_)));
+
+    let retry_error = harness
+        .send_btc(btc_pay_req.clone(), Currency::Fibb)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        retry_error,
+        CchError::SendBTCOrderCreationInProgress(hash) if hash == payment_hash
+    ));
+
+    let conflicting_error = harness
+        .send_btc(
+            create_test_lightning_invoice_with_payment_hash_and_amount(payment_hash, 100_001)
+                .to_string(),
+            Currency::Fibb,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        conflicting_error,
+        CchError::ConflictingSendBTCRequest(hash) if hash == payment_hash
+    ));
+
+    harness.set_add_invoice_failure(false);
+    let recovered = wait_for_mock_order(&store, payment_hash).await;
+    assert_eq!(recovered.outgoing_pay_req, btc_pay_req);
+}
+
+#[tokio::test]
+async fn test_send_btc_creation_resumes_after_actor_restart() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let first = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    first.set_add_invoice_failure(true);
+    let payment_hash = create_valid_preimage_pair(203).1;
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+
+    let first_result = first.send_btc(btc_pay_req.clone(), Currency::Fibb).await;
+    assert!(first_result.is_err(), "the first Fiber call should fail");
+    assert!(store.get_send_btc_order_creation(&payment_hash).is_ok());
+
+    first.actor.stop(None);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let _restarted = setup_test_harness_with_config_and_store(config, store.clone()).await;
+    let order = wait_for_mock_order(&store, payment_hash).await;
+
+    assert_eq!(order.outgoing_pay_req, btc_pay_req);
+    assert!(matches!(
+        store.get_send_btc_order_creation(&payment_hash),
+        Err(CchStoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_recovers_existing_fiber_invoice_from_intent() {
+    let (harness, store, creation) = setup_send_btc_recovery_test(204).await;
+    let payment_hash = creation.payment_hash;
+    harness.insert_fiber_invoice(creation.incoming_invoice.clone(), CkbInvoiceStatus::Open);
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness.resume_send_btc_creation(payment_hash);
+    let order = wait_for_mock_order(&store, payment_hash).await;
+
+    assert_eq!(order.payment_hash, payment_hash);
+    assert!(matches!(
+        store.get_send_btc_order_creation(&payment_hash),
+        Err(CchStoreError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_send_btc_expired_creation_does_not_create_fiber_invoice() {
+    let (harness, store, mut creation) = setup_send_btc_recovery_test(205).await;
+    let payment_hash = creation.payment_hash;
+    creation.created_at = creation
+        .created_at
+        .saturating_sub(creation.order_expiry_delta_seconds + 1);
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness.resume_send_btc_creation(payment_hash);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(store.get_cch_order(&payment_hash).is_err());
+    assert!(harness.fiber_invoice(payment_hash).is_none());
+    assert!(store.get_send_btc_order_creation(&payment_hash).is_ok());
+}
+
+#[tokio::test]
+async fn test_send_btc_rejects_mismatched_existing_fiber_invoice() {
+    let (harness, store, creation) = setup_send_btc_recovery_test(206).await;
+    let payment_hash = creation.payment_hash;
+    let wrong_invoice = create_test_fiber_invoice_with_amount_and_expiry(
+        payment_hash,
+        creation.incoming_invoice.amount.unwrap() + 1,
+        3_500,
+    );
+    harness.insert_fiber_invoice(wrong_invoice, CkbInvoiceStatus::Open);
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness.resume_send_btc_creation(payment_hash);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(store.get_cch_order(&payment_hash).is_err());
+    assert!(store.get_send_btc_order_creation(&payment_hash).is_ok());
+}
+
+#[tokio::test]
+async fn test_send_btc_recovers_received_fiber_invoice_status() {
+    let (harness, store, creation) = setup_send_btc_recovery_test(207).await;
+    let payment_hash = creation.payment_hash;
+    harness.insert_fiber_invoice(
+        creation.incoming_invoice.clone(),
+        CkbInvoiceStatus::Received,
+    );
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness.resume_send_btc_creation(payment_hash);
+    let order = wait_for_mock_order(&store, payment_hash).await;
+
+    assert_eq!(order.status, CchOrderStatus::IncomingAccepted);
+}
+
+#[tokio::test]
+async fn test_send_btc_final_recovery_releases_payment_tracking_capacity() {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, MAX_TRACKED_PAYMENTS - 1);
+    let harness = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    let payment_hash = create_valid_preimage_pair(210).1;
+    let creation = create_send_btc_order_creation(&config, payment_hash);
+    harness.insert_fiber_invoice(
+        creation.incoming_invoice.clone(),
+        CkbInvoiceStatus::Cancelled,
+    );
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness.resume_send_btc_creation(payment_hash);
+    let recovered = wait_for_mock_order(&store, payment_hash).await;
+    assert_eq!(recovered.status, CchOrderStatus::Failed);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    harness
+        .create_send_btc_order_with_seed(211)
+        .await
+        .expect("final recovery must release its payment tracking reservation");
+}
+
+#[tokio::test]
+async fn test_send_btc_recovery_preserves_absolute_btc_expiry() {
+    let (harness, store, mut creation) = setup_send_btc_recovery_test(208).await;
+    let payment_hash = creation.payment_hash;
+    let invoice_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .saturating_sub(Duration::from_secs(1_800));
+    let btc_invoice = create_test_lightning_invoice_with_payment_hash_and_timestamp(
+        payment_hash,
+        invoice_timestamp,
+    );
+    creation.created_at = invoice_timestamp.as_secs();
+    creation.btc_pay_req = btc_invoice.to_string();
+    let btc_deadline_millis = u128::from(btc_invoice.expires_at().unwrap().as_secs()) * 1_000;
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    harness.resume_send_btc_creation(payment_hash);
+    wait_for_mock_order(&store, payment_hash).await;
+    let (fiber_invoice, _) = harness
+        .fiber_invoice(payment_hash)
+        .expect("recovery should create the Fiber invoice");
+    let fiber_deadline_millis =
+        fiber_invoice.data.timestamp + fiber_invoice.expiry_time().unwrap().as_millis();
+
+    assert!(fiber_deadline_millis <= btc_deadline_millis);
 }
 
 #[tokio::test]
@@ -2077,8 +2810,8 @@ async fn test_scheduled_expiry_cancels_fiber_incoming_invoice() {
     let config = CchConfig {
         lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
         wrapped_btc_type_script_args: "0x".to_string(),
-        min_outgoing_invoice_expiry_delta_seconds: 60,
-        order_expiry_delta_seconds: 1,
+        min_outgoing_invoice_expiry_delta_seconds: 1,
+        order_expiry_delta_seconds: 2,
         ..Default::default()
     };
     let harness = setup_test_harness_with_config(config).await;
@@ -2087,7 +2820,7 @@ async fn test_scheduled_expiry_cancels_fiber_incoming_invoice() {
     let payment_hash = order.payment_hash;
 
     harness
-        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 2500)
+        .wait_for_order_status(payment_hash, CchOrderStatus::Failed, 3500)
         .await;
     harness
         .wait_for_fiber_invoice_cancelled(payment_hash, 1000)
@@ -2465,15 +3198,7 @@ async fn test_send_btc_rejects_currency_mismatch() {
     let btc_pay_req = lightning_invoice.to_string();
 
     // Try to send with Fibd currency (node is configured for Fibb)
-    let result = call!(
-        harness.actor,
-        CchMessage::SendBTC,
-        crate::cch::actor::SendBTC {
-            btc_pay_req,
-            currency: Currency::Fibd,
-        }
-    )
-    .expect("actor call failed");
+    let result = harness.send_btc(btc_pay_req, Currency::Fibd).await;
 
     match result {
         Err(CchError::CKBInvoiceNetworkMismatch { expected, actual }) => {
@@ -2499,15 +3224,7 @@ async fn test_send_btc_rejects_btc_invoice_network_mismatch() {
     );
     let btc_pay_req = lightning_invoice.to_string();
 
-    let result = call!(
-        harness.actor,
-        CchMessage::SendBTC,
-        crate::cch::actor::SendBTC {
-            btc_pay_req,
-            currency: Currency::Fibb, // Matches configured currency
-        }
-    )
-    .expect("actor call failed");
+    let result = harness.send_btc(btc_pay_req, Currency::Fibb).await;
 
     match result {
         Err(CchError::BTCInvoiceNetworkMismatch { expected, actual }) => {
@@ -2533,15 +3250,7 @@ async fn test_send_btc_rejects_future_btc_invoice_timestamp() {
     );
     let btc_pay_req = lightning_invoice.to_string();
 
-    let result = call!(
-        harness.actor,
-        CchMessage::SendBTC,
-        crate::cch::actor::SendBTC {
-            btc_pay_req,
-            currency: Currency::Fibb,
-        }
-    )
-    .expect("actor call failed");
+    let result = harness.send_btc(btc_pay_req, Currency::Fibb).await;
 
     match result {
         Err(CchError::BTCInvoiceCreationTimeInFuture {
@@ -3047,6 +3756,43 @@ fn receive_btc_recovery_test_config() -> CchConfig {
         wrapped_btc_type_script_args: "0x".to_string(),
         min_outgoing_invoice_expiry_delta_seconds: 60,
         ..Default::default()
+    }
+}
+
+async fn setup_send_btc_recovery_test(
+    seed: u8,
+) -> (TestHarness, MockCchOrderStore, CchSendBtcOrderCreation) {
+    let config = receive_btc_recovery_test_config();
+    let store = MockCchOrderStore::new();
+    let harness = setup_test_harness_with_config_and_store(config.clone(), store.clone()).await;
+    let payment_hash = create_valid_preimage_pair(seed).1;
+    let creation = create_send_btc_order_creation(&config, payment_hash);
+    (harness, store, creation)
+}
+
+fn create_send_btc_order_creation(
+    config: &CchConfig,
+    payment_hash: Hash256,
+) -> CchSendBtcOrderCreation {
+    let amount_sats = 100_000u128;
+    let fee_sats = amount_sats * u128::from(config.fee_rate_per_million_sats) / 1_000_000
+        + u128::from(config.base_fee_sats);
+    CchSendBtcOrderCreation {
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        order_expiry_delta_seconds: config.order_expiry_delta_seconds,
+        btc_pay_req: create_test_lightning_invoice_with_payment_hash(payment_hash).to_string(),
+        payment_hash,
+        // Keep the recovered Fiber invoice strictly inside the one-hour test BTC invoice.
+        incoming_invoice: create_test_fiber_invoice_with_amount_and_expiry(
+            payment_hash,
+            amount_sats + fee_sats,
+            3_500,
+        ),
+        fee_sats,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
     }
 }
 
@@ -3619,6 +4365,52 @@ fn test_store_atomically_completes_receive_btc_order_creation() {
     );
     assert!(matches!(
         store.get_receive_btc_order_creation(&payment_hash),
+        Err(CchStoreError::NotFound(hash)) if hash == payment_hash
+    ));
+}
+
+#[test]
+fn test_store_atomically_completes_send_btc_order_creation() {
+    let (store, _store_dir) = generate_store();
+    let (_, payment_hash) = create_valid_preimage_pair(205);
+    let btc_pay_req = create_test_lightning_invoice_with_payment_hash(payment_hash).to_string();
+    let incoming_invoice = create_test_fiber_invoice(payment_hash);
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let creation = CchSendBtcOrderCreation {
+        created_at,
+        order_expiry_delta_seconds: 3_600,
+        btc_pay_req: btc_pay_req.clone(),
+        payment_hash,
+        incoming_invoice: incoming_invoice.clone(),
+        fee_sats: 1_000,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+    };
+    store.insert_send_btc_order_creation(creation).unwrap();
+
+    let order = CchOrder {
+        created_at,
+        expiry_delta_seconds: 3_600,
+        wrapped_btc_type_script: ckb_jsonrpc_types::Script::default(),
+        outgoing_pay_req: btc_pay_req,
+        incoming_invoice: CchInvoice::Fiber(incoming_invoice),
+        payment_hash,
+        payment_preimage: None,
+        amount_sats: 100_000,
+        fee_sats: 1_000,
+        status: CchOrderStatus::Pending,
+        failure_reason: None,
+    };
+    store.complete_send_btc_order_creation(order).unwrap();
+
+    assert_eq!(
+        store.get_cch_order(&payment_hash).unwrap().payment_hash,
+        payment_hash
+    );
+    assert!(matches!(
+        store.get_send_btc_order_creation(&payment_hash),
         Err(CchStoreError::NotFound(hash)) if hash == payment_hash
     ));
 }

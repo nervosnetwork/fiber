@@ -83,10 +83,16 @@ pub enum CchError {
     LndRpcError(String),
     #[error("Conflicting receive_btc request for payment hash {0}")]
     ConflictingReceiveBTCRequest(Hash256),
+    #[error("Conflicting send_btc request for payment hash {0}")]
+    ConflictingSendBTCRequest(Hash256),
     #[error("receive_btc order creation for payment hash {0} is already being recovered")]
     ReceiveBTCOrderCreationInProgress(Hash256),
+    #[error("send_btc order creation for payment hash {0} is already being recovered")]
+    SendBTCOrderCreationInProgress(Hash256),
     #[error("receive_btc order creation for payment hash {0} has expired")]
     ReceiveBTCOrderCreationExpired(Hash256),
+    #[error("send_btc order creation for payment hash {0} has expired")]
+    SendBTCOrderCreationExpired(Hash256),
     #[error("LND invoice for payment hash {payment_hash} does not match the CCH order: {reason}")]
     LndInvoiceMismatch {
         payment_hash: Hash256,
@@ -106,6 +112,10 @@ pub enum CchError {
     LndInvoiceTrackerError(String),
     #[error("Fiber node error: {0}")]
     FiberNodeError(anyhow::Error),
+    #[error("Fiber invoice already exists: {0}")]
+    FiberInvoiceAlreadyExists(Hash256),
+    #[error("Fiber invoice does not match send_btc creation intent: {0}")]
+    FiberInvoiceMismatch(Hash256),
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;

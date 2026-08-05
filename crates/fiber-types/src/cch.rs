@@ -127,6 +127,33 @@ pub struct CchReceiveBtcOrderCreation {
     pub max_outgoing_fee_percentage: u64,
 }
 
+/// Durable intent for creating the Fiber incoming invoice of a `send_btc` order.
+///
+/// The intent is written before the Fiber RPC side effect and atomically removed
+/// when the final [`CchOrder`] is persisted. The BTC payment hash is the
+/// idempotency key for recovering a request whose RPC response was lost.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CchSendBtcOrderCreation {
+    /// Seconds since epoch when order creation was accepted.
+    #[serde_as(as = "U64Hex")]
+    pub created_at: u64,
+    /// Relative expiry time copied from the CCH configuration at acceptance time.
+    #[serde_as(as = "U64Hex")]
+    pub order_expiry_delta_seconds: u64,
+    /// Original BTC invoice. Exact equality is used to reject conflicting retries.
+    pub btc_pay_req: String,
+    /// Idempotency key shared by the BTC invoice, Fiber invoice, and CCH order.
+    pub payment_hash: Hash256,
+    /// Fiber invoice prepared before the external Fiber call.
+    pub incoming_invoice: CkbInvoice,
+    /// Fee charged by the CCH operator.
+    #[serde_as(as = "U128Hex")]
+    pub fee_sats: u128,
+    /// Wrapped BTC type script included in the Fiber invoice.
+    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+}
+
 impl CchOrder {
     /// Return the amount required by the incoming invoice, in satoshis.
     ///

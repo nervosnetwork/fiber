@@ -1,5 +1,5 @@
 use crate::cch::error::CchStoreError;
-use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, Hash256};
+use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation, Hash256};
 
 pub trait CchOrderStore {
     /// Gets an order from the store.
@@ -41,4 +41,25 @@ pub trait CchOrderStore {
 
     /// Deletes a durable `receive_btc` creation intent.
     fn delete_receive_btc_order_creation(&self, payment_hash: &Hash256);
+
+    /// Gets a durable `send_btc` creation intent by payment hash.
+    fn get_send_btc_order_creation(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<CchSendBtcOrderCreation, CchStoreError>;
+
+    /// Inserts a durable `send_btc` creation intent.
+    fn insert_send_btc_order_creation(
+        &self,
+        creation: CchSendBtcOrderCreation,
+    ) -> Result<(), CchStoreError>;
+
+    /// Iterates over all durable `send_btc` creation intent keys.
+    fn get_send_btc_order_creation_keys_iter(&self) -> impl IntoIterator<Item = Hash256>;
+
+    /// Atomically replaces a durable `send_btc` creation intent with its completed order.
+    fn complete_send_btc_order_creation(&self, order: CchOrder) -> Result<(), CchStoreError>;
+
+    /// Deletes a durable `send_btc` creation intent.
+    fn delete_send_btc_order_creation(&self, payment_hash: &Hash256);
 }

@@ -977,6 +977,10 @@ pub enum NetworkActorCommand {
         Option<Hash256>,
         RpcReplyPort<Result<(), InvoiceError>>,
     ),
+    GetInvoice(
+        Hash256,
+        RpcReplyPort<Result<(CkbInvoice, CkbInvoiceStatus), InvoiceError>>,
+    ),
 
     SettleInvoice(
         Hash256,
@@ -3064,6 +3068,26 @@ where
             }
             NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
                 let _ = reply.send(self.add_invoice(invoice, preimage));
+            }
+            NetworkActorCommand::GetInvoice(payment_hash, reply) => {
+                let result = self
+                    .store
+                    .get_invoice(&payment_hash)
+                    .ok_or(InvoiceError::InvoiceNotFound)
+                    .and_then(|invoice| {
+                        let status = self
+                            .store
+                            .get_invoice_status(&payment_hash)
+                            .ok_or(InvoiceError::InvoiceNotFound)?;
+                        let status = match status {
+                            CkbInvoiceStatus::Open if invoice.is_expired() => {
+                                CkbInvoiceStatus::Expired
+                            }
+                            status => status,
+                        };
+                        Ok((invoice, status))
+                    });
+                let _ = reply.send(result);
             }
 
             #[cfg(any(debug_assertions, feature = "bench"))]
