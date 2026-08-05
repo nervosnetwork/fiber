@@ -14,6 +14,8 @@ pub enum CchStoreError {
 
 #[derive(Error, Debug)]
 pub enum CchError {
+    #[error("CCH startup recovery is still initializing")]
+    StartupRecoveryInProgress,
     #[error("Configuration error: {0}")]
     ConfigError(String),
     #[error("Store error: {0}")]

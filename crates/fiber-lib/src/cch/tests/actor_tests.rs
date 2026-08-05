@@ -62,23 +62,36 @@ struct MockCchOrderStoreState {
     orders: HashMap<Hash256, CchOrder>,
     receive_btc_order_creations: HashMap<Hash256, CchReceiveBtcOrderCreation>,
     send_btc_order_creations: HashMap<Hash256, CchSendBtcOrderCreation>,
+    get_order_delay: Duration,
+    get_order_calls: usize,
 }
 
 impl MockCchOrderStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn set_get_order_delay(&self, delay: Duration) {
+        self.state.lock().unwrap().get_order_delay = delay;
+    }
+
+    fn get_order_call_count(&self) -> usize {
+        self.state.lock().unwrap().get_order_calls
+    }
 }
 
 impl CchOrderStore for MockCchOrderStore {
     fn get_cch_order(&self, payment_hash: &Hash256) -> Result<CchOrder, CchStoreError> {
-        self.state
-            .lock()
-            .unwrap()
-            .orders
-            .get(payment_hash)
-            .ok_or(CchStoreError::NotFound(*payment_hash))
-            .cloned()
+        let (order, delay) = {
+            let mut state = self.state.lock().unwrap();
+            state.get_order_calls += 1;
+            (
+                state.orders.get(payment_hash).cloned(),
+                state.get_order_delay,
+            )
+        };
+        std::thread::sleep(delay);
+        order.ok_or(CchStoreError::NotFound(*payment_hash))
     }
 
     fn insert_cch_order(&self, order: CchOrder) -> Result<(), CchStoreError> {
@@ -1051,6 +1064,21 @@ async fn setup_test_harness_with_config_store_and_lnd(
     store: MockCchOrderStore,
     lnd_invoice_client: Option<Arc<dyn LndInvoiceClient>>,
 ) -> TestHarness {
+    let harness = setup_test_harness_with_config_store_and_lnd_without_recovery_wait(
+        config,
+        store,
+        lnd_invoice_client,
+    )
+    .await;
+    wait_for_startup_recovery(&harness.actor).await;
+    harness
+}
+
+async fn setup_test_harness_with_config_store_and_lnd_without_recovery_wait(
+    config: CchConfig,
+    store: MockCchOrderStore,
+    lnd_invoice_client: Option<Arc<dyn LndInvoiceClient>>,
+) -> TestHarness {
     let event_port = Arc::new(OutputPort::<CchTrackingEvent>::default());
 
     let mock_state = MockNetworkState::new(event_port.clone(), None);
@@ -1082,6 +1110,23 @@ async fn setup_test_harness_with_config_store_and_lnd(
         event_port,
         mock_state,
         _store: store,
+    }
+}
+
+async fn wait_for_startup_recovery(actor: &ActorRef<CchMessage>) {
+    loop {
+        let in_progress = actor
+            .call(
+                CchMessage::GetStartupRecoveryStatus,
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect("startup recovery status message should be sent")
+            .expect("CchActor mailbox must answer startup recovery status");
+        if !in_progress {
+            return;
+        }
+        tokio::task::yield_now().await;
     }
 }
 
@@ -1273,6 +1318,68 @@ fn insert_pending_send_btc_orders(store: &MockCchOrderStore, count: usize) {
             })
             .expect("insert pending send_btc order");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_startup_order_recovery_does_not_block_actor_mailbox() {
+    let store = MockCchOrderStore::new();
+    insert_pending_send_btc_orders(&store, 8);
+    store.set_get_order_delay(Duration::from_millis(30));
+    let existing_payment_hash = test_payment_hash(0);
+    let config = CchConfig {
+        lnd_rpc_url: "https://127.0.0.1:10009".to_string(),
+        wrapped_btc_type_script_args: "0x".to_string(),
+        min_outgoing_invoice_expiry_delta_seconds: 60,
+        ..Default::default()
+    };
+    let harness = setup_test_harness_with_config_store_and_lnd_without_recovery_wait(
+        config,
+        store.clone(),
+        None,
+    )
+    .await;
+
+    while store.get_order_call_count() == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let startup_send = harness
+        .actor
+        .call(
+            |reply| {
+                CchMessage::SendBTC(
+                    crate::cch::SendBTC {
+                        btc_pay_req: create_test_lightning_invoice_with_payment_hash(
+                            create_valid_preimage_pair(250).1,
+                        )
+                        .to_string(),
+                        currency: Currency::Fibb,
+                    },
+                    reply,
+                )
+            },
+            Some(Duration::from_millis(100)),
+        )
+        .await
+        .expect("send_btc message should be sent")
+        .expect("CchActor mailbox must answer during startup recovery");
+    assert!(matches!(
+        startup_send,
+        Err(CchError::StartupRecoveryInProgress)
+    ));
+
+    let existing_order = harness
+        .actor
+        .call(
+            |reply| CchMessage::GetCchOrder(existing_payment_hash, reply),
+            Some(Duration::from_millis(100)),
+        )
+        .await
+        .expect("get order message should be sent")
+        .expect("CchActor mailbox must remain responsive during startup recovery")
+        .expect("existing order");
+
+    assert_eq!(existing_order.payment_hash, existing_payment_hash);
 }
 
 // =============================================================================

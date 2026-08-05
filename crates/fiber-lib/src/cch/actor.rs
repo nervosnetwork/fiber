@@ -132,6 +132,18 @@ pub enum CchMessage {
 
     GetCchOrder(Hash256, RpcReplyPort<Result<CchOrder, CchError>>),
 
+    /// Continue startup recovery after taking a snapshot of persisted keys.
+    #[doc(hidden)]
+    ContinueStartupRecovery {
+        orders: Vec<CchOrder>,
+        receive_creation_keys: Vec<Hash256>,
+        send_creation_keys: Vec<Hash256>,
+        recovered_orders: usize,
+        recovered_receive_creations: usize,
+        recovered_send_creations: usize,
+        started_at_millis: u64,
+    },
+
     TrackingEvent(CchTrackingEvent),
 
     /// Store change event from the Fiber node (either in-process or via WebSocket).
@@ -184,6 +196,10 @@ pub enum CchMessage {
     /// Test-only message to insert an order directly into the database
     #[cfg(test)]
     InsertOrder(CchOrder, RpcReplyPort<Result<(), CchError>>),
+
+    /// Test-only readiness probe for startup recovery.
+    #[cfg(test)]
+    GetStartupRecoveryStatus(RpcReplyPort<bool>),
 }
 
 impl From<CchTrackingEvent> for CchMessage {
@@ -250,6 +266,7 @@ pub struct CchState<S> {
     active_send_btc_creation_workers: HashSet<Hash256>,
     active_send_btc_requests: HashMap<Hash256, String>,
     deferred_send_btc_invoice_statuses: HashMap<Hash256, DeferredInvoiceStatus>,
+    startup_recovery_in_progress: bool,
     /// The CKB network currency this node is configured for.
     pub(super) currency: Currency,
 }
@@ -386,6 +403,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
             active_send_btc_creation_workers: HashSet::new(),
             active_send_btc_requests: HashMap::new(),
             deferred_send_btc_invoice_statuses: HashMap::new(),
+            startup_recovery_in_progress: true,
         };
 
         Ok(state)
@@ -396,90 +414,39 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let current_time = now_timestamp_as_millis_u64() / 1000;
-
-        // Load all orders from the database
-        for mut order in state
-            .store
-            .get_cch_order_keys_iter()
-            .into_iter()
-            .filter_map(|payment_hash| state.store.get_cch_order(&payment_hash).ok())
-        {
-            // Only process active (non-final) orders
-            if order.is_final() {
-                let actions = ActionDispatcher::on_starting(&order);
-                if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
-                    tracing::error!(
-                        "Failed to schedule final-order resume actions for order {:x}: {}",
-                        order.payment_hash,
-                        err
-                    );
-                }
-                state.schedule_job_for_final_order(&order);
-                continue;
+        let store = state.store.clone();
+        let started_at_millis = now_timestamp_as_millis_u64();
+        let load_snapshot = move || {
+            let orders = store
+                .get_cch_order_keys_iter()
+                .into_iter()
+                .filter_map(|payment_hash| store.get_cch_order(&payment_hash).ok())
+                .collect();
+            let receive_creation_keys = store
+                .get_receive_btc_order_creation_keys_iter()
+                .into_iter()
+                .collect();
+            let send_creation_keys = store
+                .get_send_btc_order_creation_keys_iter()
+                .into_iter()
+                .collect();
+            if let Err(err) = myself.send_message(CchMessage::ContinueStartupRecovery {
+                orders,
+                receive_creation_keys,
+                send_creation_keys,
+                recovered_orders: 0,
+                recovered_receive_creations: 0,
+                recovered_send_creations: 0,
+                started_at_millis,
+            }) {
+                tracing::error!("Failed to start CCH recovery from persisted state: {}", err);
             }
+        };
 
-            // Check if order is expired and mark as Failed if so
-            if order.update_if_expired(current_time) {
-                let payment_hash = order.payment_hash;
-                state.store.update_cch_order(order.clone());
-                let actions = ActionDispatcher::on_entering(&order);
-                append_actions(myself.clone(), payment_hash, actions)?;
-                state.schedule_job_for_final_order(&order);
-                tracing::info!("Marked expired order {:x} as Failed", payment_hash);
-                continue;
-            }
-
-            if matches!(&order.incoming_invoice, CchInvoice::Fiber(_)) {
-                // Restore reservations before dispatching payment tracking. Orders created before
-                // the admission limit remain recoverable even when they exceed the new limit.
-                state
-                    .lnd_tracker
-                    .send_message(LndTrackerMessage::RestorePaymentTracking(
-                        order.payment_hash,
-                    ))?;
-            }
-
-            // Schedule expiry job for non-final orders
-            state.schedule_job_for_non_final_order(&order);
-
-            // Resume tracking for non-expired active orders
-            let actions = ActionDispatcher::on_starting(&order);
-            if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
-                tracing::error!(
-                    "Failed to schedule resume actions for order {:x}: {}",
-                    order.payment_hash,
-                    err
-                );
-            } else {
-                tracing::debug!("Resumed tracking for active order {:x}", order.payment_hash);
-            }
-        }
-
-        // A creation intent is persisted before the external LND side effect. Replaying these
-        // messages makes a crash between AddHoldInvoice and the final order write recoverable.
-        for payment_hash in state.store.get_receive_btc_order_creation_keys_iter() {
-            if state
-                .pending_receive_btc_creation_retries
-                .insert(payment_hash)
-            {
-                myself.send_message(CchMessage::ResumeReceiveBTCOrderCreation {
-                    payment_hash,
-                    retry_count: 0,
-                })?;
-            }
-        }
-
-        // A creation intent is persisted before the external Fiber side effect. Replaying these
-        // messages makes a crash or lost RPC response during `send_btc` recoverable.
-        for payment_hash in state.store.get_send_btc_order_creation_keys_iter() {
-            if state.pending_send_btc_creation_retries.insert(payment_hash) {
-                myself.send_message(CchMessage::ResumeSendBTCOrderCreation {
-                    payment_hash,
-                    retry_count: 0,
-                })?;
-            }
-        }
+        #[cfg(not(target_family = "wasm"))]
+        state.task_tracker.spawn_blocking(load_snapshot);
+        #[cfg(target_family = "wasm")]
+        state.task_tracker.spawn(async move { load_snapshot() });
 
         Ok(())
     }
@@ -492,6 +459,10 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             CchMessage::SendBTC(send_btc, port) => {
+                if state.startup_recovery_in_progress {
+                    let _ = port.send(Err(CchError::StartupRecoveryInProgress));
+                    return Ok(());
+                }
                 // A timed-out RPC leaves its message in the mailbox. Do not begin a new
                 // state-changing operation when its caller is no longer waiting for the result.
                 if port.is_closed() {
@@ -627,6 +598,10 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::ReceiveBTC(receive_btc, port) => {
+                if state.startup_recovery_in_progress {
+                    let _ = port.send(Err(CchError::StartupRecoveryInProgress));
+                    return Ok(());
+                }
                 let payment_hash = CkbInvoice::from_str(&receive_btc.fiber_pay_req)
                     .ok()
                     .map(|invoice| *invoice.payment_hash());
@@ -702,6 +677,65 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     // ignore error
                     let _ = port.send(result);
                 }
+                Ok(())
+            }
+            CchMessage::ContinueStartupRecovery {
+                mut orders,
+                mut receive_creation_keys,
+                mut send_creation_keys,
+                mut recovered_orders,
+                mut recovered_receive_creations,
+                mut recovered_send_creations,
+                started_at_millis,
+            } => {
+                if let Some(order) = orders.pop() {
+                    recovered_orders += 1;
+                    state.recover_persisted_order(&myself, order)?;
+                } else if let Some(payment_hash) = receive_creation_keys.pop() {
+                    recovered_receive_creations += 1;
+                    if state
+                        .pending_receive_btc_creation_retries
+                        .insert(payment_hash)
+                    {
+                        myself.send_message(CchMessage::ResumeReceiveBTCOrderCreation {
+                            payment_hash,
+                            retry_count: 0,
+                        })?;
+                    }
+                } else if let Some(payment_hash) = send_creation_keys.pop() {
+                    recovered_send_creations += 1;
+                    if state.pending_send_btc_creation_retries.insert(payment_hash) {
+                        myself.send_message(CchMessage::ResumeSendBTCOrderCreation {
+                            payment_hash,
+                            retry_count: 0,
+                        })?;
+                    }
+                } else {
+                    state.startup_recovery_in_progress = false;
+                    tracing::info!(
+                        recovered_orders,
+                        recovered_receive_creations,
+                        recovered_send_creations,
+                        elapsed_millis =
+                            now_timestamp_as_millis_u64().saturating_sub(started_at_millis),
+                        "CCH startup recovery completed"
+                    );
+                    return Ok(());
+                }
+
+                // Give RPC tasks a chance to enqueue work before scheduling the next recovery
+                // item. Re-sending immediately can otherwise monopolize the actor while it
+                // dispatches actions for a large snapshot.
+                tokio::task::yield_now().await;
+                myself.send_message(CchMessage::ContinueStartupRecovery {
+                    orders,
+                    receive_creation_keys,
+                    send_creation_keys,
+                    recovered_orders,
+                    recovered_receive_creations,
+                    recovered_send_creations,
+                    started_at_millis,
+                })?;
                 Ok(())
             }
             CchMessage::TrackingEvent(event) => {
@@ -919,6 +953,11 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 }
                 Ok(())
             }
+            #[cfg(test)]
+            CchMessage::GetStartupRecoveryStatus(port) => {
+                let _ = port.send(state.startup_recovery_in_progress);
+                Ok(())
+            }
         }
     }
 }
@@ -991,6 +1030,59 @@ fn invoice_status_rank(status: CkbInvoiceStatus) -> u8 {
 }
 
 impl<S: CchOrderStore> CchState<S> {
+    fn recover_persisted_order(
+        &mut self,
+        myself: &ActorRef<CchMessage>,
+        mut order: CchOrder,
+    ) -> Result<(), ActorProcessingErr> {
+        if order.is_final() {
+            let actions = ActionDispatcher::on_starting(&order);
+            if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
+                tracing::error!(
+                    "Failed to schedule final-order resume actions for order {:x}: {}",
+                    order.payment_hash,
+                    err
+                );
+            }
+            self.schedule_job_for_final_order(&order);
+            return Ok(());
+        }
+
+        let current_time = now_timestamp_as_millis_u64() / 1000;
+        if order.update_if_expired(current_time) {
+            let payment_hash = order.payment_hash;
+            self.store.update_cch_order(order.clone());
+            let actions = ActionDispatcher::on_entering(&order);
+            append_actions(myself.clone(), payment_hash, actions)?;
+            self.schedule_job_for_final_order(&order);
+            tracing::info!("Marked expired order {:x} as Failed", payment_hash);
+            return Ok(());
+        }
+
+        if matches!(&order.incoming_invoice, CchInvoice::Fiber(_)) {
+            // Restore reservations before dispatching payment tracking. Orders created before
+            // the admission limit remain recoverable even when they exceed the new limit.
+            self.lnd_tracker
+                .send_message(LndTrackerMessage::RestorePaymentTracking(
+                    order.payment_hash,
+                ))?;
+        }
+
+        self.schedule_job_for_non_final_order(&order);
+        let actions = ActionDispatcher::on_starting(&order);
+        if let Err(err) = append_actions(myself.clone(), order.payment_hash, actions) {
+            tracing::error!(
+                "Failed to schedule resume actions for order {:x}: {}",
+                order.payment_hash,
+                err
+            );
+        } else {
+            tracing::debug!("Resumed tracking for active order {:x}", order.payment_hash);
+        }
+
+        Ok(())
+    }
+
     /// Get a CCH order by payment hash, returning None if not found.
     /// This handles the common pattern of checking for NotFound vs other errors.
     fn get_order_or_none(&self, payment_hash: &Hash256) -> Result<Option<CchOrder>, CchError> {
