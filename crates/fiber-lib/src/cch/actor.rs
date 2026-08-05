@@ -966,6 +966,24 @@ fn receive_btc_order_creation_is_expired(
     }
 }
 
+fn receive_btc_order_remaining_expiry_seconds(
+    creation: &CchReceiveBtcOrderCreation,
+    current_time: u64,
+) -> Result<u64, CchError> {
+    let expiry_time = creation
+        .created_at
+        .checked_add(creation.order_expiry_delta_seconds)
+        .ok_or(CchError::ReceiveBTCOrderCreationExpired(
+            creation.payment_hash,
+        ))?;
+    if expiry_time <= current_time {
+        return Err(CchError::ReceiveBTCOrderCreationExpired(
+            creation.payment_hash,
+        ));
+    }
+    Ok(expiry_time - current_time)
+}
+
 fn deferred_invoice_status_advances_order(
     order_status: CchOrderStatus,
     invoice_status: CkbInvoiceStatus,
@@ -1957,8 +1975,10 @@ impl<S: CchOrderStore> CchState<S> {
         }
         let fiber_invoice = CkbInvoice::from_str(&creation.fiber_pay_req)?;
         let refreshed_at = now_timestamp_as_millis_u64() / 1000;
-        let expiry =
+        let fiber_expiry =
             self.remaining_outgoing_invoice_expiry_seconds(&fiber_invoice, refreshed_at)?;
+        let order_expiry = receive_btc_order_remaining_expiry_seconds(creation, refreshed_at)?;
+        let expiry = fiber_expiry.min(order_expiry);
         let total_msat = receive_btc_total_msat(creation.amount_sats, creation.fee_sats)?;
         let request = invoicesrpc::AddHoldInvoiceRequest {
             hash: creation.payment_hash.as_ref().to_vec(),
