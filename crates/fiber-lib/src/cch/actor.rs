@@ -43,6 +43,7 @@ use fiber_types::{Hash256, Privkey};
 
 pub const ACTION_RETRY_BASE_MILLIS: u64 = 1000; // 1 second initial delay
 pub const ACTION_RETRY_MAX_MILLIS: u64 = 600_000; // 10 minute max delay
+const STARTUP_RECOVERY_ITEM_DELAY_MILLIS: u64 = 1;
 
 /// Average time per Bitcoin block in milliseconds (10 minutes = 600 seconds = 600,000 ms).
 pub const BTC_BLOCK_TIME_MILLIS: u64 = 600_000;
@@ -135,7 +136,7 @@ pub enum CchMessage {
     /// Continue startup recovery after taking a snapshot of persisted keys.
     #[doc(hidden)]
     ContinueStartupRecovery {
-        orders: Vec<CchOrder>,
+        order_keys: Vec<Hash256>,
         receive_creation_keys: Vec<Hash256>,
         send_creation_keys: Vec<Hash256>,
         recovered_orders: usize,
@@ -417,11 +418,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
         let store = state.store.clone();
         let started_at_millis = now_timestamp_as_millis_u64();
         let load_snapshot = move || {
-            let orders = store
-                .get_cch_order_keys_iter()
-                .into_iter()
-                .filter_map(|payment_hash| store.get_cch_order(&payment_hash).ok())
-                .collect();
+            let order_keys = store.get_cch_order_keys_iter().into_iter().collect();
             let receive_creation_keys = store
                 .get_receive_btc_order_creation_keys_iter()
                 .into_iter()
@@ -431,7 +428,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 .into_iter()
                 .collect();
             if let Err(err) = myself.send_message(CchMessage::ContinueStartupRecovery {
-                orders,
+                order_keys,
                 receive_creation_keys,
                 send_creation_keys,
                 recovered_orders: 0,
@@ -680,7 +677,7 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 Ok(())
             }
             CchMessage::ContinueStartupRecovery {
-                mut orders,
+                mut order_keys,
                 mut receive_creation_keys,
                 mut send_creation_keys,
                 mut recovered_orders,
@@ -688,9 +685,14 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                 mut recovered_send_creations,
                 started_at_millis,
             } => {
-                if let Some(order) = orders.pop() {
-                    recovered_orders += 1;
-                    state.recover_persisted_order(&myself, order)?;
+                if let Some(payment_hash) = order_keys.pop() {
+                    // Keep only compact keys in the startup snapshot. Reading the order when its
+                    // recovery turn arrives both bounds snapshot memory and observes any state
+                    // transition that happened while earlier keys were being processed.
+                    if let Some(order) = state.get_order_or_none(&payment_hash)? {
+                        recovered_orders += 1;
+                        state.recover_persisted_order(&myself, order)?;
+                    }
                 } else if let Some(payment_hash) = receive_creation_keys.pop() {
                     recovered_receive_creations += 1;
                     if state
@@ -723,19 +725,21 @@ impl<S: CchOrderStore + Send + Sync + Clone + 'static> Actor for CchActor<S> {
                     return Ok(());
                 }
 
-                // Give RPC tasks a chance to enqueue work before scheduling the next recovery
-                // item. Re-sending immediately can otherwise monopolize the actor while it
-                // dispatches actions for a large snapshot.
-                tokio::task::yield_now().await;
-                myself.send_message(CchMessage::ContinueStartupRecovery {
-                    orders,
-                    receive_creation_keys,
-                    send_creation_keys,
-                    recovered_orders,
-                    recovered_receive_creations,
-                    recovered_send_creations,
-                    started_at_millis,
-                })?;
+                // Keep a single recovery continuation in flight and leave a mailbox window
+                // between store reads. An immediate self-message can otherwise stay ahead of
+                // RPC work while recovering a large key snapshot.
+                myself.send_after(
+                    Duration::from_millis(STARTUP_RECOVERY_ITEM_DELAY_MILLIS),
+                    move || CchMessage::ContinueStartupRecovery {
+                        order_keys,
+                        receive_creation_keys,
+                        send_creation_keys,
+                        recovered_orders,
+                        recovered_receive_creations,
+                        recovered_send_creations,
+                        started_at_millis,
+                    },
+                );
                 Ok(())
             }
             CchMessage::TrackingEvent(event) => {
