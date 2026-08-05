@@ -13,16 +13,16 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
-        config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
+        config::{DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA},
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
             select_connect_peer_address, AcceptChannelCommand, DebugEvent, FiberMessageWithTarget,
-            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason,
+            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason, TestFiberMessageKind,
         },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
-            broadcast_message_to_gossip, BroadcastMessageWithTimestamp,
+            broadcast_message_to_gossip, AddTlc, BroadcastMessageWithTimestamp,
             BroadcastMessagesFilterResult, FiberMessage, GetBroadcastMessagesResult, GossipMessage,
             Init, OpenChannel, ReestablishChannel,
         },
@@ -45,7 +45,9 @@ use ckb_types::{
     packed::{CellOutput, OutPoint, ScriptBuilder},
     prelude::{Builder, Entity, Pack},
 };
-use fiber_types::{ChannelFlags, RemoveTlcFulfill, RemoveTlcReason, ShutdownInfo, TLCId};
+use fiber_types::{
+    ChannelFlags, HashAlgorithm, RemoveTlcFulfill, RemoveTlcReason, ShutdownInfo, TLCId,
+};
 use musig2::{PartialSignature, SecNonce};
 use ractor::{call, Actor, ActorProcessingErr, ActorRef};
 use std::{borrow::Cow, str::FromStr, time::Duration};
@@ -76,6 +78,241 @@ fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
     .expect("valid multiaddr");
     address.push(Protocol::P2P(Cow::Owned(peer_id.clone().into_bytes())));
     (peer_id, address)
+}
+
+#[tokio::test]
+async fn test_fiber_message_hold_isolates_and_releases_messages_in_fifo_order() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true)
+            .await;
+
+    node_a
+        .hold_next_fiber_messages(node_b.pubkey, channel_id, TestFiberMessageKind::AddTlc, 2)
+        .await;
+
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::add_tlc(AddTlc {
+                    channel_id: gen_rand_sha256_hash(),
+                    tlc_id: 0,
+                    amount: 1_000,
+                    payment_hash: gen_rand_sha256_hash(),
+                    expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    onion_packet: None,
+                }),
+            )),
+        ))
+        .expect("node_a alive");
+    assert_eq!(node_a.get_held_fiber_message_count().await, 0);
+
+    for tlc_id in 0..2 {
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    node_b.pubkey,
+                    FiberMessage::add_tlc(AddTlc {
+                        channel_id,
+                        tlc_id,
+                        amount: 1_000,
+                        payment_hash: gen_rand_sha256_hash(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        onion_packet: None,
+                    }),
+                )),
+            ))
+            .expect("node_a alive");
+    }
+
+    node_a.wait_for_held_fiber_messages(2).await;
+    assert_eq!(node_a.get_held_fiber_message_count().await, 2);
+
+    assert!(node_b
+        .get_channel_actor_state(channel_id)
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .is_empty());
+
+    tokio::join!(node_a.release_held_fiber_messages(), async {
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    node_b.pubkey,
+                    FiberMessage::add_tlc(AddTlc {
+                        channel_id,
+                        tlc_id: 2,
+                        amount: 1_000,
+                        payment_hash: gen_rand_sha256_hash(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        onion_packet: None,
+                    }),
+                )),
+            ))
+            .expect("node_a alive");
+    });
+
+    tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            if node_b
+                .get_channel_actor_state(channel_id)
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .len()
+                == 3
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("receiver should accept released messages before the concurrent AddTlc");
+
+    let received_tlc_ids = node_b
+        .get_channel_actor_state(channel_id)
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .map(|tlc| match &tlc.tlc_id {
+            TLCId::Received(id) => *id,
+            TLCId::Offered(id) => panic!("expected received TLC, got offered TLC {id}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(received_tlc_ids, vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn test_fiber_message_hold_release_cancels_active_hold() {
+    let (node_a, node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true)
+            .await;
+
+    node_a
+        .hold_next_fiber_messages(node_b.pubkey, channel_id, TestFiberMessageKind::AddTlc, 2)
+        .await;
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                node_b.pubkey,
+                FiberMessage::add_tlc(AddTlc {
+                    channel_id,
+                    tlc_id: 0,
+                    amount: 1_000,
+                    payment_hash: gen_rand_sha256_hash(),
+                    expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    onion_packet: None,
+                }),
+            )),
+        ))
+        .expect("node_a alive");
+    node_a.wait_for_held_fiber_messages(1).await;
+
+    node_a.release_held_fiber_messages().await;
+
+    tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            if node_b
+                .get_channel_actor_state(channel_id)
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .len()
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("release should cancel the active hold before resending messages");
+}
+
+#[tokio::test]
+async fn test_fiber_message_hold_release_retains_unattempted_messages_after_send_error() {
+    let node = NetworkNode::new().await;
+    let target = gen_rand_fiber_public_key();
+    let channel_id = gen_rand_sha256_hash();
+    node.hold_next_fiber_messages(target, channel_id, TestFiberMessageKind::AddTlc, 2)
+        .await;
+
+    for tlc_id in 0..2 {
+        node.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                    target,
+                    FiberMessage::add_tlc(AddTlc {
+                        channel_id,
+                        tlc_id,
+                        amount: 1_000,
+                        payment_hash: gen_rand_sha256_hash(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        onion_packet: None,
+                    }),
+                )),
+            ))
+            .expect("node alive");
+    }
+    node.wait_for_held_fiber_messages(2).await;
+
+    let result = tokio::time::timeout(event_wait_timeout(), async {
+        call!(node.network_actor, |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::ReleaseTestHeldFiberMessages(
+                reply,
+            ))
+        })
+    })
+    .await
+    .expect("timed out releasing held Fiber messages")
+    .expect("network actor alive");
+    assert!(result
+        .expect_err("release to an unknown peer must fail")
+        .contains("1 unattempted message remains queued"));
+
+    let remaining = tokio::time::timeout(event_wait_timeout(), async {
+        call!(node.network_actor, |reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::TakeTestHeldFiberMessages(reply))
+        })
+    })
+    .await
+    .expect("timed out taking retained Fiber messages")
+    .expect("network actor alive");
+    assert_eq!(remaining.len(), 1);
+    assert!(matches!(
+        &remaining[0].message,
+        FiberMessage::ChannelNormalOperation(crate::fiber::types::FiberChannelMessage::AddTlc(
+            add
+        )) if add.tlc_id == 1
+    ));
+}
+
+#[tokio::test]
+#[should_panic(expected = "test Fiber message hold count must be positive")]
+async fn test_fiber_message_hold_rejects_zero_count() {
+    let node = NetworkNode::new().await;
+
+    node.hold_next_fiber_messages(
+        node.pubkey,
+        gen_rand_sha256_hash(),
+        TestFiberMessageKind::AddTlc,
+        0,
+    )
+    .await;
 }
 
 #[test]
