@@ -54,6 +54,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
+#[cfg(test)]
+use std::num::NonZeroUsize;
 use std::time::Instant;
 use std::{
     env,
@@ -103,7 +105,7 @@ pub const HUGE_CKB_AMOUNT: u128 = MIN_RESERVED_CKB + 1000000 * CKB_SHANNONS as u
 const DEFAULT_WAIT_UNTIL_TIME: u64 = 60 * 10; // seconds
 const EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV: &str = "FNN_EVENT_WAIT_TIMEOUT_SECS";
 
-fn event_wait_timeout() -> Duration {
+pub(crate) fn event_wait_timeout() -> Duration {
     if let Some(timeout_secs) = env::var(EVENT_WAIT_TIMEOUT_OVERRIDE_SECS_ENV)
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -749,6 +751,91 @@ impl NetworkNode {
         Self::new_with_node_name_opt(None).await
     }
 
+    #[cfg(test)]
+    pub async fn hold_next_fiber_messages(
+        &self,
+        target: Pubkey,
+        channel_id: Hash256,
+        kind: TestFiberMessageKind,
+        count: usize,
+    ) {
+        assert!(count > 0, "test Fiber message hold count must be positive");
+        let remaining = NonZeroUsize::new(count).expect("positive hold count");
+        tokio::time::timeout(event_wait_timeout(), async {
+            call!(self.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::SetTestFiberMessageHold(
+                    TestFiberMessageHold {
+                        target,
+                        channel_id,
+                        kind,
+                        remaining,
+                    },
+                    reply,
+                ))
+            })
+        })
+        .await
+        .expect("timed out setting test Fiber message hold")
+        .expect("network actor alive");
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_held_fiber_messages(&self, expected: usize) {
+        tokio::time::timeout(event_wait_timeout(), async {
+            loop {
+                if self.get_held_fiber_message_count().await >= expected {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {expected} held fiber messages"));
+    }
+
+    #[cfg(test)]
+    pub async fn release_held_fiber_messages(&self) {
+        tokio::time::timeout(event_wait_timeout(), async {
+            call!(self.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::ReleaseTestHeldFiberMessages(
+                    reply,
+                ))
+            })
+        })
+        .await
+        .expect("timed out releasing held Fiber messages")
+        .expect("network actor alive")
+        .expect("failed to release held Fiber messages");
+    }
+
+    #[cfg(test)]
+    pub async fn discard_held_fiber_messages(&self) {
+        let _ = tokio::time::timeout(event_wait_timeout(), async {
+            call!(self.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::TakeTestHeldFiberMessages(
+                    reply,
+                ))
+            })
+        })
+        .await
+        .expect("timed out taking held Fiber messages for discard")
+        .expect("network actor alive");
+    }
+
+    #[cfg(test)]
+    pub async fn get_held_fiber_message_count(&self) -> usize {
+        tokio::time::timeout(event_wait_timeout(), async {
+            call!(self.network_actor, |reply| {
+                NetworkActorMessage::new_command(NetworkActorCommand::GetTestHeldFiberMessageCount(
+                    reply,
+                ))
+            })
+        })
+        .await
+        .expect("timed out getting held Fiber message count")
+        .expect("network actor alive")
+    }
+
     pub fn get_private_key(&self) -> &Privkey {
         &self.private_key
     }
@@ -795,7 +882,12 @@ impl NetworkNode {
         let message = |reply| {
             NetworkActorMessage::Command(NetworkActorCommand::GetChannelActor(channel_id, reply))
         };
-        call!(self.network_actor, message).expect("network actor alive")
+        tokio::time::timeout(event_wait_timeout(), async {
+            call!(self.network_actor, message)
+        })
+        .await
+        .expect("timed out getting channel actor")
+        .expect("network actor alive")
     }
 
     pub fn get_channel_actor_state_unchecked(

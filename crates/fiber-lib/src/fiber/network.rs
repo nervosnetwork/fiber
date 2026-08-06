@@ -17,8 +17,12 @@ use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::borrow::Cow;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
+#[cfg(test)]
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -817,6 +821,50 @@ pub struct SendOnionPacketCommand {
     pub attempt_id: Option<u64>,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+pub enum TestFiberMessageKind {
+    AddTlc,
+    CommitmentSigned,
+    RevokeAndAck,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub struct TestFiberMessageHold {
+    pub target: Pubkey,
+    pub channel_id: Hash256,
+    pub kind: TestFiberMessageKind,
+    pub remaining: NonZeroUsize,
+}
+
+#[cfg(test)]
+impl TestFiberMessageHold {
+    fn matches(&self, message: &FiberMessageWithTarget) -> bool {
+        if message.target != self.target {
+            return false;
+        }
+        let FiberMessage::ChannelNormalOperation(channel_message) = &message.message else {
+            return false;
+        };
+        if channel_message.get_channel_id() != self.channel_id {
+            return false;
+        }
+        matches!(
+            (&self.kind, channel_message),
+            (TestFiberMessageKind::AddTlc, FiberChannelMessage::AddTlc(_))
+                | (
+                    TestFiberMessageKind::CommitmentSigned,
+                    FiberChannelMessage::CommitmentSigned(_)
+                )
+                | (
+                    TestFiberMessageKind::RevokeAndAck,
+                    FiberChannelMessage::RevokeAndAck(_)
+                )
+        )
+    }
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -904,6 +952,14 @@ pub enum NetworkActorCommand {
     },
     #[cfg(test)]
     InstallTestChannelActor(Hash256, ActorRef<ChannelActorMessage>, RpcReplyPort<()>),
+    #[cfg(test)]
+    SetTestFiberMessageHold(TestFiberMessageHold, RpcReplyPort<()>),
+    #[cfg(test)]
+    TakeTestHeldFiberMessages(RpcReplyPort<Vec<FiberMessageWithTarget>>),
+    #[cfg(test)]
+    ReleaseTestHeldFiberMessages(RpcReplyPort<Result<(), String>>),
+    #[cfg(test)]
+    GetTestHeldFiberMessageCount(RpcReplyPort<usize>),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(Pubkey, SessionId),
     // Pace persisted channel reestablishment without blocking the NetworkActor. The channel ids
@@ -2197,8 +2253,73 @@ where
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
         match command {
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget { target, message }) => {
+            NetworkActorCommand::SendFiberMessage(message_with_target) => {
+                #[cfg(test)]
+                if state
+                    .test_fiber_message_hold
+                    .as_ref()
+                    .is_some_and(|hold| hold.matches(&message_with_target))
+                {
+                    let remaining = state
+                        .test_fiber_message_hold
+                        .as_ref()
+                        .expect("matching test hold")
+                        .remaining
+                        .get()
+                        - 1;
+                    if let Some(remaining) = NonZeroUsize::new(remaining) {
+                        state
+                            .test_fiber_message_hold
+                            .as_mut()
+                            .expect("matching test hold")
+                            .remaining = remaining;
+                    } else {
+                        state.test_fiber_message_hold = None;
+                    }
+                    state
+                        .test_held_fiber_messages
+                        .push_back(message_with_target);
+                    return Ok(());
+                }
+                let FiberMessageWithTarget { target, message } = message_with_target;
                 state.send_fiber_message_to_pubkey(&target, message).await?;
+            }
+            #[cfg(test)]
+            NetworkActorCommand::SetTestFiberMessageHold(hold, reply) => {
+                state.test_fiber_message_hold = Some(hold);
+                let _ = reply.send(());
+            }
+            #[cfg(test)]
+            NetworkActorCommand::TakeTestHeldFiberMessages(reply) => {
+                state.test_fiber_message_hold = None;
+                let messages = state.test_held_fiber_messages.drain(..).collect();
+                let _ = reply.send(messages);
+            }
+            #[cfg(test)]
+            NetworkActorCommand::ReleaseTestHeldFiberMessages(reply) => {
+                state.test_fiber_message_hold = None;
+                while let Some(FiberMessageWithTarget { target, message }) =
+                    state.test_held_fiber_messages.pop_front()
+                {
+                    if let Err(error) = state.send_fiber_message_to_pubkey(&target, message).await {
+                        let remaining = state.test_held_fiber_messages.len();
+                        let noun = if remaining == 1 {
+                            "message"
+                        } else {
+                            "messages"
+                        };
+                        let _ = reply.send(Err(format!(
+                            "failed to release held Fiber message: {error}; \
+                             {remaining} unattempted {noun} remains queued"
+                        )));
+                        return Ok(());
+                    }
+                }
+                let _ = reply.send(Ok(()));
+            }
+            #[cfg(test)]
+            NetworkActorCommand::GetTestHeldFiberMessageCount(reply) => {
+                let _ = reply.send(state.test_held_fiber_messages.len());
             }
             NetworkActorCommand::ConnectPeer(addr, save, source, rpc_reply) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
@@ -4985,6 +5106,10 @@ pub struct NetworkActorState<S, C> {
     // Active in-flight CKB tx tracers by tx_hash. Stores actor refs so
     // send_tx can upgrade a trace-only actor with the actual transaction.
     inflight_tracers: HashMap<Hash256, ActorRef<InFlightCkbTxActorMessage>>,
+    #[cfg(test)]
+    test_fiber_message_hold: Option<TestFiberMessageHold>,
+    #[cfg(test)]
+    test_held_fiber_messages: VecDeque<FiberMessageWithTarget>,
 }
 
 #[derive(Debug, Clone)]
@@ -7371,6 +7496,10 @@ where
             pending_channel_ready_retry_scans: Default::default(),
             pending_remove_tlcs: Default::default(),
             inflight_tracers: Default::default(),
+            #[cfg(test)]
+            test_fiber_message_hold: None,
+            #[cfg(test)]
+            test_held_fiber_messages: Default::default(),
         };
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
