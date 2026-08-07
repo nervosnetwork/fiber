@@ -961,6 +961,10 @@ fn process_watched_settlement_tx<S: WatchtowerStore>(
     })?;
 
     let tracked_tlcs = watched_outpoints.get(&watched_outpoint)?.clone();
+    // A terminal settlement consumes the last commitment cell: when the transaction does
+    // not produce a successor commitment output, every still-pending TLC is carried
+    // off-chain by the final-party sweep and needs an explicit settlement record.
+    let terminal = !has_successor_commitment_output(tx, commitment_lock_prefix);
     let remaining_tlcs = reconcile_settlement_witness(
         tx,
         watched_input_index,
@@ -968,18 +972,26 @@ fn process_watched_settlement_tx<S: WatchtowerStore>(
         store,
         self_node_id,
         &tracked_tlcs,
+        terminal,
     )?;
     processed_tx_hashes.insert(tx_hash.clone());
     watched_outpoints.remove(&watched_outpoint);
 
-    let outputs = tx.raw().outputs();
-    if let Some(output) = outputs.get(0) {
-        if lock_matches_commitment_prefix(&output.lock(), commitment_lock_prefix) {
-            watched_outpoints.insert(OutPoint::new(tx_hash, 0), remaining_tlcs);
-        }
+    if has_successor_commitment_output(tx, commitment_lock_prefix) {
+        watched_outpoints.insert(OutPoint::new(tx_hash, 0), remaining_tlcs);
     }
 
     Some(watched_input_index)
+}
+
+/// Whether a settlement transaction produces a successor commitment cell carrying the
+/// still-pending TLCs. The commitment lock contract always emits that cell as the first
+/// output; when it is absent, the transaction is a terminal sweep that consumes the last
+/// commitment cell and settles every remaining TLC.
+fn has_successor_commitment_output(tx: &Transaction, commitment_lock_prefix: &Script) -> bool {
+    tx.raw().outputs().get(0).is_some_and(|output| {
+        lock_matches_commitment_prefix(&output.lock(), commitment_lock_prefix)
+    })
 }
 
 /// Validate a settlement witness against the tracked snapshot, persist exact TLC proofs, and
@@ -991,6 +1003,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
     store: &S,
     self_node_id: &NodeId,
     tracked_tlcs: &[TrackedSettlementTlc],
+    terminal: bool,
 ) -> Option<Vec<TrackedSettlementTlc>> {
     let Some(witness) = tx.witnesses().get(witness_index) else {
         warn!(
@@ -1040,6 +1053,29 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
                 tracked_tlcs.len(),
                 tx.calc_tx_hash(),
             );
+            if terminal {
+                // The unlock consumes the last commitment cell, so the contract only admits
+                // the sweep when every still-pending TLC is claimable by the sweeping party
+                // (expired or already fulfilled). Each remaining TLC is therefore settled
+                // without a preimage here. Without an exact record, the channel would keep
+                // ONCHAIN_SETTLEMENT_CONFIRMED forever and never propagate `RemoveTlc`
+                // upstream (issue #1611).
+                for (index, tlc) in tracked_tlcs.iter().enumerate() {
+                    store.insert_onchain_tlc_settlement(
+                        self_node_id,
+                        channel_id,
+                        tlc.tlc_id,
+                        OnChainTlcSettlement {
+                            payment_hash: tlc.payment_hash,
+                            hash_algorithm: tlc.hash_algorithm,
+                            preimage: None,
+                            tx_hash,
+                            tlc_index: index as u8,
+                        },
+                    );
+                }
+                return Some(Vec::new());
+            }
             continue;
         }
 
@@ -2905,6 +2941,82 @@ mod tests {
             Some(&tracked.to_vec()),
             "the successor witness still contains every pending TLC"
         );
+    }
+
+    #[test]
+    fn terminal_final_party_unlock_records_settled_without_preimage() {
+        // Issue #1611: after #1583 the watchtower skips every final-party unlock. When the
+        // unlock consumes the last commitment cell (no successor commitment output), the
+        // terminal sweep carries every still-pending TLC off-chain. B (the offering party of
+        // the expired TLC) may legally sweep it, but without a settlement record the channel
+        // reconciliation stays incomplete forever and `RemoveTlc` is never propagated upstream.
+        let lock_prefix = commitment_lock_prefix();
+        let channel_id: Hash256 = [9u8; 32].into();
+        let payment_hashes = [[41u8; 20], [42u8; 20]];
+        let first_commitment_out_point = OutPoint::new([7u8; 32].pack(), 0);
+        let tracked = [
+            tracked_tlc(payment_hashes[0], 0),
+            tracked_tlc(payment_hashes[1], 1),
+        ];
+        // A terminal settlement consumes the last commitment cell: the output is a plain
+        // party-balance cell, not a successor commitment cell carrying the pending TLCs.
+        let party_balance_lock = Script::new_builder().args([1u8; 8].to_vec().pack()).build();
+        for unlock_type in [0xFE, 0xFF] {
+            let tx = tx_with_input_output_and_witness(
+                first_commitment_out_point.clone(),
+                party_balance_lock.clone(),
+                Some(settlement_witness_with_unlocks(
+                    &payment_hashes,
+                    vec![Unlock {
+                        unlock_type,
+                        with_preimage: false,
+                        signature: [0u8; 65],
+                        preimage: None,
+                    }],
+                )),
+            );
+            let mut watched_outpoints =
+                HashMap::from([(first_commitment_out_point.clone(), tracked.to_vec())]);
+            let mut processed_tx_hashes = HashSet::new();
+            let store = TestWatchtowerStore::default();
+            let self_node_id = NodeId::local();
+
+            let processed = process_watched_settlement_tx(
+                &tx,
+                &mut watched_outpoints,
+                &mut processed_tx_hashes,
+                &lock_prefix,
+                &channel_id,
+                &store,
+                &self_node_id,
+            );
+
+            assert_eq!(processed, Some(0), "unlock 0x{:02x}", unlock_type);
+            let settlements = store.settlements();
+            assert_eq!(
+                settlements.len(),
+                2,
+                "unlock 0x{:02x}: every terminal-swept TLC needs a settlement record",
+                unlock_type
+            );
+            for (index, tlc) in tracked.iter().enumerate() {
+                let (stored_channel_id, stored_tlc_id, settlement) = &settlements[index];
+                assert_eq!(stored_channel_id, &channel_id);
+                assert_eq!(stored_tlc_id, &tlc.tlc_id);
+                assert_eq!(settlement.payment_hash, tlc.payment_hash);
+                assert_eq!(settlement.hash_algorithm, tlc.hash_algorithm);
+                assert!(
+                    settlement.preimage.is_none(),
+                    "unlock 0x{:02x}: terminal sweep settles the TLC without a preimage",
+                    unlock_type
+                );
+            }
+            assert!(
+                watched_outpoints.is_empty(),
+                "unlock 0x{:02x}: no successor commitment cell remains after a terminal sweep",
+                unlock_type
+            );
+        }
     }
 
     #[test]
