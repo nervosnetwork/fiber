@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use fiber_types::Pubkey;
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::debug;
 
 use super::gossip_policy::{ByteRateLimitConfig, ByteTokenBucket, DiscreteTokenBucket};
@@ -17,6 +18,115 @@ const PEER_MESSAGE_BAN_DURATION_MS: u64 = 10 * 60 * 1000;
 const PEER_MESSAGE_MAX_TRACKED_PEERS: usize = 50_000;
 const FIBER_INGRESS_MAX_IN_FLIGHT_MESSAGES: u32 = 4_096;
 const FIBER_INGRESS_MAX_IN_FLIGHT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Tunable parameters for the inbound Fiber peer message admission policy.
+///
+/// All fields default to the constants defined above. A field set to `0` disables the
+/// corresponding limit:
+/// - `peer_message_interval_ms == 0 || peer_message_burst == 0` disables the per-peer message limit;
+/// - `peer_message_rate_bytes_per_sec == 0 || peer_message_burst_bytes == 0` disables the per-peer byte limit;
+/// - `violation_ban_threshold == 0` disables temporary bans;
+/// - `max_in_flight_messages == 0 || max_in_flight_bytes == 0` makes the global ingress budget unlimited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct PeerMessagePolicyConfig {
+    /// Refill interval of the per-peer message token bucket, in milliseconds.
+    pub peer_message_interval_ms: u64,
+    /// Capacity (burst) of the per-peer message token bucket.
+    pub peer_message_burst: u32,
+    /// Sustained per-peer byte rate, in bytes per second.
+    pub peer_message_rate_bytes_per_sec: u64,
+    /// Burst size of the per-peer byte token bucket, in bytes.
+    pub peer_message_burst_bytes: u64,
+    /// Number of repeated violations before a peer is temporarily banned.
+    pub violation_ban_threshold: u32,
+    /// Duration of a temporary ban, in milliseconds.
+    pub ban_duration_ms: u64,
+    /// Maximum number of peers tracked by the policy (LRU eviction).
+    pub max_tracked_peers: usize,
+    /// Maximum number of inbound Fiber messages in flight globally.
+    pub max_in_flight_messages: u32,
+    /// Maximum bytes of inbound Fiber messages in flight globally.
+    pub max_in_flight_bytes: u64,
+}
+
+impl Default for PeerMessagePolicyConfig {
+    fn default() -> Self {
+        Self {
+            peer_message_interval_ms: PEER_MESSAGE_INTERVAL_MS,
+            peer_message_burst: PEER_MESSAGE_BURST,
+            peer_message_rate_bytes_per_sec: PEER_MESSAGE_RATE_BYTES_PER_SEC,
+            peer_message_burst_bytes: PEER_MESSAGE_BURST_BYTES,
+            violation_ban_threshold: PEER_MESSAGE_VIOLATION_BAN_THRESHOLD,
+            ban_duration_ms: PEER_MESSAGE_BAN_DURATION_MS,
+            max_tracked_peers: PEER_MESSAGE_MAX_TRACKED_PEERS,
+            max_in_flight_messages: FIBER_INGRESS_MAX_IN_FLIGHT_MESSAGES,
+            max_in_flight_bytes: FIBER_INGRESS_MAX_IN_FLIGHT_BYTES,
+        }
+    }
+}
+
+impl PeerMessagePolicyConfig {
+    /// Whether the per-peer message token bucket is disabled.
+    pub(crate) fn message_limit_disabled(&self) -> bool {
+        self.peer_message_interval_ms == 0 || self.peer_message_burst == 0
+    }
+
+    /// Whether temporary bans are disabled.
+    pub(crate) fn ban_disabled(&self) -> bool {
+        self.violation_ban_threshold == 0
+    }
+}
+
+impl<'de> Deserialize<'de> for PeerMessagePolicyConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct PartialPeerMessagePolicyConfig {
+            peer_message_interval_ms: Option<u64>,
+            peer_message_burst: Option<u32>,
+            peer_message_rate_bytes_per_sec: Option<u64>,
+            peer_message_burst_bytes: Option<u64>,
+            violation_ban_threshold: Option<u32>,
+            ban_duration_ms: Option<u64>,
+            max_tracked_peers: Option<usize>,
+            max_in_flight_messages: Option<u32>,
+            max_in_flight_bytes: Option<u64>,
+        }
+
+        let partial = PartialPeerMessagePolicyConfig::deserialize(deserializer)?;
+        let defaults = Self::default();
+        Ok(Self {
+            peer_message_interval_ms: partial
+                .peer_message_interval_ms
+                .unwrap_or(defaults.peer_message_interval_ms),
+            peer_message_burst: partial
+                .peer_message_burst
+                .unwrap_or(defaults.peer_message_burst),
+            peer_message_rate_bytes_per_sec: partial
+                .peer_message_rate_bytes_per_sec
+                .unwrap_or(defaults.peer_message_rate_bytes_per_sec),
+            peer_message_burst_bytes: partial
+                .peer_message_burst_bytes
+                .unwrap_or(defaults.peer_message_burst_bytes),
+            violation_ban_threshold: partial
+                .violation_ban_threshold
+                .unwrap_or(defaults.violation_ban_threshold),
+            ban_duration_ms: partial.ban_duration_ms.unwrap_or(defaults.ban_duration_ms),
+            max_tracked_peers: partial
+                .max_tracked_peers
+                .unwrap_or(defaults.max_tracked_peers),
+            max_in_flight_messages: partial
+                .max_in_flight_messages
+                .unwrap_or(defaults.max_in_flight_messages),
+            max_in_flight_bytes: partial
+                .max_in_flight_bytes
+                .unwrap_or(defaults.max_in_flight_bytes),
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PeerMessageAdmission {
@@ -39,17 +149,15 @@ impl ViolationWindow {
         }
     }
 
-    fn expire(&mut self, now_ms: u64) {
-        if self.count > 0
-            && now_ms.saturating_sub(self.started_at_ms) >= PEER_MESSAGE_BAN_DURATION_MS
-        {
+    fn expire(&mut self, now_ms: u64, window_duration_ms: u64) {
+        if self.count > 0 && now_ms.saturating_sub(self.started_at_ms) >= window_duration_ms {
             self.count = 0;
             self.started_at_ms = now_ms;
         }
     }
 
-    fn record(&mut self, now_ms: u64) -> u32 {
-        self.expire(now_ms);
+    fn record(&mut self, now_ms: u64, window_duration_ms: u64) -> u32 {
+        self.expire(now_ms, window_duration_ms);
         if self.count == 0 {
             self.started_at_ms = now_ms;
         }
@@ -69,12 +177,15 @@ struct PeerMessagePolicyEntry {
 }
 
 impl PeerMessagePolicyEntry {
-    fn new(now_ms: u64) -> Self {
+    fn new(now_ms: u64, config: &PeerMessagePolicyConfig) -> Self {
         Self {
-            messages: DiscreteTokenBucket::new(PEER_MESSAGE_INTERVAL_MS, PEER_MESSAGE_BURST),
+            messages: DiscreteTokenBucket::new(
+                config.peer_message_interval_ms,
+                config.peer_message_burst,
+            ),
             bytes: ByteTokenBucket::new(ByteRateLimitConfig {
-                rate_bytes_per_sec: PEER_MESSAGE_RATE_BYTES_PER_SEC,
-                burst_bytes: PEER_MESSAGE_BURST_BYTES,
+                rate_bytes_per_sec: config.peer_message_rate_bytes_per_sec,
+                burst_bytes: config.peer_message_burst_bytes,
             }),
             rate_limit_violations: ViolationWindow::new(now_ms),
             invalid_messages: ViolationWindow::new(now_ms),
@@ -88,14 +199,15 @@ impl PeerMessagePolicyEntry {
             .is_some_and(|banned_until_ms| now_ms < banned_until_ms)
     }
 
-    fn ban(&mut self, now_ms: u64) {
-        self.banned_until_ms = Some(now_ms.saturating_add(PEER_MESSAGE_BAN_DURATION_MS));
+    fn ban(&mut self, now_ms: u64, ban_duration_ms: u64) {
+        self.banned_until_ms = Some(now_ms.saturating_add(ban_duration_ms));
         self.last_used_ms = now_ms;
     }
 
-    fn expire_violation_windows(&mut self, now_ms: u64) {
-        self.rate_limit_violations.expire(now_ms);
-        self.invalid_messages.expire(now_ms);
+    fn expire_violation_windows(&mut self, now_ms: u64, window_duration_ms: u64) {
+        self.rate_limit_violations
+            .expire(now_ms, window_duration_ms);
+        self.invalid_messages.expire(now_ms, window_duration_ms);
     }
 }
 
@@ -110,16 +222,21 @@ struct FiberIngressBudget {
 impl FiberIngressBudget {
     fn new(max_messages: u32, max_bytes: u64) -> Self {
         Self {
-            max_messages: max_messages.max(1),
-            max_bytes: max_bytes.max(1),
+            max_messages,
+            max_bytes,
             in_flight_messages: 0,
             in_flight_bytes: 0,
         }
     }
 
+    fn is_unlimited(&self) -> bool {
+        self.max_messages == 0 || self.max_bytes == 0
+    }
+
     fn try_reserve(&mut self, bytes: u64) -> bool {
-        if self.in_flight_messages >= self.max_messages
-            || bytes > self.max_bytes.saturating_sub(self.in_flight_bytes)
+        if !self.is_unlimited()
+            && (self.in_flight_messages >= self.max_messages
+                || bytes > self.max_bytes.saturating_sub(self.in_flight_bytes))
         {
             return false;
         }
@@ -143,19 +260,21 @@ pub(crate) struct PeerMessagePolicy {
     banned_expirations: BTreeSet<(u64, Pubkey)>,
     max_entries: usize,
     ingress: FiberIngressBudget,
+    config: PeerMessagePolicyConfig,
 }
 
 impl PeerMessagePolicy {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(config: PeerMessagePolicyConfig) -> Self {
         Self {
             peers: HashMap::new(),
             ordinary_lru: BTreeSet::new(),
             banned_expirations: BTreeSet::new(),
-            max_entries: PEER_MESSAGE_MAX_TRACKED_PEERS,
+            max_entries: config.max_tracked_peers.max(1),
             ingress: FiberIngressBudget::new(
-                FIBER_INGRESS_MAX_IN_FLIGHT_MESSAGES,
-                FIBER_INGRESS_MAX_IN_FLIGHT_BYTES,
+                config.max_in_flight_messages,
+                config.max_in_flight_bytes,
             ),
+            config,
         }
     }
 
@@ -165,13 +284,12 @@ impl PeerMessagePolicy {
         max_in_flight_messages: u32,
         max_in_flight_bytes: u64,
     ) -> Self {
-        Self {
-            peers: HashMap::new(),
-            ordinary_lru: BTreeSet::new(),
-            banned_expirations: BTreeSet::new(),
-            max_entries: max_entries.max(1),
-            ingress: FiberIngressBudget::new(max_in_flight_messages, max_in_flight_bytes),
-        }
+        Self::new(PeerMessagePolicyConfig {
+            max_tracked_peers: max_entries.max(1),
+            max_in_flight_messages,
+            max_in_flight_bytes,
+            ..PeerMessagePolicyConfig::default()
+        })
     }
 
     fn insert_entry(&mut self, peer: Pubkey, entry: PeerMessagePolicyEntry) {
@@ -230,7 +348,7 @@ impl PeerMessagePolicy {
     fn entry_for_update(&mut self, peer: &Pubkey, now_ms: u64) -> PeerMessagePolicyEntry {
         self.make_room(peer, now_ms);
         self.take_entry(peer)
-            .unwrap_or_else(|| PeerMessagePolicyEntry::new(now_ms))
+            .unwrap_or_else(|| PeerMessagePolicyEntry::new(now_ms, &self.config))
     }
 
     pub(crate) fn admit(&mut self, peer: &Pubkey, bytes: u64, now_ms: u64) -> PeerMessageAdmission {
@@ -239,11 +357,13 @@ impl PeerMessagePolicy {
         }
 
         let mut entry = self.entry_for_update(peer, now_ms);
-        entry.expire_violation_windows(now_ms);
+        entry.expire_violation_windows(now_ms, self.config.ban_duration_ms);
         entry.last_used_ms = now_ms;
         let mut message_bucket = entry.messages.clone();
         let mut byte_bucket = entry.bytes.clone();
-        if message_bucket.try_consume(now_ms) && byte_bucket.try_consume(bytes, now_ms) {
+        if (self.config.message_limit_disabled() || message_bucket.try_consume(now_ms))
+            && byte_bucket.try_consume(bytes, now_ms)
+        {
             if !self.ingress.try_reserve(bytes) {
                 self.insert_entry(*peer, entry);
                 return PeerMessageAdmission::Disconnect;
@@ -254,13 +374,16 @@ impl PeerMessagePolicy {
             return PeerMessageAdmission::Allow;
         }
 
-        let violations = entry.rate_limit_violations.record(now_ms);
-        let decision = if violations >= PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
-            entry.ban(now_ms);
-            PeerMessageAdmission::Ban
-        } else {
-            PeerMessageAdmission::Disconnect
-        };
+        let violations = entry
+            .rate_limit_violations
+            .record(now_ms, self.config.ban_duration_ms);
+        let decision =
+            if !self.config.ban_disabled() && violations >= self.config.violation_ban_threshold {
+                entry.ban(now_ms, self.config.ban_duration_ms);
+                PeerMessageAdmission::Ban
+            } else {
+                PeerMessageAdmission::Disconnect
+            };
         self.insert_entry(*peer, entry);
         decision
     }
@@ -271,15 +394,18 @@ impl PeerMessagePolicy {
         }
 
         let mut entry = self.entry_for_update(peer, now_ms);
-        entry.expire_violation_windows(now_ms);
+        entry.expire_violation_windows(now_ms, self.config.ban_duration_ms);
         entry.last_used_ms = now_ms;
-        let violations = entry.invalid_messages.record(now_ms);
-        let banned = if violations >= PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
-            entry.ban(now_ms);
-            true
-        } else {
-            false
-        };
+        let violations = entry
+            .invalid_messages
+            .record(now_ms, self.config.ban_duration_ms);
+        let banned =
+            if !self.config.ban_disabled() && violations >= self.config.violation_ban_threshold {
+                entry.ban(now_ms, self.config.ban_duration_ms);
+                true
+            } else {
+                false
+            };
         self.insert_entry(*peer, entry);
         banned
     }
@@ -303,7 +429,7 @@ impl PeerMessagePolicy {
         let Some(mut entry) = self.take_entry(peer) else {
             return;
         };
-        entry.expire_violation_windows(now_ms);
+        entry.expire_violation_windows(now_ms, self.config.ban_duration_ms);
         // Preserve depleted buckets across clean reconnects. Retained entries remain bounded by
         // max_entries and are evicted through ordinary_lru when capacity is needed.
         self.insert_entry(*peer, entry);
@@ -324,7 +450,7 @@ impl PeerMessagePolicy {
 
 impl Default for PeerMessagePolicy {
     fn default() -> Self {
-        Self::new()
+        Self::new(PeerMessagePolicyConfig::default())
     }
 }
 
@@ -422,7 +548,7 @@ mod tests {
     fn paced_reestablishment_allows_more_channels_than_peer_burst() {
         const PERSISTED_CHANNELS: u32 = 540;
         let peer = Privkey::from_slice(&[21u8; 32]).pubkey();
-        let mut policy = PeerMessagePolicy::new();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig::default());
         let frame_bytes = FiberMessage::reestablish_channel(ReestablishChannel {
             channel_id: Default::default(),
             local_commitment_number: 0,
@@ -449,7 +575,7 @@ mod tests {
     #[test]
     fn temp_bans_repeated_invalid_messages_across_disconnect() {
         let peer = Privkey::from_slice(&[3u8; 32]).pubkey();
-        let mut policy = PeerMessagePolicy::new();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig::default());
 
         for _ in 1..PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
             assert!(!policy.record_invalid(&peer, 1_000));
@@ -467,7 +593,7 @@ mod tests {
     #[test]
     fn invalid_score_uses_fixed_window() {
         let peer = Privkey::from_slice(&[4u8; 32]).pubkey();
-        let mut policy = PeerMessagePolicy::new();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig::default());
 
         for index in 0..PEER_MESSAGE_VIOLATION_BAN_THRESHOLD {
             let now_ms =
@@ -567,5 +693,116 @@ mod tests {
         assert!(!policy.peers.contains_key(&expired_banned_peer));
         assert!(policy.peers.contains_key(&ordinary_peer));
         assert!(policy.peers.contains_key(&new_peer));
+    }
+
+    #[test]
+    fn fiber_config_default_matches_policy_default() {
+        let config = crate::fiber::config::FiberConfig::default();
+        assert_eq!(
+            config.peer_message_policy,
+            PeerMessagePolicyConfig::default()
+        );
+    }
+
+    #[test]
+    fn config_deserializes_partial_overrides() {
+        let config: PeerMessagePolicyConfig =
+            serde_json::from_str(r#"{"peer_message_interval_ms":1,"max_in_flight_messages":0}"#)
+                .expect("deserialize peer message policy config");
+
+        assert_eq!(config.peer_message_interval_ms, 1);
+        assert_eq!(config.peer_message_burst, PEER_MESSAGE_BURST);
+        assert_eq!(
+            config.peer_message_rate_bytes_per_sec,
+            PEER_MESSAGE_RATE_BYTES_PER_SEC
+        );
+        assert_eq!(config.peer_message_burst_bytes, PEER_MESSAGE_BURST_BYTES);
+        assert_eq!(
+            config.violation_ban_threshold,
+            PEER_MESSAGE_VIOLATION_BAN_THRESHOLD
+        );
+        assert_eq!(config.ban_duration_ms, PEER_MESSAGE_BAN_DURATION_MS);
+        assert_eq!(config.max_tracked_peers, PEER_MESSAGE_MAX_TRACKED_PEERS);
+        assert_eq!(config.max_in_flight_messages, 0);
+        assert_eq!(
+            config.max_in_flight_bytes,
+            FIBER_INGRESS_MAX_IN_FLIGHT_BYTES
+        );
+    }
+
+    #[test]
+    fn disabled_message_limit_allows_unbounded_burst() {
+        let peer = Privkey::from_slice(&[30u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig {
+            peer_message_interval_ms: 0,
+            peer_message_burst: 0,
+            ..PeerMessagePolicyConfig::default()
+        });
+
+        // Far beyond the default 400-message burst in a single instant.
+        for _ in 0..10_000 {
+            expect_allowed(&mut policy, &peer, 1, 0);
+        }
+        assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Allow);
+        policy.release_ingress(1);
+    }
+
+    #[test]
+    fn disabled_byte_limit_allows_large_frames() {
+        let peer = Privkey::from_slice(&[31u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig {
+            peer_message_rate_bytes_per_sec: 0,
+            peer_message_burst_bytes: 0,
+            // Unlimited ingress bytes, otherwise the huge frame fails the ingress budget.
+            max_in_flight_bytes: 0,
+            ..PeerMessagePolicyConfig::default()
+        });
+
+        assert_eq!(
+            policy.admit(&peer, 1024 * 1024 * 1024, 0),
+            PeerMessageAdmission::Allow
+        );
+        policy.release_ingress(1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn unlimited_ingress_budget_never_disconnects_on_overflow() {
+        let peer = Privkey::from_slice(&[32u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig {
+            // Disable the per-peer message limit too, otherwise the default 400-message
+            // burst rejects messages before the ingress budget is exercised.
+            peer_message_interval_ms: 0,
+            peer_message_burst: 0,
+            max_in_flight_messages: 0,
+            max_in_flight_bytes: 0,
+            ..PeerMessagePolicyConfig::default()
+        });
+
+        // Far beyond the default 4096-message in-flight budget: the budget is unlimited,
+        // so every message is admitted even without releasing any capacity.
+        for _ in 0..20_000 {
+            assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Allow);
+        }
+        assert_eq!(policy.in_flight(), (20_000, 20_000));
+    }
+
+    #[test]
+    fn zero_ban_threshold_never_bans() {
+        let peer = Privkey::from_slice(&[33u8; 32]).pubkey();
+        let mut policy = PeerMessagePolicy::new(PeerMessagePolicyConfig {
+            violation_ban_threshold: 0,
+            ..PeerMessagePolicyConfig::default()
+        });
+
+        // Exhaust the message bucket, then keep overflowing: repeated violations only
+        // disconnect, never ban.
+        for _ in 0..PEER_MESSAGE_BURST {
+            expect_allowed(&mut policy, &peer, 1, 0);
+        }
+        for _ in 0..PEER_MESSAGE_VIOLATION_BAN_THRESHOLD.saturating_mul(2) {
+            assert_eq!(policy.admit(&peer, 1, 0), PeerMessageAdmission::Disconnect);
+            policy.on_disconnected(&peer, 0);
+        }
+        assert!(!policy.is_banned(&peer, 0));
     }
 }

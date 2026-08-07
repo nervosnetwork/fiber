@@ -7199,7 +7199,9 @@ where
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new()));
+        let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new(
+            config.peer_message_policy,
+        )));
         let handle = NetworkServiceHandle::new(myself.clone(), peer_message_policy.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let peer_channel_index = PeerChannelIndex::build(&self.store);

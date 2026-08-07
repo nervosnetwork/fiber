@@ -1,4 +1,5 @@
 use crate::fiber::gossip_policy::GossipPolicyConfig;
+use crate::fiber::peer_message_policy::PeerMessagePolicyConfig;
 #[cfg(target_arch = "wasm32")]
 use crate::fiber::KeyPair;
 #[cfg(not(target_arch = "wasm32"))]
@@ -285,6 +286,15 @@ pub struct FiberConfig {
     #[serde(default)]
     #[default(GossipPolicyConfig::default())]
     pub(crate) gossip_policy: GossipPolicyConfig,
+
+    /// Peer message policy configuration. This is loaded from config files only and is
+    /// intentionally not configurable via command-line flags or environment variables.
+    /// Limits are disabled by setting the corresponding fields to 0; see
+    /// `PeerMessagePolicyConfig` for details.
+    #[arg(skip)]
+    #[serde(default)]
+    #[default(PeerMessagePolicyConfig::default())]
+    pub(crate) peer_message_policy: PeerMessagePolicyConfig,
 
     /// Gossip network num targeted active syncing peers. [default: None]
     /// This is the number of peers to target for active syncing. This is the number of peers that we will
