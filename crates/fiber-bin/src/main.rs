@@ -10,6 +10,7 @@ use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
+use fnn::lsp::{LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
 use fnn::store::open_store_with_migration;
@@ -436,6 +437,49 @@ async fn run_node(
             )
         }
         None => (None, None, None, None),
+    };
+
+    let _lsp_actor = match (config.lsp.clone(), network_actor.as_ref()) {
+        (Some(lsp_config), Some(public_network_actor)) => {
+            let public_fiber_config = config
+                .fiber
+                .as_ref()
+                .expect("running network actor has Fiber config");
+            lsp_config
+                .validate_store_separation(&public_fiber_config.store_path())
+                .map_err(ExitMessage)?;
+            let lsp_store = open_store_with_migration(
+                lsp_config.store_path(),
+                Box::new(cli_confirm),
+                Box::new(cli_progress),
+            )
+            .map_err(ExitMessage)?;
+            let public_node_id =
+                fnn::fiber::types::pubkey_from_tentacle(public_fiber_config.public_key());
+            info!("Starting multi-tenant LSP service");
+            Some(
+                Actor::spawn_linked(
+                    Some("lsp service".to_string()),
+                    LspService,
+                    LspServiceArgs {
+                        config: lsp_config,
+                        public_node_id,
+                        public_network_actor: public_network_actor.clone(),
+                        store: lsp_store,
+                    },
+                    root_actor.get_cell(),
+                )
+                .await
+                .map_err(|err| ExitMessage(format!("failed to start LSP service: {err}")))?
+                .0,
+            )
+        }
+        (Some(_), None) => {
+            return ExitMessage::err(
+                "LSP service requires the Fiber service to be enabled".to_string(),
+            );
+        }
+        (None, _) => None,
     };
 
     let cch_currency = config
