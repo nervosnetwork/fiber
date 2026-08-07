@@ -99,7 +99,9 @@ use crate::fiber::payment::{
     SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
-use crate::fiber::trampoline::TrampolineForwardingRequest;
+use crate::fiber::trampoline::{
+    TrampolineForwardingLimits, TrampolineForwardingRequest, TrampolineForwardingTracker,
+};
 use crate::fiber::types::{
     pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
     TxSignatures,
@@ -4377,10 +4379,29 @@ where
         state: &mut NetworkActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
+        let now = now_timestamp_as_millis_u64();
         let payment_hash = request.payment_hash;
+        let previous_channel_id = request.previous_tlc.prev_channel_id;
+        let max_outgoing_tlc_expiry = request.max_outgoing_tlc_expiry;
         let payment_data = request.into_send_payment_data().map_err(|_| {
             TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
         })?;
+        if let Err(rejection) = state.trampoline_forwarding_tracker.try_reserve(
+            payment_hash,
+            previous_channel_id,
+            max_outgoing_tlc_expiry,
+            now,
+            state.trampoline_forwarding_limits,
+        ) {
+            warn!(
+                "Trampoline forwarding rejected by resource policy: {}",
+                rejection.as_str()
+            );
+            return Err(TlcErr::new_node_fail(
+                TlcErrorCode::TemporaryNodeFailure,
+                state.get_public_key(),
+            ));
+        }
         let (send, _recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
 
@@ -4395,6 +4416,7 @@ where
         {
             Ok(()) => Ok(()),
             Err(e) => {
+                state.trampoline_forwarding_tracker.release(&payment_hash);
                 error!("Failed to start trampoline payment: {}", e);
                 Err(TlcErr::new_node_fail(
                     TlcErrorCode::TemporaryNodeFailure,
@@ -5098,6 +5120,8 @@ pub struct NetworkActorState<S, C> {
 
     // Inflight payment actors
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
+    trampoline_forwarding_limits: TrampolineForwardingLimits,
+    trampoline_forwarding_tracker: TrampolineForwardingTracker,
 
     // Pending replies for external funding channel requests.
     // When a user requests to open a channel with external funding, we store the reply port here
@@ -6989,13 +7013,16 @@ where
         if self.inflight_payments.remove(&payment_hash).is_none() {
             error!("Can't find inflight payment actor");
         }
-
         // If this payment has associated previous TLCs,
         // meaning it's a trampoline forwarding payment,
         // we need to resolve those upstream TLCs based on the payment outcome.
         let Some(session) = self.store.get_payment_session(payment_hash) else {
+            self.trampoline_forwarding_tracker.release(&payment_hash);
             return;
         };
+        if session.status.is_final() {
+            self.trampoline_forwarding_tracker.release(&payment_hash);
+        }
         let trampoline_context = session.request.trampoline_context.as_ref();
 
         if let Some(context) = trampoline_context {
@@ -7448,7 +7475,23 @@ where
 
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
-
+        let trampoline_forwarding_limits = TrampolineForwardingLimits::from(&config);
+        let mut trampoline_forwarding_tracker = TrampolineForwardingTracker::default();
+        for session in self.store.get_all_payment_sessions() {
+            if session.status.is_final() {
+                continue;
+            }
+            let Some(previous_tlc) = session
+                .request
+                .trampoline_context
+                .as_ref()
+                .and_then(|context| context.previous_tlcs.first())
+            else {
+                continue;
+            };
+            trampoline_forwarding_tracker
+                .track(session.request.payment_hash, previous_tlc.prev_channel_id);
+        }
         let mut state = NetworkActorState {
             store: self.store.clone(),
             state_to_be_persisted,
@@ -7497,6 +7540,8 @@ where
                 external_funding: Default::default(),
             },
             inflight_payments: Default::default(),
+            trampoline_forwarding_limits,
+            trampoline_forwarding_tracker,
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
             pending_channel_ready_retry_scans: Default::default(),
