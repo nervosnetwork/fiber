@@ -2659,7 +2659,9 @@ where
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(
                         channel_state,
-                        ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+                        ChannelState::ChannelReady
+                            | ChannelState::ShuttingDown(..)
+                            | ChannelState::AwaitingChannelReady(_)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
@@ -4014,7 +4016,9 @@ where
 
         if !matches!(
             state.state,
-            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+            ChannelState::ChannelReady
+                | ChannelState::ShuttingDown(..)
+                | ChannelState::AwaitingChannelReady(_)
         ) {
             return;
         }
