@@ -3082,7 +3082,16 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     if let TLCId::Offered(id) = tlc.tlc_id {
-                        state.tlc_state.set_offered_tlc_removed(id, reason);
+                        // A peer RemoveTlc may already have marked this TLC removed without the
+                        // commitment handshake completing (issue #1612). Only mark it again when
+                        // it was never removed: `set_offered_tlc_removed` asserts Committed.
+                        if state
+                            .tlc_state
+                            .get(&TLCId::Offered(id))
+                            .is_some_and(|t| t.removed_reason.is_none())
+                        {
+                            state.tlc_state.set_offered_tlc_removed(id, reason);
+                        }
                     }
                 }
             }

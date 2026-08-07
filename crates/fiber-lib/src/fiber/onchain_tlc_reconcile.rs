@@ -256,7 +256,6 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
     state
         .tlc_state
         .get_expired_offered_tlcs(expect_expiry)
-        .filter(|tlc| tlc.removed_reason.is_none())
         .filter_map(|tlc| {
             if !matches!(
                 resolve_onchain_tlc(
