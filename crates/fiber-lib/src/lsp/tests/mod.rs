@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -12,10 +13,11 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
 
 use crate::fiber::network::NetworkActorMessage;
-use crate::fiber_types::Privkey;
+use crate::fiber_types::{Hash256, Privkey};
+use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::{
-    HostedTenantRecord, HostedTenantRuntime, LspConfig, TenantId, TenantRegistry,
-    TenantRuntimeFactory, TenantSupervisor,
+    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspInvoiceRegistry, TenantId,
+    TenantRegistry, TenantRuntimeFactory, TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS,
 };
 use crate::store::open_store;
 
@@ -177,4 +179,112 @@ fn hosted_tenant_config_is_private_and_isolated() {
     assert_eq!(u1.listening_addr(), "/ip4/127.0.0.1/tcp/0");
     assert_ne!(u1.store_path(), u2.store_path());
     assert_ne!(u1.public_key().inner_ref(), u2.public_key().inner_ref());
+}
+
+fn signed_invoice(signing_key: &Privkey, payment_hash: Hash256) -> crate::invoice::CkbInvoice {
+    InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_hash(payment_hash)
+        .expiry_time(Duration::from_secs(60 * 60))
+        .build_with_sign(|message| {
+            secp256k1::SECP256K1.sign_ecdsa_recoverable(message, &signing_key.0)
+        })
+        .expect("build signed invoice")
+}
+
+#[test]
+fn hosted_invoice_registration_is_signed_and_persistent() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let invoices = LspInvoiceRegistry::new(store.clone());
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([7; 32]);
+    let invoice = signed_invoice(&tenant_key, payment_hash);
+
+    let registration = invoices
+        .register(&tenant, invoice, None, lsp_key.pubkey(), &lsp_key)
+        .expect("register invoice");
+    registration
+        .hint
+        .verify_for_invoice(&registration.invoice, crate::now_timestamp_as_millis_u64())
+        .expect("valid hint");
+    assert_eq!(
+        registration.hint.payload.buffer_duration_ms,
+        DEFAULT_LSP_BUFFER_DURATION_MS
+    );
+    assert_eq!(registration.hint.trampoline_hops(), [lsp_key.pubkey()]);
+
+    let reopened = LspInvoiceRegistry::new(store);
+    assert_eq!(reopened.get(&payment_hash).unwrap(), Some(registration));
+}
+
+#[test]
+fn hosted_invoice_hint_detects_tampering_and_expiry() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let invoices = LspInvoiceRegistry::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let mut hint = invoices
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, Hash256::from([8; 32])),
+            Some(30_000),
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap()
+        .hint;
+
+    hint.payload.payment_hash = Hash256::from([1; 32]);
+    assert_eq!(
+        hint.verify(crate::now_timestamp_as_millis_u64()),
+        Err("invalid LSP invoice hint signature".to_string())
+    );
+    hint.payload.expires_at = crate::now_timestamp_as_millis_u64();
+    assert_eq!(
+        hint.verify(crate::now_timestamp_as_millis_u64()),
+        Err("LSP invoice hint has expired".to_string())
+    );
+}
+
+#[test]
+fn hosted_invoice_must_be_signed_by_registered_tenant() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let invoices = LspInvoiceRegistry::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let other_key = Privkey::from(&[4; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+
+    let result = invoices.register(
+        &tenant,
+        signed_invoice(&other_key, Hash256::from([6; 32])),
+        None,
+        lsp_key.pubkey(),
+        &lsp_key,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        "hosted invoice payee does not match tenant u1"
+    );
 }

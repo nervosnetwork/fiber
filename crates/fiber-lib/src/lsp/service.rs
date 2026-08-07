@@ -3,12 +3,13 @@ use std::sync::Arc;
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::fiber::network::NetworkActorMessage;
-use crate::fiber_types::Pubkey;
+use crate::fiber_types::{Hash256, Privkey, Pubkey};
+use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
 use super::{
-    HostedTenantStatus, LspConfig, TenantId, TenantRegistry, TenantRuntimeFactory,
-    TenantRuntimeStatus, TenantSupervisor,
+    HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, TenantId,
+    TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -18,6 +19,7 @@ pub struct LspServiceArgs {
     pub public_network_actor: ActorRef<NetworkActorMessage>,
     pub store: Store,
     pub runtime_factory: Arc<dyn TenantRuntimeFactory>,
+    pub signing_key: Privkey,
 }
 
 /// Read-only status for callers that need to discover the hosted service.
@@ -40,6 +42,16 @@ pub enum LspServiceMessage {
         TenantId,
         RpcReplyPort<Option<ActorRef<NetworkActorMessage>>>,
     ),
+    RegisterInvoice {
+        tenant_id: TenantId,
+        invoice: CkbInvoice,
+        buffer_duration_ms: Option<u64>,
+        reply: RpcReplyPort<Result<LspInvoiceRegistration, String>>,
+    },
+    GetInvoiceRegistration(
+        Hash256,
+        RpcReplyPort<Result<Option<LspInvoiceRegistration>, String>>,
+    ),
 }
 
 /// Top-level container for the multi-tenant LSP subsystem.
@@ -53,7 +65,9 @@ pub struct LspServiceState {
     pub public_network_actor: ActorRef<NetworkActorMessage>,
     pub store: Store,
     pub registry: TenantRegistry<Store>,
+    pub invoice_registry: LspInvoiceRegistry<Store>,
     pub supervisor: TenantSupervisor,
+    pub signing_key: Privkey,
 }
 
 impl LspServiceState {
@@ -90,6 +104,7 @@ impl Actor for LspService {
     ) -> Result<Self::State, ActorProcessingErr> {
         args.config.validate().map_err(anyhow::Error::msg)?;
         let registry = TenantRegistry::new(args.store.clone());
+        let invoice_registry = LspInvoiceRegistry::new(args.store.clone());
         let supervisor =
             TenantSupervisor::new(args.runtime_factory.clone(), args.config.max_active_tenants);
         for tenant in &args.config.tenants {
@@ -105,7 +120,9 @@ impl Actor for LspService {
             public_network_actor: args.public_network_actor,
             store: args.store,
             registry,
+            invoice_registry,
             supervisor,
+            signing_key: args.signing_key,
         })
     }
 
@@ -164,6 +181,28 @@ impl Actor for LspService {
                     .runtime(&tenant_id)
                     .map(|runtime| runtime.network_actor.clone());
                 let _ = reply.send(actor);
+            }
+            LspServiceMessage::RegisterInvoice {
+                tenant_id,
+                invoice,
+                buffer_duration_ms,
+                reply,
+            } => {
+                let result = match state.registry.get(&tenant_id) {
+                    Ok(Some(tenant)) => state.invoice_registry.register(
+                        &tenant,
+                        invoice,
+                        buffer_duration_ms,
+                        state.public_node_id,
+                        &state.signing_key,
+                    ),
+                    Ok(None) => Err(format!("tenant {tenant_id} is not registered")),
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
+            LspServiceMessage::GetInvoiceRegistration(payment_hash, reply) => {
+                let _ = reply.send(state.invoice_registry.get(&payment_hash));
             }
         }
         Ok(())

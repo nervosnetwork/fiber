@@ -10,6 +10,7 @@ use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
+use fnn::fiber_types::Privkey;
 use fnn::lsp::{FiberTenantRuntimeFactory, LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
@@ -473,6 +474,16 @@ async fn run_node(
             .map_err(ExitMessage)?;
             let public_node_id =
                 fnn::fiber::types::pubkey_from_tentacle(public_fiber_config.public_key());
+            let public_key_pair =
+                public_fiber_config
+                    .read_or_generate_secret_key()
+                    .map_err(|error| {
+                        ExitMessage(format!("failed to read Public T signing key: {error}"))
+                    })?;
+            let signing_key =
+                Privkey::try_from_slice(public_key_pair.as_ref()).map_err(|error| {
+                    ExitMessage(format!("failed to decode Public T signing key: {error}"))
+                })?;
             info!("Starting multi-tenant LSP service");
             Some(
                 Actor::spawn_linked(
@@ -484,6 +495,7 @@ async fn run_node(
                         public_network_actor: public_network_actor.clone(),
                         store: lsp_store,
                         runtime_factory,
+                        signing_key,
                     },
                     root_actor.get_cell(),
                 )
