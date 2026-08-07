@@ -10,7 +10,7 @@ use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
-use fnn::lsp::{LspService, LspServiceArgs};
+use fnn::lsp::{FiberTenantRuntimeFactory, LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
 use fnn::store::open_store_with_migration;
@@ -199,6 +199,7 @@ async fn run_node(
         }
     });
 
+    let mut tenant_runtime_factory = None;
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
         Some(fiber_config) => {
@@ -284,7 +285,7 @@ async fn run_node(
             let chain_client = CkbRpcClient::new(&ckb_config);
             let network_actor: ActorRef<NetworkActorMessage> = start_network(
                 fiber_config.clone(),
-                chain_client,
+                chain_client.clone(),
                 ckb_chain_actor.clone(),
                 event_sender,
                 new_tokio_task_tracker(),
@@ -292,9 +293,21 @@ async fn run_node(
                 store.clone(),
                 Some(store_actor.clone()),
                 network_graph.clone(),
-                default_shutdown_script,
+                default_shutdown_script.clone(),
             )
             .await;
+
+            tenant_runtime_factory = config.lsp.clone().map(|lsp_config| {
+                Arc::new(FiberTenantRuntimeFactory::new(
+                    lsp_config,
+                    fiber_config.clone(),
+                    chain_client,
+                    ckb_chain_actor.clone(),
+                    network_actor.clone(),
+                    root_actor.get_cell(),
+                    default_shutdown_script,
+                ))
+            });
 
             if fiber_config.standalone_watchtower_rpc_url.is_none()
                 && fiber_config.disable_built_in_watchtower.unwrap_or_default()
@@ -439,8 +452,12 @@ async fn run_node(
         None => (None, None, None, None),
     };
 
-    let _lsp_actor = match (config.lsp.clone(), network_actor.as_ref()) {
-        (Some(lsp_config), Some(public_network_actor)) => {
+    let _lsp_actor = match (
+        config.lsp.clone(),
+        network_actor.as_ref(),
+        tenant_runtime_factory,
+    ) {
+        (Some(lsp_config), Some(public_network_actor), Some(runtime_factory)) => {
             let public_fiber_config = config
                 .fiber
                 .as_ref()
@@ -466,6 +483,7 @@ async fn run_node(
                         public_node_id,
                         public_network_actor: public_network_actor.clone(),
                         store: lsp_store,
+                        runtime_factory,
                     },
                     root_actor.get_cell(),
                 )
@@ -474,12 +492,15 @@ async fn run_node(
                 .0,
             )
         }
-        (Some(_), None) => {
+        (Some(_), None, _) => {
             return ExitMessage::err(
                 "LSP service requires the Fiber service to be enabled".to_string(),
             );
         }
-        (None, _) => None,
+        (Some(_), Some(_), None) => {
+            return ExitMessage::err("LSP tenant runtime factory is unavailable".to_string());
+        }
+        (None, _, _) => None,
     };
 
     let cch_currency = config
