@@ -24,6 +24,9 @@ use crate::lsp::{
 };
 use crate::store::open_store;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod integration;
+
 fn lsp_config(base_dir: PathBuf) -> LspConfig {
     LspConfig {
         base_dir: Some(base_dir),
