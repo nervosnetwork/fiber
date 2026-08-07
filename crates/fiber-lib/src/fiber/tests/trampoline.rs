@@ -28,8 +28,8 @@ use crate::{
 use fiber_types::Hash256;
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, CurrentPaymentHopData, HashAlgorithm,
-    InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, TLCId, TlcErrorCode,
-    TlcInfo, TlcStatus,
+    InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, RetryableTlcOperation,
+    TLCId, TlcErrorCode, TlcInfo, TlcStatus,
 };
 use ractor::{call, RpcReplyPort};
 use rand::Rng;
@@ -37,6 +37,15 @@ use secp256k1::SECP256K1;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
+
+async fn set_test_trampoline_settlement_paused(node: &NetworkNode, paused: bool) {
+    call!(node.network_actor, |reply| {
+        NetworkActorMessage::new_command(NetworkActorCommand::SetTestTrampolineSettlementPaused(
+            paused, reply,
+        ))
+    })
+    .expect("network actor alive");
+}
 
 #[test]
 fn test_trampoline_forwarding_limits_defaults() {
@@ -3785,6 +3794,195 @@ async fn test_trampoline_forwarding_limit_survives_restart() {
         ))
         .expect("settle held TLC");
     node_a.wait_until_success(first_payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_success_settlement_recovers_after_restart() {
+    init_tracing();
+
+    let (nodes, _) = create_n_nodes_network_with_visibility(
+        &[
+            (
+                (0, 1),
+                (MIN_RESERVED_CKB + 1_000_000, HUGE_CKB_AMOUNT),
+                true,
+            ),
+            (
+                (1, 2),
+                (MIN_RESERVED_CKB + 1_000_000, HUGE_CKB_AMOUNT),
+                false,
+            ),
+        ],
+        3,
+    )
+    .await;
+    let [mut node_a, mut node_t, mut node_c] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    set_test_trampoline_settlement_paused(&node_t, true).await;
+
+    let (invoice, _) = node_c.gen_basic_invoice(10_000);
+    let payment_hash = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("start trampoline payment")
+        .payment_hash;
+
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Success)
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .expect("payer payment session")
+            .status,
+        PaymentStatus::Inflight
+    );
+    let previous_tlc = *node_t
+        .store
+        .get_payment_session(payment_hash)
+        .expect("trampoline payment session")
+        .request
+        .trampoline_context
+        .as_ref()
+        .and_then(|context| context.previous_tlcs.first())
+        .expect("upstream trampoline TLC");
+    assert!(node_t
+        .store
+        .get_channel_actor_state(&previous_tlc.prev_channel_id)
+        .and_then(|state| {
+            state
+                .tlc_state
+                .get(&TLCId::Received(previous_tlc.prev_tlc_id))
+                .cloned()
+        })
+        .is_some_and(|tlc| tlc.removed_reason.is_none()));
+
+    node_t.restart().await;
+    node_a.connect_to(&mut node_t).await;
+    node_c.connect_to(&mut node_t).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_states(None)
+            .iter()
+            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
+            .count()
+            == 2
+    })
+    .await;
+    node_a.wait_until_success(payment_hash).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_actor_state(&previous_tlc.prev_channel_id)
+            .and_then(|state| {
+                state
+                    .tlc_state
+                    .get(&TLCId::Received(previous_tlc.prev_tlc_id))
+                    .cloned()
+            })
+            .is_none_or(|tlc| tlc.removed_reason.is_some())
+    })
+    .await;
+
+    // A second restart re-discovers the final session, but the settled upstream TLC is skipped.
+    node_t.restart().await;
+    node_a.connect_to(&mut node_t).await;
+    node_c.connect_to(&mut node_t).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_states(None)
+            .iter()
+            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
+            .count()
+            == 2
+    })
+    .await;
+    let upstream_state = node_t
+        .store
+        .get_channel_actor_state(&previous_tlc.prev_channel_id)
+        .expect("upstream channel state");
+    assert!(!upstream_state
+        .retryable_tlc_operations
+        .iter()
+        .any(|operation| matches!(
+            operation,
+            RetryableTlcOperation::RemoveTlc(TLCId::Received(tlc_id), _)
+                if *tlc_id == previous_tlc.prev_tlc_id
+        )));
+    node_a.wait_until_success(payment_hash).await;
+}
+
+#[tokio::test]
+async fn test_trampoline_failure_settlement_recovers_after_restart() {
+    init_tracing();
+
+    let channels = vec![(
+        (0, 1),
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )];
+    let (nodes, _) = create_n_nodes_network_with_params(&channels, 3, None).await;
+    let [mut node_a, mut node_t, node_b] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    set_test_trampoline_settlement_paused(&node_t, true).await;
+
+    let (invoice, _) = node_b.gen_basic_invoice(10_000);
+    let payment_hash = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("start trampoline payment")
+        .payment_hash;
+
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .expect("payer payment session")
+            .status,
+        PaymentStatus::Inflight
+    );
+
+    node_t.restart().await;
+    node_a.connect_to(&mut node_t).await;
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_channel_states(None)
+            .iter()
+            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
+            .count()
+            == 1
+    })
+    .await;
+    node_a.wait_until_failed(payment_hash).await;
 }
 
 #[tokio::test]

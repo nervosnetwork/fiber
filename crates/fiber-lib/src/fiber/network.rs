@@ -123,7 +123,7 @@ use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
     ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
+    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentSession, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
@@ -162,6 +162,39 @@ pub(crate) fn onchain_upstream_removed_reason_matches(
         .get(&TLCId::Received(tlc_id))
         .and_then(|tlc| tlc.removed_reason.as_ref())
         .is_some_and(|removed_reason| removed_reason == reason)
+}
+
+fn trampoline_upstream_tlc_needs_settlement(
+    state: &ChannelActorState,
+    payment_hash: Hash256,
+    previous_tlc: &PrevTlcInfo,
+) -> bool {
+    if state.retryable_tlc_operations.iter().any(|operation| {
+        matches!(
+            operation,
+            RetryableTlcOperation::RemoveTlc(tlc_id, _)
+                if *tlc_id == TLCId::Received(previous_tlc.prev_tlc_id)
+        )
+    }) {
+        return false;
+    }
+    let Some(tlc) = state
+        .tlc_state
+        .get(&TLCId::Received(previous_tlc.prev_tlc_id))
+    else {
+        return false;
+    };
+    if tlc.payment_hash != payment_hash {
+        error!(
+            "Refusing to settle mismatched upstream trampoline TLC: payment_hash={:?}, tlc_payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
+            payment_hash,
+            tlc.payment_hash,
+            previous_tlc.prev_channel_id,
+            previous_tlc.prev_tlc_id
+        );
+        return false;
+    }
+    tlc.removed_reason.is_none()
 }
 
 // (128 + 2) KB, 2 KB for custom records
@@ -963,6 +996,8 @@ pub enum NetworkActorCommand {
     ReleaseTestHeldFiberMessages(RpcReplyPort<Result<(), String>>),
     #[cfg(test)]
     GetTestHeldFiberMessageCount(RpcReplyPort<usize>),
+    #[cfg(test)]
+    SetTestTrampolineSettlementPaused(bool, RpcReplyPort<()>),
     // Check peer send us Init message in an expected time, otherwise disconnect with the peer.
     CheckPeerInit(Pubkey, SessionId),
     // Pace persisted channel reestablishment without blocking the NetworkActor. The channel ids
@@ -1865,6 +1900,10 @@ where
                     }
                 }
 
+                state
+                    .recover_trampoline_settlements_for_channel(channel_id)
+                    .await;
+
                 debug_event!(
                     myself,
                     format!(
@@ -2323,6 +2362,11 @@ where
             #[cfg(test)]
             NetworkActorCommand::GetTestHeldFiberMessageCount(reply) => {
                 let _ = reply.send(state.test_held_fiber_messages.len());
+            }
+            #[cfg(test)]
+            NetworkActorCommand::SetTestTrampolineSettlementPaused(paused, reply) => {
+                state.test_trampoline_settlement_paused = paused;
+                let _ = reply.send(());
             }
             NetworkActorCommand::ConnectPeer(addr, save, source, rpc_reply) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
@@ -5122,6 +5166,8 @@ pub struct NetworkActorState<S, C> {
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
     trampoline_forwarding_limits: TrampolineForwardingLimits,
     trampoline_forwarding_tracker: TrampolineForwardingTracker,
+    // Final trampoline payments that still have an unresolved upstream TLC, indexed by channel.
+    pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>>,
 
     // Pending replies for external funding channel requests.
     // When a user requests to open a channel with external funding, we store the reply port here
@@ -5140,6 +5186,8 @@ pub struct NetworkActorState<S, C> {
     test_fiber_message_hold: Option<TestFiberMessageHold>,
     #[cfg(test)]
     test_held_fiber_messages: VecDeque<FiberMessageWithTarget>,
+    #[cfg(test)]
+    test_trampoline_settlement_paused: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -7023,86 +7071,127 @@ where
         if session.status.is_final() {
             self.trampoline_forwarding_tracker.release(&payment_hash);
         }
-        let trampoline_context = session.request.trampoline_context.as_ref();
 
-        if let Some(context) = trampoline_context {
-            match session.status {
-                PaymentStatus::Success => {
-                    let preimage = session
-                        .attempts()
-                        .find(|a| a.is_success())
-                        .and_then(|a| a.preimage);
+        #[cfg(test)]
+        if self.test_trampoline_settlement_paused
+            && session.status.is_final()
+            && session.request.trampoline_context.is_some()
+        {
+            debug!("Test paused upstream trampoline settlement for {payment_hash}");
+            return;
+        }
 
-                    if let Some(preimage) = preimage {
-                        self.store.insert_preimage(payment_hash, preimage);
-                        for prev_tlc in &context.previous_tlcs {
-                            let (send, _recv) = oneshot::channel();
-                            let rpc_reply = RpcReplyPort::from(send);
-                            let command = ChannelCommand::RemoveTlc(
-                                RemoveTlcCommand {
-                                    id: prev_tlc.prev_tlc_id,
-                                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                        payment_preimage: preimage,
-                                    }),
-                                },
-                                rpc_reply,
-                            );
-                            if let Err(e) = self
-                                .send_command_to_channel(prev_tlc.prev_channel_id, command)
-                                .await
-                            {
-                                error!("Failed to send fulfillment to upstream channel: {:?}", e);
-                            }
-                        }
-                    } else {
-                        error!("Payment success but no preimage found for {payment_hash}");
-                    }
-                }
+        self.settle_trampoline_payment(&session, last_error_packet.as_ref(), None)
+            .await;
+    }
+
+    async fn settle_trampoline_payment(
+        &mut self,
+        session: &PaymentSession,
+        last_error_packet: Option<&TlcErrPacket>,
+        channel_filter: Option<Hash256>,
+    ) {
+        let Some(context) = session.request.trampoline_context.as_ref() else {
+            return;
+        };
+        let payment_hash = session.request.payment_hash;
+        let success_preimage = if session.status == PaymentStatus::Success {
+            session
+                .attempts()
+                .find(|attempt| attempt.is_success())
+                .and_then(|attempt| attempt.preimage)
+                .or_else(|| self.store.get_preimage(&payment_hash))
+        } else {
+            None
+        };
+        if session.status == PaymentStatus::Success {
+            let Some(preimage) = success_preimage else {
+                error!("Payment success but no preimage found for {payment_hash}");
+                return;
+            };
+            self.store.insert_preimage(payment_hash, preimage);
+        } else if !session.status.is_final() {
+            warn!("Trampoline payment stopped with unknown state for {payment_hash}");
+            return;
+        }
+
+        for previous_tlc in &context.previous_tlcs {
+            if channel_filter.is_some_and(|channel_id| channel_id != previous_tlc.prev_channel_id)
+                || !self
+                    .store
+                    .get_channel_actor_state(&previous_tlc.prev_channel_id)
+                    .is_some_and(|state| {
+                        trampoline_upstream_tlc_needs_settlement(&state, payment_hash, previous_tlc)
+                    })
+            {
+                continue;
+            }
+
+            let reason = match session.status {
+                PaymentStatus::Success => RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                    payment_preimage: success_preimage.expect("success preimage checked above"),
+                }),
                 PaymentStatus::Failed => {
+                    let Some(shared_secret) = previous_tlc.shared_secret else {
+                        error!(
+                            "Can't fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
+                            payment_hash,
+                            previous_tlc.prev_channel_id,
+                            previous_tlc.prev_tlc_id
+                        );
+                        continue;
+                    };
                     let error_code = session
                         .last_error_code
                         .unwrap_or(TlcErrorCode::TemporaryNodeFailure);
-                    for prev_tlc in &context.previous_tlcs {
-                        let (send, _recv) = oneshot::channel();
-                        let rpc_reply = RpcReplyPort::from(send);
-                        let Some(shared_secret) = prev_tlc.shared_secret else {
-                            error!(
-                                "Can't fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
-                                payment_hash, prev_tlc.prev_channel_id, prev_tlc.prev_tlc_id
-                            );
-                            continue;
-                        };
-                        let inner_error_packet = last_error_packet
-                            .as_ref()
-                            .map(|packet| packet.onion_packet.clone())
-                            .unwrap_or_else(|| {
-                                TlcErrPacket::new(TlcErr::new(error_code), &shared_secret)
-                                    .onion_packet
-                            });
-                        let wrapper_packet = TlcErrPacket::new_trampoline_failed(
-                            error_code,
-                            self.get_public_key(),
-                            inner_error_packet,
-                            &shared_secret,
-                        );
-                        let command = ChannelCommand::RemoveTlc(
-                            RemoveTlcCommand {
-                                id: prev_tlc.prev_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(wrapper_packet),
-                            },
-                            rpc_reply,
-                        );
-                        if let Err(e) = self
-                            .send_command_to_channel(prev_tlc.prev_channel_id, command)
-                            .await
-                        {
-                            error!("Failed to send failure to upstream channel: {:?}", e);
-                        }
-                    }
+                    let inner_error_packet = last_error_packet
+                        .map(|packet| packet.onion_packet.clone())
+                        .unwrap_or_else(|| {
+                            TlcErrPacket::new(TlcErr::new(error_code), &shared_secret).onion_packet
+                        });
+                    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new_trampoline_failed(
+                        error_code,
+                        self.get_public_key(),
+                        inner_error_packet,
+                        &shared_secret,
+                    ))
                 }
-                _ => {
-                    warn!("Trampoline payment stopped with unknown state for {payment_hash}");
-                }
+                PaymentStatus::Created | PaymentStatus::Inflight => unreachable!(),
+            };
+            let (send, _recv) = oneshot::channel();
+            let command = ChannelCommand::RemoveTlc(
+                RemoveTlcCommand {
+                    id: previous_tlc.prev_tlc_id,
+                    reason,
+                },
+                RpcReplyPort::from(send),
+            );
+            if let Err(error) = self
+                .send_command_to_channel(previous_tlc.prev_channel_id, command)
+                .await
+            {
+                error!(
+                    "Failed to settle upstream trampoline TLC: payment_hash={:?}, channel_id={:?}, tlc_id={:?}, error={:?}",
+                    payment_hash,
+                    previous_tlc.prev_channel_id,
+                    previous_tlc.prev_tlc_id,
+                    error
+                );
+            }
+        }
+    }
+
+    async fn recover_trampoline_settlements_for_channel(&mut self, channel_id: Hash256) {
+        let Some(payment_hashes) = self.pending_trampoline_settlements.remove(&channel_id) else {
+            return;
+        };
+        for payment_hash in payment_hashes {
+            let Some(session) = self.store.get_payment_session(payment_hash) else {
+                continue;
+            };
+            if session.status.is_final() {
+                self.settle_trampoline_payment(&session, None, Some(channel_id))
+                    .await;
             }
         }
     }
@@ -7477,20 +7566,35 @@ where
         let features = config.gen_node_features();
         let trampoline_forwarding_limits = TrampolineForwardingLimits::from(&config);
         let mut trampoline_forwarding_tracker = TrampolineForwardingTracker::default();
+        let mut pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>> = HashMap::new();
         for session in self.store.get_all_payment_sessions() {
-            if session.status.is_final() {
-                continue;
-            }
-            let Some(previous_tlc) = session
-                .request
-                .trampoline_context
-                .as_ref()
-                .and_then(|context| context.previous_tlcs.first())
-            else {
+            let Some(context) = session.request.trampoline_context.as_ref() else {
                 continue;
             };
-            trampoline_forwarding_tracker
-                .track(session.request.payment_hash, previous_tlc.prev_channel_id);
+            if session.status.is_final() {
+                for previous_tlc in &context.previous_tlcs {
+                    let upstream_tlc_is_unresolved = self
+                        .store
+                        .get_channel_actor_state(&previous_tlc.prev_channel_id)
+                        .is_some_and(|state| {
+                            trampoline_upstream_tlc_needs_settlement(
+                                &state,
+                                session.request.payment_hash,
+                                previous_tlc,
+                            )
+                        });
+                    if !upstream_tlc_is_unresolved {
+                        continue;
+                    }
+                    pending_trampoline_settlements
+                        .entry(previous_tlc.prev_channel_id)
+                        .or_default()
+                        .insert(session.request.payment_hash);
+                }
+            } else if let Some(previous_tlc) = context.previous_tlcs.first() {
+                trampoline_forwarding_tracker
+                    .track(session.request.payment_hash, previous_tlc.prev_channel_id);
+            }
         }
         let mut state = NetworkActorState {
             store: self.store.clone(),
@@ -7542,6 +7646,7 @@ where
             inflight_payments: Default::default(),
             trampoline_forwarding_limits,
             trampoline_forwarding_tracker,
+            pending_trampoline_settlements,
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
             pending_channel_ready_retry_scans: Default::default(),
@@ -7551,6 +7656,8 @@ where
             test_fiber_message_hold: None,
             #[cfg(test)]
             test_held_fiber_messages: Default::default(),
+            #[cfg(test)]
+            test_trampoline_settlement_paused: false,
         };
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
