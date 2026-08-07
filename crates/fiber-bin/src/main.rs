@@ -9,7 +9,10 @@ use fnn::ckb::contracts::TypeIDResolver;
 use fnn::ckb::contracts::{get_cell_deps, Contract};
 use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
-use fnn::fiber::{graph::NetworkGraph, network::init_chain_hash, network::NetworkActorMessage};
+use fnn::fiber::{
+    graph::NetworkGraph,
+    network::{init_chain_hash, NetworkActorCommand, NetworkActorMessage},
+};
 use fnn::fiber_types::Privkey;
 use fnn::lsp::{FiberTenantRuntimeFactory, LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
@@ -485,24 +488,30 @@ async fn run_node(
                     ExitMessage(format!("failed to decode Public T signing key: {error}"))
                 })?;
             info!("Starting multi-tenant LSP service");
-            Some(
-                Actor::spawn_linked(
-                    Some("lsp service".to_string()),
-                    LspService,
-                    LspServiceArgs {
-                        config: lsp_config,
-                        public_node_id,
-                        public_network_actor: public_network_actor.clone(),
-                        store: lsp_store,
-                        runtime_factory,
-                        signing_key,
-                    },
-                    root_actor.get_cell(),
-                )
-                .await
-                .map_err(|err| ExitMessage(format!("failed to start LSP service: {err}")))?
-                .0,
+            let lsp_actor = Actor::spawn_linked(
+                Some("lsp service".to_string()),
+                LspService,
+                LspServiceArgs {
+                    config: lsp_config,
+                    public_node_id,
+                    public_network_actor: public_network_actor.clone(),
+                    store: lsp_store,
+                    runtime_factory,
+                    signing_key,
+                },
+                root_actor.get_cell(),
             )
+            .await
+            .map_err(|err| ExitMessage(format!("failed to start LSP service: {err}")))?
+            .0;
+            public_network_actor
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SetLspService(lsp_actor.clone()),
+                ))
+                .map_err(|error| {
+                    ExitMessage(format!("failed to attach LSP service to Public T: {error}"))
+                })?;
+            Some(lsp_actor)
         }
         (Some(_), None, _) => {
             return ExitMessage::err(

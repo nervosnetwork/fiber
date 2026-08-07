@@ -12,12 +12,15 @@ use fiber_store::backend::StorageBackend;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
 
-use crate::fiber::network::NetworkActorMessage;
-use crate::fiber_types::{Hash256, Privkey};
+use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::trampoline::TrampolineForwardingRequest;
+use crate::fiber_types::{Hash256, HashAlgorithm, PrevTlcInfo, Privkey};
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::{
-    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspInvoiceRegistry, TenantId,
-    TenantRegistry, TenantRuntimeFactory, TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS,
+    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspInvoiceRegistry,
+    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspService, LspServiceArgs,
+    LspServiceMessage, TenantId, TenantRegistry, TenantRuntimeFactory, TenantSupervisor,
+    DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
 };
 use crate::store::open_store;
 
@@ -287,4 +290,334 @@ fn hosted_invoice_must_be_signed_by_registered_tenant() {
         result.unwrap_err(),
         "hosted invoice payee does not match tenant u1"
     );
+}
+
+fn hosted_forwarding_request(
+    tenant: &HostedTenantRecord,
+    payment_hash: Hash256,
+    now: u64,
+) -> TrampolineForwardingRequest {
+    let downstream_expiry = 60_000;
+    TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id: tenant.node_id,
+        amount_to_forward: 1_000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        build_max_fee_amount: 10,
+        tlc_expiry_delta: downstream_expiry,
+        tlc_expiry_limit: 60 * 60 * 1_000,
+        max_parts: None,
+        udt_type_script: None,
+        remaining_trampoline_onion: vec![1, 2, 3],
+        previous_tlc: PrevTlcInfo::new_with_shared_secret(Hash256::from([5; 32]), 1, 10, [6; 32]),
+        max_outgoing_tlc_expiry: now + downstream_expiry + LSP_DELIVERY_SAFETY_MARGIN_MS + 120_000,
+    }
+}
+
+#[test]
+fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let invoices = LspInvoiceRegistry::new(store.clone());
+    let deliveries = LspPaymentDeliveryManager::new(store.clone());
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([11; 32]);
+    let registration = invoices
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, payment_hash),
+            None,
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+
+    let delivery = deliveries
+        .accept(
+            &registration,
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            now,
+        )
+        .unwrap();
+    assert_eq!(delivery.buffer_deadline, now + 120_000);
+
+    let reopened = LspPaymentDeliveryManager::new(store);
+    assert_eq!(reopened.list_pending().unwrap(), vec![delivery]);
+}
+
+#[test]
+fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let invoices = LspInvoiceRegistry::new(store.clone());
+    let deliveries = LspPaymentDeliveryManager::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([12; 32]);
+    let registration = invoices
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, payment_hash),
+            None,
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    deliveries
+        .accept(
+            &registration,
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            now,
+        )
+        .unwrap();
+    let in_flight = deliveries
+        .transition(&payment_hash, LspPaymentDeliveryStatus::InFlight, now + 1)
+        .unwrap();
+
+    assert_eq!(in_flight.status, LspPaymentDeliveryStatus::InFlight);
+    assert_eq!(deliveries.list_pending().unwrap(), vec![in_flight]);
+}
+
+struct MockPublicNetworkActor;
+
+struct MockPublicNetworkState {
+    dispatches: Arc<AtomicUsize>,
+    failures: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Actor for MockPublicNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = MockPublicNetworkState;
+    type Arguments = MockPublicNetworkState;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let NetworkActorMessage::Command(command) = message else {
+            return Ok(());
+        };
+        match command {
+            NetworkActorCommand::GetPayment(_, reply) => {
+                let _ = reply.send(Err("payment not started".to_string()));
+            }
+            NetworkActorCommand::DispatchBufferedTrampoline { reply, .. } => {
+                state.dispatches.fetch_add(1, Ordering::Relaxed);
+                let _ = reply.send(Ok(()));
+            }
+            NetworkActorCommand::FailBufferedTrampoline { reply, .. } => {
+                state.failures.fetch_add(1, Ordering::Relaxed);
+                let _ = reply.send(Ok(true));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+async fn start_test_lsp_service(
+    store: crate::store::Store,
+    config: LspConfig,
+    factory: Arc<dyn TenantRuntimeFactory>,
+    lsp_key: Privkey,
+    dispatches: Arc<AtomicUsize>,
+    failures: Arc<AtomicUsize>,
+) -> ActorRef<LspServiceMessage> {
+    let public_network_actor = Actor::spawn(
+        None,
+        MockPublicNetworkActor,
+        MockPublicNetworkState {
+            dispatches,
+            failures,
+        },
+    )
+    .await
+    .unwrap()
+    .0;
+    Actor::spawn(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: lsp_key.pubkey(),
+            public_network_actor,
+            store,
+            runtime_factory: factory,
+            signing_key: lsp_key,
+        },
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+async fn register_test_invoice(
+    service: &ActorRef<LspServiceMessage>,
+    tenant_key: &Privkey,
+    payment_hash: Hash256,
+) {
+    ractor::call!(service, |reply| LspServiceMessage::RegisterInvoice {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice: signed_invoice(tenant_key, payment_hash),
+        buffer_duration_ms: None,
+        reply,
+    })
+    .unwrap()
+    .unwrap();
+}
+
+async fn wait_for_delivery_status(
+    manager: &LspPaymentDeliveryManager<crate::store::Store>,
+    payment_hash: Hash256,
+    expected: LspPaymentDeliveryStatus,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager
+                .get(&payment_hash)
+                .unwrap()
+                .is_some_and(|delivery| delivery.status == expected)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("delivery reached expected status");
+}
+
+#[tokio::test]
+async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let starts = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new(FakeRuntimeFactory { starts });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        lsp_key,
+        dispatches.clone(),
+        failures.clone(),
+    )
+    .await;
+    let payment_hash = Hash256::from([13; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let now = crate::now_timestamp_as_millis_u64();
+
+    assert_eq!(
+        ractor::call!(service, |reply| {
+            LspServiceMessage::AcceptTrampolineDelivery(
+                hosted_forwarding_request(&tenant, payment_hash, now),
+                reply,
+            )
+        })
+        .unwrap()
+        .unwrap(),
+        crate::lsp::LspDeliveryDecision::Buffered
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(tenant.node_id))
+        .unwrap();
+    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+    assert_eq!(dispatches.load(Ordering::Relaxed), 1);
+
+    service
+        .send_message(LspServiceMessage::ExpireDelivery(payment_hash))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(failures.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn cold_tenant_delivery_fails_at_buffer_deadline() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        failures.clone(),
+    )
+    .await;
+    let payment_hash = Hash256::from([14; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        node_id: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let now = crate::now_timestamp_as_millis_u64();
+    let mut request = hosted_forwarding_request(&tenant, payment_hash, now);
+    request.max_outgoing_tlc_expiry =
+        now + request.tlc_expiry_delta + LSP_DELIVERY_SAFETY_MARGIN_MS + 200;
+
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(request, reply)
+    })
+    .unwrap()
+    .unwrap();
+    wait_for_delivery_status(
+        &manager,
+        payment_hash,
+        LspPaymentDeliveryStatus::Failed {
+            reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(failures.load(Ordering::Relaxed), 1);
 }

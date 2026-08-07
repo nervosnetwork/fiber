@@ -1,10 +1,12 @@
 use std::collections::{hash_map::Entry, HashMap};
 
 use ckb_types::packed::Script;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 use super::config::FiberConfig;
 use super::payment::{SendPaymentData, SendPaymentDataBuilder};
-use fiber_types::{Hash256, HashAlgorithm, PrevTlcInfo, Pubkey, TrampolineContext};
+use fiber_types::{EntityHex, Hash256, HashAlgorithm, PrevTlcInfo, Pubkey, TrampolineContext};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrampolineForwardingRejection {
@@ -119,8 +121,9 @@ impl TrampolineForwardingTracker {
 ///
 /// Keeping this separate from `PaymentActor` construction gives the hosted LSP
 /// integration a narrow point where it can later choose to defer delivery.
-#[derive(Clone, Debug)]
-pub(crate) struct TrampolineForwardingRequest {
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TrampolineForwardingRequest {
     pub payment_hash: Hash256,
     pub next_node_id: Pubkey,
     pub amount_to_forward: u128,
@@ -129,6 +132,7 @@ pub(crate) struct TrampolineForwardingRequest {
     pub tlc_expiry_delta: u64,
     pub tlc_expiry_limit: u64,
     pub max_parts: Option<u64>,
+    #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub remaining_trampoline_onion: Vec<u8>,
     pub previous_tlc: PrevTlcInfo,

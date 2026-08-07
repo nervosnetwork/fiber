@@ -1,15 +1,19 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
-use crate::fiber::network::NetworkActorMessage;
-use crate::fiber_types::{Hash256, Privkey, Pubkey};
+use crate::fiber::{
+    network::{NetworkActorCommand, NetworkActorMessage},
+    trampoline::TrampolineForwardingRequest,
+};
+use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey};
 use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
 use super::{
-    HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, TenantId,
-    TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
+    HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry,
+    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, TenantId, TenantRegistry,
+    TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -29,6 +33,13 @@ pub struct LspServiceStatus {
     pub tenant_store_root: std::path::PathBuf,
     pub registered_tenants: usize,
     pub active_tenants: usize,
+}
+
+/// Result of consulting the hosted invoice registry for an incoming trampoline TLC.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LspDeliveryDecision {
+    NotHosted,
+    Buffered,
 }
 
 /// Commands accepted by the LSP service container.
@@ -52,6 +63,15 @@ pub enum LspServiceMessage {
         Hash256,
         RpcReplyPort<Result<Option<LspInvoiceRegistration>, String>>,
     ),
+    AcceptTrampolineDelivery(
+        TrampolineForwardingRequest,
+        RpcReplyPort<Result<LspDeliveryDecision, String>>,
+    ),
+    ResumeDelivery(Hash256),
+    ExpireDelivery(Hash256),
+    TenantChannelOnline(Pubkey),
+    TenantChannelOffline(Pubkey),
+    PaymentOutcome(Hash256, PaymentStatus),
 }
 
 /// Top-level container for the multi-tenant LSP subsystem.
@@ -66,8 +86,10 @@ pub struct LspServiceState {
     pub store: Store,
     pub registry: TenantRegistry<Store>,
     pub invoice_registry: LspInvoiceRegistry<Store>,
+    pub delivery_manager: LspPaymentDeliveryManager<Store>,
     pub supervisor: TenantSupervisor,
     pub signing_key: Privkey,
+    pub ready_tenants: HashSet<Pubkey>,
 }
 
 impl LspServiceState {
@@ -89,6 +111,53 @@ impl LspServiceState {
             .map(|record| self.tenant_status(record))
             .ok_or_else(|| format!("tenant {tenant_id} is not registered"))
     }
+
+    fn schedule_delivery_deadline(
+        myself: &ActorRef<LspServiceMessage>,
+        payment_hash: Hash256,
+        deadline: u64,
+    ) {
+        let delay = deadline.saturating_sub(crate::now_timestamp_as_millis_u64());
+        myself.send_after(Duration::from_millis(delay), move || {
+            LspServiceMessage::ExpireDelivery(payment_hash)
+        });
+    }
+
+    fn schedule_delivery_retry(
+        myself: &ActorRef<LspServiceMessage>,
+        payment_hash: Hash256,
+        deadline: u64,
+    ) {
+        let remaining = deadline.saturating_sub(crate::now_timestamp_as_millis_u64());
+        if remaining == 0 {
+            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
+        } else {
+            myself.send_after(Duration::from_millis(remaining.min(1_000)), move || {
+                LspServiceMessage::ResumeDelivery(payment_hash)
+            });
+        }
+    }
+
+    fn update_from_payment_status(
+        &self,
+        payment_hash: &Hash256,
+        status: PaymentStatus,
+        failure: Option<String>,
+    ) -> Result<(), String> {
+        let delivery_status = match status {
+            PaymentStatus::Created | PaymentStatus::Inflight => LspPaymentDeliveryStatus::InFlight,
+            PaymentStatus::Success => LspPaymentDeliveryStatus::Succeeded,
+            PaymentStatus::Failed => LspPaymentDeliveryStatus::Failed {
+                reason: failure.unwrap_or_else(|| "downstream payment failed".to_string()),
+            },
+        };
+        self.delivery_manager.transition(
+            payment_hash,
+            delivery_status,
+            crate::now_timestamp_as_millis_u64(),
+        )?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -99,12 +168,13 @@ impl Actor for LspService {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         args.config.validate().map_err(anyhow::Error::msg)?;
         let registry = TenantRegistry::new(args.store.clone());
         let invoice_registry = LspInvoiceRegistry::new(args.store.clone());
+        let delivery_manager = LspPaymentDeliveryManager::new(args.store.clone());
         let supervisor =
             TenantSupervisor::new(args.runtime_factory.clone(), args.config.max_active_tenants);
         for tenant in &args.config.tenants {
@@ -114,6 +184,17 @@ impl Actor for LspService {
                 .map_err(anyhow::Error::msg)?;
             registry.register(record).map_err(anyhow::Error::msg)?;
         }
+        for delivery in delivery_manager
+            .list_pending()
+            .map_err(anyhow::Error::msg)?
+        {
+            let _ = myself.send_message(LspServiceMessage::ResumeDelivery(delivery.payment_hash));
+            LspServiceState::schedule_delivery_deadline(
+                &myself,
+                delivery.payment_hash,
+                delivery.buffer_deadline,
+            );
+        }
         Ok(LspServiceState {
             config: args.config,
             public_node_id: args.public_node_id,
@@ -121,14 +202,16 @@ impl Actor for LspService {
             store: args.store,
             registry,
             invoice_registry,
+            delivery_manager,
             supervisor,
             signing_key: args.signing_key,
+            ready_tenants: HashSet::new(),
         })
     }
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -163,6 +246,9 @@ impl Actor for LspService {
                 let _ = reply.send(result);
             }
             LspServiceMessage::EvictTenant(tenant_id, reply) => {
+                if let Some(record) = state.registry.get(&tenant_id)? {
+                    state.ready_tenants.remove(&record.node_id);
+                }
                 state.supervisor.evict(&tenant_id);
                 let _ = reply.send(state.get_tenant_status(&tenant_id));
             }
@@ -204,7 +290,220 @@ impl Actor for LspService {
             LspServiceMessage::GetInvoiceRegistration(payment_hash, reply) => {
                 let _ = reply.send(state.invoice_registry.get(&payment_hash));
             }
+            LspServiceMessage::AcceptTrampolineDelivery(request, reply) => {
+                let result = match state.invoice_registry.get(&request.payment_hash) {
+                    Ok(None) => Ok(LspDeliveryDecision::NotHosted),
+                    Ok(Some(registration)) => state
+                        .delivery_manager
+                        .accept(&registration, request, crate::now_timestamp_as_millis_u64())
+                        .map(|delivery| {
+                            LspServiceState::schedule_delivery_deadline(
+                                &myself,
+                                delivery.payment_hash,
+                                delivery.buffer_deadline,
+                            );
+                            let _ = myself.send_message(LspServiceMessage::ResumeDelivery(
+                                delivery.payment_hash,
+                            ));
+                            LspDeliveryDecision::Buffered
+                        }),
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
+            LspServiceMessage::ResumeDelivery(payment_hash) => {
+                self.resume_delivery(myself, state, payment_hash).await?;
+            }
+            LspServiceMessage::ExpireDelivery(payment_hash) => {
+                self.expire_delivery(myself, state, payment_hash).await?;
+            }
+            LspServiceMessage::TenantChannelOnline(node_id) => {
+                state.ready_tenants.insert(node_id);
+                let tenant_ids: HashSet<_> = state
+                    .registry
+                    .list()?
+                    .into_iter()
+                    .filter(|tenant| tenant.node_id == node_id)
+                    .map(|tenant| tenant.tenant_id)
+                    .collect();
+                for delivery in state.delivery_manager.list_pending()? {
+                    if tenant_ids.contains(&delivery.tenant_id) {
+                        let _ = myself
+                            .send_message(LspServiceMessage::ResumeDelivery(delivery.payment_hash));
+                    }
+                }
+            }
+            LspServiceMessage::TenantChannelOffline(node_id) => {
+                state.ready_tenants.remove(&node_id);
+            }
+            LspServiceMessage::PaymentOutcome(payment_hash, payment_status) => {
+                if state
+                    .delivery_manager
+                    .get(&payment_hash)?
+                    .is_some_and(|delivery| !delivery.status.is_final())
+                {
+                    state.update_from_payment_status(&payment_hash, payment_status, None)?;
+                }
+            }
         }
+        Ok(())
+    }
+}
+
+impl LspService {
+    async fn resume_delivery(
+        &self,
+        myself: ActorRef<LspServiceMessage>,
+        state: &mut LspServiceState,
+        payment_hash: Hash256,
+    ) -> Result<(), String> {
+        let Some(mut delivery) = state.delivery_manager.get(&payment_hash)? else {
+            return Ok(());
+        };
+        if delivery.status.is_final() {
+            return Ok(());
+        }
+        let _ = state
+            .public_network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
+            ));
+
+        let existing_payment = ractor::call_t!(
+            state.public_network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
+                payment_hash,
+                reply,
+            )),
+            5_000
+        );
+        if let Ok(Ok(payment)) = existing_payment {
+            state.update_from_payment_status(
+                &payment_hash,
+                payment.status,
+                payment.failed_error,
+            )?;
+            return Ok(());
+        }
+
+        let now = crate::now_timestamp_as_millis_u64();
+        if now >= delivery.buffer_deadline {
+            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
+            return Ok(());
+        }
+        let Some(tenant) = state.registry.get(&delivery.tenant_id)? else {
+            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
+            return Ok(());
+        };
+        if let Err(error) = state.supervisor.ensure(&tenant).await {
+            tracing::debug!(
+                "Deferred hosted delivery {} while tenant {} starts: {}",
+                payment_hash,
+                delivery.tenant_id,
+                error
+            );
+            state.delivery_manager.transition(
+                &payment_hash,
+                LspPaymentDeliveryStatus::Deferred,
+                now,
+            )?;
+            LspServiceState::schedule_delivery_retry(
+                &myself,
+                payment_hash,
+                delivery.buffer_deadline,
+            );
+            return Ok(());
+        }
+        if !state.ready_tenants.contains(&tenant.node_id) {
+            state.delivery_manager.transition(
+                &payment_hash,
+                LspPaymentDeliveryStatus::Deferred,
+                now,
+            )?;
+            return Ok(());
+        }
+
+        delivery = state.delivery_manager.transition(
+            &payment_hash,
+            LspPaymentDeliveryStatus::Dispatching,
+            now,
+        )?;
+        let dispatch_result = ractor::call_t!(
+            state.public_network_actor,
+            |reply| NetworkActorMessage::new_command(
+                NetworkActorCommand::DispatchBufferedTrampoline {
+                    request: delivery.request.clone(),
+                    reply,
+                },
+            ),
+            10_000
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+        match dispatch_result {
+            Ok(()) => {
+                state.delivery_manager.transition(
+                    &payment_hash,
+                    LspPaymentDeliveryStatus::InFlight,
+                    crate::now_timestamp_as_millis_u64(),
+                )?;
+            }
+            Err(error) => {
+                state.delivery_manager.transition(
+                    &payment_hash,
+                    LspPaymentDeliveryStatus::Failed { reason: error },
+                    crate::now_timestamp_as_millis_u64(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn expire_delivery(
+        &self,
+        myself: ActorRef<LspServiceMessage>,
+        state: &mut LspServiceState,
+        payment_hash: Hash256,
+    ) -> Result<(), String> {
+        let Some(delivery) = state.delivery_manager.get(&payment_hash)? else {
+            return Ok(());
+        };
+        if matches!(
+            delivery.status,
+            LspPaymentDeliveryStatus::InFlight
+                | LspPaymentDeliveryStatus::Succeeded
+                | LspPaymentDeliveryStatus::Failed { .. }
+        ) {
+            return Ok(());
+        }
+        let now = crate::now_timestamp_as_millis_u64();
+        if now < delivery.buffer_deadline {
+            LspServiceState::schedule_delivery_deadline(
+                &myself,
+                payment_hash,
+                delivery.buffer_deadline,
+            );
+            return Ok(());
+        }
+        let reason = "hosted tenant was unavailable before the buffer deadline".to_string();
+        let failed = ractor::call_t!(
+            state.public_network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
+                request: delivery.request.clone(),
+                reason: reason.clone(),
+                reply,
+            },),
+            10_000
+        )
+        .map_err(|error| error.to_string())??;
+        let status = if failed {
+            LspPaymentDeliveryStatus::Failed { reason }
+        } else {
+            LspPaymentDeliveryStatus::InFlight
+        };
+        state
+            .delivery_manager
+            .transition(&payment_hash, status, now)?;
         Ok(())
     }
 }
