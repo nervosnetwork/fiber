@@ -1035,10 +1035,9 @@ function Download-Binary {
 
     $fnnExe = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "fnn.exe"
     $fnnCliExe = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "fnn-cli.exe"
-    $fnnMigrateExe = Find-FirstFileInDirectory -SearchPath $tempDir -FileName "fnn-migrate.exe"
     $configDir = Find-FirstDirectoryInDirectory -SearchPath $tempDir -DirectoryName "config"
 
-    if (-not $fnnExe -or -not $fnnCliExe -or -not $fnnMigrateExe -or -not $configDir) {
+    if (-not $fnnExe -or -not $fnnCliExe -or -not $configDir) {
         Write-FnnError "The downloaded release bundle is missing required files."
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
         exit 1
@@ -1046,7 +1045,6 @@ function Download-Binary {
 
     Copy-Item $fnnExe.FullName "$InstallDir\fnn.exe"
     Copy-Item $fnnCliExe.FullName "$InstallDir\fnn-cli.exe"
-    Copy-Item $fnnMigrateExe.FullName "$InstallDir\fnn-migrate.exe"
     Remove-Item -Recurse -Force "$InstallDir\config" -ErrorAction SilentlyContinue
     Copy-Item $configDir.FullName "$InstallDir\config" -Recurse
 
@@ -1408,7 +1406,6 @@ function Show-Summary {
     Write-Host "Important files:"
     Write-Host "  - fnn.exe          : Node binary"
     Write-Host "  - fnn-cli.exe      : CLI utility"
-    Write-Host "  - fnn-migrate.exe  : Database migration utility"
     Write-Host "  - config\          : Bundled config templates"
     Write-Host "  - config.yml       : Configuration file"
     Write-Host "  - ckb\key          : Private key (KEEP SECURE!)"

@@ -642,7 +642,6 @@ install_fnn_binary() {
 
     install_required_artifact_from_search_dir "$extract_dir" "fnn" "$install_dir" "fnn" "Node binary" file
     install_required_artifact_from_search_dir "$extract_dir" "fnn-cli" "$install_dir" "fnn-cli" "CLI binary" file
-    install_required_artifact_from_search_dir "$extract_dir" "fnn-migrate" "$install_dir" "fnn-migrate" "Migration binary" file
     install_required_artifact_from_search_dir "$extract_dir" "config" "$install_dir" "config" "Configuration templates" dir
     rm -rf "$temp_dir"
 }
@@ -652,7 +651,6 @@ install_local_fnn_binary() {
     local install_dir="$2"
     local source_abs
     local source_dir
-    local migrate_candidate
 
     if [ ! -f "$source_path" ]; then
         print_error "Local fnn binary not found: $source_path"
@@ -673,22 +671,6 @@ install_local_fnn_binary() {
         "$source_dir/fnn-cli"
     then
         print_warning "Local fnn-cli binary not found next to $source_abs."
-    fi
-
-    for migrate_candidate in \
-        "$source_dir/fnn-migrate" \
-        "$source_dir/../../migrate/target/release/fnn-migrate"
-    do
-        if [ -f "$migrate_candidate" ]; then
-            copy_binary_to_install_dir "$migrate_candidate" "$install_dir" "fnn-migrate"
-            print_success "Migration binary installed to $install_dir/fnn-migrate"
-            break
-        fi
-    done
-
-    if [ ! -f "$install_dir/fnn-migrate" ]; then
-        print_warning "Local fnn-migrate binary not found next to $source_abs."
-        echo "  Copy fnn-migrate into $install_dir manually if you need to run database migrations."
     fi
 
     if ! install_first_existing_artifact \
@@ -850,7 +832,6 @@ has_release_bundle() {
 
     [ -f "$install_dir/fnn" ] &&
         [ -f "$install_dir/fnn-cli" ] &&
-        [ -f "$install_dir/fnn-migrate" ] &&
         [ -d "$install_dir/config" ]
 }
 
@@ -1532,7 +1513,6 @@ print_summary() {
     echo "Important files:"
     echo "  - fnn              : Node binary"
     echo "  - fnn-cli          : CLI utility"
-    echo "  - fnn-migrate      : Database migration utility"
     echo "  - config/          : Bundled config templates"
     echo "  - config.yml       : Configuration file"
     echo "  - ckb/key          : Private key (KEEP SECURE!)"
@@ -1713,7 +1693,6 @@ run_bootstrap_install() {
     echo "Release bundle installed to: $INSTALL_DIR"
     echo "  - $INSTALL_DIR/fnn"
     echo "  - $INSTALL_DIR/fnn-cli"
-    echo "  - $INSTALL_DIR/fnn-migrate"
     echo "  - $INSTALL_DIR/config"
     echo "  - $INSTALL_DIR/tools/install/install.sh"
     echo "ckb-cli is available at: $CKB_CLI_HINT_PATH"
