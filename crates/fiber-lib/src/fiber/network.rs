@@ -96,9 +96,10 @@ use crate::fiber::onchain_tlc_reconcile::{
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
-    SendPaymentDataBuilder, SendPaymentWithRouterCommand,
+    SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
+use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::{
     pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
     TxSignatures,
@@ -124,7 +125,7 @@ use fiber_types::{
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
     RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -4341,55 +4342,60 @@ where
                     return Err(TlcErr::new(TlcErrorCode::IncorrectTlcExpiry));
                 }
 
-                let payment_data =
-                    SendPaymentDataBuilder::new(next_node_id, amount_to_forward, payment_hash)
-                        .final_tlc_expiry_delta(tlc_expiry_delta)
-                        .tlc_expiry_limit(tlc_expiry_limit)
-                        .max_fee_amount(Some(build_max_fee_amount))
-                        .max_parts(max_parts)
-                        .udt_type_script(udt_type_script)
-                        .trampoline_context(Some(TrampolineContext {
-                            remaining_trampoline_onion,
-                            // currently we only support single previous tlc in trampoline forwarding,
-                            // maybe we need to support multiple previous tlcs in the future
-                            previous_tlcs: vec![prev_tlc],
-                            hash_algorithm,
-                            max_outgoing_tlc_expiry: Some(max_outgoing_tlc_expiry),
-                        }))
-                        .allow_mpp(max_parts.is_some_and(|v| v > 1))
-                        .build()
-                        .map_err(|_| {
-                            TlcErr::new_node_fail(
-                                TlcErrorCode::TemporaryNodeFailure,
-                                state.get_public_key(),
-                            )
-                        })?;
-
-                let (send, _recv) = oneshot::channel();
-                let rpc_reply = RpcReplyPort::from(send);
-
-                match self
-                    .start_payment_actor(
-                        state.network.clone(),
-                        state,
+                self.dispatch_trampoline_forwarding(
+                    state,
+                    TrampolineForwardingRequest {
                         payment_hash,
-                        PaymentActorMessage::SendPayment(payment_data, rpc_reply),
-                    )
-                    .await
-                {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        error!("Failed to start trampoline payment: {}", e);
-                        Err(TlcErr::new_node_fail(
-                            TlcErrorCode::TemporaryNodeFailure,
-                            state.get_public_key(),
-                        ))
-                    }
-                }
+                        next_node_id,
+                        amount_to_forward,
+                        hash_algorithm,
+                        build_max_fee_amount,
+                        tlc_expiry_delta,
+                        tlc_expiry_limit,
+                        max_parts,
+                        udt_type_script,
+                        remaining_trampoline_onion,
+                        previous_tlc: prev_tlc,
+                        max_outgoing_tlc_expiry,
+                    },
+                )
+                .await
             }
             TrampolineHopPayload::Final { .. } => {
                 // The channel actor should directly settle when this node is the final recipient.
                 // This case should not happen.
+                Err(TlcErr::new_node_fail(
+                    TlcErrorCode::TemporaryNodeFailure,
+                    state.get_public_key(),
+                ))
+            }
+        }
+    }
+
+    async fn dispatch_trampoline_forwarding(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        request: TrampolineForwardingRequest,
+    ) -> Result<(), TlcErr> {
+        let payment_hash = request.payment_hash;
+        let payment_data = request.into_send_payment_data().map_err(|_| {
+            TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+        })?;
+        let (send, _recv) = oneshot::channel();
+        let rpc_reply = RpcReplyPort::from(send);
+
+        match self
+            .start_payment_actor(
+                state.network.clone(),
+                state,
+                payment_hash,
+                PaymentActorMessage::SendPayment(payment_data, rpc_reply),
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                error!("Failed to start trampoline payment: {}", e);
                 Err(TlcErr::new_node_fail(
                     TlcErrorCode::TemporaryNodeFailure,
                     state.get_public_key(),

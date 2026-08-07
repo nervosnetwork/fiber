@@ -8,6 +8,7 @@ use crate::fiber::network::{
     DebugEvent, NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand,
 };
 use crate::fiber::payment::SendPaymentCommand;
+use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
@@ -30,6 +31,52 @@ use secp256k1::SECP256K1;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, error};
+
+#[test]
+fn test_trampoline_forwarding_request_preserves_dispatch_context() {
+    let payment_hash = gen_rand_sha256_hash();
+    let next_node_id = gen_rand_fiber_public_key();
+    let previous_tlc =
+        PrevTlcInfo::new_with_shared_secret(gen_rand_sha256_hash(), 42, 100, [7u8; 32]);
+    let remaining_trampoline_onion = vec![1, 2, 3];
+    let max_outgoing_tlc_expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+
+    let payment_data = TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id,
+        amount_to_forward: 1_000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        build_max_fee_amount: 100,
+        tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+        max_parts: Some(2),
+        udt_type_script: None,
+        remaining_trampoline_onion: remaining_trampoline_onion.clone(),
+        previous_tlc,
+        max_outgoing_tlc_expiry,
+    }
+    .into_send_payment_data()
+    .expect("valid trampoline forwarding request");
+
+    assert_eq!(payment_data.payment_hash, payment_hash);
+    assert_eq!(payment_data.target_pubkey, next_node_id);
+    assert_eq!(payment_data.amount, 1_000);
+    assert_eq!(payment_data.max_fee_amount, Some(100));
+    assert_eq!(payment_data.max_parts, Some(2));
+    assert!(payment_data.allow_mpp);
+
+    let context = payment_data.trampoline_context.expect("trampoline context");
+    assert_eq!(
+        context.remaining_trampoline_onion,
+        remaining_trampoline_onion
+    );
+    assert_eq!(context.previous_tlcs, vec![previous_tlc]);
+    assert_eq!(context.hash_algorithm, HashAlgorithm::Sha256);
+    assert_eq!(
+        context.max_outgoing_tlc_expiry,
+        Some(max_outgoing_tlc_expiry)
+    );
+}
 
 async fn send_manual_trampoline_final_keysend_tlc(
     node_a: &NetworkNode,

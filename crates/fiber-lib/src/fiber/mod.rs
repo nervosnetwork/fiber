@@ -21,6 +21,7 @@ mod peer_message_policy;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod proxy;
 mod settle_tlc_set_command;
+pub(crate) mod trampoline;
 
 pub use config::FiberConfig;
 pub use fiber_types::*;
