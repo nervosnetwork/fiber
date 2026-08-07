@@ -47,6 +47,15 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `get_invoice`](#invoice-get_invoice)
         * [Method `cancel_invoice`](#invoice-cancel_invoice)
         * [Method `settle_invoice`](#invoice-settle_invoice)
+    * [Module Lsp](#module-lsp)
+        * [Method `lsp_get_status`](#lsp-lsp_get_status)
+        * [Method `lsp_register_tenant`](#lsp-lsp_register_tenant)
+        * [Method `lsp_ensure_tenant`](#lsp-lsp_ensure_tenant)
+        * [Method `lsp_evict_tenant`](#lsp-lsp_evict_tenant)
+        * [Method `lsp_list_tenants`](#lsp-lsp_list_tenants)
+        * [Method `lsp_register_invoice`](#lsp-lsp_register_invoice)
+        * [Method `lsp_get_invoice_registration`](#lsp-lsp_get_invoice_registration)
+        * [Method `lsp_get_payment_delivery`](#lsp-lsp_get_payment_delivery)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -87,6 +96,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Htlc`](#type-htlc)
     * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
+    * [Type `LspInvoiceHint`](#type-lspinvoicehint)
+    * [Type `LspPaymentDeliveryStatus`](#type-lsppaymentdeliverystatus)
+    * [Type `LspTenantRuntimeStatus`](#type-lsptenantruntimestatus)
+    * [Type `LspTenantStatus`](#type-lsptenantstatus)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
@@ -773,6 +786,172 @@ Settles an invoice by saving the preimage to this invoice.
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="lsp"></a>
+### Module `Lsp`
+RPC module for hosted LSP tenant and payment-delivery administration.
+
+
+<a id="lsp-lsp_get_status"></a>
+#### Method `lsp_get_status`
+
+Returns a summary of the hosted LSP service.
+
+##### Params
+* None
+
+##### Returns
+
+* `public_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public trampoline node identity advertised by the LSP.
+* `tenant_store_root` - <em>`String`</em>, Root directory containing isolated tenant stores.
+* `registered_tenants` - <em>`u64`</em>, Number of persistently registered tenants.
+* `active_tenants` - <em>`u64`</em>, Number of tenant Fiber runtimes currently resident in this process.
+
+---
+
+
+
+<a id="lsp-lsp_register_tenant"></a>
+#### Method `lsp_register_tenant`
+
+Persistently registers a hosted tenant without starting its Fiber runtime.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
+
+---
+
+
+
+<a id="lsp-lsp_ensure_tenant"></a>
+#### Method `lsp_ensure_tenant`
+
+Starts a registered tenant Fiber runtime if it is currently cold.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
+
+---
+
+
+
+<a id="lsp-lsp_evict_tenant"></a>
+#### Method `lsp_evict_tenant`
+
+Stops a tenant Fiber runtime while retaining its persistent identity and state.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
+
+---
+
+
+
+<a id="lsp-lsp_list_tenants"></a>
+#### Method `lsp_list_tenants`
+
+Lists all persistently registered hosted tenants.
+
+##### Params
+* None
+
+##### Returns
+
+* `tenants` - <em>Vec<[LspTenantStatus](#type-lsptenantstatus)></em>, Registered hosted tenants.
+
+---
+
+
+
+<a id="lsp-lsp_register_invoice"></a>
+#### Method `lsp_register_invoice`
+
+Registers a tenant-signed invoice and returns its authenticated LSP hint.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Tenant that signed and owns the invoice.
+* `invoice` - <em>`String`</em>, Encoded Fiber invoice signed by the tenant node identity.
+* `buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time Public T may buffer the incoming payment while the tenant is offline.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Tenant that owns the invoice.
+* `invoice` - <em>`String`</em>, Canonical encoded Fiber invoice.
+* `hint` - <em>[LspInvoiceHint](#type-lspinvoicehint)</em>, Authenticated routing and buffering hint to distribute with the invoice.
+
+---
+
+
+
+<a id="lsp-lsp_get_invoice_registration"></a>
+#### Method `lsp_get_invoice_registration`
+
+Retrieves a hosted invoice registration by payment hash.
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the hosted invoice.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Tenant that owns the invoice.
+* `invoice` - <em>`String`</em>, Canonical encoded Fiber invoice.
+* `hint` - <em>[LspInvoiceHint](#type-lspinvoicehint)</em>, Authenticated routing and buffering hint to distribute with the invoice.
+
+---
+
+
+
+<a id="lsp-lsp_get_payment_delivery"></a>
+#### Method `lsp_get_payment_delivery`
+
+Retrieves durable delivery state for a hosted incoming payment.
+
+##### Params
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the hosted invoice.
+
+##### Returns
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the hosted invoice.
+* `tenant_id` - <em>`String`</em>, Tenant that owns the payment.
+* `buffer_deadline` - <em>`u64`</em>, Last instant at which an undispatched payment may remain buffered.
+* `status` - <em>[LspPaymentDeliveryStatus](#type-lsppaymentdeliverystatus)</em>, Current durable delivery state.
+* `failure_reason` - <em>`Option<String>`</em>, Failure detail when `status` is `failed`.
+* `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds since Unix epoch.
+* `updated_at` - <em>`u64`</em>, Last update timestamp in milliseconds since Unix epoch.
 
 ---
 
@@ -1558,6 +1737,66 @@ The metadata of the invoice.
 * `timestamp` - <em>`u128`</em>, The timestamp of the invoice
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
+---
+
+<a id="#type-lspinvoicehint"></a>
+### Type `LspInvoiceHint`
+
+Signed sidecar that tells a payer to use Public T and permits bounded buffering.
+
+
+#### Fields
+
+* `version` - <em>`u8`</em>, Hint wire format version.
+* `lsp_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public trampoline node selected for this invoice.
+* `tenant_node_id` - <em>[Pubkey](#type-pubkey)</em>, Hosted tenant node that ultimately receives the payment.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash bound to this hint.
+* `invoice_digest` - <em>[Hash256](#type-hash256)</em>, Digest of the complete signed invoice.
+* `buffer_duration_ms` - <em>`u64`</em>, Maximum offline buffering duration requested by the invoice owner.
+* `expires_at` - <em>`u64`</em>, Absolute invoice expiry in milliseconds since Unix epoch.
+* `signature` - <em>`String`</em>, Compact ECDSA signature by Public T, encoded as `0x`-prefixed hex.
+---
+
+<a id="#type-lsppaymentdeliverystatus"></a>
+### Type `LspPaymentDeliveryStatus`
+
+Durable hosted-payment delivery state.
+
+
+#### Enum with values of
+
+* `deferred` - Public T is waiting for the hosted tenant to become reachable.
+* `dispatching` - Public T is starting downstream trampoline dispatch.
+* `in_flight` - A downstream payment session exists; the buffer deadline no longer applies.
+* `succeeded` - The downstream payment completed successfully.
+* `failed` - Delivery failed before or during downstream payment.
+---
+
+<a id="#type-lsptenantruntimestatus"></a>
+### Type `LspTenantRuntimeStatus`
+
+Current in-process state of a hosted tenant runtime.
+
+
+#### Enum with values of
+
+* `cold` - Tenant metadata exists but its Fiber runtime is not running.
+* `active` - The tenant Fiber runtime is running.
+---
+
+<a id="#type-lsptenantstatus"></a>
+### Type `LspTenantStatus`
+
+Hosted tenant identity and liveness information.
+
+
+#### Fields
+
+* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 ---
 
 <a id="#type-nodeinfo"></a>

@@ -456,7 +456,7 @@ async fn run_node(
         None => (None, None, None, None),
     };
 
-    let _lsp_actor = match (
+    let lsp_actor = match (
         config.lsp.clone(),
         network_actor.as_ref(),
         tenant_runtime_factory,
@@ -611,6 +611,7 @@ async fn run_node(
                 config.fiber,
                 network_actor,
                 cch_actor,
+                lsp_actor,
                 store,
                 store_actor,
                 network_graph,

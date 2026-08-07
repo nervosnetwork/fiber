@@ -12,6 +12,8 @@ pub mod graph;
 pub mod info;
 pub mod invoice;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod lsp;
+#[cfg(not(target_arch = "wasm32"))]
 mod middleware;
 pub mod payment;
 pub mod peer;
@@ -36,6 +38,7 @@ pub mod server {
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
+    use crate::rpc::lsp::{LspRpcServer, LspRpcServerImpl};
     use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
@@ -275,6 +278,7 @@ pub mod server {
         fiber_config: Option<FiberConfig>,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
         store: S,
         store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
@@ -395,6 +399,13 @@ pub mod server {
             if config.is_module_enabled("cch") {
                 modules
                     .merge(CchRpcServerImpl::new(cch_actor).into_rpc())
+                    .unwrap();
+            }
+        }
+        if let Some(lsp_actor) = lsp_actor {
+            if config.is_module_enabled("lsp") {
+                modules
+                    .merge(LspRpcServerImpl::new(lsp_actor).into_rpc())
                     .unwrap();
             }
         }

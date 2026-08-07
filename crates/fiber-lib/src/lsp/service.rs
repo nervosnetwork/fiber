@@ -11,7 +11,7 @@ use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
 use super::{
-    HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry,
+    HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery,
     LspPaymentDeliveryManager, LspPaymentDeliveryStatus, TenantId, TenantRegistry,
     TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
 };
@@ -63,6 +63,10 @@ pub enum LspServiceMessage {
         Hash256,
         RpcReplyPort<Result<Option<LspInvoiceRegistration>, String>>,
     ),
+    GetPaymentDelivery(
+        Hash256,
+        RpcReplyPort<Result<Option<LspPaymentDelivery>, String>>,
+    ),
     AcceptTrampolineDelivery(
         TrampolineForwardingRequest,
         RpcReplyPort<Result<LspDeliveryDecision, String>>,
@@ -100,6 +104,7 @@ impl LspServiceState {
             TenantRuntimeStatus::Cold
         };
         HostedTenantStatus {
+            channel_online: self.ready_tenants.contains(&record.node_id),
             record,
             runtime_status,
         }
@@ -289,6 +294,9 @@ impl Actor for LspService {
             }
             LspServiceMessage::GetInvoiceRegistration(payment_hash, reply) => {
                 let _ = reply.send(state.invoice_registry.get(&payment_hash));
+            }
+            LspServiceMessage::GetPaymentDelivery(payment_hash, reply) => {
+                let _ = reply.send(state.delivery_manager.get(&payment_hash));
             }
             LspServiceMessage::AcceptTrampolineDelivery(request, reply) => {
                 let result = match state.invoice_registry.get(&request.payment_hash) {

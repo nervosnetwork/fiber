@@ -8,3 +8,5 @@ more readable and more maintainable way. Below is a few use cases for these note
 
 
 This is inspired by the notes in GHC source code. See [The Notes of GHC](https://www.stackbuilders.com/blog/the-notes-of-ghc/).
+
+- [Hosted LSP and multi-tenant trampoline delivery](hosted-lsp.md)

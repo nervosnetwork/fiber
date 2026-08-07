@@ -66,4 +66,5 @@ pub enum TenantRuntimeStatus {
 pub struct HostedTenantStatus {
     pub record: HostedTenantRecord,
     pub runtime_status: TenantRuntimeStatus,
+    pub channel_online: bool,
 }

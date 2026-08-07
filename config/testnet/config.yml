@@ -83,6 +83,12 @@ rpc:
   # Please strictly limit the access to only trusted machines.
   listening_addr: "127.0.0.1:8227"
 
+# Hosted LSP service configuration. This section is inert unless `lsp` is added
+# to `services`. Tenant identities and stores are isolated below $BASE_DIR/lsp.
+lsp:
+  max_active_tenants: 64
+  tenants: []
+
 ckb:
   rpc_url: "https://testnet.ckbapp.dev/"
   udt_whitelist:
@@ -102,3 +108,4 @@ services:
   - fiber
   - rpc
   - ckb
+  # - lsp

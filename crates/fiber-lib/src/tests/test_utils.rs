@@ -1763,6 +1763,7 @@ impl NetworkNode {
                     Some(fiber_config.clone()),
                     Some(network_actor.clone()),
                     None,
+                    None,
                     store.clone(),
                     None,
                     Some(network_graph.clone()),

@@ -1,0 +1,171 @@
+//! Hosted LSP JSON-RPC request and response types.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
+
+use crate::{
+    schema_helpers::{schema_as_uint_hex, schema_as_uint_hex_optional},
+    serde_utils::U64Hex,
+    Hash256, Pubkey,
+};
+
+/// Parameters that identify a hosted tenant.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspTenantParams {
+    /// Stable operator-facing tenant identifier.
+    pub tenant_id: String,
+}
+
+/// Parameters for registering a signed hosted invoice.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct RegisterLspInvoiceParams {
+    /// Tenant that signed and owns the invoice.
+    pub tenant_id: String,
+    /// Encoded Fiber invoice signed by the tenant node identity.
+    pub invoice: String,
+    /// Maximum time Public T may buffer the incoming payment while the tenant is offline.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub buffer_duration_ms: Option<u64>,
+}
+
+/// Parameters that identify a hosted invoice or payment delivery.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspPaymentHashParams {
+    /// Payment hash of the hosted invoice.
+    pub payment_hash: Hash256,
+}
+
+/// Current in-process state of a hosted tenant runtime.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LspTenantRuntimeStatus {
+    /// Tenant metadata exists but its Fiber runtime is not running.
+    Cold,
+    /// The tenant Fiber runtime is running.
+    Active,
+}
+
+/// Hosted tenant identity and liveness information.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspTenantStatus {
+    /// Stable operator-facing tenant identifier.
+    pub tenant_id: String,
+    /// Independent Fiber node identity assigned to the tenant.
+    pub node_id: Pubkey,
+    /// Tenant creation timestamp in milliseconds since Unix epoch.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub created_at: u64,
+    /// Whether the tenant Fiber runtime is currently resident in this process.
+    pub runtime_status: LspTenantRuntimeStatus,
+    /// Whether Public T currently has an online private channel to the tenant.
+    pub channel_online: bool,
+}
+
+/// Result of listing hosted tenants.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct ListLspTenantsResult {
+    /// Registered hosted tenants.
+    pub tenants: Vec<LspTenantStatus>,
+}
+
+/// Summary of the multi-tenant hosted LSP service.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspServiceStatus {
+    /// Public trampoline node identity advertised by the LSP.
+    pub public_node_id: Pubkey,
+    /// Root directory containing isolated tenant stores.
+    pub tenant_store_root: String,
+    /// Number of persistently registered tenants.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub registered_tenants: u64,
+    /// Number of tenant Fiber runtimes currently resident in this process.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub active_tenants: u64,
+}
+
+/// Signed sidecar that tells a payer to use Public T and permits bounded buffering.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspInvoiceHint {
+    /// Hint wire format version.
+    pub version: u8,
+    /// Public trampoline node selected for this invoice.
+    pub lsp_node_id: Pubkey,
+    /// Hosted tenant node that ultimately receives the payment.
+    pub tenant_node_id: Pubkey,
+    /// Payment hash bound to this hint.
+    pub payment_hash: Hash256,
+    /// Digest of the complete signed invoice.
+    pub invoice_digest: Hash256,
+    /// Maximum offline buffering duration requested by the invoice owner.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub buffer_duration_ms: u64,
+    /// Absolute invoice expiry in milliseconds since Unix epoch.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub expires_at: u64,
+    /// Compact ECDSA signature by Public T, encoded as `0x`-prefixed hex.
+    pub signature: String,
+}
+
+/// Registered hosted invoice and the authenticated LSP routing sidecar.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspInvoiceRegistration {
+    /// Tenant that owns the invoice.
+    pub tenant_id: String,
+    /// Canonical encoded Fiber invoice.
+    pub invoice: String,
+    /// Authenticated routing and buffering hint to distribute with the invoice.
+    pub hint: LspInvoiceHint,
+}
+
+/// Durable hosted-payment delivery state.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LspPaymentDeliveryStatus {
+    /// Public T is waiting for the hosted tenant to become reachable.
+    Deferred,
+    /// Public T is starting downstream trampoline dispatch.
+    Dispatching,
+    /// A downstream payment session exists; the buffer deadline no longer applies.
+    InFlight,
+    /// The downstream payment completed successfully.
+    Succeeded,
+    /// Delivery failed before or during downstream payment.
+    Failed,
+}
+
+/// Operator-visible state of one hosted incoming payment.
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspPaymentDelivery {
+    /// Payment hash of the hosted invoice.
+    pub payment_hash: Hash256,
+    /// Tenant that owns the payment.
+    pub tenant_id: String,
+    /// Last instant at which an undispatched payment may remain buffered.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub buffer_deadline: u64,
+    /// Current durable delivery state.
+    pub status: LspPaymentDeliveryStatus,
+    /// Failure detail when `status` is `failed`.
+    pub failure_reason: Option<String>,
+    /// Creation timestamp in milliseconds since Unix epoch.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub created_at: u64,
+    /// Last update timestamp in milliseconds since Unix epoch.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub updated_at: u64,
+}

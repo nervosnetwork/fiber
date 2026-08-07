@@ -132,6 +132,16 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("settle_invoice", r#"allow if write("invoices");"#);
     b.rule("backup_now", r#"allow if write("node");"#);
 
+    // hosted LSP
+    b.rule("lsp_get_status", r#"allow if read("lsp");"#);
+    b.rule("lsp_register_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
+    b.rule("lsp_register_invoice", r#"allow if write("lsp");"#);
+    b.rule("lsp_get_invoice_registration", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
+
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
     b.rule("get_payment", r#"allow if read("payments");"#);
@@ -388,6 +398,44 @@ mod tests {
         assert!(auth
             .check_permission("subscribe_store_changes", &internal_token)
             .is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_auth_lsp_separates_read_and_write_methods() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("lsp");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("lsp");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        let read_methods = [
+            "lsp_get_status",
+            "lsp_list_tenants",
+            "lsp_get_invoice_registration",
+            "lsp_get_payment_delivery",
+        ];
+        let write_methods = [
+            "lsp_register_tenant",
+            "lsp_ensure_tenant",
+            "lsp_evict_tenant",
+            "lsp_register_invoice",
+        ];
+
+        for method in read_methods {
+            assert!(auth.check_permission(method, &read_token).is_ok());
+            assert!(auth.check_permission(method, &write_token).is_err());
+        }
+        for method in write_methods {
+            assert!(auth.check_permission(method, &write_token).is_ok());
+            assert!(auth.check_permission(method, &read_token).is_err());
+        }
     }
 
     #[test]
