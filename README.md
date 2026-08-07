@@ -36,7 +36,7 @@ TODO
 curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | bash
 
 # Install mainnet non-interactively with a trusted CKB RPC endpoint
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber FNN_VERSION=0.8.0 NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber FNN_VERSION=0.9.0 NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash
 ```
 
 Mainnet installations do not select a public CKB RPC endpoint automatically.

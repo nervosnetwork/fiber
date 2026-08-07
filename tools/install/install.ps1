@@ -27,7 +27,7 @@ $INSTALL_SCRIPT_PATH = if ($env:INSTALL_SCRIPT_PATH) { $env:INSTALL_SCRIPT_PATH 
 $INSTALL_SCRIPT_URL = if ($env:INSTALL_SCRIPT_URL) { $env:INSTALL_SCRIPT_URL } else { "https://raw.githubusercontent.com/$INSTALL_REPO/$INSTALL_REF/$INSTALL_SCRIPT_PATH" }
 
 # Configuration
-$FNN_VERSION = if ($env:FNN_VERSION) { $env:FNN_VERSION } else { "0.8.0" }
+$FNN_VERSION = if ($env:FNN_VERSION) { $env:FNN_VERSION } else { "0.9.0" }
 $CKB_CLI_VERSION = if ($env:CKB_CLI_VERSION) { $env:CKB_CLI_VERSION } else { "1.12.0" }
 $GITHUB_RELEASE_URL = "https://github.com/nervosnetwork/fiber/releases/download/v$FNN_VERSION"
 $CKB_CLI_RELEASE_URL = "https://github.com/nervosnetwork/ckb-cli/releases/download/v$CKB_CLI_VERSION"
