@@ -1455,4 +1455,32 @@ mod tests {
             .expect_err("missing actor");
         assert!(error.message().contains("liquidity actor is not available"));
     }
+
+    #[tokio::test]
+    async fn liquidity_read_rpcs_use_store_without_actor() {
+        let store = MockLiquidityStore::with_page(LiquiditySwapPage {
+            swaps: vec![liquidity_rpc_swap()],
+            next_cursor: None,
+        });
+        let rpc = LiquidityRpcServerImpl::new(store, None);
+
+        let swap = rpc
+            .get_swap(GetSwapParams {
+                swap_id: JsonHash256([1u8; 32]),
+            })
+            .await
+            .expect("get swap");
+        let swaps = rpc
+            .list_swaps(ListSwapsParams {
+                state: None,
+                asset_id: None,
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .expect("list swaps");
+
+        assert!(swap.is_none());
+        assert_eq!(swaps.swaps.len(), 1);
+    }
 }

@@ -2464,7 +2464,7 @@ fn json_asset_to_liquidity_asset(
         fiber_json_types::LiquidityAssetKind::Udt => LiquidityAssetKind::Udt,
     };
     let udt_type_script = match (kind, &info.udt_type_script) {
-        (LiquidityAssetKind::Udt, Some(script)) => Some(script.clone().into()),
+        (LiquidityAssetKind::Udt, Some(script)) => Some(script.clone()),
         (LiquidityAssetKind::Udt, None) => {
             return Err(LiquidityLoopOutError::Store(
                 "UDT asset must have a udt_type_script".to_string(),
@@ -2493,7 +2493,7 @@ fn liquidity_asset_to_json_info(asset: &LiquidityAsset) -> LiquidityAssetInfo {
     LiquidityAssetInfo {
         asset_id: asset.asset_id.clone(),
         kind,
-        udt_type_script: asset.udt_type_script.clone().map(Into::into),
+        udt_type_script: asset.udt_type_script.clone().map(|s| s.into()),
         min_amount: asset.min_amount,
         max_amount: asset.max_amount,
         available_capacity: asset.available_capacity,
