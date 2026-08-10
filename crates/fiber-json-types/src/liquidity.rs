@@ -356,6 +356,8 @@ pub struct LiquidityProviderStatus {
     pub enabled: bool,
     /// Number of currently enabled assets.
     pub enabled_asset_count: u64,
+    /// Number of non-terminal provider swaps.
+    pub active_swaps: u64,
 }
 
 #[cfg(test)]

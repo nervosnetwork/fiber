@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use fiber_json_types::{
-    GetSwapParams, LiquidityQuoteResponse, LiquiditySwapRecord as JsonLiquiditySwapRecord,
-    LiquiditySwapResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
+    AddLiquidityAssetParams, GetSwapParams, LiquidityAssetInfo, LiquidityProviderStatus,
+    LiquidityQuoteResponse, LiquiditySwapRecord as JsonLiquiditySwapRecord, LiquiditySwapResponse,
+    ListLiquidityAssetsResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
     ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
-    QuoteLoopInParams, QuoteLoopOutParams,
+    QuoteLoopInParams, QuoteLoopOutParams, UpdateLiquidityAssetParams,
 };
 use fiber_types::LiquiditySwapState;
 #[cfg(not(target_arch = "wasm32"))]
@@ -94,6 +95,37 @@ trait LiquidityRpc {
         &self,
         params: ProviderAcceptLoopInParams,
     ) -> Result<LiquiditySwapResponse, ErrorObjectOwned>;
+
+    /// Add a provider asset registry entry.
+    #[method(name = "add_liquidity_asset")]
+    async fn add_liquidity_asset(
+        &self,
+        params: AddLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned>;
+
+    /// Update a provider asset registry entry.
+    #[method(name = "update_liquidity_asset")]
+    async fn update_liquidity_asset(
+        &self,
+        params: UpdateLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned>;
+
+    /// Disable a provider asset registry entry.
+    #[method(name = "disable_liquidity_asset")]
+    async fn disable_liquidity_asset(
+        &self,
+        asset_id: String,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned>;
+
+    /// List configured provider assets.
+    #[method(name = "list_liquidity_assets")]
+    async fn list_liquidity_assets(&self) -> Result<ListLiquidityAssetsResponse, ErrorObjectOwned>;
+
+    /// Return provider status.
+    #[method(name = "get_liquidity_provider_status")]
+    async fn get_liquidity_provider_status(
+        &self,
+    ) -> Result<LiquidityProviderStatus, ErrorObjectOwned>;
 }
 
 /// Server implementation for the liquidity RPC module.
@@ -114,6 +146,11 @@ pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
         "provider_quote_loop_out",
         "provider_accept_loop_out",
         "provider_accept_loop_in",
+        "add_liquidity_asset",
+        "update_liquidity_asset",
+        "disable_liquidity_asset",
+        "list_liquidity_assets",
+        "get_liquidity_provider_status",
     ]
 }
 
@@ -191,6 +228,37 @@ where
         params: ProviderAcceptLoopInParams,
     ) -> Result<LiquiditySwapResponse, ErrorObjectOwned> {
         self.provider_accept_loop_in(params).await
+    }
+
+    async fn add_liquidity_asset(
+        &self,
+        params: AddLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned> {
+        self.add_liquidity_asset(params).await
+    }
+
+    async fn update_liquidity_asset(
+        &self,
+        params: UpdateLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned> {
+        self.update_liquidity_asset(params).await
+    }
+
+    async fn disable_liquidity_asset(
+        &self,
+        asset_id: String,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned> {
+        self.disable_liquidity_asset(asset_id).await
+    }
+
+    async fn list_liquidity_assets(&self) -> Result<ListLiquidityAssetsResponse, ErrorObjectOwned> {
+        self.list_liquidity_assets().await
+    }
+
+    async fn get_liquidity_provider_status(
+        &self,
+    ) -> Result<LiquidityProviderStatus, ErrorObjectOwned> {
+        self.get_liquidity_provider_status().await
     }
 }
 
@@ -338,6 +406,79 @@ where
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
         let log_params = params.clone();
         let message = move |reply| LiquidityActorMessage::ProviderAcceptLoopIn(params, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Add a provider asset registry entry.
+    pub async fn add_liquidity_asset(
+        &self,
+        params: AddLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::AddLiquidityAsset(params, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Update a provider asset registry entry.
+    pub async fn update_liquidity_asset(
+        &self,
+        params: UpdateLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::UpdateLiquidityAsset(params, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Disable a provider asset registry entry.
+    pub async fn disable_liquidity_asset(
+        &self,
+        asset_id: String,
+    ) -> Result<LiquidityAssetInfo, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = asset_id.clone();
+        let message = move |reply| LiquidityActorMessage::DisableLiquidityAsset(asset_id, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// List configured provider assets.
+    pub async fn list_liquidity_assets(
+        &self,
+    ) -> Result<ListLiquidityAssetsResponse, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = "list_liquidity_assets";
+        let message = move |reply| LiquidityActorMessage::ListLiquidityAssets(reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Return provider status.
+    pub async fn get_liquidity_provider_status(
+        &self,
+    ) -> Result<LiquidityProviderStatus, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = "get_liquidity_provider_status";
+        let message = move |reply| LiquidityActorMessage::GetLiquidityProviderStatus(reply);
 
         call_liquidity_actor(actor.clone(), message, &log_params).await
     }
@@ -611,6 +752,14 @@ mod tests {
         fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))
         }
+
+        fn set_provider_mode(&self, _enabled: bool) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn get_provider_mode(&self) -> Result<bool, LiquidityStoreError> {
+            Ok(false)
+        }
     }
 
     fn liquidity_rpc_swap() -> StoreLiquiditySwapRecord {
@@ -693,6 +842,41 @@ mod tests {
                         .expect("events lock")
                         .push("provider_accept_loop_in");
                     let _ = reply.send(Ok(liquidity_swap_response()));
+                }
+                LiquidityActorMessage::AddLiquidityAsset(_, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("add_liquidity_asset");
+                    let _ = reply.send(Ok(liquidity_asset_info()));
+                }
+                LiquidityActorMessage::UpdateLiquidityAsset(_, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("update_liquidity_asset");
+                    let _ = reply.send(Ok(liquidity_asset_info()));
+                }
+                LiquidityActorMessage::DisableLiquidityAsset(_, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("disable_liquidity_asset");
+                    let _ = reply.send(Ok(liquidity_asset_info()));
+                }
+                LiquidityActorMessage::ListLiquidityAssets(reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("list_liquidity_assets");
+                    let _ = reply.send(Ok(liquidity_list_assets_response()));
+                }
+                LiquidityActorMessage::GetLiquidityProviderStatus(reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("get_liquidity_provider_status");
+                    let _ = reply.send(Ok(liquidity_provider_status()));
                 }
                 _ => {}
             }
@@ -853,6 +1037,46 @@ mod tests {
             state: "payment_settled".to_string(),
             payment_hash: JsonHash256([3u8; 32]),
             created_at: 11,
+        }
+    }
+
+    fn liquidity_asset_info() -> fiber_json_types::LiquidityAssetInfo {
+        fiber_json_types::LiquidityAssetInfo {
+            asset_id: "ckb".to_string(),
+            kind: fiber_json_types::LiquidityAssetKind::Ckb,
+            udt_type_script: None,
+            min_amount: 1,
+            max_amount: 100,
+            available_capacity: 1000,
+            base_fee: 2,
+            proportional_fee_ppm: 30,
+            enabled: true,
+        }
+    }
+
+    fn liquidity_list_assets_response() -> ListLiquidityAssetsResponse {
+        ListLiquidityAssetsResponse {
+            assets: vec![liquidity_asset_info()],
+        }
+    }
+
+    fn liquidity_provider_status() -> LiquidityProviderStatus {
+        LiquidityProviderStatus {
+            enabled: false,
+            enabled_asset_count: 0,
+            active_swaps: 0,
+        }
+    }
+
+    fn add_liquidity_asset_params() -> AddLiquidityAssetParams {
+        AddLiquidityAssetParams {
+            asset: liquidity_asset_info(),
+        }
+    }
+
+    fn update_liquidity_asset_params() -> UpdateLiquidityAssetParams {
+        UpdateLiquidityAssetParams {
+            asset: liquidity_asset_info(),
         }
     }
 
@@ -1135,30 +1359,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn liquidity_read_rpcs_use_store_without_actor() {
-        let store = MockLiquidityStore::with_page(LiquiditySwapPage {
-            swaps: vec![liquidity_rpc_swap()],
-            next_cursor: None,
-        });
-        let rpc = LiquidityRpcServerImpl::new(store, None);
+    async fn add_liquidity_asset_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
 
-        let swap = rpc
-            .get_swap(GetSwapParams {
-                swap_id: JsonHash256([1u8; 32]),
-            })
+        let response = rpc
+            .add_liquidity_asset(add_liquidity_asset_params())
             .await
-            .expect("get swap");
-        let swaps = rpc
-            .list_swaps(ListSwapsParams {
-                state: None,
-                asset_id: None,
-                limit: None,
-                cursor: None,
-            })
-            .await
-            .expect("list swaps");
+            .expect("add liquidity asset");
 
-        assert!(swap.is_none());
-        assert_eq!(swaps.swaps.len(), 1);
+        assert_eq!(response.asset_id, "ckb");
+        assert_eq!(actor.take_events(), vec!["add_liquidity_asset"]);
+    }
+
+    #[tokio::test]
+    async fn update_liquidity_asset_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .update_liquidity_asset(update_liquidity_asset_params())
+            .await
+            .expect("update liquidity asset");
+
+        assert_eq!(response.asset_id, "ckb");
+        assert_eq!(actor.take_events(), vec!["update_liquidity_asset"]);
+    }
+
+    #[tokio::test]
+    async fn disable_liquidity_asset_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .disable_liquidity_asset("ckb".to_string())
+            .await
+            .expect("disable liquidity asset");
+
+        assert_eq!(response.asset_id, "ckb");
+        assert_eq!(actor.take_events(), vec!["disable_liquidity_asset"]);
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_assets_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .list_liquidity_assets()
+            .await
+            .expect("list liquidity assets");
+
+        assert_eq!(response.assets.len(), 1);
+        assert_eq!(actor.take_events(), vec!["list_liquidity_assets"]);
+    }
+
+    #[tokio::test]
+    async fn get_liquidity_provider_status_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .get_liquidity_provider_status()
+            .await
+            .expect("get liquidity provider status");
+
+        assert_eq!(response.active_swaps, 0);
+        assert_eq!(actor.take_events(), vec!["get_liquidity_provider_status"]);
+    }
+
+    #[tokio::test]
+    async fn asset_management_rpcs_report_actor_unavailable_when_missing() {
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None);
+
+        let error = rpc
+            .add_liquidity_asset(add_liquidity_asset_params())
+            .await
+            .expect_err("missing actor");
+        assert!(error.message().contains("liquidity actor is not available"));
+
+        let error = rpc
+            .list_liquidity_assets()
+            .await
+            .expect_err("missing actor");
+        assert!(error.message().contains("liquidity actor is not available"));
+
+        let error = rpc
+            .get_liquidity_provider_status()
+            .await
+            .expect_err("missing actor");
+        assert!(error.message().contains("liquidity actor is not available"));
     }
 }

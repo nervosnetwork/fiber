@@ -57,6 +57,11 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `provider_quote_loop_out`](#liquidity-provider_quote_loop_out)
         * [Method `provider_accept_loop_out`](#liquidity-provider_accept_loop_out)
         * [Method `provider_accept_loop_in`](#liquidity-provider_accept_loop_in)
+        * [Method `add_liquidity_asset`](#liquidity-add_liquidity_asset)
+        * [Method `update_liquidity_asset`](#liquidity-update_liquidity_asset)
+        * [Method `disable_liquidity_asset`](#liquidity-disable_liquidity_asset)
+        * [Method `list_liquidity_assets`](#liquidity-list_liquidity_assets)
+        * [Method `get_liquidity_provider_status`](#liquidity-get_liquidity_provider_status)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -97,6 +102,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Htlc`](#type-htlc)
     * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
+    * [Type `LiquidityAssetInfo`](#type-liquidityassetinfo)
+    * [Type `LiquidityAssetKind`](#type-liquidityassetkind)
     * [Type `LiquiditySwapKind`](#type-liquidityswapkind)
     * [Type `LiquiditySwapRecord`](#type-liquidityswaprecord)
     * [Type `NodeInfo`](#type-nodeinfo)
@@ -1029,6 +1036,115 @@ Provider-side accept endpoint for an observed Loop In lock.
 
 
 
+<a id="liquidity-add_liquidity_asset"></a>
+#### Method `add_liquidity_asset`
+
+Add a provider asset registry entry.
+
+##### Params
+
+* `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Asset entry to add.
+
+##### Returns
+
+* `asset_id` - <em>`String`</em>, Stable provider-local asset identifier.
+* `kind` - <em>[LiquidityAssetKind](#type-liquidityassetkind)</em>, Asset family.
+* `udt_type_script` - <em>`Option<ckb_jsonrpc_types::Script>`</em>, Required for UDT assets and absent for CKB.
+* `min_amount` - <em>`u128`</em>, Smallest raw swap amount accepted by the provider.
+* `max_amount` - <em>`u128`</em>, Largest raw swap amount accepted by the provider.
+* `available_capacity` - <em>`u128`</em>, Provider-advertised capacity for this asset.
+* `base_fee` - <em>`u128`</em>, Fixed provider fee charged in the swapped asset.
+* `proportional_fee_ppm` - <em>`u64`</em>, Proportional provider fee in parts per million.
+* `enabled` - <em>`bool`</em>, Whether the provider currently quotes this asset.
+
+---
+
+
+
+<a id="liquidity-update_liquidity_asset"></a>
+#### Method `update_liquidity_asset`
+
+Update a provider asset registry entry.
+
+##### Params
+
+* `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Replacement asset entry.
+
+##### Returns
+
+* `asset_id` - <em>`String`</em>, Stable provider-local asset identifier.
+* `kind` - <em>[LiquidityAssetKind](#type-liquidityassetkind)</em>, Asset family.
+* `udt_type_script` - <em>`Option<ckb_jsonrpc_types::Script>`</em>, Required for UDT assets and absent for CKB.
+* `min_amount` - <em>`u128`</em>, Smallest raw swap amount accepted by the provider.
+* `max_amount` - <em>`u128`</em>, Largest raw swap amount accepted by the provider.
+* `available_capacity` - <em>`u128`</em>, Provider-advertised capacity for this asset.
+* `base_fee` - <em>`u128`</em>, Fixed provider fee charged in the swapped asset.
+* `proportional_fee_ppm` - <em>`u64`</em>, Proportional provider fee in parts per million.
+* `enabled` - <em>`bool`</em>, Whether the provider currently quotes this asset.
+
+---
+
+
+
+<a id="liquidity-disable_liquidity_asset"></a>
+#### Method `disable_liquidity_asset`
+
+Disable a provider asset registry entry.
+
+##### Params
+
+* `String` - <em>String</em>, 
+
+##### Returns
+
+* `asset_id` - <em>`String`</em>, Stable provider-local asset identifier.
+* `kind` - <em>[LiquidityAssetKind](#type-liquidityassetkind)</em>, Asset family.
+* `udt_type_script` - <em>`Option<ckb_jsonrpc_types::Script>`</em>, Required for UDT assets and absent for CKB.
+* `min_amount` - <em>`u128`</em>, Smallest raw swap amount accepted by the provider.
+* `max_amount` - <em>`u128`</em>, Largest raw swap amount accepted by the provider.
+* `available_capacity` - <em>`u128`</em>, Provider-advertised capacity for this asset.
+* `base_fee` - <em>`u128`</em>, Fixed provider fee charged in the swapped asset.
+* `proportional_fee_ppm` - <em>`u64`</em>, Proportional provider fee in parts per million.
+* `enabled` - <em>`bool`</em>, Whether the provider currently quotes this asset.
+
+---
+
+
+
+<a id="liquidity-list_liquidity_assets"></a>
+#### Method `list_liquidity_assets`
+
+List configured provider assets.
+
+##### Params
+* None
+
+##### Returns
+
+* `assets` - <em>Vec<[LiquidityAssetInfo](#type-liquidityassetinfo)></em>, Configured provider assets.
+
+---
+
+
+
+<a id="liquidity-get_liquidity_provider_status"></a>
+#### Method `get_liquidity_provider_status`
+
+Return provider status.
+
+##### Params
+* None
+
+##### Returns
+
+* `enabled` - <em>`bool`</em>, Whether provider mode is enabled.
+* `enabled_asset_count` - <em>`u64`</em>, Number of currently enabled assets.
+* `active_swaps` - <em>`u64`</em>, Number of non-terminal provider swaps.
+
+---
+
+
+
 <a id="payment"></a>
 ### Module `Payment`
 RPC module for channel management.
@@ -1809,6 +1925,37 @@ The metadata of the invoice.
 * `timestamp` - <em>`u128`</em>, The timestamp of the invoice
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the invoice
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
+---
+
+<a id="#type-liquidityassetinfo"></a>
+### Type `LiquidityAssetInfo`
+
+JSON representation of a provider liquidity asset.
+
+
+#### Fields
+
+* `asset_id` - <em>`String`</em>, Stable provider-local asset identifier.
+* `kind` - <em>[LiquidityAssetKind](#type-liquidityassetkind)</em>, Asset family.
+* `udt_type_script` - <em>`Option<ckb_jsonrpc_types::Script>`</em>, Required for UDT assets and absent for CKB.
+* `min_amount` - <em>`u128`</em>, Smallest raw swap amount accepted by the provider.
+* `max_amount` - <em>`u128`</em>, Largest raw swap amount accepted by the provider.
+* `available_capacity` - <em>`u128`</em>, Provider-advertised capacity for this asset.
+* `base_fee` - <em>`u128`</em>, Fixed provider fee charged in the swapped asset.
+* `proportional_fee_ppm` - <em>`u64`</em>, Proportional provider fee in parts per million.
+* `enabled` - <em>`bool`</em>, Whether the provider currently quotes this asset.
+---
+
+<a id="#type-liquidityassetkind"></a>
+### Type `LiquidityAssetKind`
+
+Asset family in the provider liquidity registry.
+
+
+#### Enum with values of
+
+* `ckb` - Native CKB capacity denominated in shannons.
+* `udt` - User-defined token identified by a type script.
 ---
 
 <a id="#type-liquidityswapkind"></a>

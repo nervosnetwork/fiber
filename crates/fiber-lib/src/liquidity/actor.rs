@@ -10,11 +10,15 @@ use async_trait::async_trait;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use fiber_json_types::{
-    LiquidityQuoteResponse, LiquiditySwapResponse, LoopInParams, LoopOutParams,
+    AddLiquidityAssetParams, LiquidityAssetInfo, LiquidityProviderStatus, LiquidityQuoteResponse,
+    LiquiditySwapResponse, ListLiquidityAssetsResponse, LoopInParams, LoopOutParams,
     ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
-    QuoteLoopInParams, QuoteLoopOutParams,
+    QuoteLoopInParams, QuoteLoopOutParams, UpdateLiquidityAssetParams,
 };
-use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
+use fiber_types::{
+    Hash256, LiquidityAsset, LiquidityAssetKind, LiquidityChainTxRole, LiquidityChainTxStatus,
+    LiquiditySwapState,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use secp256k1::{SecretKey, SECP256K1};
 
@@ -75,6 +79,27 @@ pub enum LiquidityActorMessage {
         ProviderAcceptLoopInParams,
         RpcReplyPort<Result<LiquiditySwapResponse, LiquidityLoopOutError>>,
     ),
+    /// Add a provider asset registry entry.
+    AddLiquidityAsset(
+        AddLiquidityAssetParams,
+        RpcReplyPort<Result<LiquidityAssetInfo, LiquidityLoopOutError>>,
+    ),
+    /// Update a provider asset registry entry.
+    UpdateLiquidityAsset(
+        UpdateLiquidityAssetParams,
+        RpcReplyPort<Result<LiquidityAssetInfo, LiquidityLoopOutError>>,
+    ),
+    /// Disable a provider asset registry entry.
+    DisableLiquidityAsset(
+        String,
+        RpcReplyPort<Result<LiquidityAssetInfo, LiquidityLoopOutError>>,
+    ),
+    /// List configured provider assets.
+    ListLiquidityAssets(RpcReplyPort<Result<ListLiquidityAssetsResponse, LiquidityLoopOutError>>),
+    /// Return provider status.
+    GetLiquidityProviderStatus(
+        RpcReplyPort<Result<LiquidityProviderStatus, LiquidityLoopOutError>>,
+    ),
     /// Resume every persisted non-terminal Loop Out swap.
     ResumeNonTerminal(RpcReplyPort<Result<usize, LiquidityLoopOutError>>),
     /// Internal continuation after payout lock confirmation.
@@ -105,6 +130,12 @@ impl LiquidityActorMessage {
             "loop_in",
             "provider_quote_loop_out",
             "provider_accept_loop_out",
+            "provider_accept_loop_in",
+            "add_liquidity_asset",
+            "update_liquidity_asset",
+            "disable_liquidity_asset",
+            "list_liquidity_assets",
+            "get_liquidity_provider_status",
             "resume_non_terminal",
             "payout_confirmed",
             "payment_settled",
@@ -287,6 +318,26 @@ where
                 let result = state.handle_provider_quote_loop_out(params);
                 let _ = reply.send(result);
             }
+            LiquidityActorMessage::AddLiquidityAsset(params, reply) => {
+                let result = state.handle_add_liquidity_asset(params);
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::UpdateLiquidityAsset(params, reply) => {
+                let result = state.handle_update_liquidity_asset(params);
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::DisableLiquidityAsset(asset_id, reply) => {
+                let result = state.handle_disable_liquidity_asset(&asset_id);
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::ListLiquidityAssets(reply) => {
+                let result = state.handle_list_liquidity_assets();
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::GetLiquidityProviderStatus(reply) => {
+                let result = state.handle_get_liquidity_provider_status();
+                let _ = reply.send(result);
+            }
         }
         Ok(())
     }
@@ -438,6 +489,133 @@ where
             max_routing_fee,
             expires_after_seconds,
         })
+    }
+
+    fn handle_add_liquidity_asset(
+        &mut self,
+        params: AddLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, LiquidityLoopOutError> {
+        let asset = params.asset;
+        if self
+            .store
+            .get_liquidity_asset(&asset.asset_id)
+            .map_err(map_store_error)?
+            .is_some()
+        {
+            return Err(LiquidityLoopOutError::Store(format!(
+                "asset {} already exists",
+                asset.asset_id
+            )));
+        }
+        let liquidity_asset = json_asset_to_liquidity_asset(&asset)?;
+        self.store
+            .upsert_liquidity_asset(liquidity_asset)
+            .map_err(map_store_error)?;
+        Ok(asset)
+    }
+
+    fn handle_update_liquidity_asset(
+        &mut self,
+        params: UpdateLiquidityAssetParams,
+    ) -> Result<LiquidityAssetInfo, LiquidityLoopOutError> {
+        let asset = params.asset;
+        if self
+            .store
+            .get_liquidity_asset(&asset.asset_id)
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(LiquidityLoopOutError::Store(format!(
+                "asset {} not found",
+                asset.asset_id
+            )));
+        }
+        let liquidity_asset = json_asset_to_liquidity_asset(&asset)?;
+        self.store
+            .upsert_liquidity_asset(liquidity_asset)
+            .map_err(map_store_error)?;
+        Ok(asset)
+    }
+
+    fn handle_disable_liquidity_asset(
+        &mut self,
+        asset_id: &str,
+    ) -> Result<LiquidityAssetInfo, LiquidityLoopOutError> {
+        let mut asset = self
+            .store
+            .get_liquidity_asset(asset_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| LiquidityLoopOutError::Store(format!("asset {} not found", asset_id)))?;
+        asset.enabled = false;
+        self.store
+            .upsert_liquidity_asset(asset.clone())
+            .map_err(map_store_error)?;
+        Ok(liquidity_asset_to_json_info(&asset))
+    }
+
+    fn handle_list_liquidity_assets(
+        &self,
+    ) -> Result<ListLiquidityAssetsResponse, LiquidityLoopOutError> {
+        let assets = self
+            .store
+            .list_liquidity_assets()
+            .map_err(map_store_error)?;
+        let assets = assets.iter().map(liquidity_asset_to_json_info).collect();
+        Ok(ListLiquidityAssetsResponse { assets })
+    }
+
+    fn handle_get_liquidity_provider_status(
+        &self,
+    ) -> Result<LiquidityProviderStatus, LiquidityLoopOutError> {
+        let enabled = self.store.get_provider_mode().map_err(map_store_error)?;
+        let enabled_asset_count = self
+            .store
+            .list_liquidity_assets()
+            .map_err(map_store_error)?
+            .iter()
+            .filter(|asset| asset.enabled)
+            .count() as u64;
+        let active_swaps = self.count_non_terminal_provider_swaps()?;
+        Ok(LiquidityProviderStatus {
+            enabled,
+            enabled_asset_count,
+            active_swaps,
+        })
+    }
+
+    fn count_non_terminal_provider_swaps(&self) -> Result<u64, LiquidityLoopOutError> {
+        use LiquiditySwapState::*;
+        let loop_out_states = [
+            PayoutPending,
+            PayoutLocked,
+            PaymentInFlight,
+            PaymentSettled,
+            ClaimPending,
+            RefundPending,
+        ];
+        let loop_in_states = [
+            OnchainLockPending,
+            OnchainLocked,
+            PaymentInFlight,
+            PaymentSettled,
+            ClaimPending,
+            RefundPending,
+        ];
+        let count = self
+            .store
+            .list_liquidity_swaps_by_states(&loop_out_states, LiquiditySwapKind::LoopOut)
+            .map_err(map_store_error)?
+            .iter()
+            .filter(|s| s.role == crate::liquidity::store::LiquiditySwapRole::Provider)
+            .count()
+            + self
+                .store
+                .list_liquidity_swaps_by_states(&loop_in_states, LiquiditySwapKind::LoopIn)
+                .map_err(map_store_error)?
+                .iter()
+                .filter(|s| s.role == crate::liquidity::store::LiquiditySwapRole::Provider)
+                .count();
+        Ok(count as u64)
     }
 
     async fn handle_payout_confirmed(
@@ -2268,6 +2446,63 @@ fn map_store_error(error: LiquidityStoreError) -> LiquidityLoopOutError {
     }
 }
 
+fn json_asset_to_liquidity_asset(
+    info: &LiquidityAssetInfo,
+) -> Result<LiquidityAsset, LiquidityLoopOutError> {
+    if info.asset_id.trim().is_empty() {
+        return Err(LiquidityLoopOutError::Store(
+            "asset_id must not be empty".to_string(),
+        ));
+    }
+    if info.min_amount > info.max_amount {
+        return Err(LiquidityLoopOutError::Store(
+            "min_amount must not exceed max_amount".to_string(),
+        ));
+    }
+    let kind = match info.kind {
+        fiber_json_types::LiquidityAssetKind::Ckb => LiquidityAssetKind::Ckb,
+        fiber_json_types::LiquidityAssetKind::Udt => LiquidityAssetKind::Udt,
+    };
+    let udt_type_script = match (kind, &info.udt_type_script) {
+        (LiquidityAssetKind::Udt, Some(script)) => Some(script.clone().into()),
+        (LiquidityAssetKind::Udt, None) => {
+            return Err(LiquidityLoopOutError::Store(
+                "UDT asset must have a udt_type_script".to_string(),
+            ));
+        }
+        _ => None,
+    };
+    Ok(LiquidityAsset {
+        asset_id: info.asset_id.clone(),
+        kind,
+        udt_type_script,
+        min_amount: info.min_amount,
+        max_amount: info.max_amount,
+        available_capacity: info.available_capacity,
+        base_fee: info.base_fee,
+        proportional_fee_ppm: info.proportional_fee_ppm,
+        enabled: info.enabled,
+    })
+}
+
+fn liquidity_asset_to_json_info(asset: &LiquidityAsset) -> LiquidityAssetInfo {
+    let kind = match asset.kind {
+        LiquidityAssetKind::Ckb => fiber_json_types::LiquidityAssetKind::Ckb,
+        LiquidityAssetKind::Udt => fiber_json_types::LiquidityAssetKind::Udt,
+    };
+    LiquidityAssetInfo {
+        asset_id: asset.asset_id.clone(),
+        kind,
+        udt_type_script: asset.udt_type_script.clone().map(Into::into),
+        min_amount: asset.min_amount,
+        max_amount: asset.max_amount,
+        available_capacity: asset.available_capacity,
+        base_fee: asset.base_fee,
+        proportional_fee_ppm: asset.proportional_fee_ppm,
+        enabled: asset.enabled,
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2341,6 +2576,12 @@ mod tests {
                 "loop_in",
                 "provider_quote_loop_out",
                 "provider_accept_loop_out",
+                "provider_accept_loop_in",
+                "add_liquidity_asset",
+                "update_liquidity_asset",
+                "disable_liquidity_asset",
+                "list_liquidity_assets",
+                "get_liquidity_provider_status",
                 "resume_non_terminal",
                 "payout_confirmed",
                 "payment_settled",
@@ -2400,6 +2641,7 @@ mod tests {
         events: Shared<Vec<&'static str>>,
         listed_swap_kinds: Shared<Vec<LiquiditySwapKind>>,
         label: Option<&'static str>,
+        provider_mode: Shared<bool>,
     }
 
     impl TestLiquidityStore {
@@ -2412,6 +2654,7 @@ mod tests {
                 events,
                 listed_swap_kinds: Shared::new(Vec::new()),
                 label: Some(label),
+                provider_mode: Shared::new(false),
             }
         }
 
@@ -2706,6 +2949,15 @@ mod tests {
 
         fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
             Ok(self.assets.borrow().values().cloned().collect())
+        }
+
+        fn set_provider_mode(&self, enabled: bool) -> Result<(), LiquidityStoreError> {
+            *self.provider_mode.borrow_mut() = enabled;
+            Ok(())
+        }
+
+        fn get_provider_mode(&self) -> Result<bool, LiquidityStoreError> {
+            Ok(*self.provider_mode.borrow())
         }
     }
 
