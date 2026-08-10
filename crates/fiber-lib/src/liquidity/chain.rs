@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use ckb_hash::blake2b_256;
 use ckb_types::{
     bytes::Bytes,
     core::tx_pool::TxStatus,
@@ -10,7 +11,7 @@ use ckb_types::{
     packed,
     prelude::{Builder, Entity, Pack},
 };
-use fiber_types::{Hash256, HashAlgorithm, LiquidityChainTxRole, LiquiditySwapState};
+use fiber_types::{Hash256, HashAlgorithm, LiquidityAssetKind, LiquidityChainTxRole, LiquiditySwapState};
 use ractor::{ActorRef, RpcReplyPort};
 
 use crate::ckb::contracts::get_udt_cell_deps;
@@ -338,6 +339,84 @@ pub trait LiquidityChainWatcher {
         swap_id: Hash256,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), Self::Error>;
+}
+
+fn validate_liquidity_lock_args(
+    args: &[u8],
+    quote: &LoopOutQuoteTerms,
+    liquidity_lock_code_hash: &packed::Byte32,
+    liquidity_lock_hash_type: u8,
+    cell_code_hash: &packed::Byte32,
+    cell_hash_type: u8,
+) -> Result<(), LiquidityLoopOutError> {
+    if cell_code_hash != liquidity_lock_code_hash || cell_hash_type != liquidity_lock_hash_type {
+        return Err(LiquidityLoopOutError::Chain(
+            "observed lock script does not match liquidity-lock contract".to_string(),
+        ));
+    }
+    if args.len() != 152 {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "observed lock args length {} does not match expected 152",
+            args.len()
+        )));
+    }
+    let expected_payment_hash: [u8; 32] = args[0..32].try_into().unwrap();
+    if expected_payment_hash.as_slice() != quote.payment_hash.as_ref() {
+        return Err(LiquidityLoopOutError::Chain(
+            "observed lock payment_hash mismatch".to_string(),
+        ));
+    }
+    let expected_claimant_hash = blake2b_256(quote.claimant_lock.as_slice());
+    if args[32..64] != expected_claimant_hash {
+        return Err(LiquidityLoopOutError::Chain(
+            "observed lock claimant_lock_hash mismatch".to_string(),
+        ));
+    }
+    let expected_refund_hash = blake2b_256(quote.refund_lock.as_slice());
+    if args[64..96] != expected_refund_hash {
+        return Err(LiquidityLoopOutError::Chain(
+            "observed lock refund_lock_hash mismatch".to_string(),
+        ));
+    }
+    let refund_after: u64 = u64::from_le_bytes(args[96..104].try_into().unwrap());
+    if refund_after != quote.refund_after_lock_time {
+        return Err(LiquidityLoopOutError::Chain(
+            "observed lock refund_after_lock_time mismatch".to_string(),
+        ));
+    }
+    let onchain_amount: u128 = u128::from_le_bytes(args[104..120].try_into().unwrap());
+    let expected_gross = loop_in_gross_onchain_amount(quote)?;
+    if onchain_amount != expected_gross {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "observed lock amount mismatch: expected {expected_gross}, got {onchain_amount}"
+        )));
+    }
+    let asset_type_hash = &args[120..152];
+    match quote.asset.kind {
+        LiquidityAssetKind::Ckb => {
+            if asset_type_hash != [0u8; 32] {
+                return Err(LiquidityLoopOutError::Chain(
+                    "observed lock asset_type_hash mismatch for CKB asset".to_string(),
+                ));
+            }
+        }
+        LiquidityAssetKind::Udt => {
+            let expected_udt_hash = if let Some(ref udt) = quote.asset.udt_type_script {
+                let udt_script: packed::Script = udt.clone().into();
+                blake2b_256(udt_script.as_slice())
+            } else {
+                return Err(LiquidityLoopOutError::Chain(
+                    "UDT asset missing udt_type_script".to_string(),
+                ));
+            };
+            if asset_type_hash != expected_udt_hash.as_slice() {
+                return Err(LiquidityLoopOutError::Chain(
+                    "observed lock asset_type_hash mismatch for UDT asset".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// CKB-backed liquidity chain watcher boundary.
@@ -1143,13 +1222,65 @@ where
 
     async fn validate_observed_loop_in_lock(
         &mut self,
-        _quote: &LoopOutQuoteTerms,
-        _outpoint: &packed::OutPoint,
+        quote: &LoopOutQuoteTerms,
+        outpoint: &packed::OutPoint,
     ) -> Result<(), Self::Error> {
-        Err(LiquidityLoopOutError::Chain(
-            "provider loop in observed lock validation is not available for the CKB actor"
-                .to_string(),
-        ))
+        let artifact = self
+            .liquidity_lock_artifact
+            .as_ref()
+            .ok_or_else(Self::missing_payout_builder)?;
+        let cell = ractor::call!(self.ckb_chain_actor, |reply| {
+            CkbChainMessage::GetLiveCell(outpoint.clone(), reply)
+        })
+        .map_err(|error| {
+            LiquidityLoopOutError::Chain(format!(
+                "failed to query live cell for observed loop in lock: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            LiquidityLoopOutError::Chain(format!(
+                "ckb rpc error querying live cell for observed loop in lock: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Chain(
+                "observed loop in lock cell not found or already spent".to_string(),
+            )
+        })?;
+
+        let lock_script = cell.lock();
+        let args = lock_script.args().raw_data();
+        validate_liquidity_lock_args(
+            &args,
+            quote,
+            &artifact.code_hash,
+            artifact.hash_type.into(),
+            &lock_script.code_hash(),
+            lock_script.hash_type().into(),
+        )?;
+
+        if quote.asset.kind == LiquidityAssetKind::Udt {
+            let cell_type_script = cell.type_().to_opt();
+            let expected_type = quote.asset.udt_type_script.as_ref();
+            match (cell_type_script, expected_type) {
+                (Some(cell_type), Some(expected)) => {
+                    let expected_packed: packed::Script = expected.clone().into();
+                    if cell_type != expected_packed {
+                        return Err(LiquidityLoopOutError::Chain(
+                            "observed loop in lock UDT type script mismatch".to_string(),
+                        ));
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(LiquidityLoopOutError::Chain(
+                        "observed loop in lock UDT type script mismatch".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn watch_loop_in_lock(
@@ -4368,5 +4499,126 @@ mod tests {
         let error = LoopOutRefundTxPlan::from_record(&record).unwrap_err();
 
         assert!(error.to_string().contains("loop in provider"));
+    }
+
+    fn test_loop_in_quote(now_ms: u64) -> LoopOutQuoteTerms {
+        let sk = SecretKey::from_slice(&[0xcd; 32]).unwrap();
+        LoopOutQuoteTerms {
+            quote_id: [1u8; 32].into(),
+            swap_kind: LiquiditySwapKind::LoopIn,
+            provider: Pubkey::from(sk.public_key(SECP256K1)),
+            asset: LiquidityAsset {
+                asset_id: "ckb".to_string(),
+                kind: LiquidityAssetKind::Ckb,
+                udt_type_script: None,
+                min_amount: 1,
+                max_amount: 100_000_000,
+                available_capacity: 1_000_000,
+                base_fee: 5,
+                proportional_fee_ppm: 0,
+                enabled: true,
+            },
+            amount: 100,
+            provider_fee: 5,
+            routing_fee_limit: 10,
+            onchain_fee_estimate_ckb: 1_000,
+            capacity_requirement_ckb: 61,
+            payment_hash: [44u8; 32].into(),
+            expires_at: now_ms,
+            payout_deadline: now_ms,
+            refund_after_lock_time: 10_000,
+            claimant_lock: packed::Script::new_builder()
+                .code_hash([10u8; 32].pack())
+                .hash_type(packed::Byte::new(0))
+                .args(vec![1u8; 20].pack())
+                .build(),
+            refund_lock: packed::Script::new_builder()
+                .code_hash([11u8; 32].pack())
+                .hash_type(packed::Byte::new(0))
+                .args(vec![2u8; 20].pack())
+                .build(),
+            client_invoice: None,
+        }
+    }
+
+    #[test]
+    fn validate_liquidity_lock_args_accepts_matching_ckb_lock_script_args() {
+        use crate::liquidity::build_liquidity_lock_args;
+
+        let quote = test_loop_in_quote(1_000_000);
+        let code_hash = [9u8; 32].pack();
+        let args = build_liquidity_lock_args(
+            quote.payment_hash.as_ref().try_into().unwrap(),
+            &quote.claimant_lock,
+            &quote.refund_lock,
+            quote.refund_after_lock_time,
+            loop_in_gross_onchain_amount(&quote).unwrap(),
+            None,
+        );
+        assert!(validate_liquidity_lock_args(
+            &args,
+            &quote,
+            &code_hash,
+            0,
+            &code_hash,
+            0,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_liquidity_lock_args_rejects_wrong_code_hash() {
+        let quote = test_loop_in_quote(1_000_000);
+        let args = vec![0u8; 152];
+        let result = validate_liquidity_lock_args(
+            &args,
+            &quote,
+            &[9u8; 32].pack(),
+            0,
+            &[8u8; 32].pack(),
+            0,
+        );
+        assert!(result.unwrap_err().to_string().contains("liquidity-lock contract"));
+    }
+
+    #[test]
+    fn validate_liquidity_lock_args_rejects_wrong_payment_hash() {
+        let quote = test_loop_in_quote(1_000_000);
+        let mut args = vec![0u8; 152];
+        args[0..32].copy_from_slice(&[99u8; 32]);
+        let result = validate_liquidity_lock_args(
+            &args,
+            &quote,
+            &[9u8; 32].pack(),
+            0,
+            &[9u8; 32].pack(),
+            0,
+        );
+        assert!(result.unwrap_err().to_string().contains("payment_hash"));
+    }
+
+    #[test]
+    fn validate_liquidity_lock_args_rejects_wrong_amount() {
+        use crate::liquidity::build_liquidity_lock_args;
+
+        let quote = test_loop_in_quote(1_000_000);
+        let code_hash = [9u8; 32].pack();
+        let args = build_liquidity_lock_args(
+            quote.payment_hash.as_ref().try_into().unwrap(),
+            &quote.claimant_lock,
+            &quote.refund_lock,
+            quote.refund_after_lock_time,
+            999,
+            None,
+        );
+        let result = validate_liquidity_lock_args(
+            &args,
+            &quote,
+            &code_hash,
+            0,
+            &code_hash,
+            0,
+        );
+        assert!(result.unwrap_err().to_string().contains("amount"));
     }
 }
