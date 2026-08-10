@@ -292,6 +292,9 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
                 (LspPaymentDeliveryStatus::Dispatching, None)
             }
             InternalPaymentDeliveryStatus::InFlight => (LspPaymentDeliveryStatus::InFlight, None),
+            InternalPaymentDeliveryStatus::SettlingUpstream { .. } => {
+                (LspPaymentDeliveryStatus::SettlingUpstream, None)
+            }
             InternalPaymentDeliveryStatus::Succeeded => (LspPaymentDeliveryStatus::Succeeded, None),
             InternalPaymentDeliveryStatus::Failed { reason } => {
                 (LspPaymentDeliveryStatus::Failed, Some(reason))

@@ -123,12 +123,14 @@ The last term preserves enough expiry budget to fail safely upstream. The
 delivery state machine is persisted in the LSP database:
 
 ```text
-Deferred -> Dispatching -> InFlight -> Succeeded | Failed
+Deferred -> Dispatching -> InFlight -> SettlingUpstream -> Succeeded | Failed
 ```
 
 The buffer deadline applies only to `Deferred` and `Dispatching`. Once the
 downstream payment is `InFlight`, the existing TLC expiries and payment session
-own its lifetime; the LSP buffer timer must not cancel it. On process restart,
+own its lifetime; the LSP buffer timer must not cancel it. The final downstream
+outcome and success preimage are persisted before `SettlingUpstream` resolves
+the payer-to-Public-T TLC. On process restart,
 the LSP reloads non-final deliveries, restores the trampoline resource
 reservation, consults the public payment session, and resumes or finalizes the
 record idempotently. A transient downstream dispatch failure returns to

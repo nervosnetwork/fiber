@@ -71,7 +71,17 @@ pub enum LspServiceMessage {
     ExpireDelivery(Hash256),
     TenantChannelOnline(Pubkey, Hash256),
     TenantChannelOffline(Pubkey, Hash256),
-    PaymentOutcome(Hash256, PaymentStatus),
+    PaymentOutcomeReady {
+        payment_hash: Hash256,
+        payment_status: PaymentStatus,
+        failure: Option<String>,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
+    PaymentOutcomeSettled {
+        payment_hash: Hash256,
+        payment_status: PaymentStatus,
+        failure: Option<String>,
+    },
 }
 
 /// Top-level container for the multi-tenant LSP subsystem.
@@ -145,7 +155,7 @@ impl LspServiceState {
         });
     }
 
-    fn update_from_payment_status(
+    fn begin_upstream_settlement(
         &self,
         payment_hash: &Hash256,
         status: PaymentStatus,
@@ -153,6 +163,33 @@ impl LspServiceState {
     ) -> Result<(), String> {
         let delivery_status = match status {
             PaymentStatus::Created | PaymentStatus::Inflight => LspPaymentDeliveryStatus::InFlight,
+            PaymentStatus::Success | PaymentStatus::Failed => {
+                LspPaymentDeliveryStatus::SettlingUpstream {
+                    payment_status: status,
+                    failure,
+                }
+            }
+        };
+        self.delivery_manager.transition(
+            payment_hash,
+            delivery_status,
+            crate::now_timestamp_as_millis_u64(),
+        )?;
+        Ok(())
+    }
+
+    fn finish_upstream_settlement(
+        &self,
+        payment_hash: &Hash256,
+        status: PaymentStatus,
+        failure: Option<String>,
+    ) -> Result<(), String> {
+        let delivery_status = match status {
+            PaymentStatus::Created | PaymentStatus::Inflight => {
+                return Err(format!(
+                    "hosted payment {payment_hash} has no final downstream outcome"
+                ));
+            }
             PaymentStatus::Success => LspPaymentDeliveryStatus::Succeeded,
             PaymentStatus::Failed => LspPaymentDeliveryStatus::Failed {
                 reason: failure.unwrap_or_else(|| "downstream payment failed".to_string()),
@@ -387,13 +424,35 @@ impl Actor for LspService {
                     }
                 }
             }
-            LspServiceMessage::PaymentOutcome(payment_hash, payment_status) => {
+            LspServiceMessage::PaymentOutcomeReady {
+                payment_hash,
+                payment_status,
+                failure,
+                reply,
+            } => {
+                let result = match state.delivery_manager.get(&payment_hash) {
+                    Ok(Some(delivery)) if !delivery.status.is_final() => {
+                        state.begin_upstream_settlement(&payment_hash, payment_status, failure)
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error),
+                };
+                if result.is_ok() && payment_status.is_final() {
+                    LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                }
+                let _ = reply.send(result);
+            }
+            LspServiceMessage::PaymentOutcomeSettled {
+                payment_hash,
+                payment_status,
+                failure,
+            } => {
                 if state
                     .delivery_manager
                     .get(&payment_hash)?
                     .is_some_and(|delivery| !delivery.status.is_final())
                 {
-                    state.update_from_payment_status(&payment_hash, payment_status, None)?;
+                    state.finish_upstream_settlement(&payment_hash, payment_status, failure)?;
                 }
             }
         }
@@ -420,14 +479,89 @@ impl LspService {
                 NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
             ));
 
+        // A deferred delivery has not created its downstream payment session yet. Looking up the
+        // hash at that point can find the upstream trampoline session and incorrectly treat it as
+        // the downstream delivery. Only reconcile a session after dispatch has actually started.
+        if matches!(
+            delivery.status,
+            LspPaymentDeliveryStatus::Dispatching
+                | LspPaymentDeliveryStatus::InFlight
+                | LspPaymentDeliveryStatus::SettlingUpstream { .. }
+        ) {
+            let existing_payment = ractor::call_t!(
+                state.public_network_actor,
+                |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
+                    payment_hash,
+                    reply,
+                )),
+                5_000
+            );
+            if let Ok(Ok(payment)) = existing_payment {
+                if payment.status.is_final() {
+                    state.begin_upstream_settlement(
+                        &payment_hash,
+                        payment.status,
+                        payment.failed_error.clone(),
+                    )?;
+                    let settlement = ractor::call_t!(
+                        state.public_network_actor,
+                        |reply| NetworkActorMessage::new_command(
+                            NetworkActorCommand::ReconcileBufferedTrampolineSettlement {
+                                payment_hash,
+                                reply,
+                            },
+                        ),
+                        10_000
+                    )
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result);
+                    if let Err(error) = settlement {
+                        tracing::warn!(
+                            %payment_hash,
+                            %error,
+                            "Failed to reconcile hosted upstream settlement"
+                        );
+                        LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                        return Ok(());
+                    }
+                    state.finish_upstream_settlement(
+                        &payment_hash,
+                        payment.status,
+                        payment.failed_error,
+                    )?;
+                } else {
+                    state.begin_upstream_settlement(
+                        &payment_hash,
+                        payment.status,
+                        payment.failed_error,
+                    )?;
+                    LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                }
+                return Ok(());
+            }
+            if matches!(
+                delivery.status,
+                LspPaymentDeliveryStatus::InFlight
+                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
+            ) {
+                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                return Ok(());
+            }
+        }
+
         let now = crate::now_timestamp_as_millis_u64();
+        if now >= delivery.buffer_deadline {
+            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
+            return Ok(());
+        }
+
         let Some(tenant) = state.registry.get(&delivery.tenant_id)? else {
             let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
             return Ok(());
         };
         let channel_ready =
             state.ready_tenants.get(&tenant.tenant_id) == Some(&delivery.private_channel_id);
-        if delivery.status == LspPaymentDeliveryStatus::Deferred && !channel_ready {
+        if !channel_ready {
             return Ok(());
         }
         if let Err(error) = state.supervisor.ensure(&tenant).await {
@@ -442,44 +576,6 @@ impl LspService {
                 payment_hash,
                 delivery.buffer_deadline,
             );
-            return Ok(());
-        }
-
-        // A deferred delivery has not created its downstream payment session yet. Looking up the
-        // hash at that point can find the upstream trampoline session and incorrectly treat it as
-        // the downstream delivery. Only reconcile a session after dispatch has actually started.
-        if matches!(
-            delivery.status,
-            LspPaymentDeliveryStatus::Dispatching | LspPaymentDeliveryStatus::InFlight
-        ) {
-            let existing_payment = ractor::call_t!(
-                state.public_network_actor,
-                |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
-                    payment_hash,
-                    reply,
-                )),
-                5_000
-            );
-            if let Ok(Ok(payment)) = existing_payment {
-                state.update_from_payment_status(
-                    &payment_hash,
-                    payment.status,
-                    payment.failed_error,
-                )?;
-                return Ok(());
-            }
-            if delivery.status == LspPaymentDeliveryStatus::InFlight {
-                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
-                return Ok(());
-            }
-        }
-
-        if now >= delivery.buffer_deadline {
-            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
-            return Ok(());
-        }
-
-        if !channel_ready {
             return Ok(());
         }
 
@@ -547,6 +643,13 @@ impl LspService {
         ) {
             return Ok(());
         }
+        if matches!(
+            delivery.status,
+            LspPaymentDeliveryStatus::SettlingUpstream { .. }
+        ) {
+            LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+            return Ok(());
+        }
         let now = crate::now_timestamp_as_millis_u64();
         if now < delivery.buffer_deadline {
             LspServiceState::schedule_delivery_deadline(
@@ -557,6 +660,11 @@ impl LspService {
             return Ok(());
         }
         let reason = "hosted tenant was unavailable before the buffer deadline".to_string();
+        state.begin_upstream_settlement(
+            &payment_hash,
+            PaymentStatus::Failed,
+            Some(reason.clone()),
+        )?;
         let failed = ractor::call_t!(
             state.public_network_actor,
             |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
@@ -566,7 +674,20 @@ impl LspService {
             },),
             10_000
         )
-        .map_err(|error| error.to_string())??;
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+        let failed = match failed {
+            Ok(failed) => failed,
+            Err(error) => {
+                tracing::warn!(
+                    %payment_hash,
+                    %error,
+                    "Failed to settle expired hosted delivery"
+                );
+                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                return Ok(());
+            }
+        };
         let status = if failed {
             LspPaymentDeliveryStatus::Failed { reason }
         } else {

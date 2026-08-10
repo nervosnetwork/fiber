@@ -138,6 +138,8 @@ pub enum LspPaymentDeliveryStatus {
     Dispatching,
     /// A downstream payment session exists; the buffer deadline no longer applies.
     InFlight,
+    /// The downstream outcome is durable and Public T is resolving the upstream TLC.
+    SettlingUpstream,
     /// The downstream payment completed successfully.
     Succeeded,
     /// Delivery failed before or during downstream payment.

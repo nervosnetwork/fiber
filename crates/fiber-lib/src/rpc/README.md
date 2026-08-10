@@ -1771,6 +1771,7 @@ Durable hosted-payment delivery state.
 * `deferred` - Public T is waiting for the hosted tenant to become reachable.
 * `dispatching` - Public T is starting downstream trampoline dispatch.
 * `in_flight` - A downstream payment session exists; the buffer deadline no longer applies.
+* `settling_upstream` - The downstream outcome is durable and Public T is resolving the upstream TLC.
 * `succeeded` - The downstream payment completed successfully.
 * `failed` - Delivery failed before or during downstream payment.
 ---

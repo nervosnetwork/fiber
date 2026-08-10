@@ -1085,6 +1085,11 @@ pub enum NetworkActorCommand {
         reply: RpcReplyPort<Result<(), String>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
+    ReconcileBufferedTrampolineSettlement {
+        payment_hash: Hash256,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
     FailBufferedTrampoline {
         request: TrampolineForwardingRequest,
         reason: String,
@@ -3254,6 +3259,24 @@ where
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
+            NetworkActorCommand::ReconcileBufferedTrampolineSettlement {
+                payment_hash,
+                reply,
+            } => {
+                let result = match state.store.get_payment_session(payment_hash) {
+                    Some(session) if session.status.is_final() => {
+                        let result = state.settle_trampoline_payment(&session, None, None).await;
+                        state.trampoline_forwarding_tracker.release(&payment_hash);
+                        result
+                    }
+                    Some(_) => Err(format!(
+                        "hosted payment {payment_hash} is not ready for upstream settlement"
+                    )),
+                    None => Err(format!("hosted payment {payment_hash} does not exist")),
+                };
+                let _ = reply.send(result);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::FailBufferedTrampoline {
                 request,
                 reason,
@@ -4671,13 +4694,17 @@ where
         session.last_updated_at = now;
         state.store.insert_payment_session(session.clone());
         state.trampoline_forwarding_tracker.release(&payment_hash);
-        state.settle_trampoline_payment(&session, None, None).await;
-        if let Some(lsp_service) = state.lsp_service.as_ref() {
-            let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcome(
-                payment_hash,
-                PaymentStatus::Failed,
-            ));
+        let settlement = state.settle_trampoline_payment(&session, None, None).await;
+        if settlement.is_ok() {
+            if let Some(lsp_service) = state.lsp_service.as_ref() {
+                let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcomeSettled {
+                    payment_hash,
+                    payment_status: PaymentStatus::Failed,
+                    failure: session.last_error.clone(),
+                });
+            }
         }
+        settlement?;
         Ok(true)
     }
 
@@ -7336,15 +7363,42 @@ where
             return;
         }
 
-        self.settle_trampoline_payment(&session, last_error_packet.as_ref(), None)
-            .await;
         #[cfg(not(target_arch = "wasm32"))]
         if session.status.is_final() {
             if let Some(lsp_service) = self.lsp_service.as_ref() {
-                let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcome(
+                let ready = ractor::call_t!(
+                    lsp_service,
+                    |reply| LspServiceMessage::PaymentOutcomeReady {
+                        payment_hash,
+                        payment_status: session.status,
+                        failure: session.last_error.clone(),
+                        reply,
+                    },
+                    5_000
+                );
+                if !matches!(ready, Ok(Ok(()))) {
+                    warn!(
+                        %payment_hash,
+                        ?ready,
+                        "Failed to persist hosted payment outcome before upstream settlement"
+                    );
+                }
+            }
+        }
+        let settlement = self
+            .settle_trampoline_payment(&session, last_error_packet.as_ref(), None)
+            .await;
+        if let Err(error) = &settlement {
+            warn!(%payment_hash, %error, "Failed to settle upstream trampoline payment");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if session.status.is_final() && settlement.is_ok() {
+            if let Some(lsp_service) = self.lsp_service.as_ref() {
+                let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcomeSettled {
                     payment_hash,
-                    session.status,
-                ));
+                    payment_status: session.status,
+                    failure: session.last_error.clone(),
+                });
             }
         }
     }
@@ -7354,9 +7408,9 @@ where
         session: &PaymentSession,
         last_error_packet: Option<&TlcErrPacket>,
         channel_filter: Option<Hash256>,
-    ) {
+    ) -> Result<(), String> {
         let Some(context) = session.request.trampoline_context.as_ref() else {
-            return;
+            return Ok(());
         };
         let payment_hash = session.request.payment_hash;
         let success_preimage = if session.status == PaymentStatus::Success {
@@ -7370,15 +7424,19 @@ where
         };
         if session.status == PaymentStatus::Success {
             let Some(preimage) = success_preimage else {
-                error!("Payment success but no preimage found for {payment_hash}");
-                return;
+                return Err(format!(
+                    "payment success but no preimage found for {payment_hash}"
+                ));
             };
             self.store.insert_preimage(payment_hash, preimage);
         } else if !session.status.is_final() {
-            warn!("Trampoline payment stopped with unknown state for {payment_hash}");
-            return;
+            return Err(format!(
+                "trampoline payment {payment_hash} has non-final status {:?}",
+                session.status
+            ));
         }
 
+        let mut settlement_errors = Vec::new();
         for previous_tlc in &context.previous_tlcs {
             if channel_filter.is_some_and(|channel_id| channel_id != previous_tlc.prev_channel_id)
                 || !self
@@ -7397,12 +7455,12 @@ where
                 }),
                 PaymentStatus::Failed => {
                     let Some(shared_secret) = previous_tlc.shared_secret else {
-                        error!(
-                            "Can't fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
+                        settlement_errors.push(format!(
+                            "cannot fail upstream trampoline TLC without shared secret: payment_hash={:?}, channel_id={:?}, tlc_id={:?}",
                             payment_hash,
                             previous_tlc.prev_channel_id,
                             previous_tlc.prev_tlc_id
-                        );
+                        ));
                         continue;
                     };
                     let error_code = session
@@ -7434,14 +7492,19 @@ where
                 .send_command_to_channel(previous_tlc.prev_channel_id, command)
                 .await
             {
-                error!(
-                    "Failed to settle upstream trampoline TLC: payment_hash={:?}, channel_id={:?}, tlc_id={:?}, error={:?}",
+                settlement_errors.push(format!(
+                    "failed to settle upstream trampoline TLC: payment_hash={:?}, channel_id={:?}, tlc_id={:?}, error={:?}",
                     payment_hash,
                     previous_tlc.prev_channel_id,
                     previous_tlc.prev_tlc_id,
                     error
-                );
+                ));
             }
+        }
+        if settlement_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(settlement_errors.join("; "))
         }
     }
 
@@ -7454,8 +7517,21 @@ where
                 continue;
             };
             if session.status.is_final() {
-                self.settle_trampoline_payment(&session, None, Some(channel_id))
-                    .await;
+                if let Err(error) = self
+                    .settle_trampoline_payment(&session, None, Some(channel_id))
+                    .await
+                {
+                    warn!(
+                        %payment_hash,
+                        %channel_id,
+                        %error,
+                        "Failed to recover upstream trampoline settlement"
+                    );
+                    self.pending_trampoline_settlements
+                        .entry(channel_id)
+                        .or_default()
+                        .insert(payment_hash);
+                }
             }
         }
     }

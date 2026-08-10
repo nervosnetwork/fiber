@@ -3,7 +3,7 @@ use fiber_store::backend::StorageBackend;
 use serde::{Deserialize, Serialize};
 
 use crate::fiber::trampoline::TrampolineForwardingRequest;
-use crate::fiber_types::Hash256;
+use crate::fiber_types::{Hash256, PaymentStatus};
 use crate::store::{FiberStore, Store};
 
 use super::{LspInvoiceRegistration, TenantId};
@@ -35,7 +35,17 @@ pub enum LspPaymentDeliveryStatus {
     Dispatching,
     InFlight,
     Succeeded,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
+    /// The downstream outcome is durable and Public T is resolving the upstream TLC.
+    ///
+    /// This variant is appended to preserve the bincode discriminants of records written by
+    /// earlier hosted-LSP prototypes.
+    SettlingUpstream {
+        payment_status: PaymentStatus,
+        failure: Option<String>,
+    },
 }
 
 impl LspPaymentDeliveryStatus {
@@ -239,15 +249,23 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             (&delivery.status, &status),
             (
                 LspPaymentDeliveryStatus::Deferred,
-                LspPaymentDeliveryStatus::Dispatching | LspPaymentDeliveryStatus::Failed { .. }
+                LspPaymentDeliveryStatus::Dispatching
+                    | LspPaymentDeliveryStatus::Failed { .. }
+                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::Dispatching,
                 LspPaymentDeliveryStatus::Deferred
                     | LspPaymentDeliveryStatus::InFlight
                     | LspPaymentDeliveryStatus::Failed { .. }
+                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::InFlight,
-                LspPaymentDeliveryStatus::Succeeded | LspPaymentDeliveryStatus::Failed { .. }
+                LspPaymentDeliveryStatus::SettlingUpstream { .. }
+            ) | (
+                LspPaymentDeliveryStatus::SettlingUpstream { .. },
+                LspPaymentDeliveryStatus::InFlight
+                    | LspPaymentDeliveryStatus::Succeeded
+                    | LspPaymentDeliveryStatus::Failed { .. }
             )
         );
         if !valid {

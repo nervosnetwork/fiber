@@ -14,7 +14,7 @@ use tempfile::tempdir;
 
 use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage};
 use crate::fiber::trampoline::TrampolineForwardingRequest;
-use crate::fiber_types::{Hash256, HashAlgorithm, PrevTlcInfo, Privkey};
+use crate::fiber_types::{Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey};
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::{
     HostedTenantRecord, HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
@@ -634,6 +634,9 @@ impl Actor for MockPublicNetworkActor {
                     reply.send(Ok(()))
                 };
             }
+            NetworkActorCommand::ReconcileBufferedTrampolineSettlement { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
             NetworkActorCommand::FailBufferedTrampoline { reply, .. } => {
                 state.failures.fetch_add(1, Ordering::Relaxed);
                 let _ = reply.send(Ok(true));
@@ -1064,4 +1067,99 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 2);
     assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn downstream_outcome_is_persisted_before_upstream_settlement() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store.clone(),
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let payment_hash = Hash256::from([23; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([30; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
+        created_at: 42,
+    };
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64()),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    manager
+        .transition(
+            &payment_hash,
+            LspPaymentDeliveryStatus::Dispatching,
+            crate::now_timestamp_as_millis_u64(),
+        )
+        .and_then(|_| {
+            manager.transition(
+                &payment_hash,
+                LspPaymentDeliveryStatus::InFlight,
+                crate::now_timestamp_as_millis_u64(),
+            )
+        })
+        .unwrap();
+
+    for _ in 0..2 {
+        ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
+            payment_hash,
+            payment_status: PaymentStatus::Success,
+            failure: None,
+            reply,
+        })
+        .unwrap()
+        .unwrap();
+    }
+    let settling = manager.get(&payment_hash).unwrap().unwrap();
+    assert_eq!(
+        settling.status,
+        LspPaymentDeliveryStatus::SettlingUpstream {
+            payment_status: PaymentStatus::Success,
+            failure: None,
+        }
+    );
+    let reopened = LspPaymentDeliveryManager::new(store);
+    assert_eq!(reopened.get(&payment_hash).unwrap(), Some(settling));
+
+    service
+        .send_message(LspServiceMessage::PaymentOutcomeSettled {
+            payment_hash,
+            payment_status: PaymentStatus::Success,
+            failure: None,
+        })
+        .unwrap();
+    wait_for_delivery_status(&reopened, payment_hash, LspPaymentDeliveryStatus::Succeeded).await;
 }
