@@ -84,7 +84,7 @@ rpc:
   listening_addr: "127.0.0.1:8227"
 
 # Hosted LSP service configuration. This section is inert unless `lsp` is added
-# to `services`. Tenant identities and stores are isolated below $BASE_DIR/lsp.
+# to `services`. Tenant state and signing keys are isolated below $BASE_DIR/lsp.
 lsp:
   max_active_tenants: 64
   tenants: []
