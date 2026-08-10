@@ -375,9 +375,7 @@ impl Actor for CkbChainActor {
                     .await
                     .map(|live_cell| live_cell.cell.map(|cell| cell.output.into()))
                     .map_err(|e| {
-                        RpcError::Other(anyhow::anyhow!(format!(
-                            "get_live_cell failed: {e}"
-                        )))
+                        RpcError::Other(anyhow::anyhow!("get_live_cell failed: {e}"))
                     });
                 if !reply_port.is_closed() {
                     let _ = reply_port.send(result);
