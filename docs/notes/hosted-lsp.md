@@ -128,6 +128,8 @@ delivery state machine is persisted in the LSP database:
 
 ```text
 Deferred -> Dispatching -> InFlight -> SettlingUpstream -> Succeeded | Failed
+    |              |
+    +--------------+-> Cancelled (upstream TLC already removed)
 ```
 
 The buffer deadline applies only to `Deferred` and `Dispatching`. Once the
@@ -135,9 +137,13 @@ downstream payment is `InFlight`, the existing TLC expiries and payment session
 own its lifetime; the LSP buffer timer must not cancel it. The final downstream
 outcome and success preimage are persisted before `SettlingUpstream` resolves
 the payer-to-Public-T TLC. On process restart,
-the LSP reloads non-final deliveries, restores the trampoline resource
+the LSP reloads non-final deliveries, first verifies that the exact upstream
+channel/TLC/payment-hash tuple is still pending, restores the trampoline resource
 reservation, consults the public payment session, and resumes or finalizes the
-record idempotently. A transient downstream dispatch failure returns to
+record idempotently. If the upstream TLC was already removed before downstream
+dispatch, the delivery becomes `Cancelled` and its reservation is released;
+the LSP does not create a downstream payment or attempt another upstream
+failure. A transient downstream dispatch failure returns to
 `Deferred` and is retried until the deadline instead of immediately failing the
 upstream TLC. Buffered MPP is rejected in this phase.
 

@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::fiber::{
-    network::{NetworkActorCommand, NetworkActorMessage},
+    network::{BufferedTrampolineUpstreamStatus, NetworkActorCommand, NetworkActorMessage},
     trampoline::TrampolineForwardingRequest,
 };
 use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey};
@@ -465,6 +465,34 @@ impl Actor for LspService {
 }
 
 impl LspService {
+    async fn inspect_upstream(
+        state: &LspServiceState,
+        delivery: &LspPaymentDelivery,
+    ) -> Result<BufferedTrampolineUpstreamStatus, String> {
+        ractor::call_t!(
+            state.public_network_actor,
+            |reply| NetworkActorMessage::new_command(
+                NetworkActorCommand::InspectBufferedTrampolineUpstream {
+                    request: delivery.request.clone(),
+                    reply,
+                },
+            ),
+            5_000
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn cancel_delivery(state: &LspServiceState, payment_hash: &Hash256) -> Result<(), String> {
+        state.delivery_manager.transition(
+            payment_hash,
+            LspPaymentDeliveryStatus::Cancelled {
+                reason: "upstream TLC was removed before hosted delivery dispatch".to_string(),
+            },
+            crate::now_timestamp_as_millis_u64(),
+        )?;
+        Ok(())
+    }
+
     async fn resume_delivery(
         &self,
         myself: ActorRef<LspServiceMessage>,
@@ -477,12 +505,6 @@ impl LspService {
         if delivery.status.is_final() {
             return Ok(());
         }
-        let _ = state
-            .public_network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
-            ));
-
         // A deferred delivery has not created its downstream payment session yet. Looking up the
         // hash at that point can find the upstream trampoline session and incorrectly treat it as
         // the downstream delivery. Only reconcile a session after dispatch has actually started.
@@ -553,6 +575,45 @@ impl LspService {
             }
         }
 
+        match Self::inspect_upstream(state, &delivery).await {
+            Ok(BufferedTrampolineUpstreamStatus::Pending) => {
+                let _ = state
+                    .public_network_actor
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
+                    ));
+            }
+            Ok(BufferedTrampolineUpstreamStatus::Removed) => {
+                Self::cancel_delivery(state, &payment_hash)?;
+                return Ok(());
+            }
+            Ok(BufferedTrampolineUpstreamStatus::Unknown) => {
+                tracing::warn!(
+                    %payment_hash,
+                    "Cannot determine hosted delivery upstream TLC state"
+                );
+                LspServiceState::schedule_delivery_retry(
+                    &myself,
+                    payment_hash,
+                    delivery.buffer_deadline,
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %payment_hash,
+                    %error,
+                    "Failed to inspect hosted delivery upstream TLC"
+                );
+                LspServiceState::schedule_delivery_retry(
+                    &myself,
+                    payment_hash,
+                    delivery.buffer_deadline,
+                );
+                return Ok(());
+            }
+        }
+
         let now = crate::now_timestamp_as_millis_u64();
         if now >= delivery.buffer_deadline {
             let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
@@ -566,6 +627,11 @@ impl LspService {
         let channel_ready =
             state.ready_tenants.get(&tenant.tenant_id) == Some(&delivery.private_channel_id);
         if !channel_ready {
+            LspServiceState::schedule_delivery_retry(
+                &myself,
+                payment_hash,
+                delivery.buffer_deadline,
+            );
             return Ok(());
         }
         if let Err(error) = state.supervisor.ensure(&tenant).await {
@@ -644,6 +710,7 @@ impl LspService {
             LspPaymentDeliveryStatus::InFlight
                 | LspPaymentDeliveryStatus::Succeeded
                 | LspPaymentDeliveryStatus::Failed { .. }
+                | LspPaymentDeliveryStatus::Cancelled { .. }
         ) {
             return Ok(());
         }
@@ -662,6 +729,30 @@ impl LspService {
                 delivery.buffer_deadline,
             );
             return Ok(());
+        }
+        match Self::inspect_upstream(state, &delivery).await {
+            Ok(BufferedTrampolineUpstreamStatus::Pending) => {}
+            Ok(BufferedTrampolineUpstreamStatus::Removed) => {
+                Self::cancel_delivery(state, &payment_hash)?;
+                return Ok(());
+            }
+            Ok(BufferedTrampolineUpstreamStatus::Unknown) => {
+                tracing::warn!(
+                    %payment_hash,
+                    "Cannot expire hosted delivery while upstream TLC state is unknown"
+                );
+                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %payment_hash,
+                    %error,
+                    "Failed to inspect upstream TLC before expiring hosted delivery"
+                );
+                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                return Ok(());
+            }
         }
         let reason = "hosted tenant was unavailable before the buffer deadline".to_string();
         state.begin_upstream_settlement(

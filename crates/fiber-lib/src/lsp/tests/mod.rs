@@ -1,7 +1,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -908,6 +908,7 @@ struct MockPublicNetworkState {
     dispatches: Arc<AtomicUsize>,
     dispatch_failures_remaining: Arc<AtomicUsize>,
     failures: Arc<AtomicUsize>,
+    upstream_pending: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -936,6 +937,14 @@ impl Actor for MockPublicNetworkActor {
         match command {
             NetworkActorCommand::GetPayment(_, reply) => {
                 let _ = reply.send(Err("payment not started".to_string()));
+            }
+            NetworkActorCommand::InspectBufferedTrampolineUpstream { reply, .. } => {
+                let status = if state.upstream_pending.load(Ordering::Relaxed) {
+                    crate::fiber::network::BufferedTrampolineUpstreamStatus::Pending
+                } else {
+                    crate::fiber::network::BufferedTrampolineUpstreamStatus::Removed
+                };
+                let _ = reply.send(status);
             }
             NetworkActorCommand::DispatchBufferedTrampoline { reply, .. } => {
                 state.dispatches.fetch_add(1, Ordering::Relaxed);
@@ -993,6 +1002,30 @@ async fn start_test_lsp_service_with_dispatch_failures(
     dispatch_failures_remaining: Arc<AtomicUsize>,
     failures: Arc<AtomicUsize>,
 ) -> ActorRef<LspServiceMessage> {
+    start_test_lsp_service_with_upstream(
+        store,
+        config,
+        factory,
+        lsp_key,
+        dispatches,
+        dispatch_failures_remaining,
+        failures,
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_test_lsp_service_with_upstream(
+    store: crate::store::Store,
+    config: LspConfig,
+    factory: Arc<dyn TenantRuntimeFactory>,
+    lsp_key: Privkey,
+    dispatches: Arc<AtomicUsize>,
+    dispatch_failures_remaining: Arc<AtomicUsize>,
+    failures: Arc<AtomicUsize>,
+    upstream_pending: Arc<AtomicBool>,
+) -> ActorRef<LspServiceMessage> {
     let public_network_actor = Actor::spawn(
         None,
         MockPublicNetworkActor,
@@ -1000,6 +1033,7 @@ async fn start_test_lsp_service_with_dispatch_failures(
             dispatches,
             dispatch_failures_remaining,
             failures,
+            upstream_pending,
         },
     )
     .await
@@ -1342,6 +1376,93 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
     .await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 0);
     assert_eq!(failures.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn restart_cancels_deferred_delivery_after_upstream_tlc_removal() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory: Arc<dyn TenantRuntimeFactory> = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let upstream_pending = Arc::new(AtomicBool::new(true));
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service_with_upstream(
+        store.clone(),
+        config.clone(),
+        factory.clone(),
+        lsp_key.clone(),
+        dispatches.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        failures.clone(),
+        upstream_pending.clone(),
+    )
+    .await;
+    let payment_hash = Hash256::from([41; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([42; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
+        created_at: 42,
+    };
+    let now = crate::now_timestamp_as_millis_u64();
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::Deferred).await;
+
+    service.stop(None);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    upstream_pending.store(false, Ordering::Relaxed);
+
+    let reopened = start_test_lsp_service_with_upstream(
+        store,
+        config,
+        factory,
+        lsp_key,
+        dispatches.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        failures.clone(),
+        upstream_pending,
+    )
+    .await;
+    wait_for_delivery_status(
+        &manager,
+        payment_hash,
+        LspPaymentDeliveryStatus::Cancelled {
+            reason: "upstream TLC was removed before hosted delivery dispatch".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(failures.load(Ordering::Relaxed), 0);
+    assert!(!manager.has_pending_for_tenant(&tenant.tenant_id).unwrap());
+    reopened.stop(None);
 }
 
 #[tokio::test]

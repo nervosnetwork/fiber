@@ -144,6 +144,8 @@ pub enum LspPaymentDeliveryStatus {
     Succeeded,
     /// Delivery failed before or during downstream payment.
     Failed,
+    /// The upstream TLC was removed before downstream dispatch started.
+    Cancelled,
 }
 
 /// Operator-visible state of one hosted incoming payment.
@@ -162,7 +164,7 @@ pub struct LspPaymentDelivery {
     pub buffer_deadline: u64,
     /// Current durable delivery state.
     pub status: LspPaymentDeliveryStatus,
-    /// Failure detail when `status` is `failed`.
+    /// Terminal detail when `status` is `failed` or `cancelled`.
     pub failure_reason: Option<String>,
     /// Creation timestamp in milliseconds since Unix epoch.
     #[serde_as(as = "U64Hex")]

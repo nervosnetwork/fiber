@@ -46,11 +46,20 @@ pub enum LspPaymentDeliveryStatus {
         payment_status: PaymentStatus,
         failure: Option<String>,
     },
+    /// The upstream TLC disappeared before downstream dispatch started.
+    ///
+    /// This variant is appended to preserve persisted bincode discriminants.
+    Cancelled {
+        reason: String,
+    },
 }
 
 impl LspPaymentDeliveryStatus {
     pub fn is_final(&self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed { .. })
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. }
+        )
     }
 }
 
@@ -251,12 +260,14 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
                 LspPaymentDeliveryStatus::Deferred,
                 LspPaymentDeliveryStatus::Dispatching
                     | LspPaymentDeliveryStatus::Failed { .. }
+                    | LspPaymentDeliveryStatus::Cancelled { .. }
                     | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::Dispatching,
                 LspPaymentDeliveryStatus::Deferred
                     | LspPaymentDeliveryStatus::InFlight
                     | LspPaymentDeliveryStatus::Failed { .. }
+                    | LspPaymentDeliveryStatus::Cancelled { .. }
                     | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::InFlight,

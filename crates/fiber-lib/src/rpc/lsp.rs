@@ -299,6 +299,9 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
             InternalPaymentDeliveryStatus::Failed { reason } => {
                 (LspPaymentDeliveryStatus::Failed, Some(reason))
             }
+            InternalPaymentDeliveryStatus::Cancelled { reason } => {
+                (LspPaymentDeliveryStatus::Cancelled, Some(reason))
+            }
         };
         Self {
             payment_hash: delivery.payment_hash.into(),
