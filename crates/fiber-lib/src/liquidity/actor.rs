@@ -393,6 +393,7 @@ where
         &mut self,
         params: ProviderQuoteLoopOutParams,
     ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        ensure_provider_mode(&self.store)?;
         let asset = self
             .store
             .get_liquidity_asset(&params.asset_id)
@@ -821,6 +822,7 @@ where
         params: ProviderAcceptLoopOutParams,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        ensure_provider_mode(&self.store)?;
         let quote_id: Hash256 = params.quote_id.into();
         if self
             .store
@@ -855,6 +857,7 @@ where
         params: ProviderAcceptLoopInParams,
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        ensure_provider_mode(&self.store)?;
         let quote_id: Hash256 = params.quote_id.into();
         let quote = self.quote_terms(&quote_id)?;
         ensure_loop_in_quote_terms(&quote)?;
@@ -2512,6 +2515,18 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn ensure_provider_mode<S>(store: &S) -> Result<(), LiquidityLoopOutError>
+where
+    S: LiquidityStore,
+{
+    if !store.get_provider_mode().map_err(map_store_error)? {
+        return Err(LiquidityLoopOutError::Store(
+            "provider mode is disabled".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Return whether the client may start the Fiber payment from `state`.
 pub fn client_can_start_payment(state: LiquiditySwapState) -> bool {
     state == LiquiditySwapState::PayoutLocked
@@ -3361,7 +3376,9 @@ mod tests {
         }
 
         fn new_provider() -> Self {
-            Self::new("provider")
+            let harness = Self::new("provider");
+            harness.store.set_provider_mode(true).unwrap();
+            harness
         }
 
         fn new_provider_with_asset() -> Self {
@@ -3384,6 +3401,7 @@ mod tests {
         fn new_provider_with_chain_label(chain_label: &'static str) -> Self {
             let events = Shared::new(Vec::new());
             let store = TestLiquidityStore::new(events.clone(), "provider");
+            store.set_provider_mode(true).unwrap();
             Self {
                 events: events.clone(),
                 store: store.clone(),
@@ -5623,6 +5641,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_quote_loop_out_rejects_when_provider_mode_disabled() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        harness.store.set_provider_mode(false).unwrap();
+        assert!(!harness.store.get_provider_mode().unwrap());
+
+        let result = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                receiver: "ckt1receiver".to_string(),
+                max_provider_fee: 10,
+                max_routing_fee: 5,
+                expires_after_seconds: 60,
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("provider mode is disabled")
+        );
+    }
+
+    #[tokio::test]
     async fn provider_accept_loop_in_persists_observed_lock_and_watches_it() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
         let client_invoice = valid_client_invoice(100, [45u8; 32].into());
@@ -5678,6 +5722,7 @@ mod tests {
         store
             .upsert_liquidity_asset(test_loop_out_quote(now_ms() + 60_000).asset)
             .unwrap();
+        store.set_provider_mode(true).unwrap();
         let mut chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_provider")
             .with_store(store.clone());
         chain.reject_observed_loop_in_lock();
