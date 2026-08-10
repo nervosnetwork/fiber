@@ -796,6 +796,14 @@ impl Actor for MockChainActor {
                 // ignore
             }
 
+            GetLiveCell(_, reply_port) => {
+                if !reply_port.is_closed() {
+                    let _ = reply_port.send(Err(ckb_sdk::RpcError::Other(anyhow!(
+                        "GetLiveCell not implemented in mock"
+                    ))));
+                }
+            }
+
             Stop => {
                 myself.stop(Some("stop received".to_string()));
             }
