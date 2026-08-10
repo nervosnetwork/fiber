@@ -78,6 +78,10 @@ pub enum CkbChainMessage {
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
     ReportSendTxError(Hash256, RpcError),
+    GetLiveCell(
+        packed::OutPoint,
+        RpcReplyPort<Result<Option<packed::CellOutput>, RpcError>>,
+    ),
 
     Stop,
 }
@@ -362,6 +366,22 @@ impl Actor for CkbChainActor {
                 state
                     .ckb_tx_tracing_actor
                     .send_message(CkbTxTracingMessage::ReportSendTxError(tx_hash, err))?;
+            }
+            CkbChainMessage::GetLiveCell(outpoint, reply_port) => {
+                let ckb_client = state.config.ckb_rpc_client();
+                let outpoint_json: ckb_jsonrpc_types::OutPoint = outpoint.clone().into();
+                let result = ckb_client
+                    .get_live_cell(outpoint_json, true)
+                    .await
+                    .map(|live_cell| live_cell.cell.map(|cell| cell.output.into()))
+                    .map_err(|e| {
+                        RpcError::Other(anyhow::anyhow!(format!(
+                            "get_live_cell failed: {e}"
+                        )))
+                    });
+                if !reply_port.is_closed() {
+                    let _ = reply_port.send(result);
+                }
             }
 
             CkbChainMessage::Stop => {
