@@ -17,6 +17,9 @@ use secp256k1::SECP256K1;
 use tempfile::tempdir;
 
 use super::lsp_config;
+use crate::lsp::dispatcher::{
+    HostedTenantEndpoint, HostedTenantEndpointArgs, TenantMessageDispatcher,
+};
 use crate::{
     fiber::{
         network::{NetworkActorCommand, NetworkActorMessage},
@@ -74,16 +77,21 @@ impl TenantRuntimeFactory for ExistingRuntimeFactory {
             invoice_pubkey: record.invoice_pubkey,
             network_actor: self.network_actor.clone(),
             public_network_actor: None,
+            transport: None,
         })
     }
 }
 
-async fn register_in_process_peer(local: &NetworkNode, remote: &NetworkNode) {
+async fn register_in_process_endpoint(
+    local: &NetworkNode,
+    remote_pubkey: crate::fiber_types::Pubkey,
+    endpoint: &ActorRef<NetworkActorMessage>,
+) {
     ractor::call_t!(
         local.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
-            pubkey: remote.pubkey,
-            actor: remote.network_actor.clone(),
+            pubkey: remote_pubkey,
+            actor: endpoint.clone(),
             features: crate::fiber_types::FeatureVector::default(),
             reply,
         },),
@@ -106,11 +114,44 @@ async fn activate_in_process_peer(local: &NetworkNode, remote: &NetworkNode) {
     .expect("activate in-process peer");
 }
 
-async fn connect_in_process(left: &NetworkNode, right: &NetworkNode) {
-    register_in_process_peer(left, right).await;
-    register_in_process_peer(right, left).await;
+async fn connect_in_process(
+    left: &NetworkNode,
+    right: &NetworkNode,
+    endpoint: &ActorRef<NetworkActorMessage>,
+) {
+    register_in_process_endpoint(left, right.pubkey, endpoint).await;
+    register_in_process_endpoint(right, left.pubkey, endpoint).await;
     activate_in_process_peer(left, right).await;
     activate_in_process_peer(right, left).await;
+}
+
+async fn hosted_tenant_endpoint(
+    public_t: &NetworkNode,
+    tenant: &NetworkNode,
+) -> (TenantMessageDispatcher, ActorRef<NetworkActorMessage>) {
+    let dispatcher = TenantMessageDispatcher::default();
+    dispatcher
+        .register_runtime(
+            TenantId::new(TENANT_ID).unwrap(),
+            tenant.pubkey,
+            tenant.network_actor.clone(),
+        )
+        .unwrap();
+    let endpoint = Actor::spawn(
+        None,
+        HostedTenantEndpoint,
+        HostedTenantEndpointArgs {
+            tenant_id: TenantId::new(TENANT_ID).unwrap(),
+            invoice_pubkey: tenant.pubkey,
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            dispatcher: dispatcher.clone(),
+        },
+    )
+    .await
+    .expect("start hosted tenant endpoint")
+    .0;
+    (dispatcher, endpoint)
 }
 
 fn disconnect_in_process(left: &NetworkNode, right: &NetworkNode) {
@@ -178,7 +219,8 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let mut public_t = NetworkNode::new_with_node_name("lsp-public-t").await;
     let mut tenant = NetworkNode::new_with_node_name("lsp-tenant-u1").await;
     payer.connect_to(&mut public_t).await;
-    connect_in_process(&public_t, &tenant).await;
+    let (tenant_dispatcher, tenant_endpoint) = hosted_tenant_endpoint(&public_t, &tenant).await;
+    connect_in_process(&public_t, &tenant, &tenant_endpoint).await;
     let replacement = ractor::call_t!(
         public_t.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
@@ -309,6 +351,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         },
     )
     .await;
+    assert!(tenant_dispatcher.owns_channel(&TenantId::new(TENANT_ID).unwrap(), &private_channel_id));
     wait_until_node_supports_trampoline_routing(&payer, &public_t).await;
     wait_for_tenant_channel(&client, true).await;
     let tenants: ListLspTenantsResult = client
@@ -420,7 +463,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     ));
     assert!(!tenants.tenants[0].channel_online);
 
-    connect_in_process(&public_t, &tenant).await;
+    connect_in_process(&public_t, &tenant, &tenant_endpoint).await;
     public_t
         .expect_event(|event| {
             matches!(event, NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) if pubkey == &tenant.pubkey && channel_id == &private_channel_id)

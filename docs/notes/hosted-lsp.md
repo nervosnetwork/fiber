@@ -22,7 +22,10 @@ machines, but that key is not announced as another network node. A private
 channel connects each tenant directly to Public T. The existing Fiber channel
 messages and state transitions remain unchanged; messages on these co-located
 channels are delivered directly between actors, without Tentacle encoding,
-socket I/O, peer discovery, or gossip synchronization.
+socket I/O, peer discovery, or gossip synchronization. A shared tenant message
+dispatcher resolves the runtime by `(tenant_id, channel_id)`; the tenant's
+invoice/channel key remains an internal protocol key rather than a public peer
+endpoint.
 
 ```mermaid
 flowchart TB
@@ -202,9 +205,11 @@ untrusted clients without authentication.
 - Tenant runtimes currently reuse the existing Fiber network coordinator as an
   internal channel/payment dispatcher. They open no P2P listener and perform
   no gossip synchronization; a later refactor may extract a smaller dedicated
-  tenant coordinator without changing the in-process transport contract.
-  In-process endpoint registration is single-owner and refuses to replace an
-  existing tenant route with another actor.
+  tenant coordinator without changing the in-process transport contract. The
+  runtime actor itself is no longer registered directly as an in-process peer:
+  a tenant-scoped endpoint observes the unchanged Fiber message's channel id
+  and routes it through `TenantMessageDispatcher`. Runtime and endpoint
+  registration are single-owner and refuse replacement by another live actor.
 - Tenant channel opening and funding still use existing Fiber RPC/channel
   workflows.
 - Remote Channel Signer transport, authorization, replay protection, and signer

@@ -12,9 +12,14 @@ use fiber_store::backend::StorageBackend;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
 
-use crate::fiber::network::{HostedTenantActivity, NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::network::{
+    HostedTenantActivity, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+};
 use crate::fiber::trampoline::TrampolineForwardingRequest;
-use crate::fiber_types::{Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey};
+use crate::fiber::types::FiberMessage;
+use crate::fiber_types::{
+    AddTlc, Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, Pubkey,
+};
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::{
     HostedTenantRecord, HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
@@ -24,6 +29,8 @@ use crate::lsp::{
     MAX_LSP_BUFFER_DURATION_MS,
 };
 use crate::store::open_store;
+
+use super::dispatcher::{HostedTenantEndpoint, HostedTenantEndpointArgs, TenantMessageDispatcher};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod integration;
@@ -139,6 +146,161 @@ impl Actor for NoopNetworkActor {
     }
 }
 
+struct RecordingNetworkActor;
+
+#[async_trait]
+impl Actor for RecordingNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = Arc<Mutex<Vec<(Pubkey, Hash256)>>>;
+    type Arguments = Arc<Mutex<Vec<(Pubkey, Hash256)>>>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            source,
+            FiberMessage::ChannelNormalOperation(message),
+            _,
+        )) = message
+        {
+            state
+                .lock()
+                .unwrap()
+                .push((source, message.get_channel_id()));
+        }
+        Ok(())
+    }
+}
+
+fn test_add_tlc(channel_id: Hash256) -> FiberMessage {
+    FiberMessage::add_tlc(AddTlc {
+        channel_id,
+        tlc_id: 0,
+        amount: 1_000,
+        payment_hash: Hash256::from([9; 32]),
+        expiry: crate::now_timestamp_as_millis_u64() + 60_000,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: None,
+    })
+}
+
+#[tokio::test]
+async fn tenant_dispatcher_isolates_same_channel_id_between_tenants() {
+    let dispatcher = TenantMessageDispatcher::default();
+    let public_key = Privkey::from(&[7; 32]).pubkey();
+    let tenant_u1_key = Privkey::from(&[1; 32]).pubkey();
+    let tenant_u2_key = Privkey::from(&[2; 32]).pubkey();
+    let tenant_u1_id = TenantId::new("u1").unwrap();
+    let tenant_u2_id = TenantId::new("u2").unwrap();
+    let channel_id = Hash256::from([3; 32]);
+    let public_messages = Arc::new(Mutex::new(Vec::new()));
+    let tenant_u1_messages = Arc::new(Mutex::new(Vec::new()));
+    let tenant_u2_messages = Arc::new(Mutex::new(Vec::new()));
+    let public_actor = Actor::spawn(None, RecordingNetworkActor, public_messages.clone())
+        .await
+        .unwrap()
+        .0;
+    let tenant_u1_actor = Actor::spawn(None, RecordingNetworkActor, tenant_u1_messages.clone())
+        .await
+        .unwrap()
+        .0;
+    let tenant_u2_actor = Actor::spawn(None, RecordingNetworkActor, tenant_u2_messages.clone())
+        .await
+        .unwrap()
+        .0;
+    dispatcher
+        .register_runtime(tenant_u1_id.clone(), tenant_u1_key, tenant_u1_actor)
+        .unwrap();
+    dispatcher
+        .register_runtime(tenant_u2_id.clone(), tenant_u2_key, tenant_u2_actor)
+        .unwrap();
+
+    let endpoint_u1 = Actor::spawn(
+        None,
+        HostedTenantEndpoint,
+        HostedTenantEndpointArgs {
+            tenant_id: tenant_u1_id.clone(),
+            invoice_pubkey: tenant_u1_key,
+            public_node_id: public_key,
+            public_network_actor: public_actor.clone(),
+            dispatcher: dispatcher.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .0;
+    let endpoint_u2 = Actor::spawn(
+        None,
+        HostedTenantEndpoint,
+        HostedTenantEndpointArgs {
+            tenant_id: tenant_u2_id.clone(),
+            invoice_pubkey: tenant_u2_key,
+            public_node_id: public_key,
+            public_network_actor: public_actor,
+            dispatcher: dispatcher.clone(),
+        },
+    )
+    .await
+    .unwrap()
+    .0;
+
+    endpoint_u1
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::FiberMessage(public_key, test_add_tlc(channel_id), None),
+        ))
+        .unwrap();
+    endpoint_u2
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::FiberMessage(public_key, test_add_tlc(channel_id), None),
+        ))
+        .unwrap();
+    endpoint_u1
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::FiberMessage(tenant_u1_key, test_add_tlc(channel_id), None),
+        ))
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if tenant_u1_messages.lock().unwrap().len() == 1
+                && tenant_u2_messages.lock().unwrap().len() == 1
+                && public_messages.lock().unwrap().len() == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("all messages dispatched");
+
+    assert_eq!(
+        tenant_u1_messages.lock().unwrap().as_slice(),
+        &[(public_key, channel_id)]
+    );
+    assert_eq!(
+        tenant_u2_messages.lock().unwrap().as_slice(),
+        &[(public_key, channel_id)]
+    );
+    assert_eq!(
+        public_messages.lock().unwrap().as_slice(),
+        &[(tenant_u1_key, channel_id)]
+    );
+    assert!(dispatcher.owns_channel(&tenant_u1_id, &channel_id));
+    assert!(dispatcher.owns_channel(&tenant_u2_id, &channel_id));
+}
+
 struct FakeRuntimeFactory {
     starts: Arc<AtomicUsize>,
 }
@@ -200,6 +362,7 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
             invoice_pubkey: record.invoice_pubkey,
             network_actor: actor,
             public_network_actor: None,
+            transport: None,
         })
     }
 }
@@ -231,6 +394,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
             invoice_pubkey: record.invoice_pubkey,
             network_actor: actor,
             public_network_actor: None,
+            transport: None,
         })
     }
 }
@@ -257,6 +421,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             invoice_pubkey: record.invoice_pubkey,
             network_actor: actor,
             public_network_actor: None,
+            transport: None,
         })
     }
 }

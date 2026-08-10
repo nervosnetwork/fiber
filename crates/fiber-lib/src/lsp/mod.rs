@@ -1,5 +1,6 @@
 mod config;
 mod delivery;
+mod dispatcher;
 mod invoice;
 mod registry;
 mod runtime;
