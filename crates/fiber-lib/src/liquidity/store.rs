@@ -34,6 +34,9 @@ pub enum LiquidityStoreError {
     /// Backend-specific persistence failure.
     #[error("liquidity store backend error: {0}")]
     Backend(String),
+    /// Provider mode operation failed.
+    #[error("provider mode operation failed: {0}")]
+    ProviderModeError(String),
 }
 
 /// Filter for paginated swap history queries.
@@ -334,6 +337,12 @@ pub trait LiquidityStore {
 
     /// List configured provider assets.
     fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError>;
+
+    /// Set the global provider mode flag.
+    fn set_provider_mode(&self, enabled: bool) -> Result<(), LiquidityStoreError>;
+
+    /// Read the global provider mode flag (defaults to false if not set).
+    fn get_provider_mode(&self) -> Result<bool, LiquidityStoreError>;
 }
 
 #[cfg(test)]

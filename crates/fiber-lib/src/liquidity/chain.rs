@@ -11,7 +11,9 @@ use ckb_types::{
     packed,
     prelude::{Builder, Entity, Pack},
 };
-use fiber_types::{Hash256, HashAlgorithm, LiquidityAssetKind, LiquidityChainTxRole, LiquiditySwapState};
+use fiber_types::{
+    Hash256, HashAlgorithm, LiquidityAssetKind, LiquidityChainTxRole, LiquiditySwapState,
+};
 use ractor::{ActorRef, RpcReplyPort};
 
 use crate::ckb::contracts::get_udt_cell_deps;
@@ -2186,6 +2188,14 @@ mod tests {
 
         fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
             Err(LiquidityStoreError::Backend("unused".to_string()))
+        }
+
+        fn set_provider_mode(&self, _enabled: bool) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("unused".to_string()))
+        }
+
+        fn get_provider_mode(&self) -> Result<bool, LiquidityStoreError> {
+            Ok(false)
         }
     }
 
@@ -4555,30 +4565,19 @@ mod tests {
             loop_in_gross_onchain_amount(&quote).unwrap(),
             None,
         );
-        assert!(validate_liquidity_lock_args(
-            &args,
-            &quote,
-            &code_hash,
-            0,
-            &code_hash,
-            0,
-        )
-        .is_ok());
+        assert!(validate_liquidity_lock_args(&args, &quote, &code_hash, 0, &code_hash, 0,).is_ok());
     }
 
     #[test]
     fn validate_liquidity_lock_args_rejects_wrong_code_hash() {
         let quote = test_loop_in_quote(1_000_000);
         let args = vec![0u8; 152];
-        let result = validate_liquidity_lock_args(
-            &args,
-            &quote,
-            &[9u8; 32].pack(),
-            0,
-            &[8u8; 32].pack(),
-            0,
-        );
-        assert!(result.unwrap_err().to_string().contains("liquidity-lock contract"));
+        let result =
+            validate_liquidity_lock_args(&args, &quote, &[9u8; 32].pack(), 0, &[8u8; 32].pack(), 0);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("liquidity-lock contract"));
     }
 
     #[test]
@@ -4586,14 +4585,8 @@ mod tests {
         let quote = test_loop_in_quote(1_000_000);
         let mut args = vec![0u8; 152];
         args[0..32].copy_from_slice(&[99u8; 32]);
-        let result = validate_liquidity_lock_args(
-            &args,
-            &quote,
-            &[9u8; 32].pack(),
-            0,
-            &[9u8; 32].pack(),
-            0,
-        );
+        let result =
+            validate_liquidity_lock_args(&args, &quote, &[9u8; 32].pack(), 0, &[9u8; 32].pack(), 0);
         assert!(result.unwrap_err().to_string().contains("payment_hash"));
     }
 
@@ -4611,14 +4604,7 @@ mod tests {
             999,
             None,
         );
-        let result = validate_liquidity_lock_args(
-            &args,
-            &quote,
-            &code_hash,
-            0,
-            &code_hash,
-            0,
-        );
+        let result = validate_liquidity_lock_args(&args, &quote, &code_hash, 0, &code_hash, 0);
         assert!(result.unwrap_err().to_string().contains("amount"));
     }
 }

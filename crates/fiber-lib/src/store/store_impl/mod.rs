@@ -1888,6 +1888,18 @@ impl LiquidityStore for Store {
             .map(|kv| deserialize_liquidity(kv.value.as_ref(), "LiquidityAsset"))
             .collect()
     }
+
+    fn set_provider_mode(&self, enabled: bool) -> Result<(), LiquidityStoreError> {
+        self.put(
+            b"liquidity-provider-mode",
+            [if enabled { 1u8 } else { 0u8 }],
+        );
+        Ok(())
+    }
+
+    fn get_provider_mode(&self) -> Result<bool, LiquidityStoreError> {
+        Ok(self.get(b"liquidity-provider-mode").as_deref() == Some(&[1u8]))
+    }
 }
 
 impl InvoiceStore for Store {
