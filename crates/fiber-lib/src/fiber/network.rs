@@ -1076,6 +1076,8 @@ pub enum NetworkActorCommand {
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     #[cfg(not(target_arch = "wasm32"))]
+    GetHostedTenantActivity(RpcReplyPort<HostedTenantActivity>),
+    #[cfg(not(target_arch = "wasm32"))]
     SetLspService(ActorRef<LspServiceMessage>),
     #[cfg(not(target_arch = "wasm32"))]
     RestoreBufferedTrampoline(TrampolineForwardingRequest),
@@ -2551,6 +2553,12 @@ where
             } => {
                 let result = if pubkey == state.get_public_key() {
                     Err("cannot register the local Fiber endpoint as its own peer".to_string())
+                } else if state.in_process_peers.get(&pubkey).is_some_and(|peer| {
+                    peer.actor != actor && peer.actor.get_status() < ractor::ActorStatus::Stopping
+                }) {
+                    Err(format!(
+                        "in-process peer {pubkey:?} is already owned by another actor"
+                    ))
                 } else {
                     state
                         .in_process_peers
@@ -3232,6 +3240,10 @@ where
                         let _ = reply.send(Err(e.to_string()));
                     }
                 }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            NetworkActorCommand::GetHostedTenantActivity(reply) => {
+                let _ = reply.send(state.hosted_tenant_activity());
             }
             #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::SetLspService(lsp_service) => {
@@ -5445,6 +5457,22 @@ struct InProcessPeer {
     features: FeatureVector,
 }
 
+/// Work that must drain before a hosted tenant runtime can be safely stopped.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostedTenantActivity {
+    pub inflight_payments: usize,
+    pub active_tlcs: usize,
+    pub pending_channel_operations: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HostedTenantActivity {
+    pub fn is_idle(self) -> bool {
+        self.inflight_payments == 0 && self.active_tlcs == 0 && self.pending_channel_operations == 0
+    }
+}
+
 pub trait NetworkActorStateStore {
     fn get_network_actor_state(&self, id: &Pubkey) -> Option<PersistentNetworkActorState>;
     fn insert_network_actor_state(&self, id: &Pubkey, state: PersistentNetworkActorState);
@@ -5477,6 +5505,24 @@ where
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hosted_tenant_activity(&self) -> HostedTenantActivity {
+        let active_tlcs = self
+            .store
+            .get_all_channel_states()
+            .into_iter()
+            .map(|channel| channel.tlc_state.all_tlcs().count())
+            .sum();
+        HostedTenantActivity {
+            inflight_payments: self.inflight_payments.len(),
+            active_tlcs,
+            pending_channel_operations: self.pending_channels.len()
+                + self.to_be_accepted_channels.map.len()
+                + self.pending_external_funding_replies.len()
+                + self.pending_remove_tlcs.len(),
+        }
+    }
+
     fn retry_pending_payments_for_channel(
         &self,
         myself: &ActorRef<NetworkActorMessage>,

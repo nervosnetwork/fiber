@@ -179,6 +179,24 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let mut tenant = NetworkNode::new_with_node_name("lsp-tenant-u1").await;
     payer.connect_to(&mut public_t).await;
     connect_in_process(&public_t, &tenant).await;
+    let replacement = ractor::call_t!(
+        public_t.network_actor,
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
+            pubkey: tenant.pubkey,
+            actor: payer.network_actor.clone(),
+            features: crate::fiber_types::FeatureVector::default(),
+            reply,
+        },),
+        5_000
+    )
+    .expect("in-process replacement reply");
+    assert_eq!(
+        replacement.unwrap_err(),
+        format!(
+            "in-process peer {:?} is already owned by another actor",
+            tenant.pubkey
+        )
+    );
 
     let root = tempdir().expect("temporary LSP directory");
     let config = lsp_config(root.path().join("lsp"));

@@ -304,9 +304,13 @@ impl Actor for LspService {
                         "tenant {tenant_id} has unfinished hosted payment deliveries"
                     ))
                 } else {
-                    state.ready_tenants.remove(&tenant_id);
-                    state.supervisor.evict(&tenant_id);
-                    state.get_tenant_status(&tenant_id)
+                    match state.supervisor.evict(&tenant_id).await {
+                        Ok(_) => {
+                            state.ready_tenants.remove(&tenant_id);
+                            state.get_tenant_status(&tenant_id)
+                        }
+                        Err(error) => Err(format!("cannot evict tenant {tenant_id}: {error}")),
+                    }
                 };
                 let _ = reply.send(result);
             }

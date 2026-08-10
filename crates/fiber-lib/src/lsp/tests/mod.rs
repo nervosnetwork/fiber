@@ -12,7 +12,7 @@ use fiber_store::backend::StorageBackend;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
 
-use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::network::{HostedTenantActivity, NetworkActorCommand, NetworkActorMessage};
 use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber_types::{Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey};
 use crate::invoice::{Currency, InvoiceBuilder};
@@ -127,15 +127,81 @@ impl Actor for NoopNetworkActor {
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _message: Self::Msg,
+        message: Self::Msg,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        if let NetworkActorMessage::Command(NetworkActorCommand::GetHostedTenantActivity(reply)) =
+            message
+        {
+            let _ = reply.send(Default::default());
+        }
         Ok(())
     }
 }
 
 struct FakeRuntimeFactory {
     starts: Arc<AtomicUsize>,
+}
+
+struct BusyNetworkActor;
+
+#[async_trait]
+impl Actor for BusyNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let NetworkActorMessage::Command(NetworkActorCommand::GetHostedTenantActivity(reply)) =
+            message
+        {
+            let _ = reply.send(HostedTenantActivity {
+                inflight_payments: 1,
+                active_tlcs: 2,
+                pending_channel_operations: 3,
+            });
+        }
+        Ok(())
+    }
+}
+
+struct BusyRuntimeFactory;
+
+#[async_trait]
+impl TenantRuntimeFactory for BusyRuntimeFactory {
+    fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
+        Ok(HostedTenantRecord {
+            tenant_id: tenant_id.clone(),
+            invoice_pubkey: Privkey::from(&[4; 32]).pubkey(),
+            private_channel_id: None,
+            created_at: 42,
+        })
+    }
+
+    async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
+        let actor = Actor::spawn(None, BusyNetworkActor, ())
+            .await
+            .map_err(|error| error.to_string())?
+            .0;
+        Ok(HostedTenantRuntime {
+            invoice_pubkey: record.invoice_pubkey,
+            network_actor: actor,
+            public_network_actor: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -183,11 +249,25 @@ async fn tenant_supervisor_hydrates_evicts_and_enforces_capacity() {
         Err("active tenant limit 1 reached".to_string())
     );
 
-    assert!(supervisor.evict(&u1.tenant_id));
+    assert!(supervisor.evict(&u1.tenant_id).await.unwrap());
     assert!(!supervisor.is_active(&u1.tenant_id));
     supervisor.ensure(&u2).await.unwrap();
     assert!(supervisor.is_active(&u2.tenant_id));
     assert_eq!(starts.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn tenant_supervisor_rejects_eviction_while_runtime_is_busy() {
+    let factory = Arc::new(BusyRuntimeFactory);
+    let mut supervisor = TenantSupervisor::new(factory.clone(), 1);
+    let tenant = factory.provision(&TenantId::new("u1").unwrap()).unwrap();
+    supervisor.ensure(&tenant).await.unwrap();
+
+    assert_eq!(
+        supervisor.evict(&tenant.tenant_id).await.unwrap_err(),
+        "hosted tenant runtime is busy: 1 in-flight payments, 2 active TLCs, 3 pending channel operations"
+    );
+    assert!(supervisor.is_active(&tenant.tenant_id));
 }
 
 #[test]
@@ -203,6 +283,19 @@ fn hosted_tenant_config_is_private_and_isolated() {
     assert_eq!(u1.listening_addr(), "/ip4/127.0.0.1/tcp/0");
     assert_ne!(u1.store_path(), u2.store_path());
     assert_ne!(u1.public_key().inner_ref(), u2.public_key().inner_ref());
+
+    let u1_store = open_store(u1.store_path()).expect("open U1 store");
+    let u2_store = open_store(u2.store_path()).expect("open U2 store");
+    u1_store.put(b"same-payment-hash", b"u1-session");
+    u2_store.put(b"same-payment-hash", b"u2-session");
+    assert_eq!(
+        u1_store.get(b"same-payment-hash"),
+        Some(b"u1-session".to_vec())
+    );
+    assert_eq!(
+        u2_store.get(b"same-payment-hash"),
+        Some(b"u2-session".to_vec())
+    );
 }
 
 fn signed_invoice(signing_key: &Privkey, payment_hash: Hash256) -> crate::invoice::CkbInvoice {

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
 use crate::fiber::{
     graph::NetworkGraph,
-    network::{NetworkActorCommand, NetworkActorMessage},
+    network::{HostedTenantActivity, NetworkActorCommand, NetworkActorMessage},
     types::pubkey_from_tentacle,
     FiberConfig,
 };
@@ -28,6 +28,27 @@ pub struct HostedTenantRuntime {
 }
 
 impl HostedTenantRuntime {
+    async fn ensure_idle(&self) -> Result<(), String> {
+        let activity: HostedTenantActivity = ractor::call_t!(
+            self.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
+                reply
+            )),
+            5_000
+        )
+        .map_err(|error| format!("failed to inspect hosted tenant activity: {error}"))?;
+        if activity.is_idle() {
+            Ok(())
+        } else {
+            Err(format!(
+                "hosted tenant runtime is busy: {} in-flight payments, {} active TLCs, {} pending channel operations",
+                activity.inflight_payments,
+                activity.active_tlcs,
+                activity.pending_channel_operations
+            ))
+        }
+    }
+
     pub fn stop(self) {
         if let Some(public_network_actor) = self.public_network_actor {
             let _ = public_network_actor.send_message(NetworkActorMessage::new_command(
@@ -252,12 +273,16 @@ impl TenantSupervisor {
         Ok(())
     }
 
-    pub fn evict(&mut self, tenant_id: &TenantId) -> bool {
+    pub async fn evict(&mut self, tenant_id: &TenantId) -> Result<bool, String> {
+        let Some(runtime) = self.runtimes.get(tenant_id) else {
+            return Ok(false);
+        };
+        runtime.ensure_idle().await?;
         if let Some(runtime) = self.runtimes.remove(tenant_id) {
             runtime.stop();
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 

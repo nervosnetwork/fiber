@@ -193,12 +193,13 @@ untrusted clients without authentication.
   it does not add LSP-assisted outbound payments.
 - Tenant runtime count is bounded, but eviction is explicit rather than an LRU
   policy. Eviction is rejected while that tenant has a non-final hosted
-  delivery; checking unrelated tenant runtime work remains a later hardening
-  step.
+  delivery, an in-flight payment, active TLCs, or pending channel operations.
 - Tenant runtimes currently reuse the existing Fiber network coordinator as an
   internal channel/payment dispatcher. They open no P2P listener and perform
   no gossip synchronization; a later refactor may extract a smaller dedicated
   tenant coordinator without changing the in-process transport contract.
+  In-process endpoint registration is single-owner and refuses to replace an
+  existing tenant route with another actor.
 - Tenant channel opening and funding still use existing Fiber RPC/channel
   workflows.
 - Remote Channel Signer transport, authorization, replay protection, and signer
