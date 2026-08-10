@@ -20,7 +20,7 @@ use crate::lsp::{
     HostedTenantRecord, HostedTenantRuntime, LspConfig, LspInvoiceRegistry,
     LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspService, LspServiceArgs,
     LspServiceMessage, TenantId, TenantRegistry, TenantRuntimeFactory, TenantSupervisor,
-    DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
+    DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS, MAX_LSP_BUFFER_DURATION_MS,
 };
 use crate::store::open_store;
 
@@ -81,12 +81,23 @@ fn tenant_registry_is_persistent_and_idempotent() {
     let registry = TenantRegistry::new(store.clone());
     let record = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: Privkey::from(&[1; 32]).pubkey(),
+        invoice_pubkey: Privkey::from(&[1; 32]).pubkey(),
+        private_channel_id: None,
         created_at: 42,
     };
 
     assert_eq!(registry.register(record.clone()).unwrap(), record);
     assert_eq!(registry.register(record.clone()).unwrap(), record);
+    let duplicate_key = HostedTenantRecord {
+        tenant_id: TenantId::new("u2").unwrap(),
+        invoice_pubkey: record.invoice_pubkey,
+        private_channel_id: None,
+        created_at: 43,
+    };
+    assert_eq!(
+        registry.register(duplicate_key).unwrap_err(),
+        "invoice key is already registered to tenant u1"
+    );
 
     let reopened = TenantRegistry::new(store);
     assert_eq!(reopened.get(&record.tenant_id).unwrap(), Some(record));
@@ -129,7 +140,8 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
         let secret = if tenant_id.as_str() == "u1" { 1 } else { 2 };
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
-            node_id: Privkey::from(&[secret; 32]).pubkey(),
+            invoice_pubkey: Privkey::from(&[secret; 32]).pubkey(),
+            private_channel_id: None,
             created_at: 42,
         })
     }
@@ -141,8 +153,9 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             .map_err(|error| error.to_string())?
             .0;
         Ok(HostedTenantRuntime {
-            node_id: record.node_id,
+            invoice_pubkey: record.invoice_pubkey,
             network_actor: actor,
+            public_network_actor: None,
         })
     }
 }
@@ -182,6 +195,7 @@ fn hosted_tenant_config_is_private_and_isolated() {
 
     assert!(!u1.sync_network_graph());
     assert!(!u1.auto_announce_node());
+    assert!(u1.in_process_transport_only());
     assert_eq!(u1.listening_addr(), "/ip4/127.0.0.1/tcp/0");
     assert_ne!(u1.store_path(), u2.store_path());
     assert_ne!(u1.public_key().inner_ref(), u2.public_key().inner_ref());
@@ -208,7 +222,8 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: None,
         created_at: 42,
     };
     let payment_hash = Hash256::from([7; 32]);
@@ -241,7 +256,8 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: None,
         created_at: 42,
     };
     let mut hint = invoices
@@ -268,6 +284,38 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
 }
 
 #[test]
+fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let invoices = LspInvoiceRegistry::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: None,
+        created_at: 42,
+    };
+
+    let result = invoices.register(
+        &tenant,
+        signed_invoice(&tenant_key, Hash256::from([15; 32])),
+        Some(MAX_LSP_BUFFER_DURATION_MS + 1),
+        lsp_key.pubkey(),
+        &lsp_key,
+    );
+
+    assert_eq!(
+        result.unwrap_err(),
+        format!(
+            "buffer duration exceeds maximum {}ms",
+            MAX_LSP_BUFFER_DURATION_MS
+        )
+    );
+}
+
+#[test]
 fn hosted_invoice_must_be_signed_by_registered_tenant() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
@@ -278,7 +326,8 @@ fn hosted_invoice_must_be_signed_by_registered_tenant() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: None,
         created_at: 42,
     };
 
@@ -303,7 +352,7 @@ fn hosted_forwarding_request(
     let downstream_expiry = 60_000;
     TrampolineForwardingRequest {
         payment_hash,
-        next_node_id: tenant.node_id,
+        next_node_id: tenant.invoice_pubkey,
         amount_to_forward: 1_000,
         hash_algorithm: HashAlgorithm::Sha256,
         build_max_fee_amount: 10,
@@ -328,7 +377,8 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([11; 32]);
@@ -346,6 +396,7 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
     let delivery = deliveries
         .accept(
             &registration,
+            &tenant,
             hosted_forwarding_request(&tenant, payment_hash, now),
             now,
         )
@@ -367,7 +418,8 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([12; 32]);
@@ -384,6 +436,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
     deliveries
         .accept(
             &registration,
+            &tenant,
             hosted_forwarding_request(&tenant, payment_hash, now),
             now,
         )
@@ -540,9 +593,23 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     .await;
     let payment_hash = Hash256::from([13; 32]);
     register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([23; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: None,
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -562,7 +629,10 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     assert_eq!(dispatches.load(Ordering::Relaxed), 0);
 
     service
-        .send_message(LspServiceMessage::TenantChannelOnline(tenant.node_id))
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant.invoice_pubkey,
+            private_channel_id,
+        ))
         .unwrap();
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 1);
@@ -598,9 +668,23 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
     .await;
     let payment_hash = Hash256::from([14; 32]);
     register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([24; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        node_id: tenant_key.pubkey(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();

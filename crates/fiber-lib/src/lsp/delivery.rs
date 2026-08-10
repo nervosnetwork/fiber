@@ -33,6 +33,7 @@ impl LspPaymentDeliveryStatus {
 pub struct LspPaymentDelivery {
     pub payment_hash: Hash256,
     pub tenant_id: TenantId,
+    pub private_channel_id: Hash256,
     pub request: TrampolineForwardingRequest,
     pub buffer_deadline: u64,
     pub status: LspPaymentDeliveryStatus,
@@ -105,7 +106,8 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
     pub fn accept(
         &self,
         registration: &LspInvoiceRegistration,
-        request: TrampolineForwardingRequest,
+        tenant: &super::HostedTenantRecord,
+        mut request: TrampolineForwardingRequest,
         now: u64,
     ) -> Result<LspPaymentDelivery, String> {
         registration
@@ -114,9 +116,13 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if request.payment_hash != registration.hint.payload.payment_hash {
             return Err("delivery payment hash does not match LSP invoice hint".to_string());
         }
-        if request.next_node_id != registration.hint.payload.tenant_node_id {
-            return Err("delivery target does not match hosted tenant".to_string());
+        if registration.tenant_id != tenant.tenant_id {
+            return Err("hosted invoice registration does not match tenant".to_string());
         }
+        let private_channel_id = tenant
+            .private_channel_id
+            .ok_or_else(|| "hosted tenant has no private channel".to_string())?;
+        request.next_node_id = tenant.invoice_pubkey;
         if registration
             .invoice
             .amount()
@@ -149,6 +155,7 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         let delivery = LspPaymentDelivery {
             payment_hash: request.payment_hash,
             tenant_id: registration.tenant_id.clone(),
+            private_channel_id,
             request,
             buffer_deadline,
             status: LspPaymentDeliveryStatus::Deferred,

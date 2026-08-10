@@ -36,14 +36,14 @@ trait LspRpc {
         params: LspTenantParams,
     ) -> Result<LspTenantStatus, ErrorObjectOwned>;
 
-    /// Starts a registered tenant Fiber runtime if it is currently cold.
+    /// Starts a registered tenant execution context if it is currently cold.
     #[method(name = "lsp_ensure_tenant")]
     async fn lsp_ensure_tenant(
         &self,
         params: LspTenantParams,
     ) -> Result<LspTenantStatus, ErrorObjectOwned>;
 
-    /// Stops a tenant Fiber runtime while retaining its persistent identity and state.
+    /// Stops a tenant execution context while retaining its persistent state and keys.
     #[method(name = "lsp_evict_tenant")]
     async fn lsp_evict_tenant(
         &self,
@@ -250,7 +250,8 @@ impl From<InternalTenantStatus> for LspTenantStatus {
         };
         Self {
             tenant_id: status.record.tenant_id.to_string(),
-            node_id: status.record.node_id.into(),
+            invoice_pubkey: status.record.invoice_pubkey.into(),
+            private_channel_id: status.record.private_channel_id.map(Into::into),
             created_at: status.record.created_at,
             runtime_status,
             channel_online: status.channel_online,
@@ -264,7 +265,6 @@ impl From<InternalInvoiceHint> for LspInvoiceHint {
         Self {
             version: payload.version,
             lsp_node_id: payload.lsp_node_id.into(),
-            tenant_node_id: payload.tenant_node_id.into(),
             payment_hash: payload.payment_hash.into(),
             invoice_digest: payload.invoice_digest.into(),
             buffer_duration_ms: payload.buffer_duration_ms,
@@ -300,6 +300,7 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
         Self {
             payment_hash: delivery.payment_hash.into(),
             tenant_id: delivery.tenant_id.to_string(),
+            private_channel_id: delivery.private_channel_id.into(),
             buffer_deadline: delivery.buffer_deadline,
             status,
             failure_reason,

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
 use crate::fiber::{
     graph::NetworkGraph,
-    network::{NetworkActorCommand, NetworkActorMessage, PeerConnectSource},
+    network::{NetworkActorCommand, NetworkActorMessage},
     types::pubkey_from_tentacle,
     FiberConfig,
 };
@@ -19,15 +19,21 @@ use crate::{start_network, NetworkServiceEvent};
 
 use super::{HostedTenantRecord, LspConfig, TenantId};
 
-/// A running hosted Fiber node. Dropping the handle does not stop it; callers
-/// must use [`HostedTenantRuntime::stop`] when evicting it.
+/// A running tenant-scoped Fiber runtime. It reuses the channel/payment
+/// coordinator but has no listening P2P endpoint or gossip service.
 pub struct HostedTenantRuntime {
-    pub node_id: Pubkey,
+    pub invoice_pubkey: Pubkey,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub public_network_actor: Option<ActorRef<NetworkActorMessage>>,
 }
 
 impl HostedTenantRuntime {
     pub fn stop(self) {
+        if let Some(public_network_actor) = self.public_network_actor {
+            let _ = public_network_actor.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::UnregisterInProcessPeer(self.invoice_pubkey),
+            ));
+        }
         self.network_actor
             .stop(Some("hosted tenant runtime evicted".to_string()));
     }
@@ -40,8 +46,8 @@ pub trait TenantRuntimeFactory: Send + Sync {
     async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String>;
 }
 
-/// Starts a complete Fiber network actor per tenant while sharing only the CKB
-/// chain actor/client and process root with Public T.
+/// Starts a tenant-scoped Fiber channel/payment runtime and wires it to Public
+/// T through the in-process transport.
 pub struct FiberTenantRuntimeFactory {
     lsp_config: LspConfig,
     template_config: FiberConfig,
@@ -84,20 +90,24 @@ impl FiberTenantRuntimeFactory {
 impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         let config = self.tenant_config(tenant_id);
-        let node_id = pubkey_from_tentacle(config.public_key());
+        let invoice_pubkey = pubkey_from_tentacle(config.public_key());
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
-            node_id,
+            invoice_pubkey,
+            private_channel_id: None,
             created_at: crate::now_timestamp_as_millis_u64(),
         })
     }
 
     async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
         let config = self.tenant_config(&record.tenant_id);
-        let node_id = pubkey_from_tentacle(config.public_key());
-        if node_id != record.node_id {
+        let invoice_pubkey = pubkey_from_tentacle(config.public_key());
+        let tenant_features = config.gen_node_features();
+        let public_node_id = pubkey_from_tentacle(self.template_config.public_key());
+        let public_features = self.template_config.gen_node_features();
+        if invoice_pubkey != record.invoice_pubkey {
             return Err(format!(
-                "tenant {} key does not match its registered node identity",
+                "tenant {} key does not match its registered invoice key",
                 record.tenant_id
             ));
         }
@@ -105,7 +115,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         let store = open_store(config.store_path())?;
         let graph = Arc::new(RwLock::new(NetworkGraph::new(
             store.clone(),
-            node_id,
+            invoice_pubkey,
             false,
         )));
         let (event_sender, mut event_receiver) = mpsc::channel(1024);
@@ -124,39 +134,71 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         .await;
 
         let activation_result = async {
-            let listening_addr = tokio::time::timeout(Duration::from_secs(10), async {
+            let started = tokio::time::timeout(Duration::from_secs(10), async {
                 while let Some(event) = event_receiver.recv().await {
-                    if let NetworkServiceEvent::NetworkStarted(started_node_id, addresses, _) =
-                        event
-                    {
-                        if started_node_id == node_id {
-                            return addresses.into_iter().next();
+                    if let NetworkServiceEvent::NetworkStarted(started_endpoint, _, _) = event {
+                        if started_endpoint == invoice_pubkey {
+                            return true;
                         }
                     }
                 }
-                None
+                false
             })
             .await
-            .map_err(|_| {
-                format!(
-                    "tenant {} did not start listening in time",
+            .map_err(|_| format!("tenant {} runtime did not start in time", record.tenant_id))?;
+            if !started {
+                return Err(format!(
+                    "tenant {} runtime stopped before it became ready",
                     record.tenant_id
-                )
-            })?
-            .ok_or_else(|| format!("tenant {} has no listening address", record.tenant_id))?;
+                ));
+            }
 
-            let connect_result = ractor::call_t!(
-                self.public_network_actor,
-                |reply| NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeer(
-                    listening_addr,
-                    false,
-                    PeerConnectSource::Manual,
-                    Some(reply),
-                )),
+            ractor::call_t!(
+                actor,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::RegisterInProcessPeer {
+                        pubkey: public_node_id,
+                        actor: self.public_network_actor.clone(),
+                        features: public_features.clone(),
+                        reply,
+                    },
+                ),
                 10_000
             )
-            .map_err(|error| format!("failed to connect Public T to tenant: {error}"))?;
-            connect_result
+            .map_err(|error| format!("failed to register Public T with tenant: {error}"))??;
+
+            ractor::call_t!(
+                self.public_network_actor,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::RegisterInProcessPeer {
+                        pubkey: invoice_pubkey,
+                        actor: actor.clone(),
+                        features: tenant_features,
+                        reply,
+                    },
+                ),
+                10_000
+            )
+            .map_err(|error| format!("failed to register tenant with Public T: {error}"))??;
+
+            ractor::call_t!(
+                actor,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::ActivateInProcessPeer(public_node_id, reply,)
+                ),
+                10_000
+            )
+            .map_err(|error| format!("failed to activate Public T with tenant: {error}"))??;
+
+            ractor::call_t!(
+                self.public_network_actor,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::ActivateInProcessPeer(invoice_pubkey, reply,)
+                ),
+                10_000
+            )
+            .map_err(|error| format!("failed to activate tenant with Public T: {error}"))??;
+            Ok::<(), String>(())
         }
         .await;
         if let Err(error) = activation_result {
@@ -168,8 +210,9 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             .spawn(async move { while event_receiver.recv().await.is_some() {} });
 
         Ok(HostedTenantRuntime {
-            node_id,
+            invoice_pubkey,
             network_actor: actor,
+            public_network_actor: Some(self.public_network_actor.clone()),
         })
     }
 }
@@ -224,9 +267,5 @@ impl TenantSupervisor {
 
     pub fn active_count(&self) -> usize {
         self.runtimes.len()
-    }
-
-    pub fn runtime(&self, tenant_id: &TenantId) -> Option<&HostedTenantRuntime> {
-        self.runtimes.get(tenant_id)
     }
 }

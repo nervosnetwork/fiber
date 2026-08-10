@@ -7,7 +7,7 @@ use super::{HostedTenantRecord, TenantId};
 
 const TENANT_RECORD_PREFIX: &[u8] = b"\xf0lsp/tenant/";
 
-/// Persistence interface for hosted tenant identities.
+/// Persistence interface for hosted tenant state boundaries.
 pub trait TenantRegistryStore: Clone + Send + Sync + 'static {
     fn get_tenant(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String>;
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String>;
@@ -56,13 +56,19 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
 
     pub fn register(&self, record: HostedTenantRecord) -> Result<HostedTenantRecord, String> {
         if let Some(existing) = self.get(&record.tenant_id)? {
-            if existing.node_id != record.node_id {
+            if existing.invoice_pubkey != record.invoice_pubkey {
                 return Err(format!(
-                    "tenant {} is already registered with another node identity",
+                    "tenant {} is already registered with another invoice key",
                     record.tenant_id
                 ));
             }
             return Ok(existing);
+        }
+        if let Some(existing) = self.find_by_invoice_pubkey(&record.invoice_pubkey)? {
+            return Err(format!(
+                "invoice key is already registered to tenant {}",
+                existing.tenant_id
+            ));
         }
         self.store.put_tenant(&record)?;
         Ok(record)
@@ -70,5 +76,37 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
 
     pub fn list(&self) -> Result<Vec<HostedTenantRecord>, String> {
         self.store.list_tenants()
+    }
+
+    /// Bind the tenant to its single MVP private channel.
+    pub fn bind_private_channel(
+        &self,
+        tenant_id: &TenantId,
+        channel_id: crate::fiber_types::Hash256,
+    ) -> Result<HostedTenantRecord, String> {
+        let mut record = self
+            .get(tenant_id)?
+            .ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
+        if record
+            .private_channel_id
+            .is_some_and(|existing| existing != channel_id)
+        {
+            return Err(format!(
+                "tenant {tenant_id} is already bound to another private channel"
+            ));
+        }
+        record.private_channel_id = Some(channel_id);
+        self.store.put_tenant(&record)?;
+        Ok(record)
+    }
+
+    pub fn find_by_invoice_pubkey(
+        &self,
+        invoice_pubkey: &crate::fiber_types::Pubkey,
+    ) -> Result<Option<HostedTenantRecord>, String> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|record| &record.invoice_pubkey == invoice_pubkey))
     }
 }

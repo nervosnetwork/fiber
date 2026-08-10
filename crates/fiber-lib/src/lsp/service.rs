@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
@@ -49,10 +49,6 @@ pub enum LspServiceMessage {
     EnsureTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     EvictTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     ListTenants(RpcReplyPort<Result<Vec<HostedTenantStatus>, String>>),
-    GetTenantNetworkActor(
-        TenantId,
-        RpcReplyPort<Option<ActorRef<NetworkActorMessage>>>,
-    ),
     RegisterInvoice {
         tenant_id: TenantId,
         invoice: CkbInvoice,
@@ -73,8 +69,8 @@ pub enum LspServiceMessage {
     ),
     ResumeDelivery(Hash256),
     ExpireDelivery(Hash256),
-    TenantChannelOnline(Pubkey),
-    TenantChannelOffline(Pubkey),
+    TenantChannelOnline(Pubkey, Hash256),
+    TenantChannelOffline(Pubkey, Hash256),
     PaymentOutcome(Hash256, PaymentStatus),
 }
 
@@ -93,7 +89,7 @@ pub struct LspServiceState {
     pub delivery_manager: LspPaymentDeliveryManager<Store>,
     pub supervisor: TenantSupervisor,
     pub signing_key: Privkey,
-    pub ready_tenants: HashSet<Pubkey>,
+    pub ready_tenants: HashMap<TenantId, Hash256>,
 }
 
 impl LspServiceState {
@@ -104,7 +100,7 @@ impl LspServiceState {
             TenantRuntimeStatus::Cold
         };
         HostedTenantStatus {
-            channel_online: self.ready_tenants.contains(&record.node_id),
+            channel_online: self.ready_tenants.contains_key(&record.tenant_id),
             record,
             runtime_status,
         }
@@ -210,7 +206,7 @@ impl Actor for LspService {
             delivery_manager,
             supervisor,
             signing_key: args.signing_key,
-            ready_tenants: HashSet::new(),
+            ready_tenants: HashMap::new(),
         })
     }
 
@@ -251,9 +247,7 @@ impl Actor for LspService {
                 let _ = reply.send(result);
             }
             LspServiceMessage::EvictTenant(tenant_id, reply) => {
-                if let Some(record) = state.registry.get(&tenant_id)? {
-                    state.ready_tenants.remove(&record.node_id);
-                }
+                state.ready_tenants.remove(&tenant_id);
                 state.supervisor.evict(&tenant_id);
                 let _ = reply.send(state.get_tenant_status(&tenant_id));
             }
@@ -265,13 +259,6 @@ impl Actor for LspService {
                         .collect()
                 });
                 let _ = reply.send(result);
-            }
-            LspServiceMessage::GetTenantNetworkActor(tenant_id, reply) => {
-                let actor = state
-                    .supervisor
-                    .runtime(&tenant_id)
-                    .map(|runtime| runtime.network_actor.clone());
-                let _ = reply.send(actor);
             }
             LspServiceMessage::RegisterInvoice {
                 tenant_id,
@@ -301,20 +288,32 @@ impl Actor for LspService {
             LspServiceMessage::AcceptTrampolineDelivery(request, reply) => {
                 let result = match state.invoice_registry.get(&request.payment_hash) {
                     Ok(None) => Ok(LspDeliveryDecision::NotHosted),
-                    Ok(Some(registration)) => state
-                        .delivery_manager
-                        .accept(&registration, request, crate::now_timestamp_as_millis_u64())
-                        .map(|delivery| {
-                            LspServiceState::schedule_delivery_deadline(
-                                &myself,
-                                delivery.payment_hash,
-                                delivery.buffer_deadline,
-                            );
-                            let _ = myself.send_message(LspServiceMessage::ResumeDelivery(
-                                delivery.payment_hash,
-                            ));
-                            LspDeliveryDecision::Buffered
-                        }),
+                    Ok(Some(registration)) => match state.registry.get(&registration.tenant_id) {
+                        Ok(Some(tenant)) => state
+                            .delivery_manager
+                            .accept(
+                                &registration,
+                                &tenant,
+                                request,
+                                crate::now_timestamp_as_millis_u64(),
+                            )
+                            .map(|delivery| {
+                                LspServiceState::schedule_delivery_deadline(
+                                    &myself,
+                                    delivery.payment_hash,
+                                    delivery.buffer_deadline,
+                                );
+                                let _ = myself.send_message(LspServiceMessage::ResumeDelivery(
+                                    delivery.payment_hash,
+                                ));
+                                LspDeliveryDecision::Buffered
+                            }),
+                        Ok(None) => Err(format!(
+                            "tenant {} is not registered",
+                            registration.tenant_id
+                        )),
+                        Err(error) => Err(error),
+                    },
                     Err(error) => Err(error),
                 };
                 let _ = reply.send(result);
@@ -325,24 +324,43 @@ impl Actor for LspService {
             LspServiceMessage::ExpireDelivery(payment_hash) => {
                 self.expire_delivery(myself, state, payment_hash).await?;
             }
-            LspServiceMessage::TenantChannelOnline(node_id) => {
-                state.ready_tenants.insert(node_id);
-                let tenant_ids: HashSet<_> = state
-                    .registry
-                    .list()?
-                    .into_iter()
-                    .filter(|tenant| tenant.node_id == node_id)
-                    .map(|tenant| tenant.tenant_id)
-                    .collect();
-                for delivery in state.delivery_manager.list_pending()? {
-                    if tenant_ids.contains(&delivery.tenant_id) {
-                        let _ = myself
-                            .send_message(LspServiceMessage::ResumeDelivery(delivery.payment_hash));
+            LspServiceMessage::TenantChannelOnline(invoice_pubkey, channel_id) => {
+                if let Some(tenant) = state.registry.find_by_invoice_pubkey(&invoice_pubkey)? {
+                    let tenant = match state
+                        .registry
+                        .bind_private_channel(&tenant.tenant_id, channel_id)
+                    {
+                        Ok(tenant) => tenant,
+                        Err(error) => {
+                            tracing::warn!(
+                                tenant_id = %tenant.tenant_id,
+                                channel_id = %channel_id,
+                                %error,
+                                "Ignoring an additional hosted tenant private channel"
+                            );
+                            return Ok(());
+                        }
+                    };
+                    state
+                        .ready_tenants
+                        .insert(tenant.tenant_id.clone(), channel_id);
+                    for delivery in state.delivery_manager.list_pending()? {
+                        if delivery.tenant_id == tenant.tenant_id
+                            && delivery.private_channel_id == channel_id
+                        {
+                            let _ = myself.send_message(LspServiceMessage::ResumeDelivery(
+                                delivery.payment_hash,
+                            ));
+                        }
                     }
                 }
             }
-            LspServiceMessage::TenantChannelOffline(node_id) => {
-                state.ready_tenants.remove(&node_id);
+            LspServiceMessage::TenantChannelOffline(invoice_pubkey, channel_id) => {
+                if let Some(tenant) = state.registry.find_by_invoice_pubkey(&invoice_pubkey)? {
+                    if state.ready_tenants.get(&tenant.tenant_id) == Some(&channel_id) {
+                        state.ready_tenants.remove(&tenant.tenant_id);
+                    }
+                }
             }
             LspServiceMessage::PaymentOutcome(payment_hash, payment_status) => {
                 if state
@@ -377,21 +395,29 @@ impl LspService {
                 NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
             ));
 
-        let existing_payment = ractor::call_t!(
-            state.public_network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
-                payment_hash,
-                reply,
-            )),
-            5_000
-        );
-        if let Ok(Ok(payment)) = existing_payment {
-            state.update_from_payment_status(
-                &payment_hash,
-                payment.status,
-                payment.failed_error,
-            )?;
-            return Ok(());
+        // A deferred delivery has not created its downstream payment session yet. Looking up the
+        // hash at that point can find the upstream trampoline session and incorrectly treat it as
+        // the downstream delivery. Only reconcile a session after dispatch has actually started.
+        if matches!(
+            delivery.status,
+            LspPaymentDeliveryStatus::Dispatching | LspPaymentDeliveryStatus::InFlight
+        ) {
+            let existing_payment = ractor::call_t!(
+                state.public_network_actor,
+                |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
+                    payment_hash,
+                    reply,
+                )),
+                5_000
+            );
+            if let Ok(Ok(payment)) = existing_payment {
+                state.update_from_payment_status(
+                    &payment_hash,
+                    payment.status,
+                    payment.failed_error,
+                )?;
+                return Ok(());
+            }
         }
 
         let now = crate::now_timestamp_as_millis_u64();
@@ -422,7 +448,7 @@ impl LspService {
             );
             return Ok(());
         }
-        if !state.ready_tenants.contains(&tenant.node_id) {
+        if state.ready_tenants.get(&tenant.tenant_id) != Some(&delivery.private_channel_id) {
             state.delivery_manager.transition(
                 &payment_hash,
                 LspPaymentDeliveryStatus::Deferred,

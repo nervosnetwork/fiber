@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::fiber_types::Pubkey;
+use crate::fiber_types::{Hash256, Pubkey};
 
 /// Stable operator-facing identifier for a hosted tenant.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -45,12 +45,17 @@ impl FromStr for TenantId {
     }
 }
 
-/// Persisted identity of a hosted tenant. Runtime liveness is intentionally
-/// excluded because it is rebuilt by the supervisor after process restart.
+/// Persisted state boundary of a hosted tenant. Runtime liveness is
+/// intentionally excluded because it is rebuilt by the supervisor after
+/// process restart.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostedTenantRecord {
     pub tenant_id: TenantId,
-    pub node_id: Pubkey,
+    /// Key used to authenticate invoices and the tenant side of its channel.
+    /// This is not a public, gossip-routable Fiber node identity.
+    pub invoice_pubkey: Pubkey,
+    /// Private channel bound to this tenant after channel provisioning.
+    pub private_channel_id: Option<Hash256>,
     pub created_at: u64,
 }
 

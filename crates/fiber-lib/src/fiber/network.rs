@@ -8032,14 +8032,16 @@ where
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(lsp_service) = state.lsp_service.as_ref() {
                     match &event {
-                        NetworkServiceEvent::ChannelReady(pubkey, ..)
-                        | NetworkServiceEvent::ChannelOnline(pubkey, ..) => {
-                            let _ = lsp_service
-                                .send_message(LspServiceMessage::TenantChannelOnline(*pubkey));
+                        NetworkServiceEvent::ChannelReady(pubkey, channel_id, ..)
+                        | NetworkServiceEvent::ChannelOnline(pubkey, channel_id, ..) => {
+                            let _ = lsp_service.send_message(
+                                LspServiceMessage::TenantChannelOnline(*pubkey, *channel_id),
+                            );
                         }
-                        NetworkServiceEvent::ChannelOffline(pubkey, ..) => {
-                            let _ = lsp_service
-                                .send_message(LspServiceMessage::TenantChannelOffline(*pubkey));
+                        NetworkServiceEvent::ChannelOffline(pubkey, channel_id, ..) => {
+                            let _ = lsp_service.send_message(
+                                LspServiceMessage::TenantChannelOffline(*pubkey, *channel_id),
+                            );
                         }
                         _ => {}
                     }

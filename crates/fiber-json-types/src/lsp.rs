@@ -23,7 +23,7 @@ pub struct LspTenantParams {
 pub struct RegisterLspInvoiceParams {
     /// Tenant that signed and owns the invoice.
     pub tenant_id: String,
-    /// Encoded Fiber invoice signed by the tenant node identity.
+    /// Encoded Fiber invoice signed by the tenant invoice key.
     pub invoice: String,
     /// Maximum time Public T may buffer the incoming payment while the tenant is offline.
     #[serde_as(as = "Option<U64Hex>")]
@@ -42,25 +42,27 @@ pub struct LspPaymentHashParams {
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LspTenantRuntimeStatus {
-    /// Tenant metadata exists but its Fiber runtime is not running.
+    /// Tenant metadata exists but its execution context is not running.
     Cold,
-    /// The tenant Fiber runtime is running.
+    /// The tenant execution context is running.
     Active,
 }
 
-/// Hosted tenant identity and liveness information.
+/// Hosted tenant state boundary and liveness information.
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct LspTenantStatus {
     /// Stable operator-facing tenant identifier.
     pub tenant_id: String,
-    /// Independent Fiber node identity assigned to the tenant.
-    pub node_id: Pubkey,
+    /// Key authenticating tenant invoices; it is not a public routing node identity.
+    pub invoice_pubkey: Pubkey,
+    /// Private channel currently bound to this tenant.
+    pub private_channel_id: Option<Hash256>,
     /// Tenant creation timestamp in milliseconds since Unix epoch.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub created_at: u64,
-    /// Whether the tenant Fiber runtime is currently resident in this process.
+    /// Whether the tenant execution context is currently resident in this process.
     pub runtime_status: LspTenantRuntimeStatus,
     /// Whether Public T currently has an online private channel to the tenant.
     pub channel_online: bool,
@@ -85,7 +87,7 @@ pub struct LspServiceStatus {
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub registered_tenants: u64,
-    /// Number of tenant Fiber runtimes currently resident in this process.
+    /// Number of tenant execution contexts currently resident in this process.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub active_tenants: u64,
@@ -99,8 +101,6 @@ pub struct LspInvoiceHint {
     pub version: u8,
     /// Public trampoline node selected for this invoice.
     pub lsp_node_id: Pubkey,
-    /// Hosted tenant node that ultimately receives the payment.
-    pub tenant_node_id: Pubkey,
     /// Payment hash bound to this hint.
     pub payment_hash: Hash256,
     /// Digest of the complete signed invoice.
@@ -152,6 +152,8 @@ pub struct LspPaymentDelivery {
     pub payment_hash: Hash256,
     /// Tenant that owns the payment.
     pub tenant_id: String,
+    /// Private channel selected internally for tenant delivery.
+    pub private_channel_id: Hash256,
     /// Last instant at which an undispatched payment may remain buffered.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]

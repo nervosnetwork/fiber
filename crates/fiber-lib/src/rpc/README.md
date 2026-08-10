@@ -809,7 +809,7 @@ Returns a summary of the hosted LSP service.
 * `public_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public trampoline node identity advertised by the LSP.
 * `tenant_store_root` - <em>`String`</em>, Root directory containing isolated tenant stores.
 * `registered_tenants` - <em>`u64`</em>, Number of persistently registered tenants.
-* `active_tenants` - <em>`u64`</em>, Number of tenant Fiber runtimes currently resident in this process.
+* `active_tenants` - <em>`u64`</em>, Number of tenant execution contexts currently resident in this process.
 
 ---
 
@@ -827,9 +827,10 @@ Persistently registers a hosted tenant without starting its Fiber runtime.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
-* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
 * `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 
 ---
@@ -839,7 +840,7 @@ Persistently registers a hosted tenant without starting its Fiber runtime.
 <a id="lsp-lsp_ensure_tenant"></a>
 #### Method `lsp_ensure_tenant`
 
-Starts a registered tenant Fiber runtime if it is currently cold.
+Starts a registered tenant execution context if it is currently cold.
 
 ##### Params
 
@@ -848,9 +849,10 @@ Starts a registered tenant Fiber runtime if it is currently cold.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
-* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
 * `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 
 ---
@@ -860,7 +862,7 @@ Starts a registered tenant Fiber runtime if it is currently cold.
 <a id="lsp-lsp_evict_tenant"></a>
 #### Method `lsp_evict_tenant`
 
-Stops a tenant Fiber runtime while retaining its persistent identity and state.
+Stops a tenant execution context while retaining its persistent state and keys.
 
 ##### Params
 
@@ -869,9 +871,10 @@ Stops a tenant Fiber runtime while retaining its persistent identity and state.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
-* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
 * `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 
 ---
@@ -902,7 +905,7 @@ Registers a tenant-signed invoice and returns its authenticated LSP hint.
 ##### Params
 
 * `tenant_id` - <em>`String`</em>, Tenant that signed and owns the invoice.
-* `invoice` - <em>`String`</em>, Encoded Fiber invoice signed by the tenant node identity.
+* `invoice` - <em>`String`</em>, Encoded Fiber invoice signed by the tenant invoice key.
 * `buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time Public T may buffer the incoming payment while the tenant is offline.
 
 ##### Returns
@@ -947,6 +950,7 @@ Retrieves durable delivery state for a hosted incoming payment.
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the hosted invoice.
 * `tenant_id` - <em>`String`</em>, Tenant that owns the payment.
+* `private_channel_id` - <em>[Hash256](#type-hash256)</em>, Private channel selected internally for tenant delivery.
 * `buffer_deadline` - <em>`u64`</em>, Last instant at which an undispatched payment may remain buffered.
 * `status` - <em>[LspPaymentDeliveryStatus](#type-lsppaymentdeliverystatus)</em>, Current durable delivery state.
 * `failure_reason` - <em>`Option<String>`</em>, Failure detail when `status` is `failed`.
@@ -1749,7 +1753,6 @@ Signed sidecar that tells a payer to use Public T and permits bounded buffering.
 
 * `version` - <em>`u8`</em>, Hint wire format version.
 * `lsp_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public trampoline node selected for this invoice.
-* `tenant_node_id` - <em>[Pubkey](#type-pubkey)</em>, Hosted tenant node that ultimately receives the payment.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash bound to this hint.
 * `invoice_digest` - <em>[Hash256](#type-hash256)</em>, Digest of the complete signed invoice.
 * `buffer_duration_ms` - <em>`u64`</em>, Maximum offline buffering duration requested by the invoice owner.
@@ -1780,22 +1783,23 @@ Current in-process state of a hosted tenant runtime.
 
 #### Enum with values of
 
-* `cold` - Tenant metadata exists but its Fiber runtime is not running.
-* `active` - The tenant Fiber runtime is running.
+* `cold` - Tenant metadata exists but its execution context is not running.
+* `active` - The tenant execution context is running.
 ---
 
 <a id="#type-lsptenantstatus"></a>
 ### Type `LspTenantStatus`
 
-Hosted tenant identity and liveness information.
+Hosted tenant state boundary and liveness information.
 
 
 #### Fields
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `node_id` - <em>[Pubkey](#type-pubkey)</em>, Independent Fiber node identity assigned to the tenant.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
-* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant Fiber runtime is currently resident in this process.
+* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
 * `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 ---
 

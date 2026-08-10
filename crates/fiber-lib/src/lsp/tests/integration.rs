@@ -19,7 +19,7 @@ use tempfile::tempdir;
 use super::lsp_config;
 use crate::{
     fiber::{
-        network::{NetworkActorCommand, NetworkActorMessage, PeerDisconnectReason},
+        network::{NetworkActorCommand, NetworkActorMessage},
         payment::SendPaymentCommand,
     },
     gen_rand_sha256_hash,
@@ -64,15 +64,67 @@ impl TenantRuntimeFactory for ExistingRuntimeFactory {
     }
 
     async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
-        if record != &self.record {
+        if record.tenant_id != self.record.tenant_id
+            || record.invoice_pubkey != self.record.invoice_pubkey
+        {
             return Err("tenant record changed after registration".to_string());
         }
         self.starts.fetch_add(1, Ordering::Relaxed);
         Ok(HostedTenantRuntime {
-            node_id: record.node_id,
+            invoice_pubkey: record.invoice_pubkey,
             network_actor: self.network_actor.clone(),
+            public_network_actor: None,
         })
     }
+}
+
+async fn register_in_process_peer(local: &NetworkNode, remote: &NetworkNode) {
+    ractor::call_t!(
+        local.network_actor,
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
+            pubkey: remote.pubkey,
+            actor: remote.network_actor.clone(),
+            features: crate::fiber_types::FeatureVector::default(),
+            reply,
+        },),
+        5_000
+    )
+    .expect("register in-process peer reply")
+    .expect("register in-process peer");
+}
+
+async fn activate_in_process_peer(local: &NetworkNode, remote: &NetworkNode) {
+    ractor::call_t!(
+        local.network_actor,
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::ActivateInProcessPeer(
+            remote.pubkey,
+            reply,
+        )),
+        5_000
+    )
+    .expect("activate in-process peer reply")
+    .expect("activate in-process peer");
+}
+
+async fn connect_in_process(left: &NetworkNode, right: &NetworkNode) {
+    register_in_process_peer(left, right).await;
+    register_in_process_peer(right, left).await;
+    activate_in_process_peer(left, right).await;
+    activate_in_process_peer(right, left).await;
+}
+
+fn disconnect_in_process(left: &NetworkNode, right: &NetworkNode) {
+    left.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::UnregisterInProcessPeer(right.pubkey),
+        ))
+        .expect("unregister right in-process peer");
+    right
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::UnregisterInProcessPeer(left.pubkey),
+        ))
+        .expect("unregister left in-process peer");
 }
 
 async fn wait_for_tenant_channel(client: &HttpClient, expected_online: bool) {
@@ -126,7 +178,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let mut public_t = NetworkNode::new_with_node_name("lsp-public-t").await;
     let mut tenant = NetworkNode::new_with_node_name("lsp-tenant-u1").await;
     payer.connect_to(&mut public_t).await;
-    public_t.connect_to(&mut tenant).await;
+    connect_in_process(&public_t, &tenant).await;
 
     let root = tempdir().expect("temporary LSP directory");
     let config = lsp_config(root.path().join("lsp"));
@@ -134,7 +186,8 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let starts = Arc::new(AtomicUsize::new(0));
     let tenant_record = HostedTenantRecord {
         tenant_id: TenantId::new(TENANT_ID).unwrap(),
-        node_id: tenant.pubkey,
+        invoice_pubkey: tenant.pubkey,
+        private_channel_id: None,
         created_at: crate::now_timestamp_as_millis_u64(),
     };
     let runtime_factory = Arc::new(ExistingRuntimeFactory {
@@ -208,7 +261,8 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         )
         .await
         .expect("register hosted tenant");
-    assert_eq!(registered.node_id, tenant.pubkey.into());
+    assert_eq!(registered.invoice_pubkey, tenant.pubkey.into());
+    assert_eq!(registered.private_channel_id, None);
     assert!(matches!(
         registered.runtime_status,
         LspTenantRuntimeStatus::Cold
@@ -239,6 +293,14 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     .await;
     wait_until_node_supports_trampoline_routing(&payer, &public_t).await;
     wait_for_tenant_channel(&client, true).await;
+    let tenants: ListLspTenantsResult = client
+        .request("lsp_list_tenants", rpc_params![])
+        .await
+        .expect("list hosted tenant after channel binding");
+    assert_eq!(
+        tenants.tenants[0].private_channel_id,
+        Some(private_channel_id.into())
+    );
 
     let amount = 1_000;
     let preimage = gen_rand_sha256_hash();
@@ -266,7 +328,6 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         .expect("register hosted invoice");
     assert_eq!(registration.tenant_id, TENANT_ID);
     assert_eq!(registration.hint.lsp_node_id, public_t.pubkey.into());
-    assert_eq!(registration.hint.tenant_node_id, tenant.pubkey.into());
     assert_eq!(registration.hint.payment_hash, payment_hash.into());
     assert_eq!(registration.hint.buffer_duration_ms, BUFFER_DURATION_MS);
 
@@ -285,26 +346,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         registration.hint.signature
     );
 
-    public_t
-        .network_actor
-        .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
-                tenant.pubkey,
-                PeerDisconnectReason::Requested,
-                None,
-            ),
-        ))
-        .expect("disconnect hosted tenant");
-    public_t
-        .expect_event(|event| {
-            matches!(event, NetworkServiceEvent::PeerDisConnected(pubkey, _) if pubkey == &tenant.pubkey)
-        })
-        .await;
-    tenant
-        .expect_event(|event| {
-            matches!(event, NetworkServiceEvent::PeerDisConnected(pubkey, _) if pubkey == &public_t.pubkey)
-        })
-        .await;
+    disconnect_in_process(&public_t, &tenant);
     public_t
         .expect_event(|event| {
             matches!(event, NetworkServiceEvent::ChannelOffline(pubkey, channel_id, _) if pubkey == &tenant.pubkey && channel_id == &private_channel_id)
@@ -330,8 +372,9 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let deferred =
         wait_for_delivery_status(&client, payment_hash, LspPaymentDeliveryStatus::Deferred).await;
     assert_eq!(deferred.tenant_id, TENANT_ID);
+    assert_eq!(deferred.private_channel_id, private_channel_id.into());
     assert!(deferred.buffer_deadline > crate::now_timestamp_as_millis_u64());
-    assert_eq!(starts.load(Ordering::Relaxed), 1);
+    wait_until_async_timeout(|| async { starts.load(Ordering::Relaxed) == 1 }).await;
 
     let tenants: ListLspTenantsResult = client
         .request("lsp_list_tenants", rpc_params![])
@@ -343,7 +386,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     ));
     assert!(!tenants.tenants[0].channel_online);
 
-    public_t.connect_to_nonblocking(&tenant).await;
+    connect_in_process(&public_t, &tenant).await;
     public_t
         .expect_event(|event| {
             matches!(event, NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) if pubkey == &tenant.pubkey && channel_id == &private_channel_id)

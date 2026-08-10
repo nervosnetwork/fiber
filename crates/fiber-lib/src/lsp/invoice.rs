@@ -13,16 +13,15 @@ const INVOICE_REGISTRATION_PREFIX: &[u8] = b"\xf1lsp/invoice/";
 const LSP_INVOICE_HINT_DOMAIN: &[u8] = b"fiber-lsp-invoice-hint/v1";
 
 /// Default time an LSP may wait for an offline tenant before dispatching.
-pub const DEFAULT_LSP_BUFFER_DURATION_MS: u64 = 15 * 60 * 1_000;
+pub const DEFAULT_LSP_BUFFER_DURATION_MS: u64 = 24 * 60 * 60 * 1_000;
 /// Protocol cap for invoice-requested offline buffering.
-pub const MAX_LSP_BUFFER_DURATION_MS: u64 = 60 * 60 * 1_000;
+pub const MAX_LSP_BUFFER_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 /// Fields protected by Public T's signature and distributed with an invoice.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LspInvoiceHintPayload {
     pub version: u8,
     pub lsp_node_id: Pubkey,
-    pub tenant_node_id: Pubkey,
     pub payment_hash: Hash256,
     /// Digest of the complete signed invoice, binding amount, asset and terms.
     pub invoice_digest: Hash256,
@@ -165,7 +164,7 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
             .recover_payee_pub_key()
             .map(Pubkey::from)
             .map_err(|error| format!("failed to recover hosted invoice payee: {error}"))?;
-        if payee != tenant.node_id {
+        if payee != tenant.invoice_pubkey {
             return Err(format!(
                 "hosted invoice payee does not match tenant {}",
                 tenant.tenant_id
@@ -198,7 +197,6 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
             LspInvoiceHintPayload {
                 version: 1,
                 lsp_node_id,
-                tenant_node_id: tenant.node_id,
                 payment_hash: *invoice.payment_hash(),
                 invoice_digest: invoice_digest(&invoice),
                 buffer_duration_ms,
