@@ -146,6 +146,10 @@ pub enum LspPaymentDeliveryStatus {
     Failed,
     /// The upstream TLC was removed before downstream dispatch started.
     Cancelled,
+    /// Public T is failing the upstream TLC after the buffer deadline.
+    ExpiringUpstream,
+    /// The buffer deadline elapsed before downstream dispatch started.
+    Expired,
 }
 
 /// Operator-visible state of one hosted incoming payment.
@@ -164,7 +168,7 @@ pub struct LspPaymentDelivery {
     pub buffer_deadline: u64,
     /// Current durable delivery state.
     pub status: LspPaymentDeliveryStatus,
-    /// Terminal detail when `status` is `failed` or `cancelled`.
+    /// Terminal detail when `status` is `failed`, `cancelled`, or `expired`.
     pub failure_reason: Option<String>,
     /// Creation timestamp in milliseconds since Unix epoch.
     #[serde_as(as = "U64Hex")]

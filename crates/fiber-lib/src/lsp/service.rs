@@ -451,12 +451,51 @@ impl Actor for LspService {
                 payment_status,
                 failure,
             } => {
-                if state
-                    .delivery_manager
-                    .get(&payment_hash)?
-                    .is_some_and(|delivery| !delivery.status.is_final())
-                {
-                    state.finish_upstream_settlement(&payment_hash, payment_status, failure)?;
+                if let Some(delivery) = state.delivery_manager.get(&payment_hash)? {
+                    match delivery.status {
+                        LspPaymentDeliveryStatus::ExpiringUpstream { reason } => {
+                            match payment_status {
+                                PaymentStatus::Failed => {
+                                    state.delivery_manager.transition(
+                                        &payment_hash,
+                                        LspPaymentDeliveryStatus::Expired { reason },
+                                        crate::now_timestamp_as_millis_u64(),
+                                    )?;
+                                }
+                                PaymentStatus::Success => {
+                                    state.delivery_manager.transition(
+                                        &payment_hash,
+                                        LspPaymentDeliveryStatus::InFlight,
+                                        crate::now_timestamp_as_millis_u64(),
+                                    )?;
+                                    state.begin_upstream_settlement(
+                                        &payment_hash,
+                                        payment_status,
+                                        failure.clone(),
+                                    )?;
+                                    state.finish_upstream_settlement(
+                                        &payment_hash,
+                                        payment_status,
+                                        failure,
+                                    )?;
+                                }
+                                PaymentStatus::Created | PaymentStatus::Inflight => {
+                                    return Err(anyhow::Error::msg(format!(
+                                        "hosted payment {payment_hash} received a non-final settled outcome"
+                                    ))
+                                    .into());
+                                }
+                            }
+                        }
+                        status if !status.is_final() => {
+                            state.finish_upstream_settlement(
+                                &payment_hash,
+                                payment_status,
+                                failure,
+                            )?;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -465,6 +504,9 @@ impl Actor for LspService {
 }
 
 impl LspService {
+    const EXPIRATION_REASON: &'static str =
+        "hosted tenant was unavailable before the buffer deadline";
+
     async fn inspect_upstream(
         state: &LspServiceState,
         delivery: &LspPaymentDelivery,
@@ -493,6 +535,55 @@ impl LspService {
         Ok(())
     }
 
+    async fn finish_expiration(
+        myself: &ActorRef<LspServiceMessage>,
+        state: &mut LspServiceState,
+        delivery: LspPaymentDelivery,
+    ) -> Result<(), String> {
+        let LspPaymentDeliveryStatus::ExpiringUpstream { reason } = &delivery.status else {
+            return Err(format!(
+                "hosted payment {} is not expiring upstream",
+                delivery.payment_hash
+            ));
+        };
+        let failed = ractor::call_t!(
+            state.public_network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
+                request: delivery.request.clone(),
+                reason: reason.clone(),
+                reply,
+            },),
+            10_000
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+        let failed = match failed {
+            Ok(failed) => failed,
+            Err(error) => {
+                tracing::warn!(
+                    payment_hash = %delivery.payment_hash,
+                    %error,
+                    "Failed to settle expired hosted delivery"
+                );
+                LspServiceState::schedule_reconciliation_retry(myself, delivery.payment_hash);
+                return Ok(());
+            }
+        };
+        let status = if failed {
+            LspPaymentDeliveryStatus::Expired {
+                reason: reason.clone(),
+            }
+        } else {
+            LspPaymentDeliveryStatus::InFlight
+        };
+        state.delivery_manager.transition(
+            &delivery.payment_hash,
+            status,
+            crate::now_timestamp_as_millis_u64(),
+        )?;
+        Ok(())
+    }
+
     async fn resume_delivery(
         &self,
         myself: ActorRef<LspServiceMessage>,
@@ -504,6 +595,12 @@ impl LspService {
         };
         if delivery.status.is_final() {
             return Ok(());
+        }
+        if matches!(
+            delivery.status,
+            LspPaymentDeliveryStatus::ExpiringUpstream { .. }
+        ) {
+            return Self::finish_expiration(&myself, state, delivery).await;
         }
         // A deferred delivery has not created its downstream payment session yet. Looking up the
         // hash at that point can find the upstream trampoline session and incorrectly treat it as
@@ -705,14 +802,17 @@ impl LspService {
         let Some(delivery) = state.delivery_manager.get(&payment_hash)? else {
             return Ok(());
         };
+        if matches!(delivery.status, LspPaymentDeliveryStatus::InFlight) {
+            return Ok(());
+        }
+        if delivery.status.is_final() {
+            return Ok(());
+        }
         if matches!(
             delivery.status,
-            LspPaymentDeliveryStatus::InFlight
-                | LspPaymentDeliveryStatus::Succeeded
-                | LspPaymentDeliveryStatus::Failed { .. }
-                | LspPaymentDeliveryStatus::Cancelled { .. }
+            LspPaymentDeliveryStatus::ExpiringUpstream { .. }
         ) {
-            return Ok(());
+            return Self::finish_expiration(&myself, state, delivery).await;
         }
         if matches!(
             delivery.status,
@@ -754,43 +854,13 @@ impl LspService {
                 return Ok(());
             }
         }
-        let reason = "hosted tenant was unavailable before the buffer deadline".to_string();
-        state.begin_upstream_settlement(
+        let delivery = state.delivery_manager.transition(
             &payment_hash,
-            PaymentStatus::Failed,
-            Some(reason.clone()),
+            LspPaymentDeliveryStatus::ExpiringUpstream {
+                reason: Self::EXPIRATION_REASON.to_string(),
+            },
+            now,
         )?;
-        let failed = ractor::call_t!(
-            state.public_network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
-                request: delivery.request.clone(),
-                reason: reason.clone(),
-                reply,
-            },),
-            10_000
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|result| result);
-        let failed = match failed {
-            Ok(failed) => failed,
-            Err(error) => {
-                tracing::warn!(
-                    %payment_hash,
-                    %error,
-                    "Failed to settle expired hosted delivery"
-                );
-                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
-                return Ok(());
-            }
-        };
-        let status = if failed {
-            LspPaymentDeliveryStatus::Failed { reason }
-        } else {
-            LspPaymentDeliveryStatus::InFlight
-        };
-        state
-            .delivery_manager
-            .transition(&payment_hash, status, now)?;
-        Ok(())
+        Self::finish_expiration(&myself, state, delivery).await
     }
 }

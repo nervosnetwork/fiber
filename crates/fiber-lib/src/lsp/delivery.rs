@@ -52,13 +52,25 @@ pub enum LspPaymentDeliveryStatus {
     Cancelled {
         reason: String,
     },
+    /// Public T is failing the upstream TLC because the buffering window elapsed.
+    ///
+    /// This variant is appended to preserve persisted bincode discriminants.
+    ExpiringUpstream {
+        reason: String,
+    },
+    /// The buffering window elapsed before downstream dispatch could start.
+    ///
+    /// This variant is appended to preserve persisted bincode discriminants.
+    Expired {
+        reason: String,
+    },
 }
 
 impl LspPaymentDeliveryStatus {
     pub fn is_final(&self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. }
+            Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. } | Self::Expired { .. }
         )
     }
 }
@@ -261,6 +273,7 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
                 LspPaymentDeliveryStatus::Dispatching
                     | LspPaymentDeliveryStatus::Failed { .. }
                     | LspPaymentDeliveryStatus::Cancelled { .. }
+                    | LspPaymentDeliveryStatus::ExpiringUpstream { .. }
                     | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::Dispatching,
@@ -268,6 +281,7 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
                     | LspPaymentDeliveryStatus::InFlight
                     | LspPaymentDeliveryStatus::Failed { .. }
                     | LspPaymentDeliveryStatus::Cancelled { .. }
+                    | LspPaymentDeliveryStatus::ExpiringUpstream { .. }
                     | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::InFlight,
@@ -277,6 +291,9 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
                 LspPaymentDeliveryStatus::InFlight
                     | LspPaymentDeliveryStatus::Succeeded
                     | LspPaymentDeliveryStatus::Failed { .. }
+            ) | (
+                LspPaymentDeliveryStatus::ExpiringUpstream { .. },
+                LspPaymentDeliveryStatus::InFlight | LspPaymentDeliveryStatus::Expired { .. }
             )
         );
         if !valid {

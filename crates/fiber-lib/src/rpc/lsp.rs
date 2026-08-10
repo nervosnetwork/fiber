@@ -302,6 +302,12 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
             InternalPaymentDeliveryStatus::Cancelled { reason } => {
                 (LspPaymentDeliveryStatus::Cancelled, Some(reason))
             }
+            InternalPaymentDeliveryStatus::ExpiringUpstream { reason } => {
+                (LspPaymentDeliveryStatus::ExpiringUpstream, Some(reason))
+            }
+            InternalPaymentDeliveryStatus::Expired { reason } => {
+                (LspPaymentDeliveryStatus::Expired, Some(reason))
+            }
         };
         Self {
             payment_hash: delivery.payment_hash.into(),

@@ -953,7 +953,7 @@ Retrieves durable delivery state for a hosted incoming payment.
 * `private_channel_id` - <em>[Hash256](#type-hash256)</em>, Private channel selected internally for tenant delivery.
 * `buffer_deadline` - <em>`u64`</em>, Last instant at which an undispatched payment may remain buffered.
 * `status` - <em>[LspPaymentDeliveryStatus](#type-lsppaymentdeliverystatus)</em>, Current durable delivery state.
-* `failure_reason` - <em>`Option<String>`</em>, Terminal detail when `status` is `failed` or `cancelled`.
+* `failure_reason` - <em>`Option<String>`</em>, Terminal detail when `status` is `failed`, `cancelled`, or `expired`.
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds since Unix epoch.
 * `updated_at` - <em>`u64`</em>, Last update timestamp in milliseconds since Unix epoch.
 
@@ -1775,6 +1775,8 @@ Durable hosted-payment delivery state.
 * `succeeded` - The downstream payment completed successfully.
 * `failed` - Delivery failed before or during downstream payment.
 * `cancelled` - The upstream TLC was removed before downstream dispatch started.
+* `expiring_upstream` - Public T is failing the upstream TLC after the buffer deadline.
+* `expired` - The buffer deadline elapsed before downstream dispatch started.
 ---
 
 <a id="#type-lsptenantruntimestatus"></a>

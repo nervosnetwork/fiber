@@ -1369,7 +1369,84 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
     wait_for_delivery_status(
         &manager,
         payment_hash,
-        LspPaymentDeliveryStatus::Failed {
+        LspPaymentDeliveryStatus::Expired {
+            reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+    assert_eq!(failures.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(AtomicUsize::new(0));
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        failures.clone(),
+    )
+    .await;
+    let payment_hash = Hash256::from([43; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([44; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
+        created_at: 42,
+    };
+    let now = crate::now_timestamp_as_millis_u64();
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    manager
+        .transition(
+            &payment_hash,
+            LspPaymentDeliveryStatus::ExpiringUpstream {
+                reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
+            },
+            now + 1,
+        )
+        .unwrap();
+
+    service
+        .send_message(LspServiceMessage::ResumeDelivery(payment_hash))
+        .unwrap();
+    wait_for_delivery_status(
+        &manager,
+        payment_hash,
+        LspPaymentDeliveryStatus::Expired {
             reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
         },
     )

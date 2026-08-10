@@ -130,6 +130,8 @@ delivery state machine is persisted in the LSP database:
 Deferred -> Dispatching -> InFlight -> SettlingUpstream -> Succeeded | Failed
     |              |
     +--------------+-> Cancelled (upstream TLC already removed)
+    |
+    +-> ExpiringUpstream -> Expired (buffer deadline elapsed)
 ```
 
 The buffer deadline applies only to `Deferred` and `Dispatching`. Once the
@@ -145,7 +147,10 @@ dispatch, the delivery becomes `Cancelled` and its reservation is released;
 the LSP does not create a downstream payment or attempt another upstream
 failure. A transient downstream dispatch failure returns to
 `Deferred` and is retried until the deadline instead of immediately failing the
-upstream TLC. Buffered MPP is rejected in this phase.
+upstream TLC. Deadline processing first persists `ExpiringUpstream`, then fails
+the upstream TLC and records `Expired`; a restart between those operations
+resumes the same settlement instead of collapsing expiry into a generic payment
+failure. Buffered MPP is rejected in this phase.
 
 ## Configuration
 
