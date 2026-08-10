@@ -940,6 +940,19 @@ pub enum NetworkActorCommand {
     SavePeerAddress(Multiaddr),
     // Remove queued save addresses for a peer when dialing fails.
     RemovePendingSavePeerAddress(PeerId),
+    /// Register a co-located Fiber endpoint. Messages to this peer are
+    /// delivered directly to its actor without Tentacle encoding or a socket.
+    RegisterInProcessPeer {
+        pubkey: Pubkey,
+        actor: ActorRef<NetworkActorMessage>,
+        features: FeatureVector,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
+    /// Start channel reestablishment after both directions of an in-process
+    /// route have been registered.
+    ActivateInProcessPeer(Pubkey, RpcReplyPort<Result<(), String>>),
+    /// Remove a previously registered co-located Fiber endpoint.
+    UnregisterInProcessPeer(Pubkey),
     // We need to maintain a certain number of peers connections to keep the network running.
     MaintainConnections,
     // Check hold tlcs that have expired and need to be removed.
@@ -1747,7 +1760,7 @@ where
 
                 // If a channel message arrives before the live actor has processed the reconnect,
                 // attempt to nudge reestablishment on-the-fly so the message is not dropped.
-                if !found && state.peer_session_map.contains_key(&peer_pubkey) {
+                if !found && state.is_peer_available(&peer_pubkey) {
                     if let Some(actor_state) = state.store.get_channel_actor_state(&channel_id) {
                         let _peer_id =
                             PeerId::from_public_key(&super::types::pubkey_to_tentacle(peer_pubkey));
@@ -2525,11 +2538,49 @@ where
             NetworkActorCommand::RemovePendingSavePeerAddress(peer_id) => {
                 state.pending_save_peer_addresses.remove(&peer_id);
             }
+            NetworkActorCommand::RegisterInProcessPeer {
+                pubkey,
+                actor,
+                features,
+                reply,
+            } => {
+                let result = if pubkey == state.get_public_key() {
+                    Err("cannot register the local Fiber endpoint as its own peer".to_string())
+                } else {
+                    state
+                        .in_process_peers
+                        .insert(pubkey, InProcessPeer { actor, features });
+                    state.requested_disconnect_peers.remove(&pubkey);
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            NetworkActorCommand::ActivateInProcessPeer(pubkey, reply) => {
+                let result = if !state.in_process_peers.contains_key(&pubkey) {
+                    Err(format!("in-process peer {pubkey:?} is not registered"))
+                } else {
+                    if let Some(channel_ids) = state.peer_channel_index.get_channels(&pubkey) {
+                        for channel_id in channel_ids {
+                            if let Err(error) = state.reestablish_channel(channel_id).await {
+                                error!(
+                                    "Failed to reestablish in-process channel {:x}: {:?}",
+                                    channel_id, error
+                                );
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
+            NetworkActorCommand::UnregisterInProcessPeer(pubkey) => {
+                state.disconnect_in_process_peer(pubkey);
+            }
             NetworkActorCommand::MaintainConnections => {
                 debug!("Trying to connect to peers with mutual channels");
 
                 for (pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
-                    if state.peer_session_map.contains_key(&pubkey) {
+                    if state.is_peer_available(&pubkey) {
                         continue;
                     }
                     if state.requested_disconnect_peers.contains(&pubkey) {
@@ -5283,6 +5334,7 @@ pub struct NetworkActorState<S, C> {
     #[cfg(not(target_arch = "wasm32"))]
     onion_service_token: Option<tokio_util::sync::CancellationToken>,
     peer_session_map: HashMap<Pubkey, ConnectedPeer>,
+    in_process_peers: HashMap<Pubkey, InProcessPeer>,
     pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     peer_channel_index: PeerChannelIndex,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
@@ -5362,6 +5414,12 @@ pub struct ConnectedPeer {
     pub session_type: SessionType,
     pub address: Multiaddr,
     pub features: Option<FeatureVector>,
+}
+
+#[derive(Clone, Debug)]
+struct InProcessPeer {
+    actor: ActorRef<NetworkActorMessage>,
+    features: FeatureVector,
 }
 
 pub trait NetworkActorStateStore {
@@ -6007,7 +6065,11 @@ where
     fn is_channel_online(&self, channel_id: &Hash256) -> bool {
         self.peer_channel_index
             .get_peer_by_channel_id(channel_id)
-            .is_some_and(|peer| self.peer_session_map.contains_key(&peer))
+            .is_some_and(|peer| self.is_peer_available(&peer))
+    }
+
+    fn is_peer_available(&self, pubkey: &Pubkey) -> bool {
+        self.peer_session_map.contains_key(pubkey) || self.in_process_peers.contains_key(pubkey)
     }
 
     fn check_pending_channel_limit(&self, peer_pubkey: Pubkey) -> ProcessingChannelResult {
@@ -6039,11 +6101,16 @@ where
     }
 
     fn check_feature_compatibility(&self, pubkey: &Pubkey) -> ProcessingChannelResult {
-        if let Some(peer_features) = self
-            .peer_session_map
+        let peer_features = self
+            .in_process_peers
             .get(pubkey)
-            .and_then(|peer| peer.features.as_ref())
-        {
+            .map(|peer| &peer.features)
+            .or_else(|| {
+                self.peer_session_map
+                    .get(pubkey)
+                    .and_then(|peer| peer.features.as_ref())
+            });
+        if let Some(peer_features) = peer_features {
             // check peer features
             if !self.features.compatible_with(peer_features) {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -6397,6 +6464,12 @@ where
         pubkey: &Pubkey,
         message: FiberMessage,
     ) -> crate::Result<()> {
+        if let Some(peer) = self.in_process_peers.get(pubkey) {
+            peer.actor.send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::FiberMessage(self.get_public_key(), message, None),
+            ))?;
+            return Ok(());
+        }
         match self.peer_session_map.get(pubkey).map(|p| p.session_id) {
             Some(session) => self.send_fiber_message_to_session(session, message).await,
             None => Err(Error::PeerNotFound(*pubkey)),
@@ -6779,6 +6852,26 @@ where
             return;
         }
         self.seed_peer_reconnect_backoff_if_needed(&peer_id, PeerReconnectTrigger::Disconnected);
+    }
+
+    fn disconnect_in_process_peer(&mut self, pubkey: Pubkey) {
+        if self.in_process_peers.remove(&pubkey).is_none() {
+            return;
+        }
+        if let Some(channel_ids) = self.peer_channel_index.get_channels(&pubkey) {
+            for channel_id in channel_ids {
+                if let Some(channel) = self.channels.get(&channel_id) {
+                    if let Err(error) = channel
+                        .send_message(ChannelActorMessage::Event(ChannelEvent::PeerDisconnected))
+                    {
+                        error!(
+                            "Failed to disconnect in-process channel actor {:x}: {:?}",
+                            channel_id, error
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn record_invalid_peer_message(&self, pubkey: Pubkey) -> bool {
@@ -7484,6 +7577,8 @@ where
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
+        #[cfg(not(target_arch = "wasm32"))]
+        let in_process_transport_only = config.in_process_transport_only();
         let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
             .expect("valid length for key")
             .into();
@@ -7605,8 +7700,12 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
-                .expect("valid tentacle listening address")];
+            let mut addresses_to_listen = if in_process_transport_only {
+                Vec::new()
+            } else {
+                vec![MultiAddr::from_str(config.listening_addr())
+                    .expect("valid tentacle listening address")]
+            };
             if config.reuse_port_for_websocket {
                 // Re-use the same port for websocket
                 let ws_listens = addresses_to_listen
@@ -7671,7 +7770,7 @@ where
 
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
-        let onion_service_token = if config.onion.listen_on_onion {
+        let onion_service_token = if config.onion.listen_on_onion && !in_process_transport_only {
             match self
                 .start_onion_service(
                     &config,
@@ -7788,6 +7887,7 @@ where
             #[cfg(not(target_arch = "wasm32"))]
             onion_service_token,
             peer_session_map: Default::default(),
+            in_process_peers: Default::default(),
             pending_save_peer_addresses: Default::default(),
             peer_channel_index,
             channels: Default::default(),
