@@ -871,8 +871,25 @@ async fn register_test_invoice_with_buffer(
     payment_hash: Hash256,
     buffer_duration_ms: Option<u64>,
 ) {
+    register_test_invoice_for_tenant(
+        service,
+        TenantId::new("u1").unwrap(),
+        tenant_key,
+        payment_hash,
+        buffer_duration_ms,
+    )
+    .await;
+}
+
+async fn register_test_invoice_for_tenant(
+    service: &ActorRef<LspServiceMessage>,
+    tenant_id: TenantId,
+    tenant_key: &Privkey,
+    payment_hash: Hash256,
+    buffer_duration_ms: Option<u64>,
+) {
     ractor::call!(service, |reply| LspServiceMessage::RegisterInvoice {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id,
         invoice: signed_invoice(tenant_key, payment_hash),
         buffer_duration_ms,
         reply,
@@ -975,6 +992,126 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(failures.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn offline_tenant_does_not_block_an_online_tenant() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string(), "u2".to_string()];
+    let store = open_store(config.store_path()).expect("open LSP store");
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let starts = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: starts.clone(),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let u1_key = Privkey::from(&[1; 32]);
+    let u2_key = Privkey::from(&[2; 32]);
+    let u1_payment_hash = Hash256::from([31; 32]);
+    let u2_payment_hash = Hash256::from([32; 32]);
+    register_test_invoice_for_tenant(
+        &service,
+        TenantId::new("u1").unwrap(),
+        &u1_key,
+        u1_payment_hash,
+        None,
+    )
+    .await;
+    register_test_invoice_for_tenant(
+        &service,
+        TenantId::new("u2").unwrap(),
+        &u2_key,
+        u2_payment_hash,
+        None,
+    )
+    .await;
+    let u1_channel = Hash256::from([33; 32]);
+    let u2_channel = Hash256::from([34; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            u1_key.pubkey(),
+            u1_channel,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOffline(
+            u1_key.pubkey(),
+            u1_channel,
+        ))
+        .unwrap();
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            u2_key.pubkey(),
+            u2_channel,
+        ))
+        .unwrap();
+    let u1 = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: u1_key.pubkey(),
+        private_channel_id: Some(u1_channel),
+        created_at: 42,
+    };
+    let u2 = HostedTenantRecord {
+        tenant_id: TenantId::new("u2").unwrap(),
+        invoice_pubkey: u2_key.pubkey(),
+        private_channel_id: Some(u2_channel),
+        created_at: 42,
+    };
+    let now = crate::now_timestamp_as_millis_u64();
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&u1, u1_payment_hash, now),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&u2, u2_payment_hash, now),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+
+    wait_for_delivery_status(
+        &manager,
+        u2_payment_hash,
+        LspPaymentDeliveryStatus::InFlight,
+    )
+    .await;
+    assert_eq!(
+        manager.get(&u1_payment_hash).unwrap().unwrap().status,
+        LspPaymentDeliveryStatus::Deferred
+    );
+    assert_eq!(starts.load(Ordering::Relaxed), 1);
+    assert_eq!(dispatches.load(Ordering::Relaxed), 1);
+
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            u1_key.pubkey(),
+            u1_channel,
+        ))
+        .unwrap();
+    wait_for_delivery_status(
+        &manager,
+        u1_payment_hash,
+        LspPaymentDeliveryStatus::InFlight,
+    )
+    .await;
+    assert_eq!(starts.load(Ordering::Relaxed), 2);
+    assert_eq!(dispatches.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
