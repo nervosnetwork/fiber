@@ -12,6 +12,22 @@ const PAYMENT_DELIVERY_PREFIX: &[u8] = b"\xf2lsp/delivery/";
 /// Time retained between the end of buffering and the downstream expiry budget.
 pub const LSP_DELIVERY_SAFETY_MARGIN_MS: u64 = 30_000;
 
+#[derive(Clone, Copy, Debug)]
+pub struct LspPaymentDeliveryLimits {
+    pub max_pending_deliveries: usize,
+    pub max_pending_deliveries_per_tenant: usize,
+}
+
+impl Default for LspPaymentDeliveryLimits {
+    fn default() -> Self {
+        Self {
+            max_pending_deliveries: super::config::DEFAULT_MAX_PENDING_DELIVERIES,
+            max_pending_deliveries_per_tenant:
+                super::config::DEFAULT_MAX_PENDING_DELIVERIES_PER_TENANT,
+        }
+    }
+}
+
 /// Durable lifecycle of one hosted incoming payment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LspPaymentDeliveryStatus {
@@ -83,11 +99,19 @@ impl LspPaymentDeliveryStore for Store {
 #[derive(Clone)]
 pub struct LspPaymentDeliveryManager<S> {
     store: S,
+    limits: LspPaymentDeliveryLimits,
 }
 
 impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            limits: LspPaymentDeliveryLimits::default(),
+        }
+    }
+
+    pub fn with_limits(store: S, limits: LspPaymentDeliveryLimits) -> Self {
+        Self { store, limits }
     }
 
     pub fn get(&self, payment_hash: &Hash256) -> Result<Option<LspPaymentDelivery>, String> {
@@ -101,6 +125,13 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             .into_iter()
             .filter(|delivery| !delivery.status.is_final())
             .collect())
+    }
+
+    pub fn has_pending_for_tenant(&self, tenant_id: &TenantId) -> Result<bool, String> {
+        Ok(self
+            .list_pending()?
+            .iter()
+            .any(|delivery| &delivery.tenant_id == tenant_id))
     }
 
     pub fn accept(
@@ -119,10 +150,14 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if registration.tenant_id != tenant.tenant_id {
             return Err("hosted invoice registration does not match tenant".to_string());
         }
+        if request.max_parts.is_some_and(|max_parts| max_parts > 1) {
+            return Err("buffered hosted delivery does not support MPP".to_string());
+        }
         let private_channel_id = tenant
             .private_channel_id
             .ok_or_else(|| "hosted tenant has no private channel".to_string())?;
         request.next_node_id = tenant.invoice_pubkey;
+        request.clone().into_send_payment_data()?;
         if registration
             .invoice
             .amount()
@@ -133,8 +168,30 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if registration.invoice.udt_type_script() != request.udt_type_script.as_ref() {
             return Err("delivery asset does not match hosted invoice".to_string());
         }
-        if self.get(&request.payment_hash)?.is_some() {
-            return Err("hosted payment delivery already exists".to_string());
+        if let Some(existing) = self.get(&request.payment_hash)? {
+            if existing.tenant_id == registration.tenant_id
+                && existing.private_channel_id == private_channel_id
+                && existing.request == request
+            {
+                return Ok(existing);
+            }
+            return Err("hosted payment delivery already exists with different data".to_string());
+        }
+
+        let pending = self.list_pending()?;
+        if pending.len() >= self.limits.max_pending_deliveries {
+            return Err("global pending hosted delivery limit reached".to_string());
+        }
+        if pending
+            .iter()
+            .filter(|delivery| delivery.tenant_id == tenant.tenant_id)
+            .count()
+            >= self.limits.max_pending_deliveries_per_tenant
+        {
+            return Err(format!(
+                "pending hosted delivery limit reached for tenant {}",
+                tenant.tenant_id
+            ));
         }
 
         let buffer_cap = now
@@ -175,8 +232,29 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         let mut delivery = self
             .get(payment_hash)?
             .ok_or_else(|| format!("hosted payment delivery {payment_hash} not found"))?;
-        if delivery.status.is_final() && delivery.status != status {
-            return Err("hosted payment delivery is already final".to_string());
+        if delivery.status == status {
+            return Ok(delivery);
+        }
+        let valid = matches!(
+            (&delivery.status, &status),
+            (
+                LspPaymentDeliveryStatus::Deferred,
+                LspPaymentDeliveryStatus::Dispatching | LspPaymentDeliveryStatus::Failed { .. }
+            ) | (
+                LspPaymentDeliveryStatus::Dispatching,
+                LspPaymentDeliveryStatus::Deferred
+                    | LspPaymentDeliveryStatus::InFlight
+                    | LspPaymentDeliveryStatus::Failed { .. }
+            ) | (
+                LspPaymentDeliveryStatus::InFlight,
+                LspPaymentDeliveryStatus::Succeeded | LspPaymentDeliveryStatus::Failed { .. }
+            )
+        );
+        if !valid {
+            return Err(format!(
+                "invalid hosted payment delivery transition from {:?} to {:?}",
+                delivery.status, status
+            ));
         }
         delivery.status = status;
         delivery.updated_at = now;

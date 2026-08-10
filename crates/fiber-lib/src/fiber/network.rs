@@ -3240,7 +3240,6 @@ where
             }
             #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::DispatchBufferedTrampoline { request, reply } => {
-                let request_for_failure = request.clone();
                 let result = self
                     .dispatch_reserved_trampoline_forwarding(state, request)
                     .await;
@@ -3250,9 +3249,6 @@ where
                     }
                     Err(error) => {
                         let reason = format!("failed to dispatch hosted payment: {error:?}");
-                        let _ = self
-                            .fail_buffered_trampoline(state, request_for_failure, reason.clone())
-                            .await;
                         let _ = reply.send(Err(reason));
                     }
                 }

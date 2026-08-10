@@ -8,8 +8,8 @@ mod tenant;
 
 pub use config::{LspConfig, DEFAULT_MAX_ACTIVE_TENANTS};
 pub use delivery::{
-    LspPaymentDelivery, LspPaymentDeliveryManager, LspPaymentDeliveryStatus,
-    LspPaymentDeliveryStore, LSP_DELIVERY_SAFETY_MARGIN_MS,
+    LspPaymentDelivery, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
+    LspPaymentDeliveryStatus, LspPaymentDeliveryStore, LSP_DELIVERY_SAFETY_MARGIN_MS,
 };
 pub use invoice::{
     LspInvoiceHint, LspInvoiceHintPayload, LspInvoiceRegistration, LspInvoiceRegistry,

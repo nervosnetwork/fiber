@@ -135,11 +135,22 @@ impl LspInvoiceStore for Store {
 #[derive(Clone)]
 pub struct LspInvoiceRegistry<S> {
     store: S,
+    max_buffer_duration_ms: u64,
 }
 
 impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            max_buffer_duration_ms: MAX_LSP_BUFFER_DURATION_MS,
+        }
+    }
+
+    pub fn with_max_buffer_duration(store: S, max_buffer_duration_ms: u64) -> Self {
+        Self {
+            store,
+            max_buffer_duration_ms: max_buffer_duration_ms.min(MAX_LSP_BUFFER_DURATION_MS),
+        }
     }
 
     pub fn get(&self, payment_hash: &Hash256) -> Result<Option<LspInvoiceRegistration>, String> {
@@ -182,13 +193,15 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
             .checked_add(expiry.as_millis())
             .and_then(|value| u64::try_from(value).ok())
             .ok_or_else(|| "hosted invoice expiry overflows u64 milliseconds".to_string())?;
-        let buffer_duration_ms = buffer_duration_ms.unwrap_or(DEFAULT_LSP_BUFFER_DURATION_MS);
-        if buffer_duration_ms > MAX_LSP_BUFFER_DURATION_MS {
+        let requested_buffer_duration_ms =
+            buffer_duration_ms.unwrap_or(DEFAULT_LSP_BUFFER_DURATION_MS);
+        if requested_buffer_duration_ms > MAX_LSP_BUFFER_DURATION_MS {
             return Err(format!(
                 "buffer duration exceeds maximum {}ms",
                 MAX_LSP_BUFFER_DURATION_MS
             ));
         }
+        let buffer_duration_ms = requested_buffer_duration_ms.min(self.max_buffer_duration_ms);
         if signer.pubkey() != lsp_node_id {
             return Err("LSP hint signing key does not match Public T identity".to_string());
         }

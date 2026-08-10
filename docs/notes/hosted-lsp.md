@@ -71,8 +71,10 @@ binds all of the following under Public T's signature:
 - requested buffer duration and absolute invoice expiry.
 
 The default requested buffer duration is 24 hours and the protocol maximum is
-seven days. The actual deadline is still bounded by invoice and TLC expiry, so
-these values do not promise that every payment can wait that long. The hint is
+seven days. An operator may configure a shorter service-wide cap; the signed
+hint records the duration actually accepted by the service. The actual deadline
+is still bounded by invoice and TLC expiry, so these values do not promise that
+every payment can wait that long. The hint is
 intentionally not embedded in the invoice encoding or the trampoline onion
 payload. A wallet distributes the invoice and sidecar together, verifies both
 signatures, and uses the single trampoline hop in the hint as Public T. The
@@ -90,8 +92,10 @@ not a request to fail or buffer the payment.
 2. Public T decodes the existing trampoline forwarding payload. If the payment
    hash belongs to a registered hosted invoice, it durably creates an LSP
    delivery record and keeps the upstream TLC pending.
-3. The delivery manager starts the tenant runtime if it is cold and waits for
-   the U-T private channel to become online.
+3. The delivery manager keeps the delivery `Deferred` while the tenant is cold
+   or its U-T private channel is offline. It does not hydrate a cold tenant only
+   to wait; the signer/control plane explicitly activates the tenant and
+   reconnects its private channel.
 4. Once the private channel is online, Public T creates the normal downstream
    payment session and sends the TLC to U through the existing trampoline
    forwarding path. Channel protocol messages cross an in-process actor route,
@@ -127,12 +131,15 @@ downstream payment is `InFlight`, the existing TLC expiries and payment session
 own its lifetime; the LSP buffer timer must not cancel it. On process restart,
 the LSP reloads non-final deliveries, restores the trampoline resource
 reservation, consults the public payment session, and resumes or finalizes the
-record idempotently.
+record idempotently. A transient downstream dispatch failure returns to
+`Deferred` and is retried until the deadline instead of immediately failing the
+upstream TLC. Buffered MPP is rejected in this phase.
 
 ## Configuration
 
 Enable `fiber`, `ckb`, `rpc`, and `lsp` in `services`. The `lsp` section accepts
-an optional boot-time tenant list and a bound on resident tenant runtimes:
+an optional boot-time tenant list, a bound on resident tenant runtimes, a buffer
+policy cap, and global/per-tenant pending-delivery limits:
 
 ```yaml
 services:
@@ -143,6 +150,9 @@ services:
 
 lsp:
   max_active_tenants: 64
+  max_buffer_duration_ms: 604800000 # 7 days
+  max_pending_deliveries: 1024
+  max_pending_deliveries_per_tenant: 64
   tenants:
     - u1
     - u2
@@ -180,7 +190,9 @@ untrusted clients without authentication.
 - This phase covers hosted receiving through Public T and U-T private channels;
   it does not add LSP-assisted outbound payments.
 - Tenant runtime count is bounded, but eviction is explicit rather than an LRU
-  policy.
+  policy. Eviction is rejected while that tenant has a non-final hosted
+  delivery; checking unrelated tenant runtime work remains a later hardening
+  step.
 - Tenant runtimes currently reuse the existing Fiber network coordinator as an
   internal channel/payment dispatcher. They open no P2P listener and perform
   no gossip synchronization; a later refactor may extract a smaller dedicated

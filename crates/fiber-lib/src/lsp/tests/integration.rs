@@ -374,6 +374,22 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     assert_eq!(deferred.tenant_id, TENANT_ID);
     assert_eq!(deferred.private_channel_id, private_channel_id.into());
     assert!(deferred.buffer_deadline > crate::now_timestamp_as_millis_u64());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+
+    let ensured: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_ensure_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("activate hosted tenant after signer reconnect");
+    assert!(matches!(
+        ensured.runtime_status,
+        LspTenantRuntimeStatus::Active
+    ));
     wait_until_async_timeout(|| async { starts.load(Ordering::Relaxed) == 1 }).await;
 
     let tenants: ListLspTenantsResult = client

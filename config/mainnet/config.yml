@@ -104,6 +104,10 @@ rpc:
 # to `services`. Tenant state and signing keys are isolated below $BASE_DIR/lsp.
 lsp:
   max_active_tenants: 64
+  # Requested durations are shortened to this operator policy cap (7 days).
+  max_buffer_duration_ms: 604800000
+  max_pending_deliveries: 1024
+  max_pending_deliveries_per_tenant: 64
   tenants: []
 
 ckb:

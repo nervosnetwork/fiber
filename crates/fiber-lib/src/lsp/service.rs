@@ -12,8 +12,8 @@ use crate::store::Store;
 
 use super::{
     HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery,
-    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, TenantId, TenantRegistry,
-    TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
+    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus, TenantId,
+    TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -139,6 +139,12 @@ impl LspServiceState {
         }
     }
 
+    fn schedule_reconciliation_retry(myself: &ActorRef<LspServiceMessage>, payment_hash: Hash256) {
+        myself.send_after(Duration::from_secs(1), move || {
+            LspServiceMessage::ResumeDelivery(payment_hash)
+        });
+    }
+
     fn update_from_payment_status(
         &self,
         payment_hash: &Hash256,
@@ -174,8 +180,17 @@ impl Actor for LspService {
     ) -> Result<Self::State, ActorProcessingErr> {
         args.config.validate().map_err(anyhow::Error::msg)?;
         let registry = TenantRegistry::new(args.store.clone());
-        let invoice_registry = LspInvoiceRegistry::new(args.store.clone());
-        let delivery_manager = LspPaymentDeliveryManager::new(args.store.clone());
+        let invoice_registry = LspInvoiceRegistry::with_max_buffer_duration(
+            args.store.clone(),
+            args.config.max_buffer_duration_ms,
+        );
+        let delivery_manager = LspPaymentDeliveryManager::with_limits(
+            args.store.clone(),
+            LspPaymentDeliveryLimits {
+                max_pending_deliveries: args.config.max_pending_deliveries,
+                max_pending_deliveries_per_tenant: args.config.max_pending_deliveries_per_tenant,
+            },
+        );
         let supervisor =
             TenantSupervisor::new(args.runtime_factory.clone(), args.config.max_active_tenants);
         for tenant in &args.config.tenants {
@@ -247,9 +262,16 @@ impl Actor for LspService {
                 let _ = reply.send(result);
             }
             LspServiceMessage::EvictTenant(tenant_id, reply) => {
-                state.ready_tenants.remove(&tenant_id);
-                state.supervisor.evict(&tenant_id);
-                let _ = reply.send(state.get_tenant_status(&tenant_id));
+                let result = if state.delivery_manager.has_pending_for_tenant(&tenant_id)? {
+                    Err(format!(
+                        "tenant {tenant_id} has unfinished hosted payment deliveries"
+                    ))
+                } else {
+                    state.ready_tenants.remove(&tenant_id);
+                    state.supervisor.evict(&tenant_id);
+                    state.get_tenant_status(&tenant_id)
+                };
+                let _ = reply.send(result);
             }
             LspServiceMessage::ListTenants(reply) => {
                 let result = state.registry.list().map(|records| {
@@ -289,6 +311,9 @@ impl Actor for LspService {
                 let result = match state.invoice_registry.get(&request.payment_hash) {
                     Ok(None) => Ok(LspDeliveryDecision::NotHosted),
                     Ok(Some(registration)) => match state.registry.get(&registration.tenant_id) {
+                        Ok(Some(_)) if registration.hint.payload.buffer_duration_ms == 0 => {
+                            Ok(LspDeliveryDecision::NotHosted)
+                        }
                         Ok(Some(tenant)) => state
                             .delivery_manager
                             .accept(
@@ -395,6 +420,31 @@ impl LspService {
                 NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
             ));
 
+        let now = crate::now_timestamp_as_millis_u64();
+        let Some(tenant) = state.registry.get(&delivery.tenant_id)? else {
+            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
+            return Ok(());
+        };
+        let channel_ready =
+            state.ready_tenants.get(&tenant.tenant_id) == Some(&delivery.private_channel_id);
+        if delivery.status == LspPaymentDeliveryStatus::Deferred && !channel_ready {
+            return Ok(());
+        }
+        if let Err(error) = state.supervisor.ensure(&tenant).await {
+            tracing::debug!(
+                "Deferred hosted delivery {} while tenant {} starts: {}",
+                payment_hash,
+                delivery.tenant_id,
+                error
+            );
+            LspServiceState::schedule_delivery_retry(
+                &myself,
+                payment_hash,
+                delivery.buffer_deadline,
+            );
+            return Ok(());
+        }
+
         // A deferred delivery has not created its downstream payment session yet. Looking up the
         // hash at that point can find the upstream trampoline session and incorrectly treat it as
         // the downstream delivery. Only reconcile a session after dispatch has actually started.
@@ -418,42 +468,18 @@ impl LspService {
                 )?;
                 return Ok(());
             }
+            if delivery.status == LspPaymentDeliveryStatus::InFlight {
+                LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
+                return Ok(());
+            }
         }
 
-        let now = crate::now_timestamp_as_millis_u64();
         if now >= delivery.buffer_deadline {
             let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
             return Ok(());
         }
-        let Some(tenant) = state.registry.get(&delivery.tenant_id)? else {
-            let _ = myself.send_message(LspServiceMessage::ExpireDelivery(payment_hash));
-            return Ok(());
-        };
-        if let Err(error) = state.supervisor.ensure(&tenant).await {
-            tracing::debug!(
-                "Deferred hosted delivery {} while tenant {} starts: {}",
-                payment_hash,
-                delivery.tenant_id,
-                error
-            );
-            state.delivery_manager.transition(
-                &payment_hash,
-                LspPaymentDeliveryStatus::Deferred,
-                now,
-            )?;
-            LspServiceState::schedule_delivery_retry(
-                &myself,
-                payment_hash,
-                delivery.buffer_deadline,
-            );
-            return Ok(());
-        }
-        if state.ready_tenants.get(&tenant.tenant_id) != Some(&delivery.private_channel_id) {
-            state.delivery_manager.transition(
-                &payment_hash,
-                LspPaymentDeliveryStatus::Deferred,
-                now,
-            )?;
+
+        if !channel_ready {
             return Ok(());
         }
 
@@ -485,9 +511,20 @@ impl LspService {
             Err(error) => {
                 state.delivery_manager.transition(
                     &payment_hash,
-                    LspPaymentDeliveryStatus::Failed { reason: error },
+                    LspPaymentDeliveryStatus::Deferred,
                     crate::now_timestamp_as_millis_u64(),
                 )?;
+                tracing::debug!(
+                    %payment_hash,
+                    tenant_id = %delivery.tenant_id,
+                    %error,
+                    "Deferring hosted delivery after a transient dispatch failure"
+                );
+                LspServiceState::schedule_delivery_retry(
+                    &myself,
+                    payment_hash,
+                    delivery.buffer_deadline,
+                );
             }
         }
         Ok(())
