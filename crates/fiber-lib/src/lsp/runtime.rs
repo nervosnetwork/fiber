@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ckb_types::packed::Script;
-use ractor::{ActorCell, ActorRef};
+use ractor::{ActorCell, ActorRef, ActorStatus};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
@@ -28,6 +28,10 @@ pub struct HostedTenantRuntime {
 }
 
 impl HostedTenantRuntime {
+    fn is_running(&self) -> bool {
+        self.network_actor.get_status() < ActorStatus::Stopping
+    }
+
     async fn ensure_idle(&self) -> Result<(), String> {
         let activity: HostedTenantActivity = ractor::call_t!(
             self.network_actor,
@@ -259,9 +263,14 @@ impl TenantSupervisor {
     }
 
     pub async fn ensure(&mut self, record: &HostedTenantRecord) -> Result<(), String> {
-        if self.runtimes.contains_key(&record.tenant_id) {
+        if self
+            .runtimes
+            .get(&record.tenant_id)
+            .is_some_and(HostedTenantRuntime::is_running)
+        {
             return Ok(());
         }
+        self.remove_stopped_runtimes();
         if self.runtimes.len() >= self.max_active_tenants {
             return Err(format!(
                 "active tenant limit {} reached",
@@ -277,7 +286,9 @@ impl TenantSupervisor {
         let Some(runtime) = self.runtimes.get(tenant_id) else {
             return Ok(false);
         };
-        runtime.ensure_idle().await?;
+        if runtime.is_running() {
+            runtime.ensure_idle().await?;
+        }
         if let Some(runtime) = self.runtimes.remove(tenant_id) {
             runtime.stop();
             Ok(true)
@@ -287,10 +298,28 @@ impl TenantSupervisor {
     }
 
     pub fn is_active(&self, tenant_id: &TenantId) -> bool {
-        self.runtimes.contains_key(tenant_id)
+        self.runtimes
+            .get(tenant_id)
+            .is_some_and(HostedTenantRuntime::is_running)
     }
 
     pub fn active_count(&self) -> usize {
-        self.runtimes.len()
+        self.runtimes
+            .values()
+            .filter(|runtime| runtime.is_running())
+            .count()
+    }
+
+    fn remove_stopped_runtimes(&mut self) {
+        let stopped = self
+            .runtimes
+            .iter()
+            .filter_map(|(tenant_id, runtime)| (!runtime.is_running()).then_some(tenant_id.clone()))
+            .collect::<Vec<_>>();
+        for tenant_id in stopped {
+            if let Some(runtime) = self.runtimes.remove(&tenant_id) {
+                runtime.stop();
+            }
+        }
     }
 }

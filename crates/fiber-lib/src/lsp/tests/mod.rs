@@ -2,7 +2,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -204,6 +204,37 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
     }
 }
 
+struct RestartableRuntimeFactory {
+    starts: Arc<AtomicUsize>,
+    actors: Arc<Mutex<Vec<ActorRef<NetworkActorMessage>>>>,
+}
+
+#[async_trait]
+impl TenantRuntimeFactory for RestartableRuntimeFactory {
+    fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
+        Ok(HostedTenantRecord {
+            tenant_id: tenant_id.clone(),
+            invoice_pubkey: Privkey::from(&[5; 32]).pubkey(),
+            private_channel_id: None,
+            created_at: 42,
+        })
+    }
+
+    async fn start(&self, record: &HostedTenantRecord) -> Result<HostedTenantRuntime, String> {
+        self.starts.fetch_add(1, Ordering::Relaxed);
+        let actor = Actor::spawn(None, NoopNetworkActor, ())
+            .await
+            .map_err(|error| error.to_string())?
+            .0;
+        self.actors.lock().unwrap().push(actor.clone());
+        Ok(HostedTenantRuntime {
+            invoice_pubkey: record.invoice_pubkey,
+            network_actor: actor,
+            public_network_actor: None,
+        })
+    }
+}
+
 #[async_trait]
 impl TenantRuntimeFactory for FakeRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
@@ -268,6 +299,34 @@ async fn tenant_supervisor_rejects_eviction_while_runtime_is_busy() {
         "hosted tenant runtime is busy: 1 in-flight payments, 2 active TLCs, 3 pending channel operations"
     );
     assert!(supervisor.is_active(&tenant.tenant_id));
+}
+
+#[tokio::test]
+async fn tenant_supervisor_rehydrates_a_stopped_runtime() {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let actors = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(RestartableRuntimeFactory {
+        starts: starts.clone(),
+        actors: actors.clone(),
+    });
+    let mut supervisor = TenantSupervisor::new(factory.clone(), 1);
+    let tenant = factory.provision(&TenantId::new("u1").unwrap()).unwrap();
+    supervisor.ensure(&tenant).await.unwrap();
+    let first_actor = actors.lock().unwrap()[0].clone();
+    first_actor.stop(Some("simulate tenant runtime crash".to_string()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while first_actor.get_status() < ractor::ActorStatus::Stopping {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("tenant runtime stopped");
+
+    assert!(!supervisor.is_active(&tenant.tenant_id));
+    supervisor.ensure(&tenant).await.unwrap();
+    assert!(supervisor.is_active(&tenant.tenant_id));
+    assert_eq!(supervisor.active_count(), 1);
+    assert_eq!(starts.load(Ordering::Relaxed), 2);
 }
 
 #[test]

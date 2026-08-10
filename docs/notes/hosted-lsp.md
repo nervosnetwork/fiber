@@ -194,6 +194,8 @@ untrusted clients without authentication.
 - Tenant runtime count is bounded, but eviction is explicit rather than an LRU
   policy. Eviction is rejected while that tenant has a non-final hosted
   delivery, an in-flight payment, active TLCs, or pending channel operations.
+  A stopped runtime is removed from the active set and rehydrated by the next
+  explicit ensure operation.
 - Tenant runtimes currently reuse the existing Fiber network coordinator as an
   internal channel/payment dispatcher. They open no P2P listener and perform
   no gossip synchronization; a later refactor may extract a smaller dedicated
