@@ -2,6 +2,7 @@
 use ckb_types::packed::Script;
 
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
+use crate::store::NodeNamespace;
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
 use fiber_store::StoreError;
@@ -61,6 +62,7 @@ use tracing::warn;
 #[derive(Clone)]
 pub struct Store {
     inner: fiber_store::Store,
+    namespace: Option<NodeNamespace>,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
@@ -89,12 +91,46 @@ impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("inner", &self.inner)
+            .field("namespace", &self.namespace)
             .field("watcher", &self.watcher.as_ref().map(|_| "..."))
             .finish()
     }
 }
 
 impl Store {
+    /// Create a logical node store backed by this store's physical database.
+    pub fn namespaced(&self, namespace: NodeNamespace) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            namespace: Some(namespace),
+            watcher: self.watcher.clone(),
+            #[cfg(feature = "watchtower")]
+            watchtower_write_locks: self.watchtower_write_locks.clone(),
+            #[cfg(feature = "watchtower")]
+            onchain_tlc_settlement_write_lock: self.onchain_tlc_settlement_write_lock.clone(),
+        }
+    }
+
+    /// Initialize or migrate this logical store to the current Fiber schema.
+    ///
+    /// A namespaced store owns its own migration version key, so migrations
+    /// scan only that node's logical keyspace.
+    pub fn ensure_current_schema(&self) -> Result<(), String> {
+        run_auto_migrate(self, Box::new(|_| true), Box::new(|_| {}))
+    }
+
+    fn namespace_prefix(&self) -> Option<Vec<u8>> {
+        self.namespace.as_ref().map(NodeNamespace::key_prefix)
+    }
+
+    fn physical_key(&self, key: &[u8]) -> Vec<u8> {
+        let Some(mut physical_key) = self.namespace_prefix() else {
+            return key.to_vec();
+        };
+        physical_key.extend_from_slice(key);
+        physical_key
+    }
+
     /// Set a watcher callback that will be invoked on relevant store changes.
     pub fn set_watcher(&mut self, watcher: Arc<dyn Fn(StoreChange) + Send + Sync>) {
         self.watcher = Some(watcher);
@@ -123,23 +159,58 @@ impl Store {
     }
 }
 
+/// A write batch that applies one node namespace to every physical key.
+pub struct StoreBatch {
+    inner: fiber_store::Batch,
+    namespace_prefix: Option<Vec<u8>>,
+}
+
+impl StoreBatch {
+    fn physical_key(&self, key: &[u8]) -> Vec<u8> {
+        let Some(namespace_prefix) = &self.namespace_prefix else {
+            return key.to_vec();
+        };
+        let mut physical_key = Vec::with_capacity(namespace_prefix.len() + key.len());
+        physical_key.extend_from_slice(namespace_prefix);
+        physical_key.extend_from_slice(key);
+        physical_key
+    }
+}
+
+impl BatchWriter for StoreBatch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+        self.inner.put(self.physical_key(key.as_ref()), value)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.inner.delete(self.physical_key(key.as_ref()))
+    }
+
+    fn commit(self) {
+        self.inner.commit()
+    }
+}
+
 impl StorageBackend for Store {
-    type Batch = <fiber_store::Store as StorageBackend>::Batch;
+    type Batch = StoreBatch;
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.inner.get(key)
+        self.inner.get(self.physical_key(key.as_ref()))
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.inner.put(key, value)
+        self.inner.put(self.physical_key(key.as_ref()), value)
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.inner.delete(key)
+        self.inner.delete(self.physical_key(key.as_ref()))
     }
 
     fn batch(&self) -> Self::Batch {
-        self.inner.batch()
+        StoreBatch {
+            inner: self.inner.batch(),
+            namespace_prefix: self.namespace_prefix(),
+        }
     }
 
     fn collect_iterator(
@@ -149,8 +220,31 @@ impl StorageBackend for Store {
         take_while_fn: TakeWhileFn,
         limit: usize,
     ) -> Vec<KVPair> {
+        let Some(namespace_prefix) = self.namespace_prefix() else {
+            return self
+                .inner
+                .collect_iterator(start, direction, take_while_fn, limit);
+        };
+        let mut physical_start = namespace_prefix.clone();
+        physical_start.extend_from_slice(&start);
+        let physical_namespace_prefix = namespace_prefix.clone();
         self.inner
-            .collect_iterator(start, direction, take_while_fn, limit)
+            .collect_iterator(
+                physical_start,
+                direction,
+                Box::new(move |physical_key| {
+                    physical_key
+                        .strip_prefix(physical_namespace_prefix.as_slice())
+                        .is_some_and(&take_while_fn)
+                }),
+                limit,
+            )
+            .into_iter()
+            .filter_map(|mut kv| {
+                kv.key = kv.key.strip_prefix(namespace_prefix.as_slice())?.to_vec();
+                Some(kv)
+            })
+            .collect()
     }
 
     fn backup(&self, path: &Path) -> Result<(), StoreError> {
@@ -199,6 +293,7 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
     run_auto_migrate(&db, confirm_fn, progress_fn)?;
     Ok(Store {
         inner: db,
+        namespace: None,
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -207,8 +302,8 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
     })
 }
 
-fn run_auto_migrate(
-    db: &fiber_store::Store,
+fn run_auto_migrate<S: StorageBackend>(
+    db: &S,
     confirm_fn: MigrateConfirmFn,
     progress_fn: MigrateProgressFn,
 ) -> Result<(), String> {
@@ -223,6 +318,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
     let store = Store {
         inner: db,
+        namespace: None,
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),

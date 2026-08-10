@@ -11,7 +11,8 @@ One Fiber process hosts:
 - one public trampoline node, Public T, which participates in the public Fiber
   network;
 - multiple hosted tenant state domains, U1, U2, and so on, each with isolated
-  channel/payment state, an invoice/channel signing key, and a database;
+  channel/payment state, an invoice/channel signing key, and a `NodeNamespace`
+  in the shared LSP database;
 - one LSP payment delivery manager, which persists and resumes incoming hosted
   payments.
 
@@ -35,9 +36,9 @@ flowchart TB
 
         subgraph R["Hosted tenant runtimes"]
             direction LR
-            U1["Tenant U1<br/>isolated channel/payment state and store"]
-            U2["Tenant U2<br/>isolated channel/payment state and store"]
-            U3["Tenant U3<br/>isolated channel/payment state and store"]
+            U1["Tenant U1<br/>isolated channel/payment state namespace"]
+            U2["Tenant U2<br/>isolated channel/payment state namespace"]
+            U3["Tenant U3<br/>isolated channel/payment state namespace"]
         end
 
         T["Public Trampoline T<br/>public node identity and store"]
@@ -164,13 +165,15 @@ The default storage layout is:
 
 ```text
 $BASE_DIR/fiber/store       Public T store
-$BASE_DIR/lsp/store         LSP registry and delivery store
-$BASE_DIR/lsp/tenants/<id>  isolated tenant channel/payment stores and signing keys
+$BASE_DIR/lsp/store         LSP registry/delivery state and namespaced tenant state
+$BASE_DIR/lsp/tenants/<id>  isolated tenant signing keys and runtime-local files
 ```
 
 The process refuses to start if the LSP metadata store aliases Public T's
 store. Tenant identifiers are restricted to 1-64 ASCII letters, digits,
-hyphens, or underscores.
+hyphens, or underscores. Each hosted tenant uses a `NodeNamespace` key prefix;
+all direct writes, atomic batches, and prefix scans are translated at the Store
+boundary, so the same channel id or payment hash cannot alias another tenant.
 
 ## RPC administration
 

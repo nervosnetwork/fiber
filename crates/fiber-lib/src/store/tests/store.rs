@@ -25,11 +25,13 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::store::open_store;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::store_trait::PrefixIterOptions;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::{open_store, FiberStore, NodeNamespace};
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,7 +43,11 @@ use ckb_types::prelude::*;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_store::backend::BatchWriter;
 use fiber_store::backend::StorageBackend;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_store::IteratorDirection;
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
@@ -64,6 +70,67 @@ use tentacle::secio::PeerId;
 fn gen_rand_local_signer() -> LocalSigner {
     let keypair = Keypair::new(SECP256K1, &mut rand::thread_rng());
     LocalSigner::new(keypair.secret_key())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_node_namespace_isolates_shared_physical_store() {
+    let path = TempDir::new("node_namespace_store");
+    let store = open_store(path).expect("create shared store");
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    tenant_u1
+        .ensure_current_schema()
+        .expect("initialize u1 schema");
+    tenant_u2
+        .ensure_current_schema()
+        .expect("initialize u2 schema");
+
+    tenant_u1.put(b"same-key", b"u1-value");
+    tenant_u1.put(b"scan/1", b"u1-first");
+    tenant_u1.put(b"scan/2", b"u1-second");
+    let mut tenant_u2_batch = tenant_u2.batch();
+    tenant_u2_batch.put(b"same-key", b"u2-value");
+    tenant_u2_batch.put(b"scan/1", b"u2-first");
+    tenant_u2_batch.commit();
+
+    assert_eq!(tenant_u1.get(b"same-key"), Some(b"u1-value".to_vec()));
+    assert_eq!(tenant_u2.get(b"same-key"), Some(b"u2-value".to_vec()));
+    assert_eq!(store.get(b"same-key"), None);
+    assert_eq!(
+        tenant_u1
+            .collect_iterator(
+                b"scan/".to_vec(),
+                IteratorDirection::Forward,
+                Box::new(|key| key.starts_with(b"scan/")),
+                0,
+            )
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<Vec<_>>(),
+        vec![
+            (b"scan/1".to_vec(), b"u1-first".to_vec()),
+            (b"scan/2".to_vec(), b"u1-second".to_vec()),
+        ]
+    );
+    assert_eq!(
+        tenant_u1
+            .collect_by_prefix_with(b"scan/", PrefixIterOptions::new().reverse().limit(1))
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<Vec<_>>(),
+        vec![(b"scan/2".to_vec(), b"u1-second".to_vec())]
+    );
+
+    let payment_hash = Hash256::from([3; 32]);
+    let u1_preimage = Hash256::from([4; 32]);
+    let u2_preimage = Hash256::from([5; 32]);
+    tenant_u1.insert_preimage(payment_hash, u1_preimage);
+    tenant_u2.insert_preimage(payment_hash, u2_preimage);
+
+    assert_eq!(tenant_u1.get_preimage(&payment_hash), Some(u1_preimage));
+    assert_eq!(tenant_u2.get_preimage(&payment_hash), Some(u2_preimage));
+    assert_eq!(store.get_preimage(&payment_hash), None);
 }
 
 fn mock_node() -> (Privkey, NodeAnnouncement) {

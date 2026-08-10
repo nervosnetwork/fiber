@@ -13,7 +13,7 @@ use crate::fiber::{
     FiberConfig,
 };
 use crate::fiber_types::Pubkey;
-use crate::store::open_store;
+use crate::store::{NodeNamespace, Store};
 use crate::tasks::new_tokio_task_tracker;
 use crate::{start_network, NetworkServiceEvent};
 
@@ -79,6 +79,7 @@ pub struct FiberTenantRuntimeFactory {
     chain_client: CkbRpcClient,
     chain_actor: ActorRef<CkbChainMessage>,
     public_network_actor: ActorRef<NetworkActorMessage>,
+    tenant_store: Store,
     root_actor: ActorCell,
     default_shutdown_script: Script,
 }
@@ -91,6 +92,7 @@ impl FiberTenantRuntimeFactory {
         chain_client: CkbRpcClient,
         chain_actor: ActorRef<CkbChainMessage>,
         public_network_actor: ActorRef<NetworkActorMessage>,
+        tenant_store: Store,
         root_actor: ActorCell,
         default_shutdown_script: Script,
     ) -> Self {
@@ -100,6 +102,7 @@ impl FiberTenantRuntimeFactory {
             chain_client,
             chain_actor,
             public_network_actor,
+            tenant_store,
             root_actor,
             default_shutdown_script,
         }
@@ -137,7 +140,10 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             ));
         }
 
-        let store = open_store(config.store_path())?;
+        let store = self
+            .tenant_store
+            .namespaced(NodeNamespace::hosted_tenant(record.tenant_id.as_str()));
+        store.ensure_current_schema()?;
         let graph = Arc::new(RwLock::new(NetworkGraph::new(
             store.clone(),
             invoice_pubkey,

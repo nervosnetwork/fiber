@@ -204,6 +204,7 @@ async fn run_node(
     });
 
     let mut tenant_runtime_factory = None;
+    let mut hosted_lsp_store = None;
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
         Some(fiber_config) => {
@@ -301,17 +302,28 @@ async fn run_node(
             )
             .await;
 
-            tenant_runtime_factory = config.lsp.clone().map(|lsp_config| {
-                Arc::new(FiberTenantRuntimeFactory::new(
+            if let Some(lsp_config) = config.lsp.clone() {
+                lsp_config
+                    .validate_store_separation(&fiber_config.store_path())
+                    .map_err(ExitMessage)?;
+                let lsp_store = open_store_with_migration(
+                    lsp_config.store_path(),
+                    Box::new(cli_confirm),
+                    Box::new(cli_progress),
+                )
+                .map_err(ExitMessage)?;
+                tenant_runtime_factory = Some(Arc::new(FiberTenantRuntimeFactory::new(
                     lsp_config,
                     fiber_config.clone(),
                     chain_client,
                     ckb_chain_actor.clone(),
                     network_actor.clone(),
+                    lsp_store.clone(),
                     root_actor.get_cell(),
                     default_shutdown_script,
-                ))
-            });
+                )));
+                hosted_lsp_store = Some(lsp_store);
+            }
 
             if fiber_config.standalone_watchtower_rpc_url.is_none()
                 && fiber_config.disable_built_in_watchtower.unwrap_or_default()
@@ -466,15 +478,9 @@ async fn run_node(
                 .fiber
                 .as_ref()
                 .expect("running network actor has Fiber config");
-            lsp_config
-                .validate_store_separation(&public_fiber_config.store_path())
-                .map_err(ExitMessage)?;
-            let lsp_store = open_store_with_migration(
-                lsp_config.store_path(),
-                Box::new(cli_confirm),
-                Box::new(cli_progress),
-            )
-            .map_err(ExitMessage)?;
+            let lsp_store = hosted_lsp_store
+                .take()
+                .expect("LSP runtime factory and store are initialized together");
             let public_node_id =
                 fnn::fiber::types::pubkey_from_tentacle(public_fiber_config.public_key());
             let public_key_pair =
