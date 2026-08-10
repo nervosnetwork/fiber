@@ -73,12 +73,7 @@ impl TenantRuntimeFactory for ExistingRuntimeFactory {
             return Err("tenant record changed after registration".to_string());
         }
         self.starts.fetch_add(1, Ordering::Relaxed);
-        Ok(HostedTenantRuntime {
-            invoice_pubkey: record.invoice_pubkey,
-            network_actor: self.network_actor.clone(),
-            public_network_actor: None,
-            transport: None,
-        })
+        HostedTenantRuntime::network_backed(record.invoice_pubkey, self.network_actor.clone()).await
     }
 }
 
@@ -130,11 +125,14 @@ async fn hosted_tenant_endpoint(
     tenant: &NetworkNode,
 ) -> (TenantMessageDispatcher, ActorRef<NetworkActorMessage>) {
     let dispatcher = TenantMessageDispatcher::default();
+    let runtime = HostedTenantRuntime::network_backed(tenant.pubkey, tenant.network_actor.clone())
+        .await
+        .expect("start hosted tenant runtime adapter");
     dispatcher
         .register_runtime(
             TenantId::new(TENANT_ID).unwrap(),
             tenant.pubkey,
-            tenant.network_actor.clone(),
+            runtime.actor(),
         )
         .unwrap();
     let endpoint = Actor::spawn(

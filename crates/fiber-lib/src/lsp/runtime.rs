@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ckb_types::packed::Script;
-use ractor::{Actor, ActorCell, ActorRef, ActorStatus};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, ActorStatus, RpcReplyPort};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
@@ -26,29 +26,107 @@ pub(crate) struct HostedTenantTransport {
     endpoint: ActorRef<NetworkActorMessage>,
 }
 
+pub(crate) enum HostedTenantRuntimeMessage {
+    FiberMessage {
+        source: Pubkey,
+        message: crate::fiber::types::FiberMessage,
+    },
+    GetActivity(RpcReplyPort<Result<HostedTenantActivity, String>>),
+}
+
+struct NetworkBackedHostedTenantRuntime;
+
+#[async_trait]
+impl Actor for NetworkBackedHostedTenantRuntime {
+    type Msg = HostedTenantRuntimeMessage;
+    type State = ActorRef<NetworkActorMessage>;
+    type Arguments = ActorRef<NetworkActorMessage>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        network_actor: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(network_actor)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        network_actor: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            HostedTenantRuntimeMessage::FiberMessage { source, message } => network_actor
+                .send_message(NetworkActorMessage::new_event(
+                    crate::fiber::network::NetworkActorEvent::FiberMessage(source, message, None),
+                ))
+                .map_err(|error| anyhow::Error::msg(error.to_string()))?,
+            HostedTenantRuntimeMessage::GetActivity(reply) => {
+                let activity = ractor::call_t!(
+                    network_actor,
+                    |reply| NetworkActorMessage::new_command(
+                        NetworkActorCommand::GetHostedTenantActivity(reply)
+                    ),
+                    5_000
+                )
+                .map_err(|error| error.to_string());
+                let _ = reply.send(activity);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A running tenant-scoped Fiber runtime. It reuses the channel/payment
 /// coordinator but has no listening P2P endpoint or gossip service.
 pub struct HostedTenantRuntime {
     pub invoice_pubkey: Pubkey,
-    pub network_actor: ActorRef<NetworkActorMessage>,
+    runtime_actor: ActorRef<HostedTenantRuntimeMessage>,
+    backend_actor: Option<ActorCell>,
     pub public_network_actor: Option<ActorRef<NetworkActorMessage>>,
     pub(crate) transport: Option<HostedTenantTransport>,
 }
 
 impl HostedTenantRuntime {
+    pub(crate) async fn network_backed(
+        invoice_pubkey: Pubkey,
+        network_actor: ActorRef<NetworkActorMessage>,
+    ) -> Result<Self, String> {
+        let backend_actor = network_actor.get_cell();
+        let runtime_actor = Actor::spawn(None, NetworkBackedHostedTenantRuntime, network_actor)
+            .await
+            .map_err(|error| format!("failed to start hosted tenant runtime adapter: {error}"))?
+            .0;
+        Ok(Self {
+            invoice_pubkey,
+            runtime_actor,
+            backend_actor: Some(backend_actor),
+            public_network_actor: None,
+            transport: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn actor(&self) -> ActorRef<HostedTenantRuntimeMessage> {
+        self.runtime_actor.clone()
+    }
+
     fn is_running(&self) -> bool {
-        self.network_actor.get_status() < ActorStatus::Stopping
+        self.runtime_actor.get_status() < ActorStatus::Stopping
+            && self
+                .backend_actor
+                .as_ref()
+                .is_none_or(|actor| actor.get_status() < ActorStatus::Stopping)
     }
 
     async fn ensure_idle(&self) -> Result<(), String> {
-        let activity: HostedTenantActivity = ractor::call_t!(
-            self.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
-                reply
-            )),
+        let activity = ractor::call_t!(
+            self.runtime_actor,
+            HostedTenantRuntimeMessage::GetActivity,
             5_000
         )
-        .map_err(|error| format!("failed to inspect hosted tenant activity: {error}"))?;
+        .map_err(|error| format!("failed to inspect hosted tenant activity: {error}"))??;
         if activity.is_idle() {
             Ok(())
         } else {
@@ -70,13 +148,16 @@ impl HostedTenantRuntime {
         if let Some(transport) = self.transport {
             transport
                 .dispatcher
-                .unregister_runtime(&transport.tenant_id, &self.network_actor);
+                .unregister_runtime(&transport.tenant_id, &self.runtime_actor);
             transport
                 .endpoint
                 .stop(Some("hosted tenant transport stopped".to_string()));
         }
-        self.network_actor
+        self.runtime_actor
             .stop(Some("hosted tenant runtime evicted".to_string()));
+        if let Some(backend_actor) = self.backend_actor {
+            backend_actor.stop(Some("hosted tenant backend evicted".to_string()));
+        }
     }
 }
 
@@ -211,12 +292,20 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             ));
         }
 
+        let mut runtime =
+            match HostedTenantRuntime::network_backed(invoice_pubkey, actor.clone()).await {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    actor.stop(Some("hosted tenant adapter failed".to_string()));
+                    return Err(error);
+                }
+            };
         if let Err(error) = self.dispatcher.register_runtime(
             record.tenant_id.clone(),
             invoice_pubkey,
-            actor.clone(),
+            runtime.runtime_actor.clone(),
         ) {
-            actor.stop(Some("hosted tenant registration failed".to_string()));
+            runtime.stop();
             return Err(error);
         }
         let endpoint = match Actor::spawn_linked(
@@ -236,8 +325,8 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             Ok((endpoint, _)) => endpoint,
             Err(error) => {
                 self.dispatcher
-                    .unregister_runtime(&record.tenant_id, &actor);
-                actor.stop(Some("hosted tenant endpoint failed".to_string()));
+                    .unregister_runtime(&record.tenant_id, &runtime.runtime_actor);
+                runtime.stop();
                 return Err(format!("failed to start hosted tenant endpoint: {error}"));
             }
         };
@@ -299,24 +388,21 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
                 ));
             endpoint.stop(Some("hosted tenant activation failed".to_string()));
             self.dispatcher
-                .unregister_runtime(&record.tenant_id, &actor);
-            actor.stop(Some("hosted tenant activation failed".to_string()));
+                .unregister_runtime(&record.tenant_id, &runtime.runtime_actor);
+            runtime.stop();
             return Err(error);
         }
 
         new_tokio_task_tracker()
             .spawn(async move { while event_receiver.recv().await.is_some() {} });
 
-        Ok(HostedTenantRuntime {
-            invoice_pubkey,
-            network_actor: actor,
-            public_network_actor: Some(self.public_network_actor.clone()),
-            transport: Some(HostedTenantTransport {
-                tenant_id: record.tenant_id.clone(),
-                dispatcher: self.dispatcher.clone(),
-                endpoint,
-            }),
-        })
+        runtime.public_network_actor = Some(self.public_network_actor.clone());
+        runtime.transport = Some(HostedTenantTransport {
+            tenant_id: record.tenant_id.clone(),
+            dispatcher: self.dispatcher.clone(),
+            endpoint,
+        });
+        Ok(runtime)
     }
 }
 

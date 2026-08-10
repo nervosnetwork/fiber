@@ -215,12 +215,16 @@ untrusted clients without authentication.
   explicit ensure operation.
 - Tenant runtimes currently reuse the existing Fiber network coordinator as an
   internal channel/payment dispatcher. They open no P2P listener and perform
-  no gossip synchronization; a later refactor may extract a smaller dedicated
-  tenant coordinator without changing the in-process transport contract. The
-  runtime actor itself is no longer registered directly as an in-process peer:
-  a tenant-scoped endpoint observes the unchanged Fiber message's channel id
-  and routes it through `TenantMessageDispatcher`. Runtime and endpoint
-  registration are single-owner and refuse replacement by another live actor.
+  no gossip synchronization. The LSP layer no longer depends directly on that
+  full coordinator: `HostedTenantRuntimeMessage` exposes only tenant Fiber
+  delivery and activity inspection, with a temporary network-backed adapter
+  behind it. A later refactor can replace that adapter with a smaller dedicated
+  tenant coordinator without changing the supervisor or in-process transport
+  contract. The runtime actor itself is no longer registered directly as an
+  in-process peer: a tenant-scoped endpoint observes the unchanged Fiber
+  message's channel id and routes it through `TenantMessageDispatcher`.
+  Runtime and endpoint registration are single-owner and refuse replacement by
+  another live actor.
 - Tenant channel opening and funding still use existing Fiber RPC/channel
   workflows.
 - Remote Channel Signer transport, authorization, replay protection, and signer

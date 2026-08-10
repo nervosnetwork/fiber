@@ -219,11 +219,25 @@ async fn tenant_dispatcher_isolates_same_channel_id_between_tenants() {
         .await
         .unwrap()
         .0;
-    dispatcher
-        .register_runtime(tenant_u1_id.clone(), tenant_u1_key, tenant_u1_actor)
+    let tenant_u1_runtime = HostedTenantRuntime::network_backed(tenant_u1_key, tenant_u1_actor)
+        .await
+        .unwrap();
+    let tenant_u2_runtime = HostedTenantRuntime::network_backed(tenant_u2_key, tenant_u2_actor)
+        .await
         .unwrap();
     dispatcher
-        .register_runtime(tenant_u2_id.clone(), tenant_u2_key, tenant_u2_actor)
+        .register_runtime(
+            tenant_u1_id.clone(),
+            tenant_u1_key,
+            tenant_u1_runtime.actor(),
+        )
+        .unwrap();
+    dispatcher
+        .register_runtime(
+            tenant_u2_id.clone(),
+            tenant_u2_key,
+            tenant_u2_runtime.actor(),
+        )
         .unwrap();
 
     let endpoint_u1 = Actor::spawn(
@@ -358,12 +372,7 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
             .await
             .map_err(|error| error.to_string())?
             .0;
-        Ok(HostedTenantRuntime {
-            invoice_pubkey: record.invoice_pubkey,
-            network_actor: actor,
-            public_network_actor: None,
-            transport: None,
-        })
+        HostedTenantRuntime::network_backed(record.invoice_pubkey, actor).await
     }
 }
 
@@ -390,12 +399,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
             .map_err(|error| error.to_string())?
             .0;
         self.actors.lock().unwrap().push(actor.clone());
-        Ok(HostedTenantRuntime {
-            invoice_pubkey: record.invoice_pubkey,
-            network_actor: actor,
-            public_network_actor: None,
-            transport: None,
-        })
+        HostedTenantRuntime::network_backed(record.invoice_pubkey, actor).await
     }
 }
 
@@ -417,12 +421,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             .await
             .map_err(|error| error.to_string())?
             .0;
-        Ok(HostedTenantRuntime {
-            invoice_pubkey: record.invoice_pubkey,
-            network_actor: actor,
-            public_network_actor: None,
-            transport: None,
-        })
+        HostedTenantRuntime::network_backed(record.invoice_pubkey, actor).await
     }
 }
 
