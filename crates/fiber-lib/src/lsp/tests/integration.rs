@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ckb_types::packed::Script;
 use jsonrpsee::{
     core::client::ClientT,
     http_client::{HttpClient, HttpClientBuilder},
@@ -16,11 +17,12 @@ use ractor::{Actor, ActorRef};
 use secp256k1::SECP256K1;
 use tempfile::tempdir;
 
-use super::lsp_config;
+use super::{lsp_config, NoopNetworkActor};
 use crate::lsp::dispatcher::{
     HostedTenantEndpoint, HostedTenantEndpointArgs, TenantMessageDispatcher,
 };
 use crate::{
+    ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
         network::{NetworkActorCommand, NetworkActorMessage},
         payment::SendPaymentCommand,
@@ -28,8 +30,8 @@ use crate::{
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
-        HostedTenantRecord, HostedTenantRuntime, LspService, LspServiceArgs, TenantId,
-        TenantRuntimeFactory,
+        FiberTenantRuntimeFactory, HostedTenantRecord, HostedTenantRuntime, LspService,
+        LspServiceArgs, TenantId, TenantRuntimeFactory,
     },
     rpc::{
         lsp::{
@@ -205,6 +207,186 @@ async fn wait_for_delivery_status(
     })
     .await
     .expect("delivery reached expected status")
+}
+
+#[tokio::test]
+async fn production_factory_activates_one_tenant_runtime_via_rpc() {
+    init_tracing();
+
+    let public_t = NetworkNode::new_with_node_name("lsp-production-public-t").await;
+    let root = tempdir().expect("temporary LSP directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let ckb_config = CkbConfig {
+        base_dir: Some(root.path().join("ckb")),
+        rpc_url: "http://127.0.0.1:8114".to_string(),
+        udt_whitelist: None,
+        tx_tracing_polling_interval_ms: 4_000,
+        funding_tx_shell_builder: None,
+    };
+    let root_actor = get_test_root_actor().await;
+    let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        config.clone(),
+        public_t.fiber_config.clone(),
+        CkbRpcClient::new(&ckb_config),
+        public_t.chain_actor.clone(),
+        public_t.network_actor.clone(),
+        public_t.store.clone(),
+        root_actor.get_cell(),
+        Script::default(),
+    ));
+    let tenant_id = TenantId::new(TENANT_ID).unwrap();
+    let expected_tenant = runtime_factory
+        .provision(&tenant_id)
+        .expect("provision hosted tenant identity");
+    assert_ne!(expected_tenant.invoice_pubkey, public_t.pubkey);
+
+    let public_network_actor_id = public_t.network_actor.get_id();
+    let lsp_actor = Actor::spawn_linked(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            store: public_t.store.namespaced(NodeNamespace::lsp_metadata()),
+            runtime_factory,
+            signing_key: public_t.private_key.clone(),
+        },
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("start LSP service with production runtime factory")
+    .0;
+
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.enabled_modules = vec!["lsp".to_string()];
+    let (rpc_handle, rpc_addr) = start_rpc(
+        rpc_config,
+        None,
+        None,
+        None,
+        None,
+        Some(lsp_actor.clone()),
+        public_t.store.clone(),
+        None,
+        None,
+        root_actor.get_cell(),
+        None,
+        #[cfg(debug_assertions)]
+        None,
+        #[cfg(debug_assertions)]
+        None,
+    )
+    .await
+    .expect("start LSP RPC server");
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{rpc_addr}"))
+        .expect("build LSP RPC client");
+
+    let registered: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_register_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("register hosted tenant");
+    assert_eq!(
+        registered.invoice_pubkey,
+        expected_tenant.invoice_pubkey.into()
+    );
+    assert!(matches!(
+        registered.runtime_status,
+        LspTenantRuntimeStatus::Cold
+    ));
+
+    let ensured: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_ensure_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("activate hosted tenant");
+    assert!(matches!(
+        ensured.runtime_status,
+        LspTenantRuntimeStatus::Active
+    ));
+
+    let status: LspServiceStatus = client
+        .request("lsp_get_status", rpc_params![])
+        .await
+        .expect("get active LSP status");
+    assert_eq!(status.registered_tenants, 1);
+    assert_eq!(status.active_tenants, 1);
+    assert_eq!(public_t.network_actor.get_id(), public_network_actor_id);
+
+    let impostor = Actor::spawn(None, NoopNetworkActor, ())
+        .await
+        .expect("start impostor endpoint")
+        .0;
+    let duplicate = ractor::call_t!(
+        public_t.network_actor,
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
+            pubkey: expected_tenant.invoice_pubkey,
+            actor: impostor,
+            features: crate::fiber_types::FeatureVector::default(),
+            reply,
+        },),
+        5_000
+    )
+    .expect("duplicate in-process peer reply");
+    assert_eq!(
+        duplicate.unwrap_err(),
+        format!(
+            "in-process peer {:?} is already owned by another actor",
+            expected_tenant.invoice_pubkey
+        )
+    );
+
+    let ensured_again: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_ensure_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("ensure active tenant again");
+    assert!(matches!(
+        ensured_again.runtime_status,
+        LspTenantRuntimeStatus::Active
+    ));
+    let status: LspServiceStatus = client
+        .request("lsp_get_status", rpc_params![])
+        .await
+        .expect("get idempotent LSP status");
+    assert_eq!(status.active_tenants, 1);
+
+    let evicted: crate::rpc::lsp::LspTenantStatus = client
+        .request(
+            "lsp_evict_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("evict hosted tenant");
+    assert!(matches!(
+        evicted.runtime_status,
+        LspTenantRuntimeStatus::Cold
+    ));
+    let status: LspServiceStatus = client
+        .request("lsp_get_status", rpc_params![])
+        .await
+        .expect("get cold LSP status");
+    assert_eq!(status.active_tenants, 0);
+
+    rpc_handle.stop().expect("stop LSP RPC server");
+    rpc_handle.stopped().await;
+    lsp_actor.stop(Some("integration test complete".to_string()));
 }
 
 #[tokio::test]
