@@ -200,7 +200,6 @@ methods are:
   `lsp_list_tenants`
 - `lsp_new_invoice`, `lsp_get_invoice`, `lsp_send_payment`, and
   `lsp_get_payment`
-- `lsp_get_invoice_registration`
 - `lsp_get_payment_delivery`
 
 With Biscuit authentication enabled, reads require `read("lsp")` and mutations

@@ -36,14 +36,13 @@ use crate::{
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
-        FiberTenantRuntimeFactory, HostedTenantRecord, HostedTenantRuntime, LspService,
-        LspServiceArgs, LspServiceMessage, TenantId, TenantRuntimeFactory,
+        FiberTenantRuntimeFactory, HostedTenantRecord, HostedTenantRuntime, LspInvoiceStore,
+        LspService, LspServiceArgs, LspServiceMessage, TenantId, TenantRuntimeFactory,
     },
     rpc::{
         lsp::{
-            ListLspTenantsResult, LspInvoiceRegistration, LspPaymentDelivery,
-            LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantParams,
-            LspTenantRuntimeStatus,
+            ListLspTenantsResult, LspPaymentDelivery, LspPaymentDeliveryStatus,
+            LspPaymentHashParams, LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus,
         },
         server::start_rpc,
     },
@@ -646,24 +645,19 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         decoded.trampoline_route_hint(),
         Some(&secp256k1::PublicKey::from(public_t.pubkey))
     );
-    let registration: LspInvoiceRegistration = admin_client
-        .request(
-            "lsp_get_invoice_registration",
-            rpc_params![LspPaymentHashParams {
-                payment_hash: invoice.invoice.data.payment_hash,
-            }],
-        )
-        .await
+    let payment_hash = invoice.invoice.data.payment_hash.into();
+    let registration = public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&payment_hash)
+        .expect("read hosted invoice registration")
         .expect("tenant new_invoice should register the hosted invoice");
-    assert_eq!(registration.tenant_id, TENANT_ID);
-    assert_eq!(registration.invoice, invoice.invoice_address);
-    assert_eq!(registration.hint.lsp_node_id, public_t.pubkey.into());
+    assert_eq!(registration.tenant_id, TenantId::new(TENANT_ID).unwrap());
+    assert_eq!(registration.invoice.to_string(), invoice.invoice_address);
+    assert_eq!(registration.hint.payload.lsp_node_id, public_t.pubkey);
+    assert_eq!(registration.hint.payload.payment_hash, payment_hash);
     assert_eq!(
-        registration.hint.payment_hash,
-        invoice.invoice.data.payment_hash
-    );
-    assert_eq!(
-        registration.hint.buffer_duration_ms,
+        registration.hint.payload.buffer_duration_ms,
         crate::lsp::DEFAULT_LSP_BUFFER_DURATION_MS
     );
 
@@ -880,23 +874,13 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         BUFFER_DURATION_MS
     );
 
-    let stored_registration: LspInvoiceRegistration = client
-        .request(
-            "lsp_get_invoice_registration",
-            rpc_params![LspPaymentHashParams {
-                payment_hash: payment_hash.into(),
-            }],
-        )
-        .await
-        .expect("read hosted invoice registration");
-    assert_eq!(stored_registration.invoice, invoice.to_string());
-    assert_eq!(
-        stored_registration.hint.signature,
-        format!(
-            "0x{}",
-            hex::encode(registration.hint.signature.0.serialize_compact())
-        )
-    );
+    let stored_registration = public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&payment_hash)
+        .expect("read hosted invoice registration")
+        .expect("hosted invoice should be persisted");
+    assert_eq!(stored_registration, registration);
 
     disconnect_in_process(&public_t, &tenant);
     public_t

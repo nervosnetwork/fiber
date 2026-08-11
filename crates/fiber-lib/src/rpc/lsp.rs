@@ -85,13 +85,6 @@ trait LspRpc {
         params: GetLspPaymentParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
-    /// Retrieves a hosted invoice registration by payment hash.
-    #[method(name = "lsp_get_invoice_registration")]
-    async fn lsp_get_invoice_registration(
-        &self,
-        params: LspPaymentHashParams,
-    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned>;
-
     /// Retrieves durable delivery state for a hosted incoming payment.
     #[method(name = "lsp_get_payment_delivery")]
     async fn lsp_get_payment_delivery(
@@ -223,22 +216,6 @@ impl LspRpcServerImpl {
             .await
     }
 
-    async fn get_invoice_registration(
-        &self,
-        params: LspPaymentHashParams,
-    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
-        let payment_hash = params.payment_hash.into();
-        call!(
-            self.actor,
-            LspServiceMessage::GetInvoiceRegistration,
-            payment_hash
-        )
-        .rpc_err()?
-        .rpc_err()?
-        .map(Into::into)
-        .ok_or_else(|| rpc_error("hosted invoice registration not found"))
-    }
-
     async fn get_payment_delivery(
         &self,
         params: LspPaymentHashParams,
@@ -320,13 +297,6 @@ impl LspRpcServer for LspRpcServerImpl {
         params: GetLspPaymentParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         self.get_payment(params).await
-    }
-
-    async fn lsp_get_invoice_registration(
-        &self,
-        params: LspPaymentHashParams,
-    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
-        self.get_invoice_registration(params).await
     }
 
     async fn lsp_get_payment_delivery(

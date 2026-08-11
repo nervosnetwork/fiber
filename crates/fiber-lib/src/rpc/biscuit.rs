@@ -143,7 +143,6 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("lsp_get_invoice", r#"allow if read("lsp");"#);
     b.rule("lsp_send_payment", r#"allow if write("lsp");"#);
     b.rule("lsp_get_payment", r#"allow if read("lsp");"#);
-    b.rule("lsp_get_invoice_registration", r#"allow if read("lsp");"#);
     b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
 
     // payment
@@ -482,7 +481,6 @@ mod tests {
             "lsp_list_tenants",
             "lsp_get_invoice",
             "lsp_get_payment",
-            "lsp_get_invoice_registration",
             "lsp_get_payment_delivery",
         ];
         let write_methods = [

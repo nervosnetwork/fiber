@@ -60,10 +60,6 @@ pub enum LspServiceMessage {
         buffer_duration_ms: Option<u64>,
         reply: RpcReplyPort<Result<LspInvoiceRegistration, String>>,
     },
-    GetInvoiceRegistration(
-        Hash256,
-        RpcReplyPort<Result<Option<LspInvoiceRegistration>, String>>,
-    ),
     GetPaymentDelivery(
         Hash256,
         RpcReplyPort<Result<Option<LspPaymentDelivery>, String>>,
@@ -358,9 +354,6 @@ impl Actor for LspService {
                     Err(error) => Err(error),
                 };
                 let _ = reply.send(result);
-            }
-            LspServiceMessage::GetInvoiceRegistration(payment_hash, reply) => {
-                let _ = reply.send(state.invoice_registry.get(&payment_hash));
             }
             LspServiceMessage::GetPaymentDelivery(payment_hash, reply) => {
                 let _ = reply.send(state.delivery_manager.get(&payment_hash));
