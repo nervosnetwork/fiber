@@ -691,13 +691,7 @@ impl LspService {
         }
 
         match Self::inspect_upstream(state, &delivery).await {
-            Ok(BufferedTrampolineUpstreamStatus::Pending) => {
-                let _ = state
-                    .public_network_actor
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::RestoreBufferedTrampoline(delivery.request.clone()),
-                    ));
-            }
+            Ok(BufferedTrampolineUpstreamStatus::Pending) => {}
             Ok(BufferedTrampolineUpstreamStatus::Removed) => {
                 Self::cancel_delivery(state, &payment_hash)?;
                 return Ok(());

@@ -1,22 +1,16 @@
 #![cfg(not(target_arch = "wasm32"))]
 use crate::fiber::channel::{ChannelActorStateStore, ChannelCommand, ChannelCommandWithId};
 use crate::fiber::config::{
-    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
-    DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS,
-    DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS_PER_CHANNEL,
-    MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+    DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA, MIN_TLC_EXPIRY_DELTA,
 };
 use crate::fiber::graph::*;
 use crate::fiber::network::{
     DebugEvent, NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand,
 };
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::trampoline::{
-    TrampolineForwardingLimits, TrampolineForwardingRejection, TrampolineForwardingRequest,
-    TrampolineForwardingTracker,
-};
+use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
-use crate::fiber::{FeatureVector, FiberConfig, PaymentStatus, Privkey, Pubkey};
+use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
@@ -45,72 +39,6 @@ async fn set_test_trampoline_settlement_paused(node: &NetworkNode, paused: bool)
         ))
     })
     .expect("network actor alive");
-}
-
-#[test]
-fn test_trampoline_forwarding_limits_defaults() {
-    let config = FiberConfig::default();
-    assert_eq!(
-        config.trampoline_forwarding_max_concurrent_payments(),
-        DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS
-    );
-    assert_eq!(
-        config.trampoline_forwarding_max_concurrent_payments_per_channel(),
-        DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS_PER_CHANNEL
-    );
-    assert_eq!(
-        config.trampoline_forwarding_max_expiry_delta(),
-        MAX_PAYMENT_TLC_EXPIRY_LIMIT
-    );
-}
-
-#[test]
-fn test_trampoline_forwarding_tracker_enforces_and_releases_limits() {
-    let config = FiberConfig {
-        trampoline_forwarding_max_concurrent_payments: Some(2),
-        trampoline_forwarding_max_concurrent_payments_per_channel: Some(1),
-        trampoline_forwarding_max_expiry_delta: Some(100),
-        ..Default::default()
-    };
-    let limits = TrampolineForwardingLimits::from(&config);
-    let mut tracker = TrampolineForwardingTracker::default();
-    let now = 1_000;
-    let channel_a = gen_rand_sha256_hash();
-    let channel_b = gen_rand_sha256_hash();
-    let payment_a = gen_rand_sha256_hash();
-    let payment_b = gen_rand_sha256_hash();
-    let payment_c = gen_rand_sha256_hash();
-
-    tracker
-        .try_reserve(payment_a, channel_a, now + 100, now, limits)
-        .expect("first payment is admitted");
-    assert_eq!(
-        tracker.try_reserve(payment_a, channel_b, now + 100, now, limits),
-        Err(TrampolineForwardingRejection::DuplicatePayment)
-    );
-    assert_eq!(
-        tracker.try_reserve(payment_b, channel_a, now + 100, now, limits),
-        Err(TrampolineForwardingRejection::ChannelLimit)
-    );
-    tracker
-        .try_reserve(payment_b, channel_b, now + 100, now, limits)
-        .expect("second channel is admitted");
-    assert_eq!(
-        tracker.try_reserve(payment_c, gen_rand_sha256_hash(), now + 100, now, limits),
-        Err(TrampolineForwardingRejection::GlobalLimit)
-    );
-
-    assert!(tracker.release(&payment_a));
-    assert!(!tracker.release(&payment_a));
-    assert_eq!(tracker.len(), 1);
-    assert_eq!(
-        tracker.try_reserve(payment_c, channel_a, now + 101, now, limits),
-        Err(TrampolineForwardingRejection::ExpiryTooFar)
-    );
-    tracker
-        .try_reserve(payment_c, channel_a, now + 100, now, limits)
-        .expect("released capacity can be reused");
-    assert_eq!(tracker.len(), 2);
 }
 
 #[test]
@@ -3659,141 +3587,6 @@ async fn test_trampoline_node_restart() {
     debug!("Waiting for success on Node A...");
     // Wait for A to succeed.
     node_a.wait_until_success(payment_hash).await;
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[tokio::test]
-async fn test_trampoline_forwarding_limit_survives_restart() {
-    init_tracing();
-
-    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(3, |index| {
-        let mut builder = NetworkNodeConfigBuilder::new()
-            .node_name(Some(format!("node-{index}")))
-            .base_dir_prefix(&format!("test-fnn-node-{index}-"));
-        if index == 1 {
-            builder = builder.fiber_config_updater(|config| {
-                config.trampoline_forwarding_max_concurrent_payments = Some(1);
-            });
-        }
-        builder.build()
-    })
-    .await;
-    let [mut node_a, mut node_t, mut node_c] = nodes.try_into().expect("3 nodes");
-
-    establish_channel_between_nodes(
-        &mut node_a,
-        &mut node_t,
-        ChannelParameters {
-            public: true,
-            node_a_funding_amount: HUGE_CKB_AMOUNT,
-            node_b_funding_amount: HUGE_CKB_AMOUNT,
-            ..Default::default()
-        },
-    )
-    .await;
-    establish_channel_between_nodes(
-        &mut node_t,
-        &mut node_c,
-        ChannelParameters {
-            public: false,
-            node_a_funding_amount: HUGE_CKB_AMOUNT,
-            node_b_funding_amount: HUGE_CKB_AMOUNT,
-            ..Default::default()
-        },
-    )
-    .await;
-    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
-
-    let amount = 10_000;
-    let held_preimage = gen_rand_sha256_hash();
-    let held_invoice = InvoiceBuilder::new(Currency::Fibd)
-        .amount(Some(amount))
-        .payment_preimage(held_preimage)
-        .payee_pub_key(node_c.get_public_key().into())
-        .expiry_time(Duration::from_secs(3600))
-        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
-        .expect("build held invoice");
-    node_c
-        .store
-        .insert_invoice(held_invoice.clone(), None)
-        .expect("insert held invoice");
-
-    let first_payment_hash = node_a
-        .send_payment(SendPaymentCommand {
-            invoice: Some(held_invoice.to_string()),
-            max_fee_amount: Some(5_000),
-            trampoline_hops: Some(vec![node_t.get_public_key()]),
-            ..Default::default()
-        })
-        .await
-        .expect("start first payment")
-        .payment_hash;
-
-    wait_until_async_timeout(|| async {
-        node_c
-            .store
-            .get_node_hold_tlcs()
-            .iter()
-            .any(|(payment_hash, _)| payment_hash == &first_payment_hash)
-    })
-    .await;
-    wait_until_async_timeout(|| async {
-        node_t
-            .store
-            .get_payment_session(first_payment_hash)
-            .is_some_and(|session| session.status == PaymentStatus::Inflight)
-    })
-    .await;
-
-    node_t.restart().await;
-    node_a.connect_to(&mut node_t).await;
-    node_c.connect_to(&mut node_t).await;
-    wait_until_async_timeout(|| async {
-        node_t
-            .store
-            .get_channel_states(None)
-            .iter()
-            .filter(|(_, _, state)| matches!(state, crate::fiber::ChannelState::ChannelReady))
-            .count()
-            == 2
-    })
-    .await;
-
-    let (second_invoice, _) = node_c.gen_basic_invoice(amount);
-    let second_payment_hash = node_a
-        .send_payment(SendPaymentCommand {
-            invoice: Some(second_invoice.to_string()),
-            max_fee_amount: Some(5_000),
-            trampoline_hops: Some(vec![node_t.get_public_key()]),
-            ..Default::default()
-        })
-        .await
-        .expect("start second payment")
-        .payment_hash;
-    node_a.wait_until_failed(second_payment_hash).await;
-    assert!(node_t
-        .store
-        .get_payment_session(second_payment_hash)
-        .is_none());
-    assert_eq!(
-        node_t
-            .store
-            .get_payment_session(first_payment_hash)
-            .expect("first trampoline payment remains persisted")
-            .status,
-        PaymentStatus::Inflight
-    );
-
-    node_c
-        .store
-        .insert_preimage(first_payment_hash, held_preimage);
-    node_c
-        .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SettleReceivedHoldTlcSet(first_payment_hash),
-        ))
-        .expect("settle held TLC");
-    node_a.wait_until_success(first_payment_hash).await;
 }
 
 #[tokio::test]

@@ -108,12 +108,6 @@ pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
 pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
-/// Maximum number of outgoing trampoline payments tracked by one public node.
-pub const DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS: usize = 1024;
-
-/// Maximum number of outgoing trampoline payments originating from one upstream channel.
-pub const DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS_PER_CHANNEL: usize = 64;
-
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
@@ -400,33 +394,6 @@ pub struct FiberConfig {
     )]
     pub pending_channels_number_limit: Option<usize>,
 
-    /// Maximum number of concurrent trampoline forwarding payments globally. [default: 1024]
-    #[arg(
-        name = "FIBER_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS",
-        long = "fiber-trampoline-forwarding-max-concurrent-payments",
-        env,
-        help = "Maximum number of concurrent trampoline forwarding payments globally. [default: 1024]"
-    )]
-    pub trampoline_forwarding_max_concurrent_payments: Option<usize>,
-
-    /// Maximum concurrent trampoline forwarding payments from one upstream channel. [default: 64]
-    #[arg(
-        name = "FIBER_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS_PER_CHANNEL",
-        long = "fiber-trampoline-forwarding-max-concurrent-payments-per-channel",
-        env,
-        help = "Maximum concurrent trampoline forwarding payments from one upstream channel. [default: 64]"
-    )]
-    pub trampoline_forwarding_max_concurrent_payments_per_channel: Option<usize>,
-
-    /// Maximum remaining expiry accepted for trampoline forwarding, in milliseconds. [default: 1209600000 (2 weeks)]
-    #[arg(
-        name = "FIBER_TRAMPOLINE_FORWARDING_MAX_EXPIRY_DELTA",
-        long = "fiber-trampoline-forwarding-max-expiry-delta",
-        env,
-        help = "Maximum remaining expiry accepted for trampoline forwarding, in milliseconds. [default: 1209600000 (2 weeks)]"
-    )]
-    pub trampoline_forwarding_max_expiry_delta: Option<u64>,
-
     /// Default timeout to auto close a funding channel. [default: 1 day]
     #[arg(
         name = "FIBER_FUNDING_TIMEOUT_SECONDS",
@@ -666,21 +633,6 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
-    }
-
-    pub fn trampoline_forwarding_max_concurrent_payments(&self) -> usize {
-        self.trampoline_forwarding_max_concurrent_payments
-            .unwrap_or(DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS)
-    }
-
-    pub fn trampoline_forwarding_max_concurrent_payments_per_channel(&self) -> usize {
-        self.trampoline_forwarding_max_concurrent_payments_per_channel
-            .unwrap_or(DEFAULT_TRAMPOLINE_FORWARDING_MAX_CONCURRENT_PAYMENTS_PER_CHANNEL)
-    }
-
-    pub fn trampoline_forwarding_max_expiry_delta(&self) -> u64 {
-        self.trampoline_forwarding_max_expiry_delta
-            .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT)
     }
 
     pub fn gen_node_features(&self) -> FeatureVector {

@@ -101,9 +101,7 @@ use crate::fiber::payment::{
     SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
-use crate::fiber::trampoline::{
-    TrampolineForwardingLimits, TrampolineForwardingRequest, TrampolineForwardingTracker,
-};
+use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::{
     pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
     TxSignatures,
@@ -1104,9 +1102,6 @@ pub enum NetworkActorCommand {
     GetHostedTenantActivity(RpcReplyPort<HostedTenantActivity>),
     #[cfg(not(target_arch = "wasm32"))]
     SetLspService(ActorRef<LspServiceMessage>),
-    #[cfg(not(target_arch = "wasm32"))]
-    RestoreBufferedTrampoline(TrampolineForwardingRequest),
-    #[cfg(not(target_arch = "wasm32"))]
     InspectBufferedTrampolineUpstream {
         request: TrampolineForwardingRequest,
         reply: RpcReplyPort<BufferedTrampolineUpstreamStatus>,
@@ -3281,13 +3276,6 @@ where
             NetworkActorCommand::SetLspService(lsp_service) => {
                 state.lsp_service = Some(lsp_service);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            NetworkActorCommand::RestoreBufferedTrampoline(request) => {
-                state
-                    .trampoline_forwarding_tracker
-                    .track(request.payment_hash, request.previous_tlc.prev_channel_id);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::InspectBufferedTrampolineUpstream { request, reply } => {
                 let status = state
                     .store
@@ -3300,18 +3288,11 @@ where
                         )
                     })
                     .unwrap_or(BufferedTrampolineUpstreamStatus::Unknown);
-                if status == BufferedTrampolineUpstreamStatus::Removed {
-                    state
-                        .trampoline_forwarding_tracker
-                        .release(&request.payment_hash);
-                }
                 let _ = reply.send(status);
             }
             #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::DispatchBufferedTrampoline { request, reply } => {
-                let result = self
-                    .dispatch_reserved_trampoline_forwarding(state, request)
-                    .await;
+                let result = self.dispatch_trampoline_payment(state, request).await;
                 match result {
                     Ok(()) => {
                         let _ = reply.send(Ok(()));
@@ -3329,9 +3310,7 @@ where
             } => {
                 let result = match state.store.get_payment_session(payment_hash) {
                     Some(session) if session.status.is_final() => {
-                        let result = state.settle_trampoline_payment(&session, None, None).await;
-                        state.trampoline_forwarding_tracker.release(&payment_hash);
-                        result
+                        state.settle_trampoline_payment(&session, None, None).await
                     }
                     Some(_) => Err(format!(
                         "hosted payment {payment_hash} is not ready for upstream settlement"
@@ -4594,13 +4573,6 @@ where
                     max_outgoing_tlc_expiry,
                 };
 
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(lsp_service) = state.lsp_service.clone() {
-                    return self
-                        .accept_or_dispatch_lsp_trampoline(state, lsp_service, request)
-                        .await;
-                }
-
                 self.dispatch_trampoline_forwarding(state, request).await
             }
             TrampolineHopPayload::Final { .. } => {
@@ -4619,55 +4591,25 @@ where
         state: &mut NetworkActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
-        self.reserve_trampoline_forwarding(state, &request)?;
-        self.dispatch_reserved_trampoline_forwarding(state, request)
-            .await
-    }
-
-    fn reserve_trampoline_forwarding(
-        &self,
-        state: &mut NetworkActorState<S, C>,
-        request: &TrampolineForwardingRequest,
-    ) -> Result<(), TlcErr> {
-        let now = now_timestamp_as_millis_u64();
-        let payment_hash = request.payment_hash;
-        let previous_channel_id = request.previous_tlc.prev_channel_id;
-        let max_outgoing_tlc_expiry = request.max_outgoing_tlc_expiry;
-        if let Err(rejection) = state.trampoline_forwarding_tracker.try_reserve(
-            payment_hash,
-            previous_channel_id,
-            max_outgoing_tlc_expiry,
-            now,
-            state.trampoline_forwarding_limits,
-        ) {
-            warn!(
-                "Trampoline forwarding rejected by resource policy: {}",
-                rejection.as_str()
-            );
-            return Err(TlcErr::new_node_fail(
-                TlcErrorCode::TemporaryNodeFailure,
-                state.get_public_key(),
-            ));
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lsp_service) = state.lsp_service.clone() {
+            return self
+                .accept_or_dispatch_lsp_trampoline(state, lsp_service, request)
+                .await;
         }
-        Ok(())
+
+        self.dispatch_trampoline_payment(state, request).await
     }
 
-    async fn dispatch_reserved_trampoline_forwarding(
+    async fn dispatch_trampoline_payment(
         &self,
         state: &mut NetworkActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
         let payment_hash = request.payment_hash;
-        let payment_data = match request.into_send_payment_data() {
-            Ok(payment_data) => payment_data,
-            Err(_) => {
-                state.trampoline_forwarding_tracker.release(&payment_hash);
-                return Err(TlcErr::new_node_fail(
-                    TlcErrorCode::TemporaryNodeFailure,
-                    state.get_public_key(),
-                ));
-            }
-        };
+        let payment_data = request.into_send_payment_data().map_err(|_| {
+            TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+        })?;
         let (send, _recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
 
@@ -4682,7 +4624,6 @@ where
         {
             Ok(()) => Ok(()),
             Err(e) => {
-                state.trampoline_forwarding_tracker.release(&payment_hash);
                 error!("Failed to start trampoline payment: {}", e);
                 Err(TlcErr::new_node_fail(
                     TlcErrorCode::TemporaryNodeFailure,
@@ -4699,8 +4640,6 @@ where
         lsp_service: ActorRef<LspServiceMessage>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
-        self.reserve_trampoline_forwarding(state, &request)?;
-        let payment_hash = request.payment_hash;
         let decision = ractor::call_t!(
             lsp_service,
             |reply| LspServiceMessage::AcceptTrampolineDelivery(request.clone(), reply),
@@ -4708,13 +4647,11 @@ where
         );
         match decision {
             Ok(Ok(LspDeliveryDecision::NotHosted)) => {
-                self.dispatch_reserved_trampoline_forwarding(state, request)
-                    .await
+                self.dispatch_trampoline_payment(state, request).await
             }
             Ok(Ok(LspDeliveryDecision::Buffered)) => Ok(()),
             Ok(Err(error)) => {
                 warn!("Hosted trampoline delivery rejected: {error}");
-                state.trampoline_forwarding_tracker.release(&payment_hash);
                 Err(TlcErr::new_node_fail(
                     TlcErrorCode::TemporaryNodeFailure,
                     state.get_public_key(),
@@ -4722,7 +4659,6 @@ where
             }
             Err(error) => {
                 error!("Failed to consult LSP delivery service: {error}");
-                state.trampoline_forwarding_tracker.release(&payment_hash);
                 Err(TlcErr::new_node_fail(
                     TlcErrorCode::TemporaryNodeFailure,
                     state.get_public_key(),
@@ -4757,7 +4693,6 @@ where
         session.last_error_code = Some(TlcErrorCode::TemporaryNodeFailure);
         session.last_updated_at = now;
         state.store.insert_payment_session(session.clone());
-        state.trampoline_forwarding_tracker.release(&payment_hash);
         let settlement = state.settle_trampoline_payment(&session, None, None).await;
         if settlement.is_ok() {
             if let Some(lsp_service) = state.lsp_service.as_ref() {
@@ -5467,8 +5402,6 @@ pub struct NetworkActorState<S, C> {
 
     // Inflight payment actors
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
-    trampoline_forwarding_limits: TrampolineForwardingLimits,
-    trampoline_forwarding_tracker: TrampolineForwardingTracker,
     // Final trampoline payments that still have an unresolved upstream TLC, indexed by channel.
     pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -7445,12 +7378,8 @@ where
         // meaning it's a trampoline forwarding payment,
         // we need to resolve those upstream TLCs based on the payment outcome.
         let Some(session) = self.store.get_payment_session(payment_hash) else {
-            self.trampoline_forwarding_tracker.release(&payment_hash);
             return;
         };
-        if session.status.is_final() {
-            self.trampoline_forwarding_tracker.release(&payment_hash);
-        }
 
         #[cfg(test)]
         if self.test_trampoline_settlement_paused
@@ -8008,8 +7937,6 @@ where
 
         let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
-        let trampoline_forwarding_limits = TrampolineForwardingLimits::from(&config);
-        let mut trampoline_forwarding_tracker = TrampolineForwardingTracker::default();
         let mut pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>> = HashMap::new();
         for session in self.store.get_all_payment_sessions() {
             let Some(context) = session.request.trampoline_context.as_ref() else {
@@ -8035,9 +7962,6 @@ where
                         .or_default()
                         .insert(session.request.payment_hash);
                 }
-            } else if let Some(previous_tlc) = context.previous_tlcs.first() {
-                trampoline_forwarding_tracker
-                    .track(session.request.payment_hash, previous_tlc.prev_channel_id);
             }
         }
         let mut state = NetworkActorState {
@@ -8089,8 +8013,6 @@ where
                 external_funding: Default::default(),
             },
             inflight_payments: Default::default(),
-            trampoline_forwarding_limits,
-            trampoline_forwarding_tracker,
             pending_trampoline_settlements,
             #[cfg(not(target_arch = "wasm32"))]
             lsp_service: None,
