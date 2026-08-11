@@ -30,6 +30,7 @@ pub(crate) struct HostedTenantTransport {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct HostedTenantRpcContext {
+    pub(crate) tenant_id: TenantId,
     pub(crate) config: FiberConfig,
     pub(crate) network_actor: ActorRef<NetworkActorMessage>,
     pub(crate) public_node_id: Pubkey,
@@ -416,6 +417,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
 
         runtime.public_network_actor = Some(self.public_network_actor.clone());
         runtime.rpc_context = Some(HostedTenantRpcContext {
+            tenant_id: record.tenant_id.clone(),
             config,
             network_actor: actor,
             public_node_id,

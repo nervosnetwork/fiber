@@ -58,20 +58,6 @@ pub struct GetLspInvoiceParams {
     pub payment_hash: Hash256,
 }
 
-/// Parameters for registering a signed hosted invoice.
-#[serde_as]
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct RegisterLspInvoiceParams {
-    /// Tenant that signed and owns the invoice.
-    pub tenant_id: String,
-    /// Encoded Fiber invoice signed by the tenant invoice key.
-    pub invoice: String,
-    /// Maximum time Public T may buffer the incoming payment while the tenant is offline.
-    #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
-    pub buffer_duration_ms: Option<u64>,
-}
-
 /// Parameters that identify a hosted invoice or payment delivery.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct LspPaymentHashParams {

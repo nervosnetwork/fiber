@@ -65,9 +65,11 @@ this boundary as non-custodial.
 
 ## Invoice registration and payer hint
 
-The tenant creates and signs a normal finite-expiry Fiber invoice. The LSP
-registers that invoice and returns a signed `LspInvoiceHint` sidecar. The hint
-binds all of the following under Public T's signature:
+When a tenant token calls the standard `new_invoice` RPC, the hosted runtime
+creates a normal finite-expiry Fiber invoice, signs it with the tenant invoice
+key, and embeds Public T in the signed trampoline route hint. Before the RPC
+returns, the LSP also registers the invoice payment hash and creates an internal
+signed `LspInvoiceHint` delivery-policy record. The record binds:
 
 - Public T's public trampoline identity;
 - payment hash;
@@ -78,12 +80,11 @@ The default requested buffer duration is 24 hours and the protocol maximum is
 seven days. An operator may configure a shorter service-wide cap; the signed
 hint records the duration actually accepted by the service. The actual deadline
 is still bounded by invoice and TLC expiry, so these values do not promise that
-every payment can wait that long. The hint is
-intentionally not embedded in the invoice encoding or the trampoline onion
-payload. A wallet distributes the invoice and sidecar together, verifies both
-signatures, and uses the single trampoline hop in the hint as Public T. The
-hint carries no tenant node id; Public T resolves the tenant and private
-channel from its durable invoice registry.
+every payment can wait that long. The `LspInvoiceHint` record is intentionally
+not embedded in the invoice encoding or trampoline onion payload. A payer only
+needs the tenant-signed invoice and uses its trampoline route hint to select
+Public T. Public T resolves the tenant, delivery policy, and private channel
+from its durable invoice registry; no tenant node id is exposed to the payer.
 
 An invoice without a registered hint keeps existing Fiber behavior: Public T
 forwards it immediately as an ordinary trampoline payment. Absence of a hint is
@@ -199,7 +200,7 @@ methods are:
   `lsp_list_tenants`
 - `lsp_new_invoice`, `lsp_get_invoice`, `lsp_send_payment`, and
   `lsp_get_payment`
-- `lsp_register_invoice` and `lsp_get_invoice_registration`
+- `lsp_get_invoice_registration`
 - `lsp_get_payment_delivery`
 
 With Biscuit authentication enabled, reads require `read("lsp")` and mutations
@@ -215,13 +216,18 @@ JSON-RPC parameter. The channel, invoice, and payment RPC handlers then resolve
 that tenant's active actor and Store namespace through `TenantSupervisor`.
 Tokens without a tenant fact continue to address Public T.
 
+When a tenant token calls the standard `new_invoice` method, the hosted runtime
+signs the invoice with the tenant invoice key, adds Public T as its trampoline
+route hint, and registers the payment hash with the LSP service before returning
+the invoice. Clients do not register hosted invoices separately.
+
 For example, a hosted wallet calls the existing `open_channel` method with
 Public T's pubkey, its own `funding_amount`, and `public: false`. A tenant-scoped
 request cannot open a public channel or target another peer. `new_invoice`,
 `get_invoice`, and the payment RPCs use the same request-scoped routing. The
-`lsp_new_invoice` composite remains available because it additionally registers
-the invoice and returns the signed `LspInvoiceHint`; it is not equivalent to a
-plain `new_invoice` call.
+operator-oriented `lsp_new_invoice` composite remains available for callers
+that explicitly select a tenant and buffer duration and need the full
+registration record. Hosted clients use the standard `new_invoice` method.
 
 ## Current boundaries
 

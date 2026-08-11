@@ -57,7 +57,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `lsp_get_invoice`](#lsp-lsp_get_invoice)
         * [Method `lsp_send_payment`](#lsp-lsp_send_payment)
         * [Method `lsp_get_payment`](#lsp-lsp_get_payment)
-        * [Method `lsp_register_invoice`](#lsp-lsp_register_invoice)
         * [Method `lsp_get_invoice_registration`](#lsp-lsp_get_invoice_registration)
         * [Method `lsp_get_payment_delivery`](#lsp-lsp_get_payment_delivery)
     * [Module Payment](#module-payment)
@@ -1000,27 +999,6 @@ Retrieves an outgoing payment owned by a hosted tenant runtime.
  For example:
     `A(amount, channel) -> B -> C -> D`
  means A will send `amount` with `channel` to B.
-
----
-
-
-
-<a id="lsp-lsp_register_invoice"></a>
-#### Method `lsp_register_invoice`
-
-Registers a tenant-signed invoice and returns its authenticated LSP hint.
-
-##### Params
-
-* `tenant_id` - <em>`String`</em>, Tenant that signed and owns the invoice.
-* `invoice` - <em>`String`</em>, Encoded Fiber invoice signed by the tenant invoice key.
-* `buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time Public T may buffer the incoming payment while the tenant is offline.
-
-##### Returns
-
-* `tenant_id` - <em>`String`</em>, Tenant that owns the invoice.
-* `invoice` - <em>`String`</em>, Canonical encoded Fiber invoice.
-* `hint` - <em>[LspInvoiceHint](#type-lspinvoicehint)</em>, Authenticated routing and buffering hint to distribute with the invoice.
 
 ---
 

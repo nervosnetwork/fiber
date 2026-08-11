@@ -10,6 +10,8 @@ use crate::invoice::{
     CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
 use crate::rpc::utils::rpc_error;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::utils::RpcResultExt;
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use fiber_types::{FeatureVector, Privkey};
 
@@ -158,14 +160,36 @@ where
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return InvoiceRpcServerImpl::new(
+            let tenant_id = context.tenant_id.clone();
+            let result = InvoiceRpcServerImpl::new(
                 context.store,
                 Some(context.network_actor),
                 Some(context.config),
             )
             .with_trampoline_route_hint(context.public_node_id.into())
             .new_invoice(params)
-            .await;
+            .await?;
+            let invoice = result
+                .invoice_address
+                .parse::<InternalCkbInvoice>()
+                .map_err(|error| {
+                    rpc_error(format!("failed to parse generated hosted invoice: {error}"))
+                })?;
+            let lsp_actor = self
+                .lsp_actor
+                .as_ref()
+                .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
+            call!(lsp_actor, |reply| {
+                crate::lsp::LspServiceMessage::RegisterInvoice {
+                    tenant_id,
+                    invoice,
+                    buffer_duration_ms: None,
+                    reply,
+                }
+            })
+            .rpc_err()?
+            .rpc_err()?;
+            return Ok(result);
         }
         self.new_invoice(params).await
     }
