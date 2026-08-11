@@ -181,6 +181,12 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
                 tenant.tenant_id
             ));
         }
+        if invoice
+            .trampoline_route_hint()
+            .is_some_and(|node_id| Pubkey::from(*node_id) != lsp_node_id)
+        {
+            return Err("hosted invoice trampoline route hint does not match Public T".to_string());
+        }
         if invoice.is_expired() {
             return Err("hosted invoice has already expired".to_string());
         }

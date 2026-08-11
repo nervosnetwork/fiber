@@ -194,6 +194,7 @@ impl LspRpcServerImpl {
             Some(context.network_actor),
             Some(context.config),
         )
+        .with_trampoline_route_hint(context.public_node_id.into())
         .new_invoice(params.invoice)
         .await?;
         let invoice = CkbInvoice::from_str(&result.invoice_address)

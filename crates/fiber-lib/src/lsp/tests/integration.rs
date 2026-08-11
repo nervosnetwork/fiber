@@ -642,6 +642,10 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .expect("decode tenant invoice");
     let expected_invoice_pubkey: secp256k1::PublicKey = expected_tenant.invoice_pubkey.into();
     assert_eq!(decoded.payee_pub_key(), Some(&expected_invoice_pubkey));
+    assert_eq!(
+        decoded.trampoline_route_hint(),
+        Some(&secp256k1::PublicKey::from(public_t.pubkey))
+    );
 
     let tenant_invoice: fiber_json_types::GetInvoiceResult = tenant_client
         .request(
@@ -834,7 +838,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         .payment_preimage(preimage)
         .payee_pub_key(tenant.pubkey.into())
         .expiry_time(Duration::from_secs(60 * 60))
-        .allow_trampoline_routing(true)
+        .trampoline_route_hint(public_t.pubkey.into())
         .build_with_sign(|message| SECP256K1.sign_ecdsa_recoverable(message, &tenant.private_key.0))
         .expect("build hosted invoice");
     tenant.insert_invoice(invoice.clone(), Some(preimage));
@@ -888,7 +892,6 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.to_string()),
             max_fee_amount: Some(500),
-            trampoline_hops: Some(vec![public_t.pubkey]),
             ..Default::default()
         })
         .await

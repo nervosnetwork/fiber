@@ -1541,6 +1541,7 @@ The attributes of the invoice.
 * `hash_algorithm` - <em>[HashAlgorithm](#type-hashalgorithm)</em>, The hash algorithm of the invoice
 * `feature` - <em>`Vec<String>`</em>, The feature flags of the invoice
 * `payment_secret` - <em>`String`</em>, The payment secret of the invoice
+* `trampoline_route_hint` - <em>[Pubkey](#type-pubkey)</em>, A public trampoline node suggested by the payee
 ---
 
 <a id="#type-cchinvoice"></a>

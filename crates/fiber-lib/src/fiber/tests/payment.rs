@@ -10826,6 +10826,35 @@ async fn test_send_payment_max_fee_rate_limit() {
     assert_eq!(payment_data.max_fee_amount, Some(10));
 }
 
+#[test]
+fn test_send_payment_uses_invoice_trampoline_route_hint() {
+    let (payee_private_key, payee) = gen_rand_secp256k1_keypair_tuple();
+    let trampoline = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee)
+        .trampoline_route_hint(trampoline.into())
+        .build_with_sign(|message| SECP256K1.sign_ecdsa_recoverable(message, &payee_private_key))
+        .expect("build invoice with trampoline route hint");
+
+    let payment = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        ..Default::default()
+    })
+    .expect("build trampoline payment from invoice hint");
+    assert_eq!(payment.trampoline_hops, Some(vec![trampoline]));
+
+    let explicit_trampoline = gen_rand_fiber_public_key();
+    let payment = SendPaymentData::new(SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        trampoline_hops: Some(vec![explicit_trampoline]),
+        ..Default::default()
+    })
+    .expect("explicit trampoline hop overrides invoice hint");
+    assert_eq!(payment.trampoline_hops, Some(vec![explicit_trampoline]));
+}
+
 fn malicious_invoice_that_used_to_panic_parser() -> String {
     let mut data = vec![u5::try_from_u8(0).expect("valid unsigned invoice marker")];
     data.extend(std::iter::repeat_n(

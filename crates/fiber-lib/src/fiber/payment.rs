@@ -397,6 +397,15 @@ impl SendPaymentDataExt for SendPaymentData {
             }
         }
 
+        let trampoline_hops = command.trampoline_hops.or_else(|| {
+            invoice.as_ref().and_then(|invoice| {
+                invoice
+                    .trampoline_route_hint()
+                    .copied()
+                    .map(|node_id| vec![node_id.into()])
+            })
+        });
+
         fn validate_field<T: PartialEq + Clone>(
             field: Option<T>,
             invoice_field: Option<T>,
@@ -554,7 +563,7 @@ impl SendPaymentDataExt for SendPaymentData {
             .hop_hints(hop_hints)
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
-            .trampoline_hops(command.trampoline_hops)
+            .trampoline_hops(trampoline_hops)
             .build()
     }
 
@@ -786,7 +795,8 @@ impl SendPaymentWithRouterCommand {
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
-        // specify the router to be used
+        // An explicit router takes precedence over an invoice route hint.
+        payment_data.trampoline_hops = None;
         payment_data.router = self.router.clone();
         Ok(payment_data)
     }

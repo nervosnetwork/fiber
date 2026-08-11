@@ -535,6 +535,9 @@ impl From<fiber_types::Attribute> for crate::invoice::Attribute {
             InternalAttr::PaymentSecret(secret) => {
                 JsonAttr::PaymentSecret(JsonHash256::from(secret).to_string())
             }
+            InternalAttr::TrampolineRouteHint(node_id) => {
+                JsonAttr::TrampolineRouteHint(JsonPubkey(node_id.serialize()))
+            }
         }
     }
 }

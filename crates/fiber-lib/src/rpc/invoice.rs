@@ -76,6 +76,7 @@ pub struct InvoiceRpcServerImpl<S> {
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
+    trampoline_route_hint: Option<PublicKey>,
     #[cfg(not(target_arch = "wasm32"))]
     lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
@@ -116,9 +117,15 @@ impl<S> InvoiceRpcServerImpl<S> {
             keypair,
             currency,
             node_features,
+            trampoline_route_hint: None,
             #[cfg(not(target_arch = "wasm32"))]
             lsp_actor: None,
         }
+    }
+
+    pub fn with_trampoline_route_hint(mut self, node_id: PublicKey) -> Self {
+        self.trampoline_route_hint = Some(node_id);
+        self
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -156,6 +163,7 @@ where
                 Some(context.network_actor),
                 Some(context.config),
             )
+            .with_trampoline_route_hint(context.public_node_id.into())
             .new_invoice(params)
             .await;
         }
@@ -301,6 +309,10 @@ where
                 return error("Node does not support trampoline routing, please enable trampoline routing feature");
             }
         };
+
+        if let Some(node_id) = self.trampoline_route_hint {
+            invoice_builder = invoice_builder.trampoline_route_hint(node_id);
+        }
 
         let final_expiry_delta = params.final_expiry_delta.unwrap_or(MIN_TLC_EXPIRY_DELTA);
         if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {

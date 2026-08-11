@@ -552,6 +552,39 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
 }
 
 #[test]
+fn hosted_invoice_route_hint_must_match_public_t() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let invoices = LspInvoiceRegistry::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let other_lsp_key = Privkey::from(&[10; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: None,
+        created_at: 42,
+    };
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_hash(Hash256::from([14; 32]))
+        .expiry_time(Duration::from_secs(60 * 60))
+        .trampoline_route_hint(other_lsp_key.pubkey().into())
+        .build_with_sign(|message| {
+            secp256k1::SECP256K1.sign_ecdsa_recoverable(message, &tenant_key.0)
+        })
+        .expect("build hosted invoice");
+
+    assert_eq!(
+        invoices
+            .register(&tenant, invoice, None, lsp_key.pubkey(), &lsp_key)
+            .unwrap_err(),
+        "hosted invoice trampoline route hint does not match Public T"
+    );
+}
+
+#[test]
 fn hosted_invoice_hint_detects_tampering_and_expiry() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));

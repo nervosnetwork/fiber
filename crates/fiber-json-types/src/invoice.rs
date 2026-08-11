@@ -76,6 +76,8 @@ pub enum Attribute {
     Feature(Vec<String>),
     /// The payment secret of the invoice
     PaymentSecret(String),
+    /// A public trampoline node suggested by the payee
+    TrampolineRouteHint(Pubkey),
 }
 
 /// The metadata of the invoice.
