@@ -101,7 +101,6 @@ use crate::fiber::payment::{
     SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
-use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::{
     pubkey_to_tentacle, FiberChannelMessage, TrampolineHopPayload, TrampolineOnionPacket, TxAbort,
     TxSignatures,
@@ -114,6 +113,7 @@ use crate::invoice::{
     CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
     SettleInvoiceError,
 };
+use crate::lsp::TrampolineForwardingRequest;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::lsp::{LspDeliveryDecision, LspServiceMessage};
 use crate::utils::actor::ActorHandleLogGuard;

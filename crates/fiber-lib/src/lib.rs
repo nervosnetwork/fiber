@@ -24,6 +24,8 @@ pub use cch::{CchActor, CchConfig};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lsp;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod lsp;
 #[cfg(not(target_arch = "wasm32"))]
 pub use lsp::LspConfig;
 

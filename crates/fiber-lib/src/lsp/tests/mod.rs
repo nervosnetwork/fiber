@@ -15,12 +15,12 @@ use tempfile::tempdir;
 use crate::fiber::network::{
     HostedTenantActivity, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
-use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::FiberMessage;
 use crate::fiber_types::{
     AddTlc, Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, Pubkey,
 };
 use crate::invoice::{Currency, InvoiceBuilder};
+use crate::lsp::TrampolineForwardingRequest;
 use crate::lsp::{
     HostedTenantRecord, HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
     LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspService,

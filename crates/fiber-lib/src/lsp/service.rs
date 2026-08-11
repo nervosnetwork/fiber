@@ -2,9 +2,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
-use crate::fiber::{
-    network::{BufferedTrampolineUpstreamStatus, NetworkActorCommand, NetworkActorMessage},
-    trampoline::TrampolineForwardingRequest,
+use crate::fiber::network::{
+    BufferedTrampolineUpstreamStatus, NetworkActorCommand, NetworkActorMessage,
 };
 use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey};
 use crate::invoice::CkbInvoice;
@@ -14,7 +13,7 @@ use super::{
     HostedTenantRpcContext, HostedTenantStatus, LspConfig, LspInvoiceRegistration,
     LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
     LspPaymentDeliveryStatus, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
-    TenantSupervisor,
+    TenantSupervisor, TrampolineForwardingRequest,
 };
 
 /// Runtime dependencies of the LSP service container.

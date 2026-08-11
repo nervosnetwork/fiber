@@ -2,11 +2,10 @@ use bincode::{deserialize, serialize};
 use fiber_store::backend::StorageBackend;
 use serde::{Deserialize, Serialize};
 
-use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber_types::{Hash256, PaymentStatus};
 use crate::store::{FiberStore, Store};
 
-use super::{LspInvoiceRegistration, TenantId};
+use super::{LspInvoiceRegistration, TenantId, TrampolineForwardingRequest};
 
 const PAYMENT_DELIVERY_PREFIX: &[u8] = b"\xf2lsp/delivery/";
 /// Time retained between the end of buffering and the downstream expiry budget.

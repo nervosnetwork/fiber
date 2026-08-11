@@ -8,11 +8,11 @@ use crate::fiber::network::{
     DebugEvent, NetworkActorCommand, NetworkActorMessage, SendOnionPacketCommand,
 };
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::trampoline::TrampolineForwardingRequest;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
+use crate::lsp::TrampolineForwardingRequest;
 use crate::tests::test_utils::*;
 use crate::{
     create_channel_with_nodes, gen_rand_fiber_private_key, gen_rand_sha256_hash,
