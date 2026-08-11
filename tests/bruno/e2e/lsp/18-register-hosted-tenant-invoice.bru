@@ -1,5 +1,5 @@
 meta {
-  name: create hosted tenant invoice
+  name: Public T registers hosted tenant invoice
   type: http
   seq: 18
 }
@@ -13,23 +13,18 @@ post {
 headers {
   Content-Type: application/json
   Accept: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
 }
 
 body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "lsp_new_invoice",
+    "method": "lsp_register_invoice",
     "params": [
       {
         "tenant_id": "u1",
-        "invoice": {
-          "amount": "0xf4240",
-          "currency": "Fibd",
-          "description": "hosted tenant incoming payment",
-          "expiry": "0xe10",
-          "allow_trampoline_routing": true
-        },
+        "invoice": "{{LSP_INCOMING_INVOICE}}",
         "buffer_duration_ms": "0xea60"
       }
     ]
@@ -44,6 +39,7 @@ assert {
 }
 
 script:post-response {
-  bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice);
-  bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.hint.payment_hash);
+  if (res.body.result.hint.payment_hash !== bru.getVar("LSP_INCOMING_PAYMENT_HASH")) {
+    throw new Error("registered LSP hint must match the tenant invoice payment hash");
+  }
 }

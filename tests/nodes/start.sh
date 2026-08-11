@@ -142,7 +142,11 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
     fi
     node2_args=(-d 2)
     if [[ "$testcase_name" == "e2e/lsp" ]]; then
-        node2_args+=(-s fiber,rpc,ckb,lsp)
+        node2_args+=(
+            -s fiber,rpc,ckb,lsp
+            --fiber-auto-accept-channel-ckb-funding-amount 50000000000
+            --rpc-biscuit-public-key ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79
+        )
     fi
     if [[ -n "$enable_fiber_metrics" ]]; then
         FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' FIBER_METRICS_ADDR="$node1_metrics_addr" start_fnn -d 1 &

@@ -1,5 +1,5 @@
 meta {
-  name: open hosted private channel
+  name: hosted tenant opens private channel to Public T
   type: http
   seq: 5
 }
@@ -13,6 +13,7 @@ post {
 headers {
   Content-Type: application/json
   Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
 }
 
 body:json {
@@ -22,7 +23,7 @@ body:json {
     "method": "open_channel",
     "params": [
       {
-        "pubkey": "{{HOSTED_TENANT_PUBKEY}}",
+        "pubkey": "{{NODE2_PUBKEY}}",
         "funding_amount": "0xba43b7400",
         "public": false
       }

@@ -1,0 +1,45 @@
+meta {
+  name: hosted tenant creates invoice through standard RPC
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "new_invoice",
+    "params": [
+      {
+        "amount": "0xf4240",
+        "currency": "Fibd",
+        "description": "hosted tenant incoming payment",
+        "expiry": "0xe10",
+        "allow_trampoline_routing": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.invoice_address: isDefined
+  res.body.result.invoice.data.payment_hash: isDefined
+}
+
+script:post-response {
+  bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice_address);
+  bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
+}

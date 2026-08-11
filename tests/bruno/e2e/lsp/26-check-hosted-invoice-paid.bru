@@ -13,16 +13,16 @@ post {
 headers {
   Content-Type: application/json
   Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
 }
 
 body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "lsp_get_invoice",
+    "method": "get_invoice",
     "params": [
       {
-        "tenant_id": "u1",
         "payment_hash": "{{LSP_INCOMING_PAYMENT_HASH}}"
       }
     ]
