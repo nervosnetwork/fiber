@@ -7888,6 +7888,7 @@ impl ChannelActorState {
 
                 if let Err(err) = call!(network, |tx| NetworkActorMessage::Command(
                     NetworkActorCommand::VerifyFundingTx {
+                        peer: self.get_remote_pubkey(),
                         local_tx: self.funding_tx.clone().unwrap_or_default(),
                         remote_tx: msg.tx.clone(),
                         funding_cell_lock_script: self.get_funding_lock_script(),

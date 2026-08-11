@@ -1069,6 +1069,7 @@ pub enum NetworkActorCommand {
     SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<(), TlcErr>>),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     VerifyFundingTx {
+        peer: Pubkey,
         local_tx: Transaction,
         remote_tx: Transaction,
         funding_cell_lock_script: Script,
@@ -3093,6 +3094,7 @@ where
                     .await?
             }
             NetworkActorCommand::VerifyFundingTx {
+                peer,
                 local_tx,
                 remote_tx,
                 funding_cell_lock_script,
@@ -3109,6 +3111,7 @@ where
                         funding_cell_lock_script,
                         funding_udt_type_script,
                         funding_source_lock_script,
+                        allow_peer_funding_source_lock: state.in_process_peers.contains_key(&peer),
                     });
             }
             NetworkActorCommand::NotifyFundingTx(tx) => {

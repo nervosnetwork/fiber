@@ -695,6 +695,7 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                allow_peer_funding_source_lock,
                 reply,
             } = message
             else {
@@ -707,6 +708,7 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 funding_source_lock_script_cell_deps: Vec::new(),
                 funding_cell_lock_script,
                 funding_udt_type_script,
+                allow_peer_funding_source_lock,
             };
             let mut funding_tx: FundingTx = local_tx.into();
             let result = funding_tx
