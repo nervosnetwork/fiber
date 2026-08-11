@@ -1,0 +1,39 @@
+meta {
+  name: get empty LSP status
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "lsp_get_status"
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  const status = res.body.result;
+  if (status.public_node_id !== bru.getEnvVar("NODE2_PUBKEY")) {
+    throw new Error("Node2 is not the LSP public node");
+  }
+  if (status.registered_tenants !== "0x0" || status.active_tenants !== "0x0") {
+    throw new Error(`expected an empty LSP, got ${JSON.stringify(status)}`);
+  }
+}

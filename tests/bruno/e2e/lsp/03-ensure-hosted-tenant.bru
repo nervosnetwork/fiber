@@ -1,0 +1,40 @@
+meta {
+  name: activate hosted tenant
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "lsp_ensure_tenant",
+    "params": [
+      { "tenant_id": "u1" }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.tenant_id: eq "u1"
+  res.body.result.runtime_status: eq "active"
+  res.body.result.channel_online: eq false
+}
+
+script:post-response {
+  if (res.body.result.invoice_pubkey !== bru.getVar("HOSTED_TENANT_PUBKEY")) {
+    throw new Error("hosted tenant identity changed during activation");
+  }
+}

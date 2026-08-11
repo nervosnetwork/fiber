@@ -38,6 +38,9 @@ case "$testcase_name" in
   "e2e/router-pay")
     export START_BOOTNODE=y
     ;;
+  "e2e/lsp")
+    export RPC_ENABLED_MODULES=cch,channel,payment,graph,info,invoice,lsp,peer,pubsub,watchtower,dev,prof
+    ;;
   "e2e/funding-tx-verification")
     cd ./tests/funding-tx-builder/ && cargo build --locked && cd -
     export FIBER_FUNDING_TX_SHELL_BUILDER="$(dirname "$script_dir")/funding-tx-builder/target/debug/funding-tx-builder ${EXTRA_BRU_ARGS:-}"
@@ -137,13 +140,17 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
         # export the environment variable so that other nodes can connect to the bootnode.
         export FIBER_BOOTNODE_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
+    node2_args=(-d 2)
+    if [[ "$testcase_name" == "e2e/lsp" ]]; then
+        node2_args+=(-s fiber,rpc,ckb,lsp)
+    fi
     if [[ -n "$enable_fiber_metrics" ]]; then
         FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' FIBER_METRICS_ADDR="$node1_metrics_addr" start_fnn -d 1 &
-        FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' FIBER_METRICS_ADDR="$node2_metrics_addr" start_fnn -d 2 &
+        FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' FIBER_METRICS_ADDR="$node2_metrics_addr" start_fnn "${node2_args[@]}" &
         FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' FIBER_METRICS_ADDR="$node3_metrics_addr" start_fnn -d 3 &
     else
         FIBER_SECRET_KEY_PASSWORD='password1' LOG_PREFIX=$'[node 1]' start_fnn -d 1 &
-        FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start_fnn -d 2 &
+        FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start_fnn "${node2_args[@]}" &
         FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start_fnn -d 3 &
     fi
     if [[ -n "${CCH_SEPARATE:-}" ]]; then
