@@ -807,7 +807,7 @@ Returns a summary of the hosted LSP service.
 ##### Returns
 
 * `public_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public trampoline node identity advertised by the LSP.
-* `tenant_store_root` - <em>`String`</em>, Root directory containing isolated tenant stores.
+* `tenant_store_root` - <em>`String`</em>, Root directory containing tenant-local runtime files such as signing keys.
 * `registered_tenants` - <em>`u64`</em>, Number of persistently registered tenants.
 * `active_tenants` - <em>`u64`</em>, Number of tenant execution contexts currently resident in this process.
 

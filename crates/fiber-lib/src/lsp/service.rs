@@ -88,7 +88,7 @@ pub enum LspServiceMessage {
 pub struct LspService;
 
 /// State owned by the LSP service. Tenant components are added behind this
-/// boundary rather than sharing Public T's network actor or database.
+/// boundary rather than sharing Public T's network actor or unscoped keyspace.
 pub struct LspServiceState {
     pub config: LspConfig,
     pub public_node_id: Pubkey,

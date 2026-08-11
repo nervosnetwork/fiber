@@ -81,7 +81,7 @@ pub struct ListLspTenantsResult {
 pub struct LspServiceStatus {
     /// Public trampoline node identity advertised by the LSP.
     pub public_node_id: Pubkey,
-    /// Root directory containing isolated tenant stores.
+    /// Root directory containing tenant-local runtime files such as signing keys.
     pub tenant_store_root: String,
     /// Number of persistently registered tenants.
     #[serde_as(as = "U64Hex")]

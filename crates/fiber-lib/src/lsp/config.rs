@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use clap_serde_derive::ClapSerde;
 
@@ -17,12 +14,13 @@ pub const DEFAULT_MAX_PENDING_DELIVERIES_PER_TENANT: usize = 64;
 /// Configuration for the multi-tenant LSP service hosted by a Fiber node.
 #[derive(ClapSerde, Debug, Clone)]
 pub struct LspConfig {
-    /// Base directory for LSP-owned state.
+    /// Base directory for tenant-local runtime files such as signing keys.
+    /// LSP database state is stored in namespaces of the Fiber store.
     #[arg(
         name = "LSP_BASE_DIR",
         long = "lsp-base-dir",
         env,
-        help = "base directory for LSP state [default: $BASE_DIR/lsp]"
+        help = "base directory for LSP tenant runtime files [default: $BASE_DIR/lsp]"
     )]
     pub(crate) base_dir: Option<PathBuf>,
 
@@ -79,21 +77,7 @@ impl LspConfig {
         self.base_dir.as_deref().expect("have set LSP base dir")
     }
 
-    /// Return the database path reserved for LSP service metadata.
-    pub fn store_path(&self) -> PathBuf {
-        let path = self.base_dir().join("store");
-        if !path.exists() {
-            fs::create_dir_all(&path).expect("create LSP store directory");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
-        }
-        path
-    }
-
-    /// Return the root directory below which hosted tenant stores are created.
+    /// Return the root directory below which tenant-local runtime files are created.
     pub fn tenant_store_root(&self) -> PathBuf {
         self.base_dir().join("tenants")
     }
@@ -117,16 +101,6 @@ impl LspConfig {
         if self.max_pending_deliveries_per_tenant == 0 {
             return Err(
                 "LSP max_pending_deliveries_per_tenant must be greater than zero".to_string(),
-            );
-        }
-        Ok(())
-    }
-
-    /// Ensure the service metadata never shares a physical store with Public T.
-    pub fn validate_store_separation(&self, public_store_path: &Path) -> Result<(), String> {
-        if self.store_path() == public_store_path {
-            return Err(
-                "LSP service store must be separate from the public Fiber store".to_string(),
             );
         }
         Ok(())

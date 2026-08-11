@@ -103,7 +103,10 @@ impl Store {
         Self {
             inner: self.inner.clone(),
             namespace: Some(namespace),
-            watcher: self.watcher.clone(),
+            // Watchers observe one logical node's state changes. Inheriting
+            // Public T's watcher would expose hosted tenant invoices and
+            // payments to Public T consumers such as CCH.
+            watcher: None,
             #[cfg(feature = "watchtower")]
             watchtower_write_locks: self.watchtower_write_locks.clone(),
             #[cfg(feature = "watchtower")]

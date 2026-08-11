@@ -39,7 +39,7 @@ use crate::{
         },
         server::start_rpc,
     },
-    store::open_store,
+    store::NodeNamespace,
     tests::{
         establish_channel_between_nodes, gen_rpc_config, get_test_root_actor, init_tracing,
         wait_until_async_timeout, wait_until_node_supports_trampoline_routing, ChannelParameters,
@@ -240,7 +240,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
 
     let root = tempdir().expect("temporary LSP directory");
     let config = lsp_config(root.path().join("lsp"));
-    let lsp_store = open_store(config.store_path()).expect("open LSP store");
+    let lsp_store = public_t.store.namespaced(NodeNamespace::lsp_metadata());
     let starts = Arc::new(AtomicUsize::new(0));
     let tenant_record = HostedTenantRecord {
         tenant_id: TenantId::new(TENANT_ID).unwrap(),

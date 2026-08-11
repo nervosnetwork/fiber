@@ -77,6 +77,7 @@ fn gen_rand_local_signer() -> LocalSigner {
 fn test_node_namespace_isolates_shared_physical_store() {
     let path = TempDir::new("node_namespace_store");
     let store = open_store(path).expect("create shared store");
+    let lsp_metadata = store.namespaced(NodeNamespace::lsp_metadata());
     let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
     let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
     tenant_u1
@@ -86,6 +87,7 @@ fn test_node_namespace_isolates_shared_physical_store() {
         .ensure_current_schema()
         .expect("initialize u2 schema");
 
+    lsp_metadata.put(b"same-key", b"lsp-value");
     tenant_u1.put(b"same-key", b"u1-value");
     tenant_u1.put(b"scan/1", b"u1-first");
     tenant_u1.put(b"scan/2", b"u1-second");
@@ -96,6 +98,7 @@ fn test_node_namespace_isolates_shared_physical_store() {
 
     assert_eq!(tenant_u1.get(b"same-key"), Some(b"u1-value".to_vec()));
     assert_eq!(tenant_u2.get(b"same-key"), Some(b"u2-value".to_vec()));
+    assert_eq!(lsp_metadata.get(b"same-key"), Some(b"lsp-value".to_vec()));
     assert_eq!(store.get(b"same-key"), None);
     assert_eq!(
         tenant_u1
@@ -1885,6 +1888,27 @@ fn test_store_save_channel_update_and_get_timestamp() {
 #[derive(Debug, Default)]
 struct StoreChangeSaver {
     pub changes: std::sync::RwLock<Vec<crate::store::store_impl::StoreChange>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_node_namespace_does_not_inherit_public_store_watcher() {
+    use crate::store::store_impl::StoreChange;
+    use std::sync::Arc;
+
+    let (mut store, _dir) = generate_store();
+    let saver = Arc::new(StoreChangeSaver::default());
+    let saver_clone = saver.clone();
+    store.set_watcher(Arc::new(move |change: StoreChange| {
+        saver_clone.changes.write().unwrap().push(change);
+    }));
+    let tenant_store = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+
+    tenant_store.insert_preimage(gen_rand_sha256_hash(), gen_rand_sha256_hash());
+    assert!(saver.changes.read().unwrap().is_empty());
+
+    store.insert_preimage(gen_rand_sha256_hash(), gen_rand_sha256_hash());
+    assert_eq!(saver.changes.read().unwrap().len(), 1);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

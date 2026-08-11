@@ -28,7 +28,7 @@ use crate::lsp::{
     TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
     MAX_LSP_BUFFER_DURATION_MS,
 };
-use crate::store::open_store;
+use crate::store::{open_store, NodeNamespace, Store};
 
 use super::dispatcher::{HostedTenantEndpoint, HostedTenantEndpointArgs, TenantMessageDispatcher};
 
@@ -46,21 +46,26 @@ fn lsp_config(base_dir: PathBuf) -> LspConfig {
     }
 }
 
+fn open_lsp_store(config: &LspConfig) -> Store {
+    std::fs::create_dir_all(config.base_dir()).expect("create test LSP base directory");
+    open_store(config.base_dir().join("fiber-store"))
+        .expect("open shared Fiber store")
+        .namespaced(NodeNamespace::lsp_metadata())
+}
+
 #[test]
-fn lsp_service_uses_an_independent_store() {
+fn lsp_service_uses_a_namespace_in_the_fiber_store() {
     let root = tempdir().expect("temporary directory");
     let public_store_path = root.path().join("fiber/store");
     let config = lsp_config(root.path().join("lsp"));
 
-    config
-        .validate_store_separation(&public_store_path)
-        .expect("separate store paths");
-
     std::fs::create_dir_all(&public_store_path).expect("create public store path");
     let public_store = open_store(&public_store_path).expect("open public store");
-    let lsp_store = open_store(config.store_path()).expect("open LSP store");
+    let lsp_store = public_store.namespaced(NodeNamespace::lsp_metadata());
+    let tenant_store = public_store.namespaced(NodeNamespace::hosted_tenant("u1"));
     public_store.put(b"same-key", b"public-value");
     lsp_store.put(b"same-key", b"lsp-value");
+    tenant_store.put(b"same-key", b"tenant-value");
 
     assert_eq!(
         public_store.get(b"same-key"),
@@ -68,19 +73,12 @@ fn lsp_service_uses_an_independent_store() {
     );
     assert_eq!(lsp_store.get(b"same-key"), Some(b"lsp-value".to_vec()));
     assert_eq!(
+        tenant_store.get(b"same-key"),
+        Some(b"tenant-value".to_vec())
+    );
+    assert_eq!(
         config.tenant_store_root(),
         PathBuf::from(root.path()).join("lsp/tenants")
-    );
-}
-
-#[test]
-fn lsp_service_rejects_public_store_reuse() {
-    let public_store_path = PathBuf::from("shared/store");
-    let config = lsp_config(PathBuf::from("shared"));
-
-    assert_eq!(
-        config.validate_store_separation(&public_store_path),
-        Err("LSP service store must be separate from the public Fiber store".to_string())
     );
 }
 
@@ -88,7 +86,7 @@ fn lsp_service_rejects_public_store_reuse() {
 fn tenant_registry_is_persistent_and_idempotent() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let registry = TenantRegistry::new(store.clone());
     let record = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
@@ -494,7 +492,7 @@ async fn tenant_supervisor_rehydrates_a_stopped_runtime() {
 }
 
 #[test]
-fn hosted_tenant_config_is_private_and_isolated() {
+fn hosted_tenant_config_is_private() {
     let root = tempdir().expect("temporary directory");
     let public_config = crate::tests::get_fiber_config(root.path().join("public"), Some("T"));
     let u1 = public_config.hosted_tenant_config(root.path().join("lsp/tenants/u1"));
@@ -506,19 +504,6 @@ fn hosted_tenant_config_is_private_and_isolated() {
     assert_eq!(u1.listening_addr(), "/ip4/127.0.0.1/tcp/0");
     assert_ne!(u1.store_path(), u2.store_path());
     assert_ne!(u1.public_key().inner_ref(), u2.public_key().inner_ref());
-
-    let u1_store = open_store(u1.store_path()).expect("open U1 store");
-    let u2_store = open_store(u2.store_path()).expect("open U2 store");
-    u1_store.put(b"same-payment-hash", b"u1-session");
-    u2_store.put(b"same-payment-hash", b"u2-session");
-    assert_eq!(
-        u1_store.get(b"same-payment-hash"),
-        Some(b"u1-session".to_vec())
-    );
-    assert_eq!(
-        u2_store.get(b"same-payment-hash"),
-        Some(b"u2-session".to_vec())
-    );
 }
 
 fn signed_invoice(signing_key: &Privkey, payment_hash: Hash256) -> crate::invoice::CkbInvoice {
@@ -536,7 +521,7 @@ fn signed_invoice(signing_key: &Privkey, payment_hash: Hash256) -> crate::invoic
 fn hosted_invoice_registration_is_signed_and_persistent() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store.clone());
     let tenant_key = Privkey::from(&[3; 32]);
     let lsp_key = Privkey::from(&[9; 32]);
@@ -570,7 +555,7 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
 fn hosted_invoice_hint_detects_tampering_and_expiry() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store);
     let tenant_key = Privkey::from(&[3; 32]);
     let lsp_key = Privkey::from(&[9; 32]);
@@ -607,7 +592,7 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
 fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store);
     let tenant_key = Privkey::from(&[3; 32]);
     let lsp_key = Privkey::from(&[9; 32]);
@@ -639,7 +624,7 @@ fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
 fn hosted_invoice_buffer_duration_is_shortened_by_operator_policy() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let policy_cap = 12 * 60 * 60 * 1_000;
     let invoices = LspInvoiceRegistry::with_max_buffer_duration(store, policy_cap);
     let tenant_key = Privkey::from(&[3; 32]);
@@ -668,7 +653,7 @@ fn hosted_invoice_buffer_duration_is_shortened_by_operator_policy() {
 fn hosted_invoice_must_be_signed_by_registered_tenant() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store);
     let tenant_key = Privkey::from(&[3; 32]);
     let other_key = Privkey::from(&[4; 32]);
@@ -719,7 +704,7 @@ fn hosted_forwarding_request(
 fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store.clone());
     let deliveries = LspPaymentDeliveryManager::new(store.clone());
     let tenant_key = Privkey::from(&[3; 32]);
@@ -760,7 +745,7 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
 fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store.clone());
     let deliveries = LspPaymentDeliveryManager::new(store);
     let tenant_key = Privkey::from(&[3; 32]);
@@ -809,7 +794,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
 fn payment_delivery_rejects_invalid_state_transition_and_mpp() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store.clone());
     let deliveries = LspPaymentDeliveryManager::new(store);
     let tenant_key = Privkey::from(&[3; 32]);
@@ -853,7 +838,7 @@ fn payment_delivery_rejects_invalid_state_transition_and_mpp() {
 fn payment_delivery_enforces_per_tenant_pending_limit() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let invoices = LspInvoiceRegistry::new(store.clone());
     let deliveries = LspPaymentDeliveryManager::with_limits(
         store,
@@ -1122,7 +1107,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let starts = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(FakeRuntimeFactory { starts });
@@ -1197,7 +1182,7 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string(), "u2".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let starts = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(FakeRuntimeFactory {
@@ -1317,7 +1302,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let factory = Arc::new(FakeRuntimeFactory {
         starts: Arc::new(AtomicUsize::new(0)),
@@ -1382,7 +1367,7 @@ async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let factory = Arc::new(FakeRuntimeFactory {
         starts: Arc::new(AtomicUsize::new(0)),
@@ -1459,7 +1444,7 @@ async fn restart_cancels_deferred_delivery_after_upstream_tlc_removal() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let factory: Arc<dyn TenantRuntimeFactory> = Arc::new(FakeRuntimeFactory {
         starts: Arc::new(AtomicUsize::new(0)),
@@ -1546,7 +1531,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let starts = Arc::new(AtomicUsize::new(0));
     let factory = Arc::new(FakeRuntimeFactory {
@@ -1612,7 +1597,7 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let factory = Arc::new(FakeRuntimeFactory {
         starts: Arc::new(AtomicUsize::new(0)),
     });
@@ -1672,7 +1657,7 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let factory = Arc::new(FakeRuntimeFactory {
         starts: Arc::new(AtomicUsize::new(0)),
@@ -1725,7 +1710,7 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
-    let store = open_store(config.store_path()).expect("open LSP store");
+    let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let factory = Arc::new(FakeRuntimeFactory {
         starts: Arc::new(AtomicUsize::new(0)),
