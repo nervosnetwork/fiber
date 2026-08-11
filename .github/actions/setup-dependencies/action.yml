@@ -81,7 +81,7 @@ runs:
       run: |
         echo "📥 Downloading Bitcoin Core v27.0 with retry..."
         for attempt in 1 2 3; do
-          if wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"; then
+          if wget "https://bitcoincore.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"; then
             break
           else
             echo "Bitcoin download attempt $attempt failed, retrying..."
