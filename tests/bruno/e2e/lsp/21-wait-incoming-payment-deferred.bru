@@ -1,0 +1,48 @@
+meta {
+  name: wait incoming hosted payment buffered
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "lsp_get_payment_delivery",
+    "params": [
+      { "payment_hash": "{{LSP_INCOMING_PAYMENT_HASH}}" }
+    ]
+  }
+}
+
+vars:post-response {
+  LSP_DEFERRED_MAX_ITERATIONS: 30
+}
+
+script:post-response {
+  const iteration = Number(bru.getVar("LSP_DEFERRED_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("LSP_DEFERRED_MAX_ITERATIONS"));
+
+  if (!res.body.error && res.body.result.status === "deferred") {
+    bru.setVar("LSP_DEFERRED_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("LSP_DEFERRED_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait incoming hosted payment buffered");
+    return;
+  }
+  throw new Error(`incoming hosted payment was not buffered: ${JSON.stringify(res.body)}`);
+}
