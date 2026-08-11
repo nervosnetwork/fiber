@@ -18,7 +18,8 @@ pub use invoice::{
 };
 pub use registry::{TenantRegistry, TenantRegistryStore};
 pub use runtime::{
-    FiberTenantRuntimeFactory, HostedTenantRuntime, TenantRuntimeFactory, TenantSupervisor,
+    FiberTenantRuntimeFactory, HostedTenantRpcContext, HostedTenantRuntime, TenantRuntimeFactory,
+    TenantSupervisor,
 };
 pub use service::{
     LspDeliveryDecision, LspService, LspServiceArgs, LspServiceMessage, LspServiceState,

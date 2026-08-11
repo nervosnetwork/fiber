@@ -7,7 +7,7 @@ use serde_with::serde_as;
 use crate::{
     schema_helpers::{schema_as_uint_hex, schema_as_uint_hex_optional},
     serde_utils::U64Hex,
-    Hash256, Pubkey,
+    GetPaymentCommandParams, Hash256, NewInvoiceParams, Pubkey, SendPaymentCommandParams,
 };
 
 /// Parameters that identify a hosted tenant.
@@ -15,6 +15,47 @@ use crate::{
 pub struct LspTenantParams {
     /// Stable operator-facing tenant identifier.
     pub tenant_id: String,
+}
+
+/// Parameters for creating and registering an invoice owned by a hosted tenant.
+#[serde_as]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+pub struct NewLspInvoiceParams {
+    /// Hosted tenant that owns and signs the invoice.
+    pub tenant_id: String,
+    /// Standard Fiber invoice parameters evaluated in the tenant runtime.
+    pub invoice: NewInvoiceParams,
+    /// Maximum time Public T may buffer the incoming payment while the tenant is offline.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub buffer_duration_ms: Option<u64>,
+}
+
+/// Parameters for sending a payment from a hosted tenant runtime.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct SendLspPaymentParams {
+    /// Hosted tenant that owns the outgoing payment session.
+    pub tenant_id: String,
+    /// Standard Fiber payment parameters evaluated in the tenant runtime.
+    pub payment: SendPaymentCommandParams,
+}
+
+/// Parameters for retrieving a hosted tenant's outgoing payment session.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+pub struct GetLspPaymentParams {
+    /// Hosted tenant that owns the outgoing payment session.
+    pub tenant_id: String,
+    /// Standard Fiber payment lookup parameters.
+    pub payment: GetPaymentCommandParams,
+}
+
+/// Parameters for retrieving an invoice from a hosted tenant's store.
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
+pub struct GetLspInvoiceParams {
+    /// Hosted tenant that owns the invoice.
+    pub tenant_id: String,
+    /// Payment hash of the invoice to retrieve.
+    pub payment_hash: Hash256,
 }
 
 /// Parameters for registering a signed hosted invoice.

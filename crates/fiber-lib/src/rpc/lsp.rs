@@ -7,19 +7,23 @@ use ractor::{call, ActorRef};
 
 use crate::invoice::CkbInvoice;
 use crate::lsp::{
-    HostedTenantStatus as InternalTenantStatus, LspInvoiceHint as InternalInvoiceHint,
-    LspInvoiceRegistration as InternalInvoiceRegistration,
+    HostedTenantRpcContext, HostedTenantStatus as InternalTenantStatus,
+    LspInvoiceHint as InternalInvoiceHint, LspInvoiceRegistration as InternalInvoiceRegistration,
     LspPaymentDelivery as InternalPaymentDelivery,
     LspPaymentDeliveryStatus as InternalPaymentDeliveryStatus, LspServiceMessage,
     LspServiceStatus as InternalServiceStatus, TenantId,
     TenantRuntimeStatus as InternalTenantRuntimeStatus,
 };
+use crate::rpc::invoice::InvoiceRpcServerImpl;
+use crate::rpc::payment::PaymentRpcServerImpl;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 
 pub use fiber_json_types::{
+    GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetPaymentCommandResult,
     ListLspTenantsResult, LspInvoiceHint, LspInvoiceRegistration, LspPaymentDelivery,
     LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantParams,
-    LspTenantRuntimeStatus, LspTenantStatus, RegisterLspInvoiceParams,
+    LspTenantRuntimeStatus, LspTenantStatus, NewLspInvoiceParams, RegisterLspInvoiceParams,
+    SendLspPaymentParams,
 };
 
 /// RPC module for hosted LSP tenant and payment-delivery administration.
@@ -54,6 +58,34 @@ trait LspRpc {
     #[method(name = "lsp_list_tenants")]
     async fn lsp_list_tenants(&self) -> Result<ListLspTenantsResult, ErrorObjectOwned>;
 
+    /// Creates a tenant-signed invoice, stores it in the tenant runtime and registers its LSP hint.
+    #[method(name = "lsp_new_invoice")]
+    async fn lsp_new_invoice(
+        &self,
+        params: NewLspInvoiceParams,
+    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned>;
+
+    /// Retrieves an invoice from a hosted tenant's scoped store.
+    #[method(name = "lsp_get_invoice")]
+    async fn lsp_get_invoice(
+        &self,
+        params: GetLspInvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
+
+    /// Starts an outgoing payment in a hosted tenant runtime.
+    #[method(name = "lsp_send_payment")]
+    async fn lsp_send_payment(
+        &self,
+        params: SendLspPaymentParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    /// Retrieves an outgoing payment owned by a hosted tenant runtime.
+    #[method(name = "lsp_get_payment")]
+    async fn lsp_get_payment(
+        &self,
+        params: GetLspPaymentParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
     /// Registers a tenant-signed invoice and returns its authenticated LSP hint.
     #[method(name = "lsp_register_invoice")]
     async fn lsp_register_invoice(
@@ -85,6 +117,19 @@ impl LspRpcServerImpl {
     /// Construct an LSP RPC server backed by `actor`.
     pub fn new(actor: ActorRef<LspServiceMessage>) -> Self {
         Self { actor }
+    }
+
+    async fn tenant_rpc_context(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<HostedTenantRpcContext, ErrorObjectOwned> {
+        call!(
+            self.actor,
+            LspServiceMessage::GetTenantRpcContext,
+            tenant_id
+        )
+        .rpc_err()?
+        .rpc_err()
     }
 
     async fn register_tenant(
@@ -136,6 +181,71 @@ impl LspRpcServerImpl {
         .rpc_err()?
         .rpc_err()
         .map(Into::into)
+    }
+
+    async fn new_invoice(
+        &self,
+        params: NewLspInvoiceParams,
+    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
+        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
+        let context = self.tenant_rpc_context(tenant_id.clone()).await?;
+        let result = InvoiceRpcServerImpl::new(
+            context.store,
+            Some(context.network_actor),
+            Some(context.config),
+        )
+        .new_invoice(params.invoice)
+        .await?;
+        let invoice = CkbInvoice::from_str(&result.invoice_address)
+            .map_err(|error| rpc_error(format!("failed to parse hosted invoice: {error}")))?;
+        call!(self.actor, |reply| LspServiceMessage::RegisterInvoice {
+            tenant_id,
+            invoice,
+            buffer_duration_ms: params.buffer_duration_ms,
+            reply,
+        })
+        .rpc_err()?
+        .rpc_err()
+        .map(Into::into)
+    }
+
+    async fn get_invoice(
+        &self,
+        params: GetLspInvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
+        let context = self.tenant_rpc_context(tenant_id).await?;
+        InvoiceRpcServerImpl::new(
+            context.store,
+            Some(context.network_actor),
+            Some(context.config),
+        )
+        .get_invoice(fiber_json_types::InvoiceParams {
+            payment_hash: params.payment_hash,
+        })
+        .await
+    }
+
+    async fn send_payment(
+        &self,
+        params: SendLspPaymentParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
+        let context = self.tenant_rpc_context(tenant_id).await?;
+        PaymentRpcServerImpl::new(context.network_actor, context.store)
+            .send_payment(params.payment)
+            .await
+    }
+
+    async fn get_payment(
+        &self,
+        params: GetLspPaymentParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
+        let context = self.tenant_rpc_context(tenant_id).await?;
+        PaymentRpcServerImpl::new(context.network_actor, context.store)
+            .get_payment(params.payment)
+            .await
     }
 
     async fn get_invoice_registration(
@@ -207,6 +317,34 @@ impl LspRpcServer for LspRpcServerImpl {
             .map(|tenants| ListLspTenantsResult {
                 tenants: tenants.into_iter().map(Into::into).collect(),
             })
+    }
+
+    async fn lsp_new_invoice(
+        &self,
+        params: NewLspInvoiceParams,
+    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
+        self.new_invoice(params).await
+    }
+
+    async fn lsp_get_invoice(
+        &self,
+        params: GetLspInvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        self.get_invoice(params).await
+    }
+
+    async fn lsp_send_payment(
+        &self,
+        params: SendLspPaymentParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.send_payment(params).await
+    }
+
+    async fn lsp_get_payment(
+        &self,
+        params: GetLspPaymentParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        self.get_payment(params).await
     }
 
     async fn lsp_register_invoice(

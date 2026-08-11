@@ -26,6 +26,15 @@ pub(crate) struct HostedTenantTransport {
     endpoint: ActorRef<NetworkActorMessage>,
 }
 
+/// Tenant-scoped handles used by the authenticated LSP RPC facade.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct HostedTenantRpcContext {
+    pub(crate) config: FiberConfig,
+    pub(crate) network_actor: ActorRef<NetworkActorMessage>,
+    pub(crate) store: Store,
+}
+
 pub(crate) enum HostedTenantRuntimeMessage {
     FiberMessage {
         source: Pubkey,
@@ -86,6 +95,7 @@ pub struct HostedTenantRuntime {
     backend_actor: Option<ActorCell>,
     pub public_network_actor: Option<ActorRef<NetworkActorMessage>>,
     pub(crate) transport: Option<HostedTenantTransport>,
+    rpc_context: Option<HostedTenantRpcContext>,
 }
 
 impl HostedTenantRuntime {
@@ -104,6 +114,7 @@ impl HostedTenantRuntime {
             backend_actor: Some(backend_actor),
             public_network_actor: None,
             transport: None,
+            rpc_context: None,
         })
     }
 
@@ -137,6 +148,12 @@ impl HostedTenantRuntime {
                 activity.pending_channel_operations
             ))
         }
+    }
+
+    fn rpc_context(&self) -> Result<HostedTenantRpcContext, String> {
+        self.rpc_context
+            .clone()
+            .ok_or_else(|| "hosted tenant runtime has no RPC context".to_string())
     }
 
     pub fn stop(self) {
@@ -250,13 +267,13 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         )));
         let (event_sender, mut event_receiver) = mpsc::channel(1024);
         let actor = start_network(
-            config,
+            config.clone(),
             self.chain_client.clone(),
             self.chain_actor.clone(),
             event_sender,
             new_tokio_task_tracker(),
             self.root_actor.clone(),
-            store,
+            store.clone(),
             None,
             graph,
             self.default_shutdown_script.clone(),
@@ -397,6 +414,11 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             .spawn(async move { while event_receiver.recv().await.is_some() {} });
 
         runtime.public_network_actor = Some(self.public_network_actor.clone());
+        runtime.rpc_context = Some(HostedTenantRpcContext {
+            config,
+            network_actor: actor,
+            store,
+        });
         runtime.transport = Some(HostedTenantTransport {
             tenant_id: record.tenant_id.clone(),
             dispatcher: self.dispatcher.clone(),
@@ -472,6 +494,13 @@ impl TenantSupervisor {
             .values()
             .filter(|runtime| runtime.is_running())
             .count()
+    }
+
+    pub fn rpc_context(&self, tenant_id: &TenantId) -> Result<HostedTenantRpcContext, String> {
+        self.runtimes
+            .get(tenant_id)
+            .ok_or_else(|| format!("hosted tenant {tenant_id} runtime is not active"))?
+            .rpc_context()
     }
 
     fn remove_stopped_runtimes(&mut self) {

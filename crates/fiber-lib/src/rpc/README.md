@@ -53,6 +53,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `lsp_ensure_tenant`](#lsp-lsp_ensure_tenant)
         * [Method `lsp_evict_tenant`](#lsp-lsp_evict_tenant)
         * [Method `lsp_list_tenants`](#lsp-lsp_list_tenants)
+        * [Method `lsp_new_invoice`](#lsp-lsp_new_invoice)
+        * [Method `lsp_get_invoice`](#lsp-lsp_get_invoice)
+        * [Method `lsp_send_payment`](#lsp-lsp_send_payment)
+        * [Method `lsp_get_payment`](#lsp-lsp_get_payment)
         * [Method `lsp_register_invoice`](#lsp-lsp_register_invoice)
         * [Method `lsp_get_invoice_registration`](#lsp-lsp_get_invoice_registration)
         * [Method `lsp_get_payment_delivery`](#lsp-lsp_get_payment_delivery)
@@ -100,6 +104,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `LspPaymentDeliveryStatus`](#type-lsppaymentdeliverystatus)
     * [Type `LspTenantRuntimeStatus`](#type-lsptenantruntimestatus)
     * [Type `LspTenantStatus`](#type-lsptenantstatus)
+    * [Type `NewInvoiceParams`](#type-newinvoiceparams)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
@@ -892,6 +897,109 @@ Lists all persistently registered hosted tenants.
 ##### Returns
 
 * `tenants` - <em>Vec<[LspTenantStatus](#type-lsptenantstatus)></em>, Registered hosted tenants.
+
+---
+
+
+
+<a id="lsp-lsp_new_invoice"></a>
+#### Method `lsp_new_invoice`
+
+Creates a tenant-signed invoice, stores it in the tenant runtime and registers its LSP hint.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Hosted tenant that owns and signs the invoice.
+* `invoice` - <em>[NewInvoiceParams](#type-newinvoiceparams)</em>, Standard Fiber invoice parameters evaluated in the tenant runtime.
+* `buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time Public T may buffer the incoming payment while the tenant is offline.
+
+##### Returns
+
+* `tenant_id` - <em>`String`</em>, Tenant that owns the invoice.
+* `invoice` - <em>`String`</em>, Canonical encoded Fiber invoice.
+* `hint` - <em>[LspInvoiceHint](#type-lspinvoicehint)</em>, Authenticated routing and buffering hint to distribute with the invoice.
+
+---
+
+
+
+<a id="lsp-lsp_get_invoice"></a>
+#### Method `lsp_get_invoice`
+
+Retrieves an invoice from a hosted tenant's scoped store.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Hosted tenant that owns the invoice.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the invoice to retrieve.
+
+##### Returns
+
+* `invoice_address` - <em>`String`</em>, The encoded invoice address.
+* `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+* `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
+
+---
+
+
+
+<a id="lsp-lsp_send_payment"></a>
+#### Method `lsp_send_payment`
+
+Starts an outgoing payment in a hosted tenant runtime.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Hosted tenant that owns the outgoing payment session.
+* `payment` - <em>[SendPaymentCommandParams](#type-sendpaymentcommandparams)</em>, Standard Fiber payment parameters evaluated in the tenant runtime.
+
+##### Returns
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
+
+---
+
+
+
+<a id="lsp-lsp_get_payment"></a>
+#### Method `lsp_get_payment`
+
+Retrieves an outgoing payment owned by a hosted tenant runtime.
+
+##### Params
+
+* `tenant_id` - <em>`String`</em>, Hosted tenant that owns the outgoing payment session.
+* `payment` - <em>[GetPaymentCommandParams](#type-getpaymentcommandparams)</em>, Standard Fiber payment lookup parameters.
+
+##### Returns
+
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
+* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
+* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
+* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
+* `fee` - <em>`u128`</em>, fee paid for the payment
+* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
+* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
+ We store in the payment session and then will use it to track the payment history.
+ If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
+ For example:
+    `A(amount, channel) -> B -> C -> D`
+ means A will send `amount` with `channel` to B.
 
 ---
 
@@ -1805,6 +1913,31 @@ Hosted tenant state boundary and liveness information.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
 * `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
+---
+
+<a id="#type-newinvoiceparams"></a>
+### Type `NewInvoiceParams`
+
+The parameter struct for generating a new invoice.
+
+
+#### Fields
+
+* `amount` - <em>`u128`</em>, The amount of the invoice.
+* `description` - <em>`Option<String>`</em>, The description of the invoice.
+* `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
+* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
+ If both preimage and hash are absent, a random preimage is generated.
+* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
+ for which the tlc must be accepted and held until the preimage becomes known.
+* `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
+* `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
+* `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
+ Minimal value is 16 hours, and maximal value is 14 days.
+* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
+* `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
+* `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
+* `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
 ---
 
 <a id="#type-nodeinfo"></a>

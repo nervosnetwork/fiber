@@ -11,9 +11,10 @@ use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
 use super::{
-    HostedTenantStatus, LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery,
-    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus, TenantId,
-    TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
+    HostedTenantRpcContext, HostedTenantStatus, LspConfig, LspInvoiceRegistration,
+    LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
+    LspPaymentDeliveryStatus, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
+    TenantSupervisor,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -49,6 +50,11 @@ pub enum LspServiceMessage {
     EnsureTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     EvictTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     ListTenants(RpcReplyPort<Result<Vec<HostedTenantStatus>, String>>),
+    /// Returns an active tenant's scoped RPC backend, starting it when needed.
+    GetTenantRpcContext(
+        TenantId,
+        RpcReplyPort<Result<HostedTenantRpcContext, String>>,
+    ),
     RegisterInvoice {
         tenant_id: TenantId,
         invoice: CkbInvoice,
@@ -321,6 +327,18 @@ impl Actor for LspService {
                         .map(|record| state.tenant_status(record))
                         .collect()
                 });
+                let _ = reply.send(result);
+            }
+            LspServiceMessage::GetTenantRpcContext(tenant_id, reply) => {
+                let result = match state.registry.get(&tenant_id) {
+                    Ok(Some(record)) => state
+                        .supervisor
+                        .ensure(&record)
+                        .await
+                        .and_then(|()| state.supervisor.rpc_context(&tenant_id)),
+                    Ok(None) => Err(format!("tenant {tenant_id} is not registered")),
+                    Err(error) => Err(error),
+                };
                 let _ = reply.send(result);
             }
             LspServiceMessage::RegisterInvoice {
