@@ -10,6 +10,7 @@ use biscuit_auth::{
     Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
 };
 
+use crate::lsp::TenantId;
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
 
@@ -138,6 +139,10 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
+    b.rule("lsp_new_invoice", r#"allow if write("lsp");"#);
+    b.rule("lsp_get_invoice", r#"allow if read("lsp");"#);
+    b.rule("lsp_send_payment", r#"allow if write("lsp");"#);
+    b.rule("lsp_get_payment", r#"allow if read("lsp");"#);
     b.rule("lsp_register_invoice", r#"allow if write("lsp");"#);
     b.rule("lsp_get_invoice_registration", r#"allow if read("lsp");"#);
     b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
@@ -285,13 +290,36 @@ pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     Ok(node_id)
 }
 
+/// Extract the hosted tenant identity from the token authority block.
+///
+/// Biscuit holders may append attenuation blocks, so tenant facts from those
+/// blocks must not be trusted for request routing. `Authorizer::query` only
+/// exposes authority facts unless an additional trust scope is requested.
+pub fn extract_tenant_id(token: &Biscuit) -> Result<Option<TenantId>> {
+    const QUERY: &str = "data($id) <- tenant($id)";
+    let mut authorizer = build_authorizer(token)?;
+    let tenants: Vec<(String,)> = authorizer.query(QUERY)?;
+    match tenants.as_slice() {
+        [] => Ok(None),
+        [(tenant_id,)] => TenantId::new(tenant_id.clone())
+            .map(Some)
+            .map_err(anyhow::Error::msg),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one tenant fact"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use biscuit_auth::{macros::biscuit, KeyPair};
+    use biscuit_auth::{
+        macros::{biscuit, block},
+        KeyPair,
+    };
 
-    use crate::rpc::biscuit::extract_node_id;
+    use crate::rpc::biscuit::{extract_node_id, extract_tenant_id};
 
     use super::{build_authorizer, AuthRule, BiscuitAuth};
 
@@ -315,6 +343,41 @@ mod tests {
         let limits = authorizer.limits();
 
         assert_eq!(limits.max_time, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_extract_tenant_id_only_trusts_the_authority_block() {
+        let root = KeyPair::new();
+        let tenant_token = biscuit!(r#"tenant("u1");"#).build(&root).unwrap();
+        assert_eq!(
+            extract_tenant_id(&tenant_token).unwrap(),
+            Some(crate::lsp::TenantId::new("u1").unwrap())
+        );
+
+        let public_token = biscuit!(r#"read("channels");"#).build(&root).unwrap();
+        assert_eq!(extract_tenant_id(&public_token).unwrap(), None);
+
+        let attenuated = public_token
+            .append(block!(r#"tenant("u1");"#))
+            .expect("append untrusted tenant fact");
+        assert_eq!(extract_tenant_id(&attenuated).unwrap(), None);
+    }
+
+    #[test]
+    fn test_extract_tenant_id_rejects_invalid_authority_facts() {
+        let root = KeyPair::new();
+        let invalid = biscuit!(r#"tenant("../u1");"#).build(&root).unwrap();
+        assert!(extract_tenant_id(&invalid).is_err());
+
+        let ambiguous = biscuit!(
+            r#"
+                tenant("u1");
+                tenant("u2");
+            "#
+        )
+        .build(&root)
+        .unwrap();
+        assert!(extract_tenant_id(&ambiguous).is_err());
     }
 
     #[test]
@@ -418,6 +481,8 @@ mod tests {
         let read_methods = [
             "lsp_get_status",
             "lsp_list_tenants",
+            "lsp_get_invoice",
+            "lsp_get_payment",
             "lsp_get_invoice_registration",
             "lsp_get_payment_delivery",
         ];
@@ -425,6 +490,8 @@ mod tests {
             "lsp_register_tenant",
             "lsp_ensure_tenant",
             "lsp_evict_tenant",
+            "lsp_new_invoice",
+            "lsp_send_payment",
             "lsp_register_invoice",
         ];
 

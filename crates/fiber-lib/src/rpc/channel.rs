@@ -21,6 +21,8 @@ use fiber_types::{ChannelOpeningStatus, Pubkey, TLCId};
 use jsonrpsee::proc_macros::rpc;
 
 use jsonrpsee::types::ErrorObjectOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::Extensions;
 use ractor::{call, ActorRef};
 use std::cmp::Reverse;
 
@@ -37,14 +39,14 @@ pub use fiber_json_types::{
 #[rpc(server)]
 trait ChannelRpc {
     /// Attempts to open a channel with a peer.
-    #[method(name = "open_channel")]
+    #[method(name = "open_channel", with_extensions)]
     async fn open_channel(
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned>;
 
     /// Accepts a channel opening request from a peer.
-    #[method(name = "accept_channel")]
+    #[method(name = "accept_channel", with_extensions)]
     async fn accept_channel(
         &self,
         params: AcceptChannelParams,
@@ -52,23 +54,23 @@ trait ChannelRpc {
 
     /// Abandon a channel, this will remove the channel from the channel manager and DB.
     /// Only channels not in Ready or Closed state can be abandoned.
-    #[method(name = "abandon_channel")]
+    #[method(name = "abandon_channel", with_extensions)]
     async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned>;
 
     /// Lists all channels.
-    #[method(name = "list_channels")]
+    #[method(name = "list_channels", with_extensions)]
     async fn list_channels(
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned>;
 
     /// Shuts down a channel.
-    #[method(name = "shutdown_channel")]
+    #[method(name = "shutdown_channel", with_extensions)]
     async fn shutdown_channel(&self, params: ShutdownChannelParams)
         -> Result<(), ErrorObjectOwned>;
 
     /// Updates a channel.
-    #[method(name = "update_channel")]
+    #[method(name = "update_channel", with_extensions)]
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
 
     /// Opens a channel with external funding. The node will negotiate the channel with the peer,
@@ -80,7 +82,7 @@ trait ChannelRpc {
     /// Returns the final unsigned funding transaction after internal tx collaboration
     /// has frozen the structure. The user must sign it and submit it with
     /// `submit_signed_funding_tx` without changing the transaction structure.
-    #[method(name = "open_channel_with_external_funding")]
+    #[method(name = "open_channel_with_external_funding", with_extensions)]
     async fn open_channel_with_external_funding(
         &self,
         params: OpenChannelWithExternalFundingParams,
@@ -95,7 +97,7 @@ trait ChannelRpc {
     /// External signers must keep `inputs`, `outputs`, `outputs_data`, and `cell_deps`
     /// unchanged. See the [external funding guide](../../../../docs/external-funding.md)
     /// for signing details and examples.
-    #[method(name = "submit_signed_funding_tx")]
+    #[method(name = "submit_signed_funding_tx", with_extensions)]
     async fn submit_signed_funding_tx(
         &self,
         params: SubmitSignedFundingTxParams,
@@ -140,11 +142,35 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
 pub struct ChannelRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
 
 impl<S> ChannelRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
-        ChannelRpcServerImpl { actor, store }
+        ChannelRpcServerImpl {
+            actor,
+            store,
+            #[cfg(not(target_arch = "wasm32"))]
+            lsp_actor: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lsp_actor(
+        mut self,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    ) -> Self {
+        self.lsp_actor = lsp_actor;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn tenant_rpc_context(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -156,59 +182,131 @@ where
     /// Attempts to open a channel with a peer.
     async fn open_channel(
         &self,
+        extensions: &Extensions,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
+            if pubkey != context.public_node_id {
+                return Err(rpc_error(
+                    "hosted tenants may only open a channel to the public LSP node",
+                ));
+            }
+            if params.public.unwrap_or(true) {
+                return Err(rpc_error("hosted tenant channels must be private"));
+            }
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .open_channel(params)
+                .await;
+        }
         self.open_channel(params).await
     }
 
     /// Accepts a channel opening request from a peer.
     async fn accept_channel(
         &self,
+        extensions: &Extensions,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .accept_channel(params)
+                .await;
+        }
         self.accept_channel(params).await
     }
 
     /// Abandon a channel, this will remove the channel from the channel manager and DB.
     /// Only channels not in Ready or Closed state can be abandoned.
-    async fn abandon_channel(&self, params: AbandonChannelParams) -> Result<(), ErrorObjectOwned> {
+    async fn abandon_channel(
+        &self,
+        extensions: &Extensions,
+        params: AbandonChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .abandon_channel(params)
+                .await;
+        }
         self.abandon_channel(params).await
     }
 
     /// Lists all channels.
     async fn list_channels(
         &self,
+        extensions: &Extensions,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .list_channels(params)
+                .await;
+        }
         self.list_channels(params).await
     }
 
     /// Shuts down a channel.
     async fn shutdown_channel(
         &self,
+        extensions: &Extensions,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .shutdown_channel(params)
+                .await;
+        }
         self.shutdown_channel(params).await
     }
 
     /// Updates a channel.
-    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
+    async fn update_channel(
+        &self,
+        extensions: &Extensions,
+        params: UpdateChannelParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .update_channel(params)
+                .await;
+        }
         self.update_channel(params).await
     }
 
     /// Opens a channel with external funding.
     async fn open_channel_with_external_funding(
         &self,
+        extensions: &Extensions,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
+            if pubkey != context.public_node_id {
+                return Err(rpc_error(
+                    "hosted tenants may only open a channel to the public LSP node",
+                ));
+            }
+            if params.public.unwrap_or(true) {
+                return Err(rpc_error("hosted tenant channels must be private"));
+            }
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .open_channel_with_external_funding(params)
+                .await;
+        }
         self.open_channel_with_external_funding(params).await
     }
 
     /// Submits a signed funding transaction for an externally funded channel.
     async fn submit_signed_funding_tx(
         &self,
+        extensions: &Extensions,
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+                .submit_signed_funding_tx(params)
+                .await;
+        }
         self.submit_signed_funding_tx(params).await
     }
 }

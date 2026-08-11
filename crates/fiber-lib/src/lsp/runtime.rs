@@ -32,6 +32,7 @@ pub(crate) struct HostedTenantTransport {
 pub struct HostedTenantRpcContext {
     pub(crate) config: FiberConfig,
     pub(crate) network_actor: ActorRef<NetworkActorMessage>,
+    pub(crate) public_node_id: Pubkey,
     pub(crate) store: Store,
 }
 
@@ -417,6 +418,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         runtime.rpc_context = Some(HostedTenantRpcContext {
             config,
             network_actor: actor,
+            public_node_id,
             store,
         });
         runtime.transport = Some(HostedTenantTransport {

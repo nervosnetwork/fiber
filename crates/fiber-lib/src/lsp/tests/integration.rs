@@ -1,4 +1,5 @@
 use std::{
+    str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -7,7 +8,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use biscuit_auth::{macros::biscuit, KeyPair};
 use ckb_types::packed::Script;
+use hyper::{
+    header::{HeaderValue, AUTHORIZATION},
+    HeaderMap,
+};
 use jsonrpsee::{
     core::client::ClientT,
     http_client::{HttpClient, HttpClientBuilder},
@@ -52,6 +58,18 @@ use crate::{
 
 const TENANT_ID: &str = "u1";
 const BUFFER_DURATION_MS: u64 = 120_000;
+
+fn authenticated_client(rpc_addr: std::net::SocketAddr, token: &str) -> HttpClient {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("valid authorization header"),
+    );
+    HttpClientBuilder::default()
+        .set_headers(headers)
+        .build(format!("http://{rpc_addr}"))
+        .expect("build authenticated LSP RPC client")
+}
 
 struct ExistingRuntimeFactory {
     record: HostedTenantRecord,
@@ -385,6 +403,272 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     assert_eq!(status.active_tenants, 0);
 
     rpc_handle.stop().expect("stop LSP RPC server");
+    rpc_handle.stopped().await;
+    lsp_actor.stop(Some("integration test complete".to_string()));
+}
+
+#[tokio::test]
+async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
+    init_tracing();
+
+    let public_t = NetworkNode::new_with_node_name("lsp-auth-public-t").await;
+    let root = tempdir().expect("temporary LSP directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let ckb_config = CkbConfig {
+        base_dir: Some(root.path().join("ckb")),
+        rpc_url: "http://127.0.0.1:8114".to_string(),
+        udt_whitelist: None,
+        tx_tracing_polling_interval_ms: 4_000,
+        funding_tx_shell_builder: None,
+    };
+    let root_actor = get_test_root_actor().await;
+    let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        config.clone(),
+        public_t.fiber_config.clone(),
+        CkbRpcClient::new(&ckb_config),
+        public_t.chain_actor.clone(),
+        public_t.network_actor.clone(),
+        public_t.store.clone(),
+        root_actor.get_cell(),
+        Script::default(),
+    ));
+    let tenant_id = TenantId::new(TENANT_ID).unwrap();
+    let expected_tenant = runtime_factory
+        .provision(&tenant_id)
+        .expect("provision hosted tenant identity");
+    let lsp_actor = Actor::spawn_linked(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: public_t.pubkey,
+            public_network_actor: public_t.network_actor.clone(),
+            store: public_t.store.namespaced(NodeNamespace::lsp_metadata()),
+            runtime_factory,
+            signing_key: public_t.private_key.clone(),
+        },
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("start authenticated LSP service")
+    .0;
+
+    let biscuit_root = KeyPair::new();
+    let admin_token = biscuit!(
+        r#"
+            read("lsp");
+            write("lsp");
+        "#
+    )
+    .build(&biscuit_root)
+    .unwrap()
+    .to_base64()
+    .unwrap();
+    let tenant_token = biscuit!(
+        r#"
+            tenant("u1");
+            read("channels");
+            write("channels");
+            read("invoices");
+            write("invoices");
+            read("payments");
+        "#
+    )
+    .build(&biscuit_root)
+    .unwrap()
+    .to_base64()
+    .unwrap();
+    let public_invoice_token = biscuit!(r#"read("invoices");"#)
+        .build(&biscuit_root)
+        .unwrap()
+        .to_base64()
+        .unwrap();
+
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.biscuit_public_key = Some(biscuit_root.public().to_string());
+    rpc_config.enabled_modules = vec![
+        "channel".to_string(),
+        "invoice".to_string(),
+        "lsp".to_string(),
+        "payment".to_string(),
+    ];
+    let (rpc_handle, rpc_addr) = start_rpc(
+        rpc_config,
+        None,
+        Some(public_t.fiber_config.clone()),
+        Some(public_t.network_actor.clone()),
+        None,
+        Some(lsp_actor.clone()),
+        public_t.store.clone(),
+        None,
+        Some(public_t.network_graph.clone()),
+        root_actor.get_cell(),
+        None,
+        #[cfg(debug_assertions)]
+        None,
+        #[cfg(debug_assertions)]
+        None,
+    )
+    .await
+    .expect("start authenticated LSP RPC server");
+    let admin_client = authenticated_client(rpc_addr, &admin_token);
+    let tenant_client = authenticated_client(rpc_addr, &tenant_token);
+    let public_client = authenticated_client(rpc_addr, &public_invoice_token);
+
+    let registered: crate::rpc::lsp::LspTenantStatus = admin_client
+        .request(
+            "lsp_register_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("register hosted tenant");
+    assert!(matches!(
+        registered.runtime_status,
+        LspTenantRuntimeStatus::Cold
+    ));
+
+    let channels: fiber_json_types::ListChannelsResult = tenant_client
+        .request(
+            "list_channels",
+            rpc_params![fiber_json_types::ListChannelsParams {
+                pubkey: None,
+                include_closed: None,
+                only_pending: None,
+            }],
+        )
+        .await
+        .expect("list tenant channels through the standard RPC");
+    assert!(channels.channels.is_empty());
+    let payments: fiber_json_types::ListPaymentsResult = tenant_client
+        .request(
+            "list_payments",
+            rpc_params![fiber_json_types::ListPaymentsParams {
+                status: None,
+                limit: None,
+                after: None,
+            }],
+        )
+        .await
+        .expect("list tenant payments through the standard RPC");
+    assert!(payments.payments.is_empty());
+
+    let active: LspServiceStatus = admin_client
+        .request("lsp_get_status", rpc_params![])
+        .await
+        .expect("get active LSP status");
+    assert_eq!(active.active_tenants, 1);
+
+    let public_channel_error = match tenant_client
+        .request::<fiber_json_types::OpenChannelResult, _>(
+            "open_channel",
+            rpc_params![fiber_json_types::OpenChannelParams {
+                pubkey: public_t.pubkey.into(),
+                funding_amount: 1_000,
+                public: Some(true),
+                one_way: None,
+                shutdown_script: None,
+                commitment_delay_epoch: None,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            }],
+        )
+        .await
+    {
+        Ok(_) => panic!("tenant must not open a public channel"),
+        Err(error) => error,
+    };
+    assert!(public_channel_error
+        .to_string()
+        .contains("hosted tenant channels must be private"));
+
+    let wrong_peer_error = match tenant_client
+        .request::<fiber_json_types::OpenChannelResult, _>(
+            "open_channel",
+            rpc_params![fiber_json_types::OpenChannelParams {
+                pubkey: expected_tenant.invoice_pubkey.into(),
+                funding_amount: 1_000,
+                public: Some(false),
+                one_way: None,
+                shutdown_script: None,
+                commitment_delay_epoch: None,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            }],
+        )
+        .await
+    {
+        Ok(_) => panic!("tenant must not open a channel to another peer"),
+        Err(error) => error,
+    };
+    assert!(wrong_peer_error
+        .to_string()
+        .contains("hosted tenants may only open a channel to the public LSP node"));
+
+    let invoice: fiber_json_types::InvoiceResult = tenant_client
+        .request(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000,
+                description: Some("tenant-scoped RPC invoice".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: None,
+                expiry: None,
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+            }],
+        )
+        .await
+        .expect("create invoice through the standard tenant RPC");
+    let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
+        .expect("decode tenant invoice");
+    let expected_invoice_pubkey: secp256k1::PublicKey = expected_tenant.invoice_pubkey.into();
+    assert_eq!(decoded.payee_pub_key(), Some(&expected_invoice_pubkey));
+
+    let tenant_invoice: fiber_json_types::GetInvoiceResult = tenant_client
+        .request(
+            "get_invoice",
+            rpc_params![fiber_json_types::InvoiceParams {
+                payment_hash: invoice.invoice.data.payment_hash,
+            }],
+        )
+        .await
+        .expect("read tenant invoice from its namespace");
+    assert_eq!(tenant_invoice.invoice_address, invoice.invoice_address);
+    if public_client
+        .request::<fiber_json_types::GetInvoiceResult, _>(
+            "get_invoice",
+            rpc_params![fiber_json_types::InvoiceParams {
+                payment_hash: invoice.invoice.data.payment_hash,
+            }],
+        )
+        .await
+        .is_ok()
+    {
+        panic!("public node must not see a tenant invoice");
+    }
+
+    rpc_handle
+        .stop()
+        .expect("stop authenticated LSP RPC server");
     rpc_handle.stopped().await;
     lsp_actor.stop(Some("integration test complete".to_string()));
 }

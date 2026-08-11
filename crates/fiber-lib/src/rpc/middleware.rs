@@ -9,9 +9,10 @@ use hyper::HeaderMap;
 use jsonrpsee::core::middleware::{Batch, BatchEntry, BatchEntryErr, Notification};
 use jsonrpsee::server::middleware::rpc::RpcServiceT;
 use jsonrpsee::types::{ErrorObject, ErrorObjectOwned, Id, Request};
-use jsonrpsee::MethodResponse;
+use jsonrpsee::{Extensions, MethodResponse};
 
-use crate::rpc::biscuit::extract_node_id;
+use crate::rpc::biscuit::{extract_node_id, extract_tenant_id};
+use crate::rpc::tenant::AuthenticatedTenant;
 use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
 
@@ -58,11 +59,23 @@ impl<S> BiscuitAuthMiddleware<S> {
         tracing::trace!("Injected req params {:?}", &req.params);
     }
 
+    fn inject_authenticated_tenant(
+        &self,
+        extensions: &mut Extensions,
+        token: &biscuit_auth::Biscuit,
+    ) -> Result<()> {
+        if let Some(tenant_id) = extract_tenant_id(token)? {
+            extensions.insert(AuthenticatedTenant(tenant_id));
+        }
+        Ok(())
+    }
+
     /// Authorize the request
     fn auth_call(&self, req: &mut Request<'_>) -> Result<()> {
         if self.enable_auth {
             let token = self.auth_token()?;
             let (token, rule) = self.auth.check_permission(&req.method, &token)?;
+            self.inject_authenticated_tenant(req.extensions_mut(), &token)?;
             if rule.require_rpc_context {
                 let node_id = extract_node_id(&token)?;
 
@@ -97,11 +110,14 @@ impl<S> BiscuitAuthMiddleware<S> {
     }
 
     /// Authorize the notification
-    fn auth_notify(&self, notify: &Notification<'_>) -> Result<()> {
-        let token = self.auth_token()?;
-        self.auth
-            .check_permission(notify.method_name(), &token)
-            .map(|_| ())
+    fn auth_notify(&self, notify: &mut Notification<'_>) -> Result<()> {
+        if self.enable_auth {
+            let token = self.auth_token()?;
+            let (token, _) = self.auth.check_permission(notify.method_name(), &token)?;
+            self.inject_authenticated_tenant(notify.extensions_mut(), &token)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -149,9 +165,9 @@ where
                         Some(Err(BatchEntryErr::new(req.id, rpc_error)))
                     }
                 },
-                Ok(BatchEntry::Notification(notif)) => {
+                Ok(BatchEntry::Notification(mut notif)) => {
                     // ignore permissionless notification
-                    match self.auth_notify(&notif) {
+                    match self.auth_notify(&mut notif) {
                         Ok(()) => Some(Ok(BatchEntry::Notification(notif))),
                         Err(err) => {
                             log_auth_rejection(notif.method_name(), &err);
@@ -168,11 +184,11 @@ where
 
     fn notification<'a>(
         &self,
-        n: Notification<'a>,
+        mut n: Notification<'a>,
     ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
         let this = self.clone();
         let auth_error = this
-            .auth_notify(&n)
+            .auth_notify(&mut n)
             .err()
             .map(|err| auth_reject_error(n.method_name(), &err));
 

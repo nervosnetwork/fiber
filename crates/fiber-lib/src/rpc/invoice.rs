@@ -16,6 +16,8 @@ use fiber_types::{FeatureVector, Privkey};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::Extensions;
 use ractor::{call, ActorRef};
 use rand::Rng;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
@@ -33,7 +35,7 @@ pub use fiber_json_types::{
 #[rpc(server)]
 trait InvoiceRpc {
     /// Generates a new invoice.
-    #[method(name = "new_invoice")]
+    #[method(name = "new_invoice", with_extensions)]
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
@@ -47,21 +49,21 @@ trait InvoiceRpc {
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
 
     /// Retrieves an invoice.
-    #[method(name = "get_invoice")]
+    #[method(name = "get_invoice", with_extensions)]
     async fn get_invoice(
         &self,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
-    #[method(name = "cancel_invoice")]
+    #[method(name = "cancel_invoice", with_extensions)]
     async fn cancel_invoice(
         &self,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 
     /// Settles an invoice by saving the preimage to this invoice.
-    #[method(name = "settle_invoice")]
+    #[method(name = "settle_invoice", with_extensions)]
     async fn settle_invoice(
         &self,
         settle_invoice: SettleInvoiceParams,
@@ -74,6 +76,8 @@ pub struct InvoiceRpcServerImpl<S> {
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
@@ -112,7 +116,26 @@ impl<S> InvoiceRpcServerImpl<S> {
             keypair,
             currency,
             node_features,
+            #[cfg(not(target_arch = "wasm32"))]
+            lsp_actor: None,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lsp_actor(
+        mut self,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    ) -> Self {
+        self.lsp_actor = lsp_actor;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn tenant_rpc_context(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -124,8 +147,18 @@ where
     /// Generates a new invoice.
     async fn new_invoice(
         &self,
+        extensions: &Extensions,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new(
+                context.store,
+                Some(context.network_actor),
+                Some(context.config),
+            )
+            .new_invoice(params)
+            .await;
+        }
         self.new_invoice(params).await
     }
 
@@ -140,24 +173,54 @@ where
     /// Retrieves an invoice.
     async fn get_invoice(
         &self,
+        extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new(
+                context.store,
+                Some(context.network_actor),
+                Some(context.config),
+            )
+            .get_invoice(payment_hash)
+            .await;
+        }
         self.get_invoice(payment_hash).await
     }
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
     async fn cancel_invoice(
         &self,
+        extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new(
+                context.store,
+                Some(context.network_actor),
+                Some(context.config),
+            )
+            .cancel_invoice(payment_hash)
+            .await;
+        }
         self.cancel_invoice(payment_hash).await
     }
 
     /// Settles an invoice by saving the preimage to this invoice.
     async fn settle_invoice(
         &self,
+        extensions: &Extensions,
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new(
+                context.store,
+                Some(context.network_actor),
+                Some(context.config),
+            )
+            .settle_invoice(settle_invoice)
+            .await;
+        }
         self.settle_invoice(settle_invoice).await
     }
 }

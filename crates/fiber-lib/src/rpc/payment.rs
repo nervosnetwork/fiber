@@ -16,6 +16,8 @@ use fiber_json_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::Extensions;
 
 use ractor::{call, ActorRef};
 
@@ -30,21 +32,21 @@ pub use fiber_json_types::{
 #[rpc(server)]
 trait PaymentRpc {
     /// Sends a payment to a peer.
-    #[method(name = "send_payment")]
+    #[method(name = "send_payment", with_extensions)]
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Retrieves a payment.
-    #[method(name = "get_payment")]
+    #[method(name = "get_payment", with_extensions)]
     async fn get_payment(
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Builds a router with a list of pubkeys and required channels.
-    #[method(name = "build_router")]
+    #[method(name = "build_router", with_extensions)]
     async fn build_router(
         &self,
         params: BuildRouterParams,
@@ -63,14 +65,14 @@ trait PaymentRpc {
     /// 2. Call `send_payment_with_router` with the returned `router_hops` and `keysend: true`.
     ///
     /// Only routing fees are deducted; your total balance across channels remains the same.
-    #[method(name = "send_payment_with_router")]
+    #[method(name = "send_payment_with_router", with_extensions)]
     async fn send_payment_with_router(
         &self,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Lists all payments, optionally filtered by status.
-    #[method(name = "list_payments")]
+    #[method(name = "list_payments", with_extensions)]
     async fn list_payments(
         &self,
         params: ListPaymentsParams,
@@ -80,11 +82,35 @@ trait PaymentRpc {
 pub struct PaymentRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
 
 impl<S> PaymentRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
-        PaymentRpcServerImpl { actor, store }
+        PaymentRpcServerImpl {
+            actor,
+            store,
+            #[cfg(not(target_arch = "wasm32"))]
+            lsp_actor: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lsp_actor(
+        mut self,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    ) -> Self {
+        self.lsp_actor = lsp_actor;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn tenant_rpc_context(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -96,24 +122,42 @@ where
     /// Sends a payment to a peer.
     async fn send_payment(
         &self,
+        extensions: &Extensions,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+                .send_payment(params)
+                .await;
+        }
         self.send_payment(params).await
     }
 
     /// Retrieves a payment.
     async fn get_payment(
         &self,
+        extensions: &Extensions,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+                .get_payment(params)
+                .await;
+        }
         self.get_payment(params).await
     }
 
     /// Builds a router with a list of pubkeys and required channels.
     async fn build_router(
         &self,
+        extensions: &Extensions,
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+                .build_router(params)
+                .await;
+        }
         self.build_router(params).await
     }
 
@@ -122,16 +166,28 @@ where
     /// This can be used for things like channel rebalancing.
     async fn send_payment_with_router(
         &self,
+        extensions: &Extensions,
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+                .send_payment_with_router(params)
+                .await;
+        }
         self.send_payment_with_router(params).await
     }
 
     /// Lists all payments, optionally filtered by status.
     async fn list_payments(
         &self,
+        extensions: &Extensions,
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+                .list_payments(params)
+                .await;
+        }
         self.list_payments(params).await
     }
 }

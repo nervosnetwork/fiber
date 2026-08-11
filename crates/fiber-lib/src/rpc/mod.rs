@@ -21,6 +21,8 @@ pub mod peer;
 pub mod prof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pubsub;
+#[cfg(not(target_arch = "wasm32"))]
+mod tenant;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -312,6 +314,7 @@ pub mod server {
                         network_actor.clone(),
                         fiber_config.clone(),
                     )
+                    .with_lsp_actor(lsp_actor.clone())
                     .into_rpc(),
                 )
                 .unwrap();
@@ -345,7 +348,9 @@ pub mod server {
             if config.is_module_enabled("channel") {
                 modules
                     .merge(
-                        ChannelRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc(),
+                        ChannelRpcServerImpl::new(network_actor.clone(), store.clone())
+                            .with_lsp_actor(lsp_actor.clone())
+                            .into_rpc(),
                     )
                     .unwrap();
             }
@@ -353,7 +358,9 @@ pub mod server {
             if config.is_module_enabled("payment") {
                 modules
                     .merge(
-                        PaymentRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc(),
+                        PaymentRpcServerImpl::new(network_actor.clone(), store.clone())
+                            .with_lsp_actor(lsp_actor.clone())
+                            .into_rpc(),
                     )
                     .unwrap();
             }

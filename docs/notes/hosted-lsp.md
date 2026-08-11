@@ -12,7 +12,7 @@ One Fiber process hosts:
   network;
 - multiple hosted tenant state domains, U1, U2, and so on, each with isolated
   channel/payment state, an invoice/channel signing key, and a `NodeNamespace`
-  in the shared LSP database;
+  in the shared Fiber store;
 - one LSP payment delivery manager, which persists and resumes incoming hosted
   payments.
 
@@ -178,16 +178,16 @@ lsp:
 The default storage layout is:
 
 ```text
-$BASE_DIR/fiber/store       Public T store
-$BASE_DIR/lsp/store         LSP registry/delivery state and namespaced tenant state
+$BASE_DIR/fiber/store       Public T root keyspace, LSP metadata, and tenant namespaces
 $BASE_DIR/lsp/tenants/<id>  isolated tenant signing keys and runtime-local files
 ```
 
-The process refuses to start if the LSP metadata store aliases Public T's
+LSP metadata uses `NodeNamespace::lsp_metadata()` and each hosted tenant uses a
+`NodeNamespace::hosted_tenant(tenant_id)` key prefix in the already-open Fiber
 store. Tenant identifiers are restricted to 1-64 ASCII letters, digits,
-hyphens, or underscores. Each hosted tenant uses a `NodeNamespace` key prefix;
-all direct writes, atomic batches, and prefix scans are translated at the Store
-boundary, so the same channel id or payment hash cannot alias another tenant.
+hyphens, or underscores. All direct writes, atomic batches, and prefix scans are
+translated at the Store boundary, so the same channel id or payment hash cannot
+alias another tenant.
 
 ## RPC administration
 
@@ -197,12 +197,31 @@ methods are:
 - `lsp_get_status`
 - `lsp_register_tenant`, `lsp_ensure_tenant`, `lsp_evict_tenant`, and
   `lsp_list_tenants`
+- `lsp_new_invoice`, `lsp_get_invoice`, `lsp_send_payment`, and
+  `lsp_get_payment`
 - `lsp_register_invoice` and `lsp_get_invoice_registration`
 - `lsp_get_payment_delivery`
 
 With Biscuit authentication enabled, reads require `read("lsp")` and mutations
 require `write("lsp")`. These are operator/SDK APIs and should not be exposed to
 untrusted clients without authentication.
+
+Hosted tenant data-plane requests reuse the standard Fiber RPC method names.
+The authority block of the Biscuit token contains `tenant("<tenant_id>")` plus
+the normal resource capabilities such as `write("channels")`,
+`write("payments")`, or `read("invoices")`. The authentication middleware puts
+the verified tenant identity in the request extensions; it is not accepted as a
+JSON-RPC parameter. The channel, invoice, and payment RPC handlers then resolve
+that tenant's active actor and Store namespace through `TenantSupervisor`.
+Tokens without a tenant fact continue to address Public T.
+
+For example, a hosted wallet calls the existing `open_channel` method with
+Public T's pubkey, its own `funding_amount`, and `public: false`. A tenant-scoped
+request cannot open a public channel or target another peer. `new_invoice`,
+`get_invoice`, and the payment RPCs use the same request-scoped routing. The
+`lsp_new_invoice` composite remains available because it additionally registers
+the invoice and returns the signed `LspInvoiceHint`; it is not equivalent to a
+plain `new_invoice` call.
 
 ## Current boundaries
 
