@@ -132,10 +132,9 @@ delivery state machine is persisted in the shared Fiber store:
 
 ```text
 Deferred -> Dispatching -> InFlight -> SettlingUpstream -> Succeeded | Failed
-    |              |
-    +--------------+-> Cancelled (upstream TLC already removed)
-    |
-    +-> ExpiringUpstream -> Expired (buffer deadline elapsed)
+    |              |                         ^
+    +--------------+-------------------------+
+          buffer timeout or permanent failure
 ```
 
 The buffer deadline applies only to `Deferred` and `Dispatching`. Once the
@@ -147,7 +146,7 @@ the LSP reloads non-final deliveries, first verifies that the exact upstream
 channel/TLC/payment-hash tuple is still pending, restores the trampoline resource
 reservation, consults the public payment session, and resumes or finalizes the
 record idempotently. If the upstream TLC was already removed before downstream
-dispatch, the delivery becomes `Cancelled` and its reservation is released;
+dispatch, the delivery becomes `Failed` and its reservation is released;
 the LSP does not create a downstream payment or attempt another upstream
 failure. A transient downstream dispatch or final payment failure (for example,
 no route or an offline peer) returns to
@@ -159,10 +158,9 @@ failure for RPC inspection. A permanent dispatch failure instead enters
 TLC error code; it is never returned to `Deferred`. Permanent outcomes reported
 by the downstream payment actor, including an expired or cancelled invoice and
 final amount/expiry mismatches, follow the same settlement path. Deadline
-processing first persists `ExpiringUpstream`, then fails
-the upstream TLC and records `Expired`; a restart between those operations
-resumes the same settlement instead of collapsing expiry into a generic payment
-failure.
+processing records `SettlingUpstream(Failed)` before failing the upstream TLC,
+then records `Failed`; a restart between those operations resumes the same
+settlement.
 
 Each durable delivery is keyed by `(incoming_channel_id, incoming_tlc_id)`, the
 identity of the concrete payer-to-Public-T TLC being held. Replaying the same

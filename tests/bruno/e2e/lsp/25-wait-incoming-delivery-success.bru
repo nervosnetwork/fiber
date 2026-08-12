@@ -44,7 +44,7 @@ script:post-response {
     bru.setVar("LSP_DELIVERY_SUCCESS_ITERATION", 0);
     return;
   }
-  if (["failed", "cancelled", "expired"].includes(delivery.status)) {
+  if (delivery.status === "failed") {
     throw new Error(`hosted delivery failed: ${JSON.stringify(delivery)}`);
   }
   if (iteration + 1 < maxIterations) {

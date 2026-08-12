@@ -840,7 +840,7 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     deliveries
         .transition(
             &first.key(),
-            LspPaymentDeliveryStatus::Cancelled {
+            LspPaymentDeliveryStatus::Failed {
                 reason: "payer replaced the incoming TLC".to_string(),
             },
             now + 4,
@@ -862,7 +862,7 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     deliveries
         .transition(
             &second.key(),
-            LspPaymentDeliveryStatus::Cancelled {
+            LspPaymentDeliveryStatus::Failed {
                 reason: "payer replaced the incoming channel".to_string(),
             },
             now + 6,
@@ -998,44 +998,20 @@ fn payment_delivery_status_accepts_only_declared_transitions() {
                 failure: None,
             },
         ),
-        (
-            "Cancelled",
-            LspPaymentDeliveryStatus::Cancelled {
-                reason: "cancelled".to_string(),
-            },
-        ),
-        (
-            "ExpiringUpstream",
-            LspPaymentDeliveryStatus::ExpiringUpstream {
-                reason: "expiring".to_string(),
-            },
-        ),
-        (
-            "Expired",
-            LspPaymentDeliveryStatus::Expired {
-                reason: "expired".to_string(),
-            },
-        ),
     ];
     let valid_transitions = [
         ("Deferred", "Dispatching"),
         ("Deferred", "Failed"),
         ("Deferred", "SettlingUpstream"),
-        ("Deferred", "Cancelled"),
-        ("Deferred", "ExpiringUpstream"),
         ("Dispatching", "Deferred"),
         ("Dispatching", "InFlight"),
         ("Dispatching", "Failed"),
         ("Dispatching", "SettlingUpstream"),
-        ("Dispatching", "Cancelled"),
-        ("Dispatching", "ExpiringUpstream"),
         ("InFlight", "Deferred"),
         ("InFlight", "SettlingUpstream"),
         ("SettlingUpstream", "InFlight"),
         ("SettlingUpstream", "Succeeded"),
         ("SettlingUpstream", "Failed"),
-        ("ExpiringUpstream", "InFlight"),
-        ("ExpiringUpstream", "Expired"),
     ];
 
     for (current_name, current) in &statuses {
@@ -1683,7 +1659,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
     wait_for_delivery_status(
         &manager,
         payment_hash,
-        LspPaymentDeliveryStatus::Expired {
+        LspPaymentDeliveryStatus::Failed {
             reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
         },
     )
@@ -1693,7 +1669,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
 }
 
 #[tokio::test]
-async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
+async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
@@ -1750,11 +1726,18 @@ async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
         .unwrap()
         .key();
     manager
-        .transition(
+        .transition_with_error(
             &key,
-            LspPaymentDeliveryStatus::ExpiringUpstream {
-                reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
+            LspPaymentDeliveryStatus::SettlingUpstream {
+                payment_status: PaymentStatus::Failed,
+                failure: Some(
+                    "hosted tenant was unavailable before the buffer deadline".to_string(),
+                ),
             },
+            Some((
+                "hosted tenant was unavailable before the buffer deadline".to_string(),
+                Some(TlcErrorCode::TemporaryNodeFailure),
+            )),
             now + 1,
         )
         .unwrap();
@@ -1765,7 +1748,7 @@ async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
     wait_for_delivery_status(
         &manager,
         payment_hash,
-        LspPaymentDeliveryStatus::Expired {
+        LspPaymentDeliveryStatus::Failed {
             reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
         },
     )
@@ -1775,7 +1758,7 @@ async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
 }
 
 #[tokio::test]
-async fn restart_cancels_deferred_delivery_after_upstream_tlc_removal() {
+async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
     let root = tempdir().expect("temporary directory");
     let mut config = lsp_config(root.path().join("lsp"));
     config.tenants = vec!["u1".to_string()];
@@ -1850,7 +1833,7 @@ async fn restart_cancels_deferred_delivery_after_upstream_tlc_removal() {
     wait_for_delivery_status(
         &manager,
         payment_hash,
-        LspPaymentDeliveryStatus::Cancelled {
+        LspPaymentDeliveryStatus::Failed {
             reason: "upstream TLC was removed before hosted delivery dispatch".to_string(),
         },
     )

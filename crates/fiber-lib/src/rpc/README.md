@@ -1022,7 +1022,7 @@ Retrieves durable delivery state for a hosted incoming payment.
 * `status` - <em>[LspPaymentDeliveryStatus](#type-lsppaymentdeliverystatus)</em>, Current durable delivery state.
 * `attempt_count` - <em>`u64`</em>, Number of downstream dispatch attempts started by Public T.
 * `last_error` - <em>`Option<String>`</em>, Most recent downstream dispatch or payment error, including retryable errors.
-* `failure_reason` - <em>`Option<String>`</em>, Terminal detail when `status` is `failed`, `cancelled`, or `expired`.
+* `failure_reason` - <em>`Option<String>`</em>, Terminal detail when `status` is `failed`.
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds since Unix epoch.
 * `updated_at` - <em>`u64`</em>, Last update timestamp in milliseconds since Unix epoch.
 
@@ -1844,9 +1844,6 @@ Durable hosted-payment delivery state.
 * `settling_upstream` - The downstream outcome is durable and Public T is resolving the upstream TLC.
 * `succeeded` - The downstream payment completed successfully.
 * `failed` - Delivery failed before or during downstream payment.
-* `cancelled` - The upstream TLC was removed before downstream dispatch started.
-* `expiring_upstream` - Public T is failing the upstream TLC after the buffer deadline.
-* `expired` - The buffer deadline elapsed before downstream dispatch started.
 ---
 
 <a id="#type-lsptenantruntimestatus"></a>

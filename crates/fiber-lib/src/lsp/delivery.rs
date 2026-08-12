@@ -60,7 +60,7 @@ pub enum LspPaymentDeliveryStatus {
     InFlight,
     /// The downstream payment succeeded and the upstream TLC was fulfilled. Final state.
     Succeeded,
-    /// A permanent downstream failure was propagated to the upstream TLC. Final state.
+    /// Delivery ended unsuccessfully. Final state.
     Failed { reason: String },
     /// The downstream result is known, but Public T is still fulfilling or failing the upstream
     /// TLC.
@@ -71,45 +71,35 @@ pub enum LspPaymentDeliveryStatus {
         payment_status: PaymentStatus,
         failure: Option<String>,
     },
-    /// The upstream TLC disappeared before the downstream payment became active. Final state.
-    ///
-    /// This variant is appended to preserve persisted bincode discriminants.
-    Cancelled { reason: String },
-    /// The buffer deadline elapsed and Public T is failing the upstream TLC.
-    ///
-    /// This variant is appended to preserve persisted bincode discriminants.
-    ExpiringUpstream { reason: String },
-    /// The buffer deadline elapsed and the upstream TLC was failed. Final state.
-    ///
-    /// This variant is appended to preserve persisted bincode discriminants.
-    Expired { reason: String },
 }
 
 impl LspPaymentDeliveryStatus {
     /// Checks whether `next` is a valid state transition.
     ///
-    /// Simplified lifecycle (the matcher below remains the complete transition table):
+    /// Upstream and downstream are named relative to Public T:
     ///
-    /// ```mermaid
-    /// stateDiagram-v2
-    ///     [*] --> Deferred
-    ///     Deferred --> Dispatching
-    ///     Dispatching --> InFlight
-    ///     InFlight --> SettlingUpstream
-    ///     SettlingUpstream --> Succeeded
-    ///     SettlingUpstream --> Failed
-    ///
-    ///     Dispatching --> Deferred: retry
-    ///     InFlight --> Deferred: retry
-    ///
-    ///     Deferred --> ExpiringUpstream: buffer timeout
-    ///     ExpiringUpstream --> Expired
-    ///
-    ///     Deferred --> Cancelled: upstream TLC removed
+    /// ```text
+    /// Payer P                   Public T / LSP                 Hosted Tenant U
+    ///    |                            |                               |
+    ///    |------ upstream TLC ------->|                               |
+    ///    |                            |  Deferred                     |
+    ///    |                            |  Dispatching                  |
+    ///    |                            |------ downstream payment ---->|
+    ///    |                            |                               |
+    ///    |                            |            InFlight           |
+    ///    |                            |                               |
+    ///    |                            |<----- preimage / failure -----|
+    ///    |                            |  SettlingUpstream             |
+    ///    |<-- fulfill / fail TLC -----|                               |
+    ///    |                            |  Succeeded / Failed           |
     /// ```
     ///
-    /// Recovery may enter `SettlingUpstream` directly or return from `SettlingUpstream` and
-    /// `ExpiringUpstream` to `InFlight` when a concurrent downstream payment is discovered.
+    /// Transient dispatch or payment failures return to `Deferred` for retry. If the upstream TLC
+    /// disappears before dispatch, the delivery transitions directly to `Failed`.
+    ///
+    /// Buffer timeout and permanent errors enter `SettlingUpstream(Failed)` while Public T fails
+    /// the upstream TLC. Recovery may enter `SettlingUpstream` directly or return from it to
+    /// `InFlight` when a concurrent downstream payment is discovered.
     ///
     /// Re-entering the same state is handled as an idempotent update by the delivery manager and
     /// therefore is not considered a transition here. Final states have no outgoing transitions.
@@ -118,18 +108,12 @@ impl LspPaymentDeliveryStatus {
             (self, next),
             (
                 Self::Deferred,
-                Self::Dispatching
-                    | Self::Failed { .. }
-                    | Self::Cancelled { .. }
-                    | Self::ExpiringUpstream { .. }
-                    | Self::SettlingUpstream { .. }
+                Self::Dispatching | Self::Failed { .. } | Self::SettlingUpstream { .. }
             ) | (
                 Self::Dispatching,
                 Self::Deferred
                     | Self::InFlight
                     | Self::Failed { .. }
-                    | Self::Cancelled { .. }
-                    | Self::ExpiringUpstream { .. }
                     | Self::SettlingUpstream { .. }
             ) | (
                 Self::InFlight,
@@ -137,18 +121,12 @@ impl LspPaymentDeliveryStatus {
             ) | (
                 Self::SettlingUpstream { .. },
                 Self::InFlight | Self::Succeeded | Self::Failed { .. }
-            ) | (
-                Self::ExpiringUpstream { .. },
-                Self::InFlight | Self::Expired { .. }
             )
         )
     }
 
     pub fn is_final(&self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded | Self::Failed { .. } | Self::Cancelled { .. } | Self::Expired { .. }
-        )
+        matches!(self, Self::Succeeded | Self::Failed { .. })
     }
 }
 
