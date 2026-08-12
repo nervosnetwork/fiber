@@ -4,8 +4,56 @@ use serde_with::serde_as;
 
 use crate::fiber::payment::{SendPaymentData, SendPaymentDataBuilder};
 use crate::fiber_types::{
-    EntityHex, Hash256, HashAlgorithm, PrevTlcInfo, Pubkey, TrampolineContext,
+    EntityHex, Hash256, HashAlgorithm, PrevTlcInfo, Pubkey, TlcErrorCode, TrampolineContext,
 };
+
+/// Failure returned while starting a buffered hosted payment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LspPaymentDispatchError {
+    /// The runtime may become able to dispatch the payment before its deadline.
+    Temporary { reason: String },
+    /// Retrying the same request cannot succeed and the upstream TLC must fail.
+    Permanent {
+        reason: String,
+        error_code: TlcErrorCode,
+    },
+}
+
+impl std::fmt::Display for LspPaymentDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Temporary { reason } | Self::Permanent { reason, .. } => {
+                formatter.write_str(reason)
+            }
+        }
+    }
+}
+
+impl std::error::Error for LspPaymentDispatchError {}
+
+/// Action Public T should take after persisting a hosted payment outcome.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LspPaymentOutcomeDecision {
+    /// Resolve the upstream TLC with the downstream payment outcome.
+    SettleUpstream,
+    /// Keep the upstream TLC pending and retry delivery before its deadline.
+    RetryDelivery,
+}
+
+/// Returns whether a failed hosted payment cannot succeed with a later route attempt.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn is_permanent_hosted_payment_failure(error_code: TlcErrorCode) -> bool {
+    matches!(
+        error_code,
+        TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            | TlcErrorCode::InvoiceExpired
+            | TlcErrorCode::InvoiceCancelled
+            | TlcErrorCode::FinalIncorrectExpiryDelta
+            | TlcErrorCode::FinalIncorrectTlcAmount
+            | TlcErrorCode::HoldTlcTimeout
+    )
+}
 
 /// A validated trampoline forwarding request that may be handed to the hosted LSP service.
 #[serde_as]

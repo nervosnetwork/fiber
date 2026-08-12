@@ -204,6 +204,12 @@ pub struct LspPaymentDelivery {
     pub buffer_deadline: u64,
     /// Current durable delivery state.
     pub status: LspPaymentDeliveryStatus,
+    /// Number of downstream dispatch attempts started by Public T.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub attempt_count: u64,
+    /// Most recent downstream dispatch or payment error, including retryable errors.
+    pub last_error: Option<String>,
     /// Terminal detail when `status` is `failed`, `cancelled`, or `expired`.
     pub failure_reason: Option<String>,
     /// Creation timestamp in milliseconds since Unix epoch.

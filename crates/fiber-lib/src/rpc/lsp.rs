@@ -412,6 +412,8 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
             private_channel_id: delivery.private_channel_id.into(),
             buffer_deadline: delivery.buffer_deadline,
             status,
+            attempt_count: delivery.attempt_count,
+            last_error: delivery.last_error,
             failure_reason,
             created_at: delivery.created_at,
             updated_at: delivery.updated_at,

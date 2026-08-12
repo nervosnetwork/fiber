@@ -1015,6 +1015,8 @@ Retrieves durable delivery state for a hosted incoming payment.
 * `private_channel_id` - <em>[Hash256](#type-hash256)</em>, Private channel selected internally for tenant delivery.
 * `buffer_deadline` - <em>`u64`</em>, Last instant at which an undispatched payment may remain buffered.
 * `status` - <em>[LspPaymentDeliveryStatus](#type-lsppaymentdeliverystatus)</em>, Current durable delivery state.
+* `attempt_count` - <em>`u64`</em>, Number of downstream dispatch attempts started by Public T.
+* `last_error` - <em>`Option<String>`</em>, Most recent downstream dispatch or payment error, including retryable errors.
 * `failure_reason` - <em>`Option<String>`</em>, Terminal detail when `status` is `failed`, `cancelled`, or `expired`.
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds since Unix epoch.
 * `updated_at` - <em>`u64`</em>, Last update timestamp in milliseconds since Unix epoch.

@@ -5,14 +5,15 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use crate::fiber::network::{
     BufferedTrampolineUpstreamStatus, NetworkActorCommand, NetworkActorMessage,
 };
-use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey};
+use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey, TlcErrorCode};
 use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
 use super::{
-    HostedTenantRpcContext, HostedTenantStatus, LspConfig, LspInvoiceRegistration,
-    LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
-    LspPaymentDeliveryStatus, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
+    is_permanent_hosted_payment_failure, HostedTenantRpcContext, HostedTenantStatus, LspConfig,
+    LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryLimits,
+    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspPaymentDispatchError,
+    LspPaymentOutcomeDecision, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
     TenantSupervisor, TrampolineForwardingRequest,
 };
 
@@ -85,7 +86,8 @@ pub enum LspServiceMessage {
         payment_hash: Hash256,
         payment_status: PaymentStatus,
         failure: Option<String>,
-        reply: RpcReplyPort<Result<(), String>>,
+        failure_code: Option<TlcErrorCode>,
+        reply: RpcReplyPort<Result<LspPaymentOutcomeDecision, String>>,
     },
     PaymentOutcomeSettled {
         payment_hash: Hash256,
@@ -165,12 +167,25 @@ impl LspServiceState {
         });
     }
 
-    fn begin_upstream_settlement(
+    fn record_payment_outcome(
         &self,
         payment_hash: &Hash256,
         status: PaymentStatus,
         failure: Option<String>,
-    ) -> Result<(), String> {
+        failure_code: Option<TlcErrorCode>,
+    ) -> Result<LspPaymentOutcomeDecision, String> {
+        let error = failure.clone().map(|reason| (reason, failure_code));
+        if status == PaymentStatus::Failed
+            && failure_code.is_some_and(|code| !is_permanent_hosted_payment_failure(code))
+        {
+            self.delivery_manager.transition_with_error(
+                payment_hash,
+                LspPaymentDeliveryStatus::Deferred,
+                error,
+                crate::now_timestamp_as_millis_u64(),
+            )?;
+            return Ok(LspPaymentOutcomeDecision::RetryDelivery);
+        }
         let delivery_status = match status {
             PaymentStatus::Created | PaymentStatus::Inflight => LspPaymentDeliveryStatus::InFlight,
             PaymentStatus::Success | PaymentStatus::Failed => {
@@ -180,12 +195,13 @@ impl LspServiceState {
                 }
             }
         };
-        self.delivery_manager.transition(
+        self.delivery_manager.transition_with_error(
             payment_hash,
             delivery_status,
+            error,
             crate::now_timestamp_as_millis_u64(),
         )?;
-        Ok(())
+        Ok(LspPaymentOutcomeDecision::SettleUpstream)
     }
 
     fn finish_upstream_settlement(
@@ -457,16 +473,33 @@ impl Actor for LspService {
                 payment_hash,
                 payment_status,
                 failure,
+                failure_code,
                 reply,
             } => {
                 let result = match state.delivery_manager.get(&payment_hash) {
                     Ok(Some(delivery)) if !delivery.status.is_final() => {
-                        state.begin_upstream_settlement(&payment_hash, payment_status, failure)
+                        let deadline = delivery.buffer_deadline;
+                        let decision = state.record_payment_outcome(
+                            &payment_hash,
+                            payment_status,
+                            failure,
+                            failure_code,
+                        );
+                        if let Ok(LspPaymentOutcomeDecision::RetryDelivery) = decision {
+                            LspServiceState::schedule_delivery_retry(
+                                &myself,
+                                payment_hash,
+                                deadline,
+                            );
+                        }
+                        decision
                     }
-                    Ok(_) => Ok(()),
+                    Ok(_) => Ok(LspPaymentOutcomeDecision::SettleUpstream),
                     Err(error) => Err(error),
                 };
-                if result.is_ok() && payment_status.is_final() {
+                if matches!(&result, Ok(LspPaymentOutcomeDecision::SettleUpstream))
+                    && payment_status.is_final()
+                {
                     LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
                 }
                 let _ = reply.send(result);
@@ -493,10 +526,11 @@ impl Actor for LspService {
                                         LspPaymentDeliveryStatus::InFlight,
                                         crate::now_timestamp_as_millis_u64(),
                                     )?;
-                                    state.begin_upstream_settlement(
+                                    let _ = state.record_payment_outcome(
                                         &payment_hash,
                                         payment_status,
                                         failure.clone(),
+                                        None,
                                     )?;
                                     state.finish_upstream_settlement(
                                         &payment_hash,
@@ -576,6 +610,7 @@ impl LspService {
             |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
                 request: delivery.request.clone(),
                 reason: reason.clone(),
+                error_code: TlcErrorCode::TemporaryNodeFailure,
                 reply,
             },),
             10_000
@@ -606,6 +641,67 @@ impl LspService {
             status,
             crate::now_timestamp_as_millis_u64(),
         )?;
+        Ok(())
+    }
+
+    async fn finish_permanent_dispatch_failure(
+        myself: &ActorRef<LspServiceMessage>,
+        state: &mut LspServiceState,
+        delivery: LspPaymentDelivery,
+    ) -> Result<(), String> {
+        let LspPaymentDeliveryStatus::SettlingUpstream {
+            payment_status: PaymentStatus::Failed,
+            failure,
+        } = &delivery.status
+        else {
+            return Err(format!(
+                "hosted payment {} has no permanent dispatch failure to settle",
+                delivery.payment_hash
+            ));
+        };
+        let reason = failure
+            .clone()
+            .or_else(|| delivery.last_error.clone())
+            .unwrap_or_else(|| "hosted payment dispatch failed permanently".to_string());
+        let error_code = delivery
+            .last_error_code
+            .unwrap_or(TlcErrorCode::PermanentNodeFailure);
+        let failed = ractor::call_t!(
+            state.public_network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
+                request: delivery.request.clone(),
+                reason: reason.clone(),
+                error_code,
+                reply,
+            },),
+            10_000
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+        match failed {
+            Ok(true) => {
+                state.finish_upstream_settlement(
+                    &delivery.payment_hash,
+                    PaymentStatus::Failed,
+                    Some(reason),
+                )?;
+            }
+            Ok(false) => {
+                state.delivery_manager.transition(
+                    &delivery.payment_hash,
+                    LspPaymentDeliveryStatus::InFlight,
+                    crate::now_timestamp_as_millis_u64(),
+                )?;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    payment_hash = %delivery.payment_hash,
+                    %error,
+                    "Failed to settle permanent hosted dispatch failure"
+                );
+                LspServiceState::schedule_reconciliation_retry(myself, delivery.payment_hash);
+            }
+        }
         Ok(())
     }
 
@@ -646,11 +742,20 @@ impl LspService {
             );
             if let Ok(Ok(payment)) = existing_payment {
                 if payment.status.is_final() {
-                    state.begin_upstream_settlement(
+                    let decision = state.record_payment_outcome(
                         &payment_hash,
                         payment.status,
                         payment.failed_error.clone(),
+                        payment.failed_error_code,
                     )?;
+                    if decision == LspPaymentOutcomeDecision::RetryDelivery {
+                        LspServiceState::schedule_delivery_retry(
+                            &myself,
+                            payment_hash,
+                            delivery.buffer_deadline,
+                        );
+                        return Ok(());
+                    }
                     let settlement = ractor::call_t!(
                         state.public_network_actor,
                         |reply| NetworkActorMessage::new_command(
@@ -678,14 +783,25 @@ impl LspService {
                         payment.failed_error,
                     )?;
                 } else {
-                    state.begin_upstream_settlement(
+                    let _ = state.record_payment_outcome(
                         &payment_hash,
                         payment.status,
                         payment.failed_error,
+                        payment.failed_error_code,
                     )?;
                     LspServiceState::schedule_reconciliation_retry(&myself, payment_hash);
                 }
                 return Ok(());
+            }
+            if matches!(
+                delivery.status,
+                LspPaymentDeliveryStatus::SettlingUpstream {
+                    payment_status: PaymentStatus::Failed,
+                    ..
+                }
+            ) && delivery.last_error_code.is_some()
+            {
+                return Self::finish_permanent_dispatch_failure(&myself, state, delivery).await;
             }
             if matches!(
                 delivery.status,
@@ -765,12 +881,8 @@ impl LspService {
             return Ok(());
         }
 
-        delivery = state.delivery_manager.transition(
-            &payment_hash,
-            LspPaymentDeliveryStatus::Dispatching,
-            now,
-        )?;
-        let dispatch_result = ractor::call_t!(
+        delivery = state.delivery_manager.begin_dispatch(&payment_hash, now)?;
+        let dispatch_result = match ractor::call_t!(
             state.public_network_actor,
             |reply| NetworkActorMessage::new_command(
                 NetworkActorCommand::DispatchBufferedTrampoline {
@@ -779,9 +891,12 @@ impl LspService {
                 },
             ),
             10_000
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|result| result);
+        ) {
+            Ok(result) => result,
+            Err(error) => Err(LspPaymentDispatchError::Temporary {
+                reason: format!("failed to call Public T for hosted payment dispatch: {error}"),
+            }),
+        };
         match dispatch_result {
             Ok(()) => {
                 state.delivery_manager.transition(
@@ -790,16 +905,18 @@ impl LspService {
                     crate::now_timestamp_as_millis_u64(),
                 )?;
             }
-            Err(error) => {
-                state.delivery_manager.transition(
+            Err(LspPaymentDispatchError::Temporary { reason }) => {
+                state.delivery_manager.transition_with_error(
                     &payment_hash,
                     LspPaymentDeliveryStatus::Deferred,
+                    Some((reason.clone(), Some(TlcErrorCode::TemporaryNodeFailure))),
                     crate::now_timestamp_as_millis_u64(),
                 )?;
                 tracing::debug!(
                     %payment_hash,
                     tenant_id = %delivery.tenant_id,
-                    %error,
+                    error = %reason,
+                    attempt_count = delivery.attempt_count,
                     "Deferring hosted delivery after a transient dispatch failure"
                 );
                 LspServiceState::schedule_delivery_retry(
@@ -807,6 +924,18 @@ impl LspService {
                     payment_hash,
                     delivery.buffer_deadline,
                 );
+            }
+            Err(LspPaymentDispatchError::Permanent { reason, error_code }) => {
+                let delivery = state.delivery_manager.transition_with_error(
+                    &payment_hash,
+                    LspPaymentDeliveryStatus::SettlingUpstream {
+                        payment_status: PaymentStatus::Failed,
+                        failure: Some(reason.clone()),
+                    },
+                    Some((reason, Some(error_code))),
+                    crate::now_timestamp_as_millis_u64(),
+                )?;
+                Self::finish_permanent_dispatch_failure(&myself, state, delivery).await?;
             }
         }
         Ok(())

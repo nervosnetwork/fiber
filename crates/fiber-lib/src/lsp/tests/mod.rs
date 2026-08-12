@@ -17,13 +17,14 @@ use crate::fiber::network::{
 };
 use crate::fiber::types::FiberMessage;
 use crate::fiber_types::{
-    AddTlc, Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, Pubkey,
+    AddTlc, Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, Pubkey, TlcErrorCode,
 };
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::TrampolineForwardingRequest;
 use crate::lsp::{
-    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
-    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspService,
+    is_permanent_hosted_payment_failure, HostedTenantRecord, HostedTenantRuntime, LspConfig,
+    LspDeliveryDecision, LspInvoiceRegistry, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
+    LspPaymentDeliveryStatus, LspPaymentDispatchError, LspPaymentOutcomeDecision, LspService,
     LspServiceArgs, LspServiceMessage, TenantId, TenantRegistry, TenantRuntimeFactory,
     TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
     MAX_LSP_BUFFER_DURATION_MS,
@@ -868,6 +869,28 @@ fn payment_delivery_rejects_invalid_state_transition_and_mpp() {
 }
 
 #[test]
+fn hosted_payment_failure_classification_matches_retry_policy() {
+    for code in [
+        TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+        TlcErrorCode::InvoiceExpired,
+        TlcErrorCode::InvoiceCancelled,
+        TlcErrorCode::FinalIncorrectExpiryDelta,
+        TlcErrorCode::FinalIncorrectTlcAmount,
+        TlcErrorCode::HoldTlcTimeout,
+    ] {
+        assert!(is_permanent_hosted_payment_failure(code), "{code:?}");
+    }
+    for code in [
+        TlcErrorCode::TemporaryNodeFailure,
+        TlcErrorCode::TemporaryChannelFailure,
+        TlcErrorCode::UnknownNextPeer,
+        TlcErrorCode::ChannelDisabled,
+    ] {
+        assert!(!is_permanent_hosted_payment_failure(code), "{code:?}");
+    }
+}
+
+#[test]
 fn payment_delivery_enforces_per_tenant_pending_limit() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
@@ -924,6 +947,7 @@ struct MockPublicNetworkActor;
 struct MockPublicNetworkState {
     dispatches: Arc<AtomicUsize>,
     dispatch_failures_remaining: Arc<AtomicUsize>,
+    permanent_dispatch_failures_remaining: Arc<AtomicUsize>,
     failures: Arc<AtomicUsize>,
     upstream_pending: Arc<AtomicBool>,
 }
@@ -965,14 +989,27 @@ impl Actor for MockPublicNetworkActor {
             }
             NetworkActorCommand::DispatchBufferedTrampoline { reply, .. } => {
                 state.dispatches.fetch_add(1, Ordering::Relaxed);
+                let should_fail_permanently = state
+                    .permanent_dispatch_failures_remaining
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok();
                 let should_fail = state
                     .dispatch_failures_remaining
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                         remaining.checked_sub(1)
                     })
                     .is_ok();
-                let _ = if should_fail {
-                    reply.send(Err("temporary dispatch failure".to_string()))
+                let _ = if should_fail_permanently {
+                    reply.send(Err(LspPaymentDispatchError::Permanent {
+                        reason: "invoice is cancelled".to_string(),
+                        error_code: TlcErrorCode::InvoiceCancelled,
+                    }))
+                } else if should_fail {
+                    reply.send(Err(LspPaymentDispatchError::Temporary {
+                        reason: "temporary dispatch failure".to_string(),
+                    }))
                 } else {
                     reply.send(Ok(()))
                 };
@@ -1043,12 +1080,39 @@ async fn start_test_lsp_service_with_upstream(
     failures: Arc<AtomicUsize>,
     upstream_pending: Arc<AtomicBool>,
 ) -> ActorRef<LspServiceMessage> {
+    start_test_lsp_service_with_all_dispatch_failures(
+        store,
+        config,
+        factory,
+        lsp_key,
+        dispatches,
+        dispatch_failures_remaining,
+        Arc::new(AtomicUsize::new(0)),
+        failures,
+        upstream_pending,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_test_lsp_service_with_all_dispatch_failures(
+    store: crate::store::Store,
+    config: LspConfig,
+    factory: Arc<dyn TenantRuntimeFactory>,
+    lsp_key: Privkey,
+    dispatches: Arc<AtomicUsize>,
+    dispatch_failures_remaining: Arc<AtomicUsize>,
+    permanent_dispatch_failures_remaining: Arc<AtomicUsize>,
+    failures: Arc<AtomicUsize>,
+    upstream_pending: Arc<AtomicBool>,
+) -> ActorRef<LspServiceMessage> {
     let public_network_actor = Actor::spawn(
         None,
         MockPublicNetworkActor,
         MockPublicNetworkState {
             dispatches,
             dispatch_failures_remaining,
+            permanent_dispatch_failures_remaining,
             failures,
             upstream_pending,
         },
@@ -1736,6 +1800,275 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 2);
     assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
+    let delivery = manager.get(&payment_hash).unwrap().unwrap();
+    assert_eq!(delivery.attempt_count, 2);
+    assert_eq!(
+        delivery.last_error.as_deref(),
+        Some("temporary dispatch failure")
+    );
+    assert_eq!(
+        delivery.last_error_code,
+        Some(TlcErrorCode::TemporaryNodeFailure)
+    );
+}
+
+#[tokio::test]
+async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let upstream_failures = Arc::new(AtomicUsize::new(0));
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service_with_all_dispatch_failures(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(1)),
+        upstream_failures.clone(),
+        Arc::new(AtomicBool::new(true)),
+    )
+    .await;
+    let payment_hash = Hash256::from([24; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([31; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
+        created_at: 42,
+    };
+
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64()),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+
+    wait_for_delivery_status(
+        &manager,
+        payment_hash,
+        LspPaymentDeliveryStatus::Failed {
+            reason: "invoice is cancelled".to_string(),
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let delivery = manager.get(&payment_hash).unwrap().unwrap();
+    assert_eq!(delivery.attempt_count, 1);
+    assert_eq!(delivery.last_error.as_deref(), Some("invoice is cancelled"));
+    assert_eq!(
+        delivery.last_error_code,
+        Some(TlcErrorCode::InvoiceCancelled)
+    );
+    assert_eq!(dispatches.load(Ordering::Relaxed), 1);
+    assert_eq!(upstream_failures.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn transient_payment_outcome_retries_delivery_before_deadline() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let upstream_failures = Arc::new(AtomicUsize::new(0));
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        upstream_failures.clone(),
+    )
+    .await;
+    let payment_hash = Hash256::from([25; 32]);
+    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    let private_channel_id = Hash256::from([32; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
+        created_at: 42,
+    };
+
+    ractor::call!(service, |reply| {
+        LspServiceMessage::AcceptTrampolineDelivery(
+            hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64()),
+            reply,
+        )
+    })
+    .unwrap()
+    .unwrap();
+    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+
+    assert_eq!(
+        ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
+            payment_hash,
+            payment_status: PaymentStatus::Failed,
+            failure: Some("peer is offline".to_string()),
+            failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+            reply,
+        })
+        .unwrap()
+        .unwrap(),
+        LspPaymentOutcomeDecision::RetryDelivery
+    );
+    let deferred = manager.get(&payment_hash).unwrap().unwrap();
+    assert_eq!(deferred.status, LspPaymentDeliveryStatus::Deferred);
+    assert_eq!(deferred.attempt_count, 1);
+    assert_eq!(deferred.last_error.as_deref(), Some("peer is offline"));
+
+    wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+    let retried = manager.get(&payment_hash).unwrap().unwrap();
+    assert_eq!(retried.attempt_count, 2);
+    assert_eq!(dispatches.load(Ordering::Relaxed), 2);
+    assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
+    let root = tempdir().expect("temporary directory");
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.tenants = vec!["u1".to_string()];
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let upstream_failures = Arc::new(AtomicUsize::new(0));
+    let tenant_key = Privkey::from(&[1; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        Privkey::from(&[9; 32]),
+        dispatches.clone(),
+        upstream_failures.clone(),
+    )
+    .await;
+    let private_channel_id = Hash256::from([33; 32]);
+    service
+        .send_message(LspServiceMessage::TenantChannelOnline(
+            tenant_key.pubkey(),
+            private_channel_id,
+        ))
+        .unwrap();
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(private_channel_id),
+        created_at: 42,
+    };
+    let cases = [
+        (
+            TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+            "incorrect payment details",
+        ),
+        (TlcErrorCode::InvoiceExpired, "invoice expired"),
+        (TlcErrorCode::InvoiceCancelled, "invoice cancelled"),
+        (
+            TlcErrorCode::FinalIncorrectExpiryDelta,
+            "final expiry mismatch",
+        ),
+        (
+            TlcErrorCode::FinalIncorrectTlcAmount,
+            "final amount mismatch",
+        ),
+        (TlcErrorCode::HoldTlcTimeout, "hold TLC timed out"),
+    ];
+
+    for (index, (error_code, reason)) in cases.into_iter().enumerate() {
+        let payment_hash = Hash256::from([40 + index as u8; 32]);
+        register_test_invoice(&service, &tenant_key, payment_hash).await;
+        ractor::call!(service, |reply| {
+            LspServiceMessage::AcceptTrampolineDelivery(
+                hosted_forwarding_request(
+                    &tenant,
+                    payment_hash,
+                    crate::now_timestamp_as_millis_u64(),
+                ),
+                reply,
+            )
+        })
+        .unwrap()
+        .unwrap();
+        wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
+
+        assert_eq!(
+            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
+                payment_hash,
+                payment_status: PaymentStatus::Failed,
+                failure: Some(reason.to_string()),
+                failure_code: Some(error_code),
+                reply,
+            })
+            .unwrap()
+            .unwrap(),
+            LspPaymentOutcomeDecision::SettleUpstream,
+            "{error_code:?} must not be retried"
+        );
+        let settling = manager.get(&payment_hash).unwrap().unwrap();
+        assert_eq!(
+            settling.status,
+            LspPaymentDeliveryStatus::SettlingUpstream {
+                payment_status: PaymentStatus::Failed,
+                failure: Some(reason.to_string()),
+            }
+        );
+        assert_eq!(settling.attempt_count, 1);
+        assert_eq!(settling.last_error.as_deref(), Some(reason));
+        assert_eq!(settling.last_error_code, Some(error_code));
+
+        service
+            .send_message(LspServiceMessage::PaymentOutcomeSettled {
+                payment_hash,
+                payment_status: PaymentStatus::Failed,
+                failure: Some(reason.to_string()),
+            })
+            .unwrap();
+        wait_for_delivery_status(
+            &manager,
+            payment_hash,
+            LspPaymentDeliveryStatus::Failed {
+                reason: reason.to_string(),
+            },
+        )
+        .await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(dispatches.load(Ordering::Relaxed), cases.len());
+    assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -1803,14 +2136,18 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         .unwrap();
 
     for _ in 0..2 {
-        ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
-            payment_hash,
-            payment_status: PaymentStatus::Success,
-            failure: None,
-            reply,
-        })
-        .unwrap()
-        .unwrap();
+        assert_eq!(
+            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
+                payment_hash,
+                payment_status: PaymentStatus::Success,
+                failure: None,
+                failure_code: None,
+                reply,
+            })
+            .unwrap()
+            .unwrap(),
+            LspPaymentOutcomeDecision::SettleUpstream
+        );
     }
     let settling = manager.get(&payment_hash).unwrap().unwrap();
     assert_eq!(

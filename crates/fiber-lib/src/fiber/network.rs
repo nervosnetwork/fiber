@@ -113,9 +113,9 @@ use crate::invoice::{
     CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
     SettleInvoiceError,
 };
-use crate::lsp::TrampolineForwardingRequest;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::lsp::{LspDeliveryDecision, LspServiceMessage};
+use crate::lsp::{LspDeliveryDecision, LspPaymentOutcomeDecision, LspServiceMessage};
+use crate::lsp::{LspPaymentDispatchError, TrampolineForwardingRequest};
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, Error};
 use fiber_types::protocol::AnnouncedNodeName;
@@ -831,6 +831,8 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) failed_error_code: Option<TlcErrorCode>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
     #[cfg(any(debug_assertions, test, feature = "bench"))]
@@ -1109,7 +1111,7 @@ pub enum NetworkActorCommand {
     #[cfg(not(target_arch = "wasm32"))]
     DispatchBufferedTrampoline {
         request: TrampolineForwardingRequest,
-        reply: RpcReplyPort<Result<(), String>>,
+        reply: RpcReplyPort<Result<(), LspPaymentDispatchError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
     ReconcileBufferedTrampolineSettlement {
@@ -1120,6 +1122,7 @@ pub enum NetworkActorCommand {
     FailBufferedTrampoline {
         request: TrampolineForwardingRequest,
         reason: String,
+        error_code: TlcErrorCode,
         reply: RpcReplyPort<Result<bool, String>>,
     },
     // Build a payment router with the given hops
@@ -3292,16 +3295,8 @@ where
             }
             #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::DispatchBufferedTrampoline { request, reply } => {
-                let result = self.dispatch_trampoline_payment(state, request).await;
-                match result {
-                    Ok(()) => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    Err(error) => {
-                        let reason = format!("failed to dispatch hosted payment: {error:?}");
-                        let _ = reply.send(Err(reason));
-                    }
-                }
+                let result = self.try_dispatch_trampoline_payment(state, request).await;
+                let _ = reply.send(result);
             }
             #[cfg(not(target_arch = "wasm32"))]
             NetworkActorCommand::ReconcileBufferedTrampolineSettlement {
@@ -3323,9 +3318,12 @@ where
             NetworkActorCommand::FailBufferedTrampoline {
                 request,
                 reason,
+                error_code,
                 reply,
             } => {
-                let result = self.fail_buffered_trampoline(state, request, reason).await;
+                let result = self
+                    .fail_buffered_trampoline(state, request, reason, error_code)
+                    .await;
                 let _ = reply.send(result);
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
@@ -4606,9 +4604,25 @@ where
         state: &mut NetworkActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
+        self.try_dispatch_trampoline_payment(state, request)
+            .await
+            .map_err(|error| {
+                error!("Failed to start trampoline payment: {error}");
+                TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+            })
+    }
+
+    async fn try_dispatch_trampoline_payment(
+        &self,
+        state: &mut NetworkActorState<S, C>,
+        request: TrampolineForwardingRequest,
+    ) -> Result<(), LspPaymentDispatchError> {
         let payment_hash = request.payment_hash;
-        let payment_data = request.into_send_payment_data().map_err(|_| {
-            TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+        let payment_data = request.into_send_payment_data().map_err(|reason| {
+            LspPaymentDispatchError::Permanent {
+                reason: format!("invalid hosted payment request: {reason}"),
+                error_code: TlcErrorCode::InvalidOnionPayload,
+            }
         })?;
         let (send, _recv) = oneshot::channel();
         let rpc_reply = RpcReplyPort::from(send);
@@ -4623,13 +4637,9 @@ where
             .await
         {
             Ok(()) => Ok(()),
-            Err(e) => {
-                error!("Failed to start trampoline payment: {}", e);
-                Err(TlcErr::new_node_fail(
-                    TlcErrorCode::TemporaryNodeFailure,
-                    state.get_public_key(),
-                ))
-            }
+            Err(error) => Err(LspPaymentDispatchError::Temporary {
+                reason: format!("failed to start hosted payment: {error}"),
+            }),
         }
     }
 
@@ -4673,6 +4683,7 @@ where
         state: &mut NetworkActorState<S, C>,
         request: TrampolineForwardingRequest,
         reason: String,
+        error_code: TlcErrorCode,
     ) -> Result<bool, String> {
         if let Some(session) = state.store.get_payment_session(request.payment_hash) {
             if matches!(
@@ -4690,7 +4701,7 @@ where
         let mut session = PaymentSession::new_session(&state.store, payment_data, 0);
         session.status = PaymentStatus::Failed;
         session.last_error = Some(reason);
-        session.last_error_code = Some(TlcErrorCode::TemporaryNodeFailure);
+        session.last_error_code = Some(error_code);
         session.last_updated_at = now;
         state.store.insert_payment_session(session.clone());
         let settlement = state.settle_trampoline_payment(&session, None, None).await;
@@ -7399,16 +7410,24 @@ where
                         payment_hash,
                         payment_status: session.status,
                         failure: session.last_error.clone(),
+                        failure_code: session.last_error_code,
                         reply,
                     },
                     5_000
                 );
-                if !matches!(ready, Ok(Ok(()))) {
-                    warn!(
-                        %payment_hash,
-                        ?ready,
-                        "Failed to persist hosted payment outcome before upstream settlement"
-                    );
+                match ready {
+                    Ok(Ok(LspPaymentOutcomeDecision::SettleUpstream)) => {}
+                    Ok(Ok(LspPaymentOutcomeDecision::RetryDelivery)) => {
+                        return;
+                    }
+                    ready => {
+                        warn!(
+                            %payment_hash,
+                            ?ready,
+                            "Failed to persist hosted payment outcome before upstream settlement"
+                        );
+                        return;
+                    }
                 }
             }
         }

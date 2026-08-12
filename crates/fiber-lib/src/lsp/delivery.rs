@@ -2,7 +2,7 @@ use bincode::{deserialize, serialize};
 use fiber_store::backend::StorageBackend;
 use serde::{Deserialize, Serialize};
 
-use crate::fiber_types::{Hash256, PaymentStatus};
+use crate::fiber_types::{Hash256, PaymentStatus, TlcErrorCode};
 use crate::store::{FiberStore, Store};
 
 use super::{LspInvoiceRegistration, TenantId, TrampolineForwardingRequest};
@@ -83,6 +83,12 @@ pub struct LspPaymentDelivery {
     pub request: TrampolineForwardingRequest,
     pub buffer_deadline: u64,
     pub status: LspPaymentDeliveryStatus,
+    /// Number of times Public T has tried to create the downstream payment.
+    pub attempt_count: u64,
+    /// Most recent downstream dispatch or payment error.
+    pub last_error: Option<String>,
+    /// Structured TLC failure code paired with `last_error`, when available.
+    pub last_error_code: Option<TlcErrorCode>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -162,6 +168,33 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             .list_pending()?
             .iter()
             .any(|delivery| &delivery.tenant_id == tenant_id))
+    }
+
+    pub fn begin_dispatch(
+        &self,
+        payment_hash: &Hash256,
+        now: u64,
+    ) -> Result<LspPaymentDelivery, String> {
+        let mut delivery = self
+            .get(payment_hash)?
+            .ok_or_else(|| format!("hosted payment delivery {payment_hash} not found"))?;
+        if !matches!(
+            delivery.status,
+            LspPaymentDeliveryStatus::Deferred | LspPaymentDeliveryStatus::Dispatching
+        ) {
+            return Err(format!(
+                "cannot dispatch hosted payment delivery in state {:?}",
+                delivery.status
+            ));
+        }
+        delivery.attempt_count = delivery
+            .attempt_count
+            .checked_add(1)
+            .ok_or_else(|| "hosted payment delivery attempt count overflow".to_string())?;
+        delivery.status = LspPaymentDeliveryStatus::Dispatching;
+        delivery.updated_at = now;
+        self.store.put_lsp_payment_delivery(&delivery)?;
+        Ok(delivery)
     }
 
     pub fn accept(
@@ -246,6 +279,9 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             request,
             buffer_deadline,
             status: LspPaymentDeliveryStatus::Deferred,
+            attempt_count: 0,
+            last_error: None,
+            last_error_code: None,
             created_at: now,
             updated_at: now,
         };
@@ -259,10 +295,26 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         status: LspPaymentDeliveryStatus,
         now: u64,
     ) -> Result<LspPaymentDelivery, String> {
+        self.transition_with_error(payment_hash, status, None, now)
+    }
+
+    pub fn transition_with_error(
+        &self,
+        payment_hash: &Hash256,
+        status: LspPaymentDeliveryStatus,
+        error: Option<(String, Option<TlcErrorCode>)>,
+        now: u64,
+    ) -> Result<LspPaymentDelivery, String> {
         let mut delivery = self
             .get(payment_hash)?
             .ok_or_else(|| format!("hosted payment delivery {payment_hash} not found"))?;
         if delivery.status == status {
+            if let Some((reason, error_code)) = error {
+                delivery.last_error = Some(reason);
+                delivery.last_error_code = error_code;
+                delivery.updated_at = now;
+                self.store.put_lsp_payment_delivery(&delivery)?;
+            }
             return Ok(delivery);
         }
         let valid = matches!(
@@ -284,7 +336,8 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
                     | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::InFlight,
-                LspPaymentDeliveryStatus::SettlingUpstream { .. }
+                LspPaymentDeliveryStatus::Deferred
+                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
             ) | (
                 LspPaymentDeliveryStatus::SettlingUpstream { .. },
                 LspPaymentDeliveryStatus::InFlight
@@ -300,6 +353,10 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
                 "invalid hosted payment delivery transition from {:?} to {:?}",
                 delivery.status, status
             ));
+        }
+        if let Some((reason, error_code)) = error {
+            delivery.last_error = Some(reason);
+            delivery.last_error_code = error_code;
         }
         delivery.status = status;
         delivery.updated_at = now;

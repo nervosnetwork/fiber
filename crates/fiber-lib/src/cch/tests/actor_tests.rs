@@ -615,6 +615,7 @@ impl Actor for MockNetworkActor {
                             .unwrap()
                             .as_secs(),
                         failed_error: None,
+                        failed_error_code: None,
                         custom_records: None,
                         fee: 0,
                         #[cfg(any(debug_assertions, test, feature = "bench"))]

@@ -665,6 +665,8 @@ impl From<PaymentSession> for SendPaymentResponse {
             payment_preimage,
             status,
             failed_error: session.last_error.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            failed_error_code: session.last_error_code,
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
             custom_records: session.request.custom_records.clone(),

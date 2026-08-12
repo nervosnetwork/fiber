@@ -146,9 +146,17 @@ reservation, consults the public payment session, and resumes or finalizes the
 record idempotently. If the upstream TLC was already removed before downstream
 dispatch, the delivery becomes `Cancelled` and its reservation is released;
 the LSP does not create a downstream payment or attempt another upstream
-failure. A transient downstream dispatch failure returns to
+failure. A transient downstream dispatch or final payment failure (for example,
+no route or an offline peer) returns to
 `Deferred` and is retried until the deadline instead of immediately failing the
-upstream TLC. Deadline processing first persists `ExpiringUpstream`, then fails
+upstream TLC. Each transition into `Dispatching` durably increments
+`attempt_count`, while `last_error` records the most recent dispatch or payment
+failure for RPC inspection. A permanent dispatch failure instead enters
+`SettlingUpstream` immediately and fails the upstream TLC with its structured
+TLC error code; it is never returned to `Deferred`. Permanent outcomes reported
+by the downstream payment actor, including an expired or cancelled invoice and
+final amount/expiry mismatches, follow the same settlement path. Deadline
+processing first persists `ExpiringUpstream`, then fails
 the upstream TLC and records `Expired`; a restart between those operations
 resumes the same settlement instead of collapsing expiry into a generic payment
 failure. Buffered MPP is rejected in this phase.
