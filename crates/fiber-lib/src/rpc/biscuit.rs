@@ -1,13 +1,15 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use biscuit_auth::{
     builder::{Fact, Term},
-    Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
+    Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, KeyPair, PrivateKey, PublicKey,
 };
 
 use crate::lsp::TenantId;
@@ -15,6 +17,60 @@ use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
 
 const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
+const TENANT_CAPABILITIES: [(&str, &str); 6] = [
+    ("read", "channels"),
+    ("write", "channels"),
+    ("read", "invoices"),
+    ("write", "invoices"),
+    ("read", "payments"),
+    ("write", "payments"),
+];
+
+/// Signs tenant-scoped Biscuit access tokens with the RPC authentication root key.
+#[derive(Clone)]
+pub struct BiscuitTokenIssuer {
+    root: Arc<KeyPair>,
+}
+
+impl BiscuitTokenIssuer {
+    pub fn from_private_key_file(path: &Path, expected_public_key: &str) -> Result<Self> {
+        let private_key = std::fs::read_to_string(path).with_context(|| {
+            format!("failed to read Biscuit private key from {}", path.display())
+        })?;
+        Self::from_private_key(private_key.trim(), expected_public_key)
+    }
+
+    fn from_private_key(private_key: &str, expected_public_key: &str) -> Result<Self> {
+        let private_key =
+            PrivateKey::from_str(private_key).context("invalid Biscuit private key")?;
+        let root = KeyPair::from(&private_key);
+        let expected_public_key =
+            PublicKey::from_str(expected_public_key).context("invalid Biscuit public key")?;
+        if root.public() != expected_public_key {
+            bail!("Biscuit private key does not match rpc.biscuit_public_key");
+        }
+        Ok(Self {
+            root: Arc::new(root),
+        })
+    }
+
+    pub fn issue_tenant_token(&self, tenant_id: &TenantId) -> Result<String> {
+        let mut builder = Biscuit::builder().fact(Fact::new(
+            "tenant".to_string(),
+            &[Term::Str(tenant_id.as_str().to_string())],
+        ))?;
+        for (operation, resource) in TENANT_CAPABILITIES {
+            builder = builder.fact(Fact::new(
+                operation.to_string(),
+                &[Term::Str(resource.to_string())],
+            ))?;
+        }
+        builder
+            .build(&self.root)?
+            .to_base64()
+            .context("failed to encode tenant Biscuit token")
+    }
+}
 
 fn authorizer_builder() -> AuthorizerBuilder {
     AuthorizerBuilder::new().set_limits(AuthorizerLimits {
@@ -317,9 +373,44 @@ mod tests {
         KeyPair,
     };
 
-    use crate::rpc::biscuit::{extract_node_id, extract_tenant_id};
+    use crate::{
+        lsp::TenantId,
+        rpc::biscuit::{extract_node_id, extract_tenant_id},
+    };
 
-    use super::{build_authorizer, AuthRule, BiscuitAuth};
+    use super::{build_authorizer, AuthRule, BiscuitAuth, BiscuitTokenIssuer};
+
+    #[test]
+    fn tenant_token_issuer_binds_identity_and_data_plane_capabilities() {
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let token = issuer
+            .issue_tenant_token(&TenantId::new("u1".to_string()).unwrap())
+            .unwrap();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let (biscuit, _) = auth.check_permission("open_channel", &token).unwrap();
+        assert_eq!(
+            extract_tenant_id(&biscuit).unwrap(),
+            Some(TenantId::new("u1".to_string()).unwrap())
+        );
+        auth.check_permission("new_invoice", &token).unwrap();
+        auth.check_permission("send_payment", &token).unwrap();
+        assert!(auth
+            .check_permission("lsp_register_tenant", &token)
+            .is_err());
+
+        let other_root = KeyPair::new();
+        assert!(BiscuitTokenIssuer::from_private_key(
+            &other_root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .is_err());
+    }
 
     #[test]
     fn test_biscuit_auth_uses_ten_millisecond_authorizer_limit() {

@@ -85,6 +85,9 @@ rpc:
   # If you bind RPC to a public address, set biscuit_public_key to enable authentication.
   # See https://github.com/nervosnetwork/fiber/blob/main/docs/biscuit-auth.md for how to generate and configure the biscuit key pair.
   # biscuit_public_key: "<placeholder>"
+  # When the hosted LSP service issues tenant access tokens, configure a protected
+  # file containing the matching private key.
+  # biscuit_private_key_path: "/path/to/biscuit-private-key"
   # enabled_modules:
   #   - cch
   #   - channel

@@ -95,6 +95,15 @@ pub struct LspTenantStatus {
     pub channel_online: bool,
 }
 
+/// Result of registering a hosted tenant.
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
+pub struct RegisterLspTenantResult {
+    /// Persistent and runtime status of the registered tenant.
+    pub tenant: LspTenantStatus,
+    /// Newly issued tenant access token. It is returned only when the tenant is first created.
+    pub access_token: Option<String>,
+}
+
 /// Result of listing hosted tenants.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct ListLspTenantsResult {

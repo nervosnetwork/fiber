@@ -43,6 +43,7 @@ use crate::{
         lsp::{
             ListLspTenantsResult, LspPaymentDelivery, LspPaymentDeliveryStatus,
             LspPaymentHashParams, LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus,
+            RegisterLspTenantResult,
         },
         server::start_rpc,
     },
@@ -300,7 +301,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         .build(format!("http://{rpc_addr}"))
         .expect("build LSP RPC client");
 
-    let registered: crate::rpc::lsp::LspTenantStatus = client
+    let registered: RegisterLspTenantResult = client
         .request(
             "lsp_register_tenant",
             rpc_params![LspTenantParams {
@@ -310,11 +311,12 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         .await
         .expect("register hosted tenant");
     assert_eq!(
-        registered.invoice_pubkey,
+        registered.tenant.invoice_pubkey,
         expected_tenant.invoice_pubkey.into()
     );
+    assert!(registered.access_token.is_none());
     assert!(matches!(
-        registered.runtime_status,
+        registered.tenant.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
 
@@ -463,20 +465,6 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     .unwrap()
     .to_base64()
     .unwrap();
-    let tenant_token = biscuit!(
-        r#"
-            tenant("u1");
-            read("channels");
-            write("channels");
-            read("invoices");
-            write("invoices");
-            read("payments");
-        "#
-    )
-    .build(&biscuit_root)
-    .unwrap()
-    .to_base64()
-    .unwrap();
     let public_invoice_token = biscuit!(r#"read("invoices");"#)
         .build(&biscuit_root)
         .unwrap()
@@ -485,6 +473,13 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
 
     let mut rpc_config = gen_rpc_config();
     rpc_config.biscuit_public_key = Some(biscuit_root.public().to_string());
+    let biscuit_private_key_path = root.path().join("biscuit-private-key");
+    std::fs::write(
+        &biscuit_private_key_path,
+        biscuit_root.private().to_prefixed_string(),
+    )
+    .expect("write Biscuit private key");
+    rpc_config.biscuit_private_key_path = Some(biscuit_private_key_path);
     rpc_config.enabled_modules = vec![
         "channel".to_string(),
         "invoice".to_string(),
@@ -511,10 +506,9 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     .await
     .expect("start authenticated LSP RPC server");
     let admin_client = authenticated_client(rpc_addr, &admin_token);
-    let tenant_client = authenticated_client(rpc_addr, &tenant_token);
     let public_client = authenticated_client(rpc_addr, &public_invoice_token);
 
-    let registered: crate::rpc::lsp::LspTenantStatus = admin_client
+    let registered: RegisterLspTenantResult = admin_client
         .request(
             "lsp_register_tenant",
             rpc_params![LspTenantParams {
@@ -524,9 +518,24 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .await
         .expect("register hosted tenant");
     assert!(matches!(
-        registered.runtime_status,
+        registered.tenant.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
+    let tenant_token = registered
+        .access_token
+        .expect("new tenant registration must issue an access token");
+    let duplicate: RegisterLspTenantResult = admin_client
+        .request(
+            "lsp_register_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: TENANT_ID.to_string(),
+            }],
+        )
+        .await
+        .expect("repeat hosted tenant registration");
+    assert_eq!(duplicate.tenant.tenant_id, TENANT_ID);
+    assert!(duplicate.access_token.is_none());
+    let tenant_client = authenticated_client(rpc_addr, &tenant_token);
 
     let channels: fiber_json_types::ListChannelsResult = tenant_client
         .request(
@@ -794,7 +803,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     assert_eq!(status.registered_tenants, 0);
     assert_eq!(status.active_tenants, 0);
 
-    let registered: crate::rpc::lsp::LspTenantStatus = client
+    let registered: RegisterLspTenantResult = client
         .request(
             "lsp_register_tenant",
             rpc_params![LspTenantParams {
@@ -803,13 +812,14 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         )
         .await
         .expect("register hosted tenant");
-    assert_eq!(registered.invoice_pubkey, tenant.pubkey.into());
-    assert_eq!(registered.private_channel_id, None);
+    assert_eq!(registered.tenant.invoice_pubkey, tenant.pubkey.into());
+    assert_eq!(registered.tenant.private_channel_id, None);
+    assert!(registered.access_token.is_none());
     assert!(matches!(
-        registered.runtime_status,
+        registered.tenant.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
-    assert!(!registered.channel_online);
+    assert!(!registered.tenant.channel_online);
 
     establish_channel_between_nodes(
         &mut payer,

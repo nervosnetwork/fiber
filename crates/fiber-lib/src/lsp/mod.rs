@@ -84,8 +84,8 @@ pub use runtime::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use service::{
-    LspDeliveryDecision, LspService, LspServiceArgs, LspServiceMessage, LspServiceState,
-    LspServiceStatus,
+    HostedTenantRegistration, LspDeliveryDecision, LspService, LspServiceArgs, LspServiceMessage,
+    LspServiceState, LspServiceStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use tenant::{HostedTenantRecord, HostedTenantStatus, TenantId, TenantRuntimeStatus};

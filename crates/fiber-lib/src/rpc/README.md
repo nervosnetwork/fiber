@@ -829,12 +829,8 @@ Persistently registers a hosted tenant without starting its Fiber runtime.
 
 ##### Returns
 
-* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
-* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
-* `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
-* `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
-* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
+* `tenant` - <em>[LspTenantStatus](#type-lsptenantstatus)</em>, Persistent and runtime status of the registered tenant.
+* `access_token` - <em>`Option<String>`</em>, Newly issued tenant access token. It is returned only when the tenant is first created.
 
 ---
 

@@ -43,7 +43,7 @@ script:post-response {
   const routeHint = res.body.result.invoice.data.attrs.find(
     (attr) => attr.trampoline_route_hint !== undefined
   );
-  if (!routeHint || routeHint.trampoline_route_hint !== bru.getVar("NODE2_PUBKEY")) {
+  if (!routeHint || routeHint.trampoline_route_hint !== bru.getEnvVar("NODE2_PUBKEY")) {
     throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
   }
   bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice_address);

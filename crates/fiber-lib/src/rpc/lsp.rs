@@ -14,6 +14,7 @@ use crate::lsp::{
     LspServiceStatus as InternalServiceStatus, TenantId,
     TenantRuntimeStatus as InternalTenantRuntimeStatus,
 };
+use crate::rpc::biscuit::BiscuitTokenIssuer;
 use crate::rpc::invoice::InvoiceRpcServerImpl;
 use crate::rpc::payment::PaymentRpcServerImpl;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
@@ -22,7 +23,8 @@ pub use fiber_json_types::{
     GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetPaymentCommandResult,
     ListLspTenantsResult, LspInvoiceHint, LspInvoiceRegistration, LspPaymentDelivery,
     LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantParams,
-    LspTenantRuntimeStatus, LspTenantStatus, NewLspInvoiceParams, SendLspPaymentParams,
+    LspTenantRuntimeStatus, LspTenantStatus, NewLspInvoiceParams, RegisterLspTenantResult,
+    SendLspPaymentParams,
 };
 
 /// RPC module for hosted LSP tenant and payment-delivery administration.
@@ -37,7 +39,7 @@ trait LspRpc {
     async fn lsp_register_tenant(
         &self,
         params: LspTenantParams,
-    ) -> Result<LspTenantStatus, ErrorObjectOwned>;
+    ) -> Result<RegisterLspTenantResult, ErrorObjectOwned>;
 
     /// Starts a registered tenant execution context if it is currently cold.
     #[method(name = "lsp_ensure_tenant")]
@@ -96,12 +98,22 @@ trait LspRpc {
 /// JSON-RPC adapter for an active hosted LSP service actor.
 pub struct LspRpcServerImpl {
     actor: ActorRef<LspServiceMessage>,
+    token_issuer: Option<BiscuitTokenIssuer>,
 }
 
 impl LspRpcServerImpl {
     /// Construct an LSP RPC server backed by `actor`.
     pub fn new(actor: ActorRef<LspServiceMessage>) -> Self {
-        Self { actor }
+        Self {
+            actor,
+            token_issuer: None,
+        }
+    }
+
+    /// Configure the Biscuit authority used for first-time tenant onboarding.
+    pub fn with_token_issuer(mut self, token_issuer: Option<BiscuitTokenIssuer>) -> Self {
+        self.token_issuer = token_issuer;
+        self
     }
 
     async fn tenant_rpc_context(
@@ -120,12 +132,21 @@ impl LspRpcServerImpl {
     async fn register_tenant(
         &self,
         params: LspTenantParams,
-    ) -> Result<LspTenantStatus, ErrorObjectOwned> {
+    ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
         let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
-        call!(self.actor, LspServiceMessage::RegisterTenant, tenant_id)
+        let access_token = self
+            .token_issuer
+            .as_ref()
+            .map(|issuer| issuer.issue_tenant_token(&tenant_id))
+            .transpose()
+            .rpc_err()?;
+        let registration = call!(self.actor, LspServiceMessage::RegisterTenant, tenant_id)
             .rpc_err()?
-            .rpc_err()
-            .map(Into::into)
+            .rpc_err()?;
+        Ok(RegisterLspTenantResult {
+            tenant: registration.status.into(),
+            access_token: registration.created.then_some(access_token).flatten(),
+        })
     }
 
     async fn ensure_tenant(
@@ -244,7 +265,7 @@ impl LspRpcServer for LspRpcServerImpl {
     async fn lsp_register_tenant(
         &self,
         params: LspTenantParams,
-    ) -> Result<LspTenantStatus, ErrorObjectOwned> {
+    ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
         self.register_tenant(params).await
     }
 

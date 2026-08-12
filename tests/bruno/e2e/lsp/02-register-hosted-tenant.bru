@@ -29,15 +29,39 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.tenant_id: eq "u1"
-  res.body.result.runtime_status: eq "cold"
-  res.body.result.channel_online: eq false
+  res.body.result.tenant.tenant_id: eq "u1"
+  res.body.result.tenant.runtime_status: eq "cold"
+  res.body.result.tenant.channel_online: eq false
 }
 
 script:post-response {
-  const tenantPubkey = res.body.result.invoice_pubkey;
+  const axios = require("axios");
+  const tenantPubkey = res.body.result.tenant.invoice_pubkey;
   if (!tenantPubkey || tenantPubkey === bru.getEnvVar("NODE2_PUBKEY")) {
     throw new Error("hosted tenant must have an identity distinct from Public T");
   }
+  const tenantToken = res.body.result.access_token;
+  if (!tenantToken) {
+    throw new Error("new hosted tenant registration must return an access token");
+  }
+  const duplicate = await axios.post(
+    bru.getEnvVar("NODE2_RPC_URL"),
+    {
+      id: "duplicate-registration",
+      jsonrpc: "2.0",
+      method: "lsp_register_tenant",
+      params: [{ tenant_id: "u1" }]
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${bru.getEnvVar("LSP_OPERATOR_TOKEN")}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+  if (duplicate.data.error || duplicate.data.result.access_token !== null) {
+    throw new Error("repeat hosted tenant registration must not issue another access token");
+  }
   bru.setVar("HOSTED_TENANT_PUBKEY", tenantPubkey);
+  bru.setVar("LSP_TENANT_TOKEN", tenantToken);
 }

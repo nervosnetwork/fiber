@@ -192,6 +192,7 @@ pub fn gen_rpc_config() -> RpcConfig {
     RpcConfig {
         listening_addr: None,
         biscuit_public_key: None,
+        biscuit_private_key_path: None,
         enabled_modules: vec![
             "info".to_string(),
             "channel".to_string(),

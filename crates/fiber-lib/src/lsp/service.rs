@@ -35,6 +35,12 @@ pub struct LspServiceStatus {
     pub active_tenants: usize,
 }
 
+/// Result of the idempotent hosted tenant registration operation.
+pub struct HostedTenantRegistration {
+    pub status: HostedTenantStatus,
+    pub created: bool,
+}
+
 /// Result of consulting the hosted invoice registry for an incoming trampoline TLC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LspDeliveryDecision {
@@ -45,7 +51,10 @@ pub enum LspDeliveryDecision {
 /// Commands accepted by the LSP service container.
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
-    RegisterTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
+    RegisterTenant(
+        TenantId,
+        RpcReplyPort<Result<HostedTenantRegistration, String>>,
+    ),
     EnsureTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     EvictTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     ListTenants(RpcReplyPort<Result<Vec<HostedTenantStatus>, String>>),
@@ -280,11 +289,17 @@ impl Actor for LspService {
                 });
             }
             LspServiceMessage::RegisterTenant(tenant_id, reply) => {
-                let result = state
-                    .supervisor
-                    .provision(&tenant_id)
-                    .and_then(|record| state.registry.register(record))
-                    .map(|record| state.tenant_status(record));
+                let result = state.registry.get(&tenant_id).and_then(|existing| {
+                    let created = existing.is_none();
+                    state
+                        .supervisor
+                        .provision(&tenant_id)
+                        .and_then(|record| state.registry.register(record))
+                        .map(|record| HostedTenantRegistration {
+                            status: state.tenant_status(record),
+                            created,
+                        })
+                });
                 let _ = reply.send(result);
             }
             LspServiceMessage::EnsureTenant(tenant_id, reply) => {

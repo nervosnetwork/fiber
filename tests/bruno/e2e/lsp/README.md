@@ -12,8 +12,9 @@ directions: the tenant creates a standard invoice which Public T registers with 
 Node1 pays the offline hosted tenant while Public T buffers and later completes the delivery,
 then the hosted tenant uses `send_payment` to pay Node1 through Public T.
 
-The Biscuit public key and test-only bearer tokens are fixed fixtures in `tests/nodes/start.sh`
-and `tests/bruno/environments/test.bru`. They are not production credentials.
+The Biscuit key pair and operator bearer token are test-only fixtures. The workflow does not
+carry a fixed tenant token: `lsp_register_tenant` issues it on first registration, and Bruno
+stores the response for the remaining tenant-scoped requests. They are not production credentials.
 For this payment topology, Public T auto-accepts each CKB channel with 500 CKB so that both the
 U-T and Node1-T channels have usable outbound liquidity in both directions.
 

@@ -146,6 +146,7 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
             -s fiber,rpc,ckb,lsp
             --fiber-auto-accept-channel-ckb-funding-amount 50000000000
             --rpc-biscuit-public-key ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79
+            --rpc-biscuit-private-key-path "${script_dir}/biscuit-test-private-key"
         )
     fi
     if [[ -n "$enable_fiber_metrics" ]]; then
