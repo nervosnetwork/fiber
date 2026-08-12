@@ -703,7 +703,19 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         5_000
     )
     .expect("hosted tenant connect reply");
-    assert_eq!(connect_result.unwrap_err(), "network service is disabled");
+    assert_eq!(
+        connect_result.unwrap_err(),
+        "public network service is disabled for hosted tenant"
+    );
+    let activity = ractor::call_t!(
+        tenant_rpc_context.network_actor.clone(),
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
+            reply
+        )),
+        5_000
+    )
+    .expect("hosted tenant remains alive after rejecting public network command");
+    assert!(activity.is_idle());
 
     let impostor = Actor::spawn(None, NoopNetworkActor, ())
         .await

@@ -1498,7 +1498,12 @@ impl GossipMessageWithTarget {
     }
 }
 
-pub struct NetworkActor<S, C> {
+/// Shared Fiber channel/payment data plane.
+///
+/// This core deliberately has no P2P actor identity of its own. Both
+/// the public `NetworkActor` and a local-only `HostedTenantActor` drive it with
+/// their respective runtime state.
+pub(crate) struct FiberActorCore<S, C> {
     // An event emitter to notify outside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
@@ -1508,23 +1513,39 @@ pub struct NetworkActor<S, C> {
     chain_client: C,
 }
 
-struct NetworkActorRuntime {
+pub struct PublicNetworkRuntimeState {
+    state_to_be_persisted: PersistentNetworkActorState,
     node_name: Option<AnnouncedNodeName>,
     announced_addrs: Vec<Multiaddr>,
     auto_announce: bool,
-    control: Option<ServiceAsyncControl>,
+    last_node_announcement_message: Option<NodeAnnouncement>,
+    control: ServiceAsyncControl,
     peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
-    peer_channel_index: PeerChannelIndex,
     #[cfg(not(target_arch = "wasm32"))]
     onion_service_token: Option<tokio_util::sync::CancellationToken>,
+    peer_session_map: HashMap<Pubkey, ConnectedPeer>,
+    pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     gossip_actor: Option<ActorRef<GossipActorMessage>>,
     max_inbound_peers: usize,
     min_outbound_peers: usize,
     enable_peer_reconnect_backoff: bool,
-    features: FeatureVector,
+    peer_reconnect_backoff_attempts: HashMap<Pubkey, u32>,
+    requested_disconnect_peers: HashSet<Pubkey>,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp_service: Option<ActorRef<LspServiceMessage>>,
 }
 
-impl<S, C> NetworkActor<S, C>
+struct FiberActorStateArgs {
+    private_key: Privkey,
+    entropy: [u8; 32],
+    default_shutdown_script: Script,
+    network: ActorRef<NetworkActorMessage>,
+    peer_channel_index: PeerChannelIndex,
+    features: FeatureVector,
+    public_runtime: Option<Box<PublicNetworkRuntimeState>>,
+}
+
+impl<S, C> FiberActorCore<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
@@ -1557,34 +1578,20 @@ where
         }
     }
 
-    fn build_coordinator_state(
+    fn build_actor_state(
         &self,
         config: &FiberConfig,
-        private_key: Privkey,
-        entropy: [u8; 32],
-        default_shutdown_script: Script,
-        network: ActorRef<NetworkActorMessage>,
-        runtime: NetworkActorRuntime,
-    ) -> NetworkActorState<S, C> {
-        let NetworkActorRuntime {
-            node_name,
-            announced_addrs,
-            auto_announce,
-            control,
-            peer_message_policy,
+        args: FiberActorStateArgs,
+    ) -> FiberActorState<S, C> {
+        let FiberActorStateArgs {
+            private_key,
+            entropy,
+            default_shutdown_script,
+            network,
             peer_channel_index,
-            #[cfg(not(target_arch = "wasm32"))]
-            onion_service_token,
-            gossip_actor,
-            max_inbound_peers,
-            min_outbound_peers,
-            enable_peer_reconnect_backoff,
             features,
-        } = runtime;
-        let state_to_be_persisted = self
-            .store
-            .get_network_actor_state(&private_key.pubkey())
-            .unwrap_or_default();
+            public_runtime,
+        } = args;
         let mut pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>> = HashMap::new();
         for session in self.store.get_all_payment_sessions() {
             let Some(context) = session.request.trampoline_context.as_ref() else {
@@ -1613,25 +1620,15 @@ where
             }
         }
 
-        NetworkActorState {
+        FiberActorState {
             store: self.store.clone(),
-            state_to_be_persisted,
             store_actor: self.store_actor.clone(),
-            node_name,
-            announced_addrs,
-            auto_announce,
-            last_node_announcement_message: None,
             private_key,
             entropy,
             default_shutdown_script,
             network,
-            control,
-            peer_message_policy,
-            #[cfg(not(target_arch = "wasm32"))]
-            onion_service_token,
-            peer_session_map: Default::default(),
+            public_runtime,
             in_process_peers: Default::default(),
-            pending_save_peer_addresses: Default::default(),
             peer_channel_index,
             channels: Default::default(),
             channels_funding_lock_script_cache: Default::default(),
@@ -1649,12 +1646,6 @@ where
             tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
-            gossip_actor,
-            max_inbound_peers,
-            min_outbound_peers,
-            enable_peer_reconnect_backoff,
-            peer_reconnect_backoff_attempts: Default::default(),
-            requested_disconnect_peers: Default::default(),
             features,
             channel_ephemeral_config: ChannelEphemeralConfig {
                 funding_timeout_seconds: config.funding_timeout_seconds,
@@ -1663,8 +1654,6 @@ where
             },
             inflight_payments: Default::default(),
             pending_trampoline_settlements,
-            #[cfg(not(target_arch = "wasm32"))]
-            lsp_service: None,
             pending_external_funding_replies: Default::default(),
             last_channel_ready_scan: Default::default(),
             pending_channel_ready_retry_scans: Default::default(),
@@ -1865,7 +1854,7 @@ where
     pub async fn handle_peer_message(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         peer_pubkey: Pubkey,
         message: FiberMessage,
     ) -> crate::Result<()> {
@@ -1977,7 +1966,7 @@ where
     pub async fn handle_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
         match event {
@@ -2496,7 +2485,7 @@ where
     pub async fn handle_command(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
         match command {
@@ -2574,12 +2563,7 @@ where
                 let _ = reply.send(());
             }
             NetworkActorCommand::ConnectPeer(addr, save, source, rpc_reply) => {
-                let Some(control) = state.control.clone() else {
-                    if let Some(reply) = rpc_reply {
-                        let _ = reply.send(Err("network service is disabled".to_string()));
-                    }
-                    return Ok(());
-                };
+                let control = state.control.clone();
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 if matches!(source, PeerConnectSource::Manual) {
@@ -2607,10 +2591,7 @@ where
                 // may receive errors like DialerError.
             }
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, source, reply) => {
-                let Some(control) = state.control.clone() else {
-                    let _ = reply.send(Err("network service is disabled".to_string()));
-                    return Ok(());
-                };
+                let control = state.control.clone();
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
                 let has_known_addresses = !addresses.is_empty();
                 let address = select_connect_peer_address(addresses, addr_type);
@@ -2647,12 +2628,7 @@ where
                     state.requested_disconnect_peers.insert(pubkey);
                 }
                 if let Some(session) = session {
-                    let Some(control) = state.control.clone() else {
-                        if let Some(reply) = reply {
-                            let _ = reply.send(Err("network service is disabled".to_string()));
-                        }
-                        return Ok(());
-                    };
+                    let control = state.control.clone();
                     debug!(
                         "Disconnecting peer {:?} session {:?} with reason {:?}",
                         &pubkey, &session, &reason
@@ -2745,7 +2721,9 @@ where
                     state
                         .in_process_peers
                         .insert(pubkey, InProcessPeer { actor, features });
-                    state.requested_disconnect_peers.remove(&pubkey);
+                    if let Some(runtime) = state.public_runtime.as_deref_mut() {
+                        runtime.requested_disconnect_peers.remove(&pubkey);
+                    }
                     Ok(())
                 };
                 let _ = reply.send(result);
@@ -3686,7 +3664,7 @@ where
     fn forward_remove_tlc_to_channel<F>(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         remove_tlc_command: RemoveTlcCommand,
         completion: F,
@@ -3736,7 +3714,7 @@ where
     fn forward_onchain_tlc_remove_upstream(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        network_state: &mut NetworkActorState<S, C>,
+        network_state: &mut FiberActorState<S, C>,
         downstream_channel_id: Hash256,
         downstream_tlc_id: TLCId,
         forwarding_channel_id: Hash256,
@@ -3767,7 +3745,7 @@ where
 
     fn confirm_onchain_tlc_remove_relay(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         downstream_channel_id: Hash256,
         downstream_tlc_id: TLCId,
         payment_hash: Hash256,
@@ -3806,7 +3784,7 @@ where
     /// the downstream TLC removed only after the upstream delivery is durable.
     fn relay_onchain_tlc_remove_upstream(
         &self,
-        network_state: &mut NetworkActorState<S, C>,
+        network_state: &mut FiberActorState<S, C>,
         channel_state: &ChannelActorState,
         relay: OnChainTlcRemoveRelay,
     ) -> bool {
@@ -3861,7 +3839,7 @@ where
     /// closed channel state.
     async fn reconcile_onchain_tlcs_without_live_actor(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         actor_state: &mut ChannelActorState,
         now: u64,
         mark_settlement_confirmed: bool,
@@ -4127,7 +4105,7 @@ where
     fn timeout_hold_tlc(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         channel_id: Hash256,
         tlc_id: u64,
@@ -4197,7 +4175,7 @@ where
     fn settle_hold_tlc_set(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
     ) {
         let settlements = SettleTlcSetCommand::new_hold_tlc_set(payment_hash, &self.store).run();
@@ -4207,7 +4185,7 @@ where
     fn settle_received_hold_tlc_set(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
     ) {
         let settlements =
@@ -4218,7 +4196,7 @@ where
     fn settle_tlc_set(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
     ) {
@@ -4230,7 +4208,7 @@ where
     fn apply_tlc_settlements(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         settlements: Vec<TlcSettlement>,
         hold_payment_hash: Option<Hash256>,
     ) {
@@ -4522,7 +4500,7 @@ where
 
     async fn handle_send_onion_packet_command(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         command: SendOnionPacketCommand,
     ) -> Result<(), TlcErr> {
         trace!("Entering handle_send_onion_packet_command");
@@ -4607,7 +4585,7 @@ where
 
     async fn forward_trampoline_packet(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         trampoline_bytes: &[u8],
         previous_tlc: Option<PrevTlcInfo>,
         payment_hash: Hash256,
@@ -4740,11 +4718,15 @@ where
 
     async fn dispatch_trampoline_forwarding(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(lsp_service) = state.lsp_service.clone() {
+        if let Some(lsp_service) = state
+            .public_runtime
+            .as_deref()
+            .and_then(|runtime| runtime.lsp_service.clone())
+        {
             return self
                 .accept_or_dispatch_lsp_trampoline(state, lsp_service, request)
                 .await;
@@ -4755,7 +4737,7 @@ where
 
     async fn dispatch_trampoline_payment(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
         self.try_dispatch_trampoline_payment(state, request)
@@ -4768,7 +4750,7 @@ where
 
     async fn try_dispatch_trampoline_payment(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), LspPaymentDispatchError> {
         let payment_hash = request.payment_hash;
@@ -4800,7 +4782,7 @@ where
     #[cfg(not(target_arch = "wasm32"))]
     async fn accept_or_dispatch_lsp_trampoline(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         lsp_service: ActorRef<LspServiceMessage>,
         request: TrampolineForwardingRequest,
     ) -> Result<(), TlcErr> {
@@ -4834,7 +4816,7 @@ where
     #[cfg(not(target_arch = "wasm32"))]
     async fn fail_buffered_trampoline(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         request: TrampolineForwardingRequest,
         reason: String,
         error_code: TlcErrorCode,
@@ -4860,7 +4842,11 @@ where
         state.store.insert_payment_session(session.clone());
         let settlement = state.settle_trampoline_payment(&session, None, None).await;
         if settlement.is_ok() {
-            if let Some(lsp_service) = state.lsp_service.as_ref() {
+            if let Some(lsp_service) = state
+                .public_runtime
+                .as_deref()
+                .and_then(|runtime| runtime.lsp_service.as_ref())
+            {
                 let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcomeSettled {
                     payment_hash,
                     payment_status: PaymentStatus::Failed,
@@ -4874,7 +4860,7 @@ where
 
     fn get_tlc_error(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         error: &Error,
         channel_outpoint: &OutPoint,
     ) -> TlcErr {
@@ -4907,7 +4893,7 @@ where
     async fn on_remove_tlc_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
@@ -4926,7 +4912,7 @@ where
     /// reconciliation safely finalize without losing the higher-level payment update on restart.
     async fn reconcile_onchain_payer_tlc(
         &self,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         tlc_id: TLCId,
         payment_hash: Hash256,
@@ -5056,7 +5042,7 @@ where
     async fn on_add_tlc_result_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         add_tlc_result: Result<(Hash256, u64), (ProcessingChannelError, TlcErr)>,
@@ -5101,7 +5087,7 @@ where
     async fn resume_payment_actor_and_send_command(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         message: PaymentActorMessage,
     ) {
@@ -5128,7 +5114,7 @@ where
     async fn start_payment_actor(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         init_command: PaymentActorMessage,
     ) -> Result<(), String> {
@@ -5209,7 +5195,7 @@ where
     async fn do_update_channel_funding(
         &self,
         myself: &ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         retry_count: u32,
         transaction: Transaction,
@@ -5301,7 +5287,7 @@ where
     async fn do_sign_funding_tx(
         &self,
         myself: &ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
+        state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         retry_count: u32,
         target: Pubkey,
@@ -5495,15 +5481,51 @@ where
     }
 }
 
-pub struct NetworkActorState<S, C> {
+/// The public Fiber node actor. Public P2P, gossip and peer-session lifecycle
+/// live in this wrapper; channel/payment behavior lives in the core.
+pub struct NetworkActor<S, C> {
+    core: FiberActorCore<S, C>,
+}
+
+impl<S, C> NetworkActor<S, C>
+where
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    pub fn new(
+        event_sender: mpsc::Sender<NetworkServiceEvent>,
+        chain_actor: ActorRef<CkbChainMessage>,
+        store: S,
+        store_actor: Option<ActorRef<StoreActorMessage>>,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
+        chain_client: C,
+    ) -> Self {
+        Self {
+            core: FiberActorCore::new(
+                event_sender,
+                chain_actor,
+                store,
+                store_actor,
+                network_graph,
+                chain_client,
+            ),
+        }
+    }
+}
+
+pub struct FiberActorState<S, C> {
     store: S,
-    state_to_be_persisted: PersistentNetworkActorState,
     store_actor: Option<ActorRef<StoreActorMessage>>,
-    // The name of the node to be announced to the network, may be empty.
-    node_name: Option<AnnouncedNodeName>,
-    announced_addrs: Vec<Multiaddr>,
-    auto_announce: bool,
-    last_node_announcement_message: Option<NodeAnnouncement>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
     // This is the entropy used to generate various random values.
@@ -5513,18 +5535,10 @@ pub struct NetworkActorState<S, C> {
     // The default lock script to be used when closing a channel, may be overridden by the shutdown command.
     default_shutdown_script: Script,
     network: ActorRef<NetworkActorMessage>,
-    // This immutable attribute is placed here because we need to create it in
-    // the pre_start function.
-    // Hosted tenants reuse the channel/payment coordinator without starting a
-    // Tentacle service, so only public network actors have a service control.
-    control: Option<ServiceAsyncControl>,
-    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
-    // Cancellation token for the onion service background task.
-    #[cfg(not(target_arch = "wasm32"))]
-    onion_service_token: Option<tokio_util::sync::CancellationToken>,
-    peer_session_map: HashMap<Pubkey, ConnectedPeer>,
+    // Public P2P/gossip state is allocated only for the public network actor.
+    // Hosted tenants keep this as None and retain only the shared channel/payment state below.
+    public_runtime: Option<Box<PublicNetworkRuntimeState>>,
     in_process_peers: HashMap<Pubkey, InProcessPeer>,
-    pending_save_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
     peer_channel_index: PeerChannelIndex,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels funding lock script cache
@@ -5553,16 +5567,6 @@ pub struct NetworkActorState<S, C> {
     tlc_min_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
-    // The gossip messages actor to process and send gossip messages.
-    // None if gossip is disabled via sync_network_graph config.
-    gossip_actor: Option<ActorRef<GossipActorMessage>>,
-    max_inbound_peers: usize,
-    min_outbound_peers: usize,
-    enable_peer_reconnect_backoff: bool,
-    peer_reconnect_backoff_attempts: HashMap<Pubkey, u32>,
-    // Peers manually disconnected by the user. Automatic reconnect stays disabled until the user
-    // explicitly issues another connect request for that peer.
-    requested_disconnect_peers: HashSet<Pubkey>,
     // The features of the node, used to indicate the capabilities of the node.
     features: FeatureVector,
     channel_ephemeral_config: ChannelEphemeralConfig,
@@ -5571,9 +5575,6 @@ pub struct NetworkActorState<S, C> {
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
     // Final trampoline payments that still have an unresolved upstream TLC, indexed by channel.
     pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    lsp_service: Option<ActorRef<LspServiceMessage>>,
-
     // Pending replies for external funding channel requests.
     // When a user requests to open a channel with external funding, we store the reply port here
     // until the peer accepts the channel and we build the unsigned funding tx.
@@ -5625,6 +5626,24 @@ impl HostedTenantActivity {
     }
 }
 
+impl<S, C> std::ops::Deref for FiberActorState<S, C> {
+    type Target = PublicNetworkRuntimeState;
+
+    fn deref(&self) -> &Self::Target {
+        self.public_runtime
+            .as_deref()
+            .expect("public network state is required for this operation")
+    }
+}
+
+impl<S, C> std::ops::DerefMut for FiberActorState<S, C> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.public_runtime
+            .as_deref_mut()
+            .expect("public network state is required for this operation")
+    }
+}
+
 pub trait NetworkActorStateStore {
     fn get_network_actor_state(&self, id: &Pubkey) -> Option<PersistentNetworkActorState>;
     fn insert_network_actor_state(&self, id: &Pubkey, state: PersistentNetworkActorState);
@@ -5642,7 +5661,7 @@ fn generate_channel_actor_name(local_pubkey: &Pubkey, remote_pubkey: &Pubkey) ->
     )
 }
 
-impl<S, C> NetworkActorState<S, C>
+impl<S, C> FiberActorState<S, C>
 where
     S: NetworkActorStateStore
         + ChannelActorStateStore
@@ -6288,7 +6307,11 @@ where
     }
 
     fn is_peer_available(&self, pubkey: &Pubkey) -> bool {
-        self.peer_session_map.contains_key(pubkey) || self.in_process_peers.contains_key(pubkey)
+        self.in_process_peers.contains_key(pubkey)
+            || self
+                .public_runtime
+                .as_deref()
+                .is_some_and(|runtime| runtime.peer_session_map.contains_key(pubkey))
     }
 
     fn check_pending_channel_limit(&self, peer_pubkey: Pubkey) -> ProcessingChannelResult {
@@ -6325,7 +6348,9 @@ where
             .get(pubkey)
             .map(|peer| &peer.features)
             .or_else(|| {
-                self.peer_session_map
+                self.public_runtime
+                    .as_deref()?
+                    .peer_session_map
                     .get(pubkey)
                     .and_then(|peer| peer.features.as_ref())
             });
@@ -6533,11 +6558,7 @@ where
                 "Disconnecting inbound no-channel peer {:?} on session {:?} immediately after connect",
                 pubkey, session_id
             );
-            let Some(control) = self.control.as_ref() else {
-                debug!("Skipping inbound peer budget enforcement without a network service");
-                return;
-            };
-            match control.disconnect(session_id).await {
+            match self.control.disconnect(session_id).await {
                 Ok(()) => {
                     if matches!(
                         self.peer_session_map.get(&pubkey),
@@ -6677,8 +6698,6 @@ where
         message: FiberMessage,
     ) -> crate::Result<()> {
         self.control
-            .as_ref()
-            .ok_or_else(|| Error::InternalError(anyhow::anyhow!("network service is disabled")))?
             .send_message_to(session_id, FIBER_PROTOCOL_ID, message.to_molecule_bytes())
             .await?;
         Ok(())
@@ -6695,7 +6714,12 @@ where
             ))?;
             return Ok(());
         }
-        match self.peer_session_map.get(pubkey).map(|p| p.session_id) {
+        match self
+            .public_runtime
+            .as_deref()
+            .and_then(|runtime| runtime.peer_session_map.get(pubkey))
+            .map(|peer| peer.session_id)
+        {
             Some(session) => self.send_fiber_message_to_session(session, message).await,
             None => Err(Error::PeerNotFound(*pubkey)),
         }
@@ -7100,14 +7124,20 @@ where
     }
 
     fn record_invalid_peer_message(&self, pubkey: Pubkey) -> bool {
-        self.peer_message_policy
-            .lock()
-            .expect("peer message policy lock")
-            .record_invalid(&pubkey, now_timestamp_as_millis_u64())
+        self.public_runtime.as_deref().is_some_and(|runtime| {
+            runtime
+                .peer_message_policy
+                .lock()
+                .expect("peer message policy lock")
+                .record_invalid(&pubkey, now_timestamp_as_millis_u64())
+        })
     }
 
     async fn disconnect_peer_for_message_policy(&mut self, pubkey: Pubkey) {
-        let Some(session_id) = self
+        let Some(runtime) = self.public_runtime.as_deref_mut() else {
+            return;
+        };
+        let Some(session_id) = runtime
             .peer_session_map
             .get(&pubkey)
             .map(|peer| peer.session_id)
@@ -7120,10 +7150,7 @@ where
             session = format!("{session_id:?}"),
             "Temporarily banning peer after repeated invalid Fiber messages"
         );
-        let Some(control) = self.control.as_ref() else {
-            return;
-        };
-        if let Err(err) = control.disconnect(session_id).await {
+        if let Err(err) = runtime.control.disconnect(session_id).await {
             error!(
                 peer = format!("{pubkey:?}"),
                 session = format!("{session_id:?}"),
@@ -7566,7 +7593,11 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         if session.status.is_final() {
-            if let Some(lsp_service) = self.lsp_service.as_ref() {
+            if let Some(lsp_service) = self
+                .public_runtime
+                .as_deref()
+                .and_then(|runtime| runtime.lsp_service.as_ref())
+            {
                 let ready = ractor::call_t!(
                     lsp_service,
                     |reply| LspServiceMessage::PaymentOutcomeReady {
@@ -7602,7 +7633,11 @@ where
         }
         #[cfg(not(target_arch = "wasm32"))]
         if session.status.is_final() && settlement.is_ok() {
-            if let Some(lsp_service) = self.lsp_service.as_ref() {
+            if let Some(lsp_service) = self
+                .public_runtime
+                .as_deref()
+                .and_then(|runtime| runtime.lsp_service.as_ref())
+            {
                 let _ = lsp_service.send_message(LspServiceMessage::PaymentOutcomeSettled {
                     payment_hash,
                     payment_status: session.status,
@@ -7831,13 +7866,12 @@ pub(crate) struct HostedTenantActorStartArguments {
 
 /// A local-only Fiber data-plane actor for one hosted tenant.
 ///
-/// It intentionally reuses the existing NetworkActor coordinator and message
-/// protocol so ChannelActor and PaymentActor keep a single implementation. Its
-/// startup path does not construct Tentacle, gossip or onion services and the
-/// only available peer is the public LSP node through an in-process transport.
+/// It drives the shared data-plane core directly, without constructing
+/// or wrapping a public `NetworkActor`. Its only available peer is the public
+/// LSP node through an in-process transport.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct HostedTenantActor<S, C> {
-    coordinator: NetworkActor<S, C>,
+    core: FiberActorCore<S, C>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7856,15 +7890,15 @@ where
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(coordinator: NetworkActor<S, C>) -> Self {
-        Self { coordinator }
+    pub(crate) fn new(core: FiberActorCore<S, C>) -> Self {
+        Self { core }
     }
 
     async fn build_state(
         &self,
         myself: ActorRef<NetworkActorMessage>,
         args: HostedTenantActorStartArguments,
-    ) -> Result<NetworkActorState<S, C>, ActorProcessingErr> {
+    ) -> Result<FiberActorState<S, C>, ActorProcessingErr> {
         let HostedTenantActorStartArguments {
             config,
             default_shutdown_script,
@@ -7881,29 +7915,100 @@ where
             [kp.as_ref(), entropy_rand.as_slice()].concat().as_slice(),
             b"FIBER_NETWORK_ENTROPY",
         );
-        let state = self.coordinator.build_coordinator_state(
+        let state = self.core.build_actor_state(
             &config,
-            private_key,
-            entropy,
-            default_shutdown_script,
-            myself,
-            NetworkActorRuntime {
-                node_name: None,
-                announced_addrs: Vec::new(),
-                auto_announce: false,
-                control: None,
-                peer_message_policy: Arc::new(StdMutex::new(PeerMessagePolicy::new())),
-                peer_channel_index: PeerChannelIndex::build(&self.coordinator.store),
-                onion_service_token: None,
-                gossip_actor: None,
-                max_inbound_peers: 0,
-                min_outbound_peers: 0,
-                enable_peer_reconnect_backoff: false,
+            FiberActorStateArgs {
+                private_key,
+                entropy,
+                default_shutdown_script,
+                network: myself,
+                peer_channel_index: PeerChannelIndex::build(&self.core.store),
                 features: config.gen_node_features(),
+                public_runtime: None,
             },
         );
-        state.persist_state();
         Ok(state)
+    }
+
+    async fn handle_event(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut FiberActorState<S, C>,
+        event: NetworkActorEvent,
+    ) -> crate::Result<()> {
+        match event {
+            NetworkActorEvent::PeerConnected(..)
+            | NetworkActorEvent::PeerDisconnected(..)
+            | NetworkActorEvent::GossipMessageUpdates(..) => {
+                warn!("Ignoring public-network event sent to a hosted tenant actor");
+                Ok(())
+            }
+            NetworkActorEvent::FiberMessage(_, FiberMessage::Init(_), ingress_permit) => {
+                drop(ingress_permit);
+                warn!("Ignoring public peer Init message sent to a hosted tenant actor");
+                Ok(())
+            }
+            event => self.core.handle_event(myself, state, event).await,
+        }
+    }
+
+    async fn handle_command(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut FiberActorState<S, C>,
+        command: NetworkActorCommand,
+    ) -> crate::Result<()> {
+        const PUBLIC_NETWORK_DISABLED: &str =
+            "public network service is disabled for hosted tenant";
+
+        match command {
+            NetworkActorCommand::ConnectPeer(_, _, _, reply) => {
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(PUBLIC_NETWORK_DISABLED.to_string()));
+                }
+                Ok(())
+            }
+            NetworkActorCommand::ConnectPeerWithPubkey(_, _, _, reply) => {
+                let _ = reply.send(Err(PUBLIC_NETWORK_DISABLED.to_string()));
+                Ok(())
+            }
+            NetworkActorCommand::DisconnectPeer(_, _, reply) => {
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(PUBLIC_NETWORK_DISABLED.to_string()));
+                }
+                Ok(())
+            }
+            NetworkActorCommand::NodeInfo(_, reply) => {
+                let _ = reply.send(Err(PUBLIC_NETWORK_DISABLED.to_string()));
+                Ok(())
+            }
+            NetworkActorCommand::ListPeers(_, reply) => {
+                let _ = reply.send(Err(PUBLIC_NETWORK_DISABLED.to_string()));
+                Ok(())
+            }
+            NetworkActorCommand::SeedPeerReconnectBackoff(..)
+            | NetworkActorCommand::PeerReconnectBackoffTick(..)
+            | NetworkActorCommand::SavePeerAddress(..)
+            | NetworkActorCommand::RemovePendingSavePeerAddress(..)
+            | NetworkActorCommand::MaintainConnections
+            | NetworkActorCommand::CheckPeerInit(..)
+            | NetworkActorCommand::ReestablishChannels(..)
+            | NetworkActorCommand::BroadcastMessages(..)
+            | NetworkActorCommand::BroadcastLocalInfo(..) => {
+                warn!("Ignoring public-network command sent to a hosted tenant actor");
+                Ok(())
+            }
+            NetworkActorCommand::SetLspService(_) => {
+                warn!("Ignoring LSP service registration sent to a hosted tenant actor");
+                Ok(())
+            }
+            #[cfg(any(debug_assertions, feature = "bench"))]
+            NetworkActorCommand::UpdateFeatures(features) => {
+                state.features = features;
+                Ok(())
+            }
+            command => self.core.handle_command(myself, state, command).await,
+        }
     }
 }
 
@@ -7925,7 +8030,7 @@ where
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = NetworkActorMessage;
-    type State = NetworkActorState<S, C>;
+    type State = FiberActorState<S, C>;
     type Arguments = HostedTenantActorStartArguments;
 
     async fn pre_start(
@@ -7948,7 +8053,7 @@ where
         myself.send_interval(CHECK_CHANNELS_SHUTDOWN_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
         });
-        self.coordinator.retry_hold_tlc_sets(&myself);
+        self.core.retry_hold_tlc_sets(&myself);
         Ok(())
     }
 
@@ -7960,21 +8065,17 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             NetworkActorMessage::Event(event) => {
-                if let Err(error) = self.coordinator.handle_event(myself, state, event).await {
+                if let Err(error) = self.handle_event(myself, state, event).await {
                     error!("Failed to handle hosted tenant event: {error}");
                 }
             }
             NetworkActorMessage::Command(command) => {
-                if let Err(error) = self
-                    .coordinator
-                    .handle_command(myself, state, command)
-                    .await
-                {
+                if let Err(error) = self.handle_command(myself, state, command).await {
                     error!("Failed to handle hosted tenant command: {error}");
                 }
             }
             NetworkActorMessage::Notification(event) => {
-                if let Err(error) = self.coordinator.event_sender.send(event).await {
+                if let Err(error) = self.core.event_sender.send(event).await {
                     error!("Failed to notify hosted tenant observer: {error}");
                 }
             }
@@ -7992,7 +8093,6 @@ where
             .get_cell()
             .stop_children_and_wait(Some("Hosted tenant actor stopped".to_string()), None)
             .await;
-        state.persist_state();
         Ok(())
     }
 }
@@ -8014,7 +8114,7 @@ where
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
     type Msg = NetworkActorMessage;
-    type State = NetworkActorState<S, C>;
+    type State = FiberActorState<S, C>;
     type Arguments = NetworkActorStartArguments;
 
     async fn pre_start(
@@ -8047,7 +8147,7 @@ where
         let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new()));
         let handle = NetworkServiceHandle::new(myself.clone(), peer_message_policy.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
-        let peer_channel_index = PeerChannelIndex::build(&self.store);
+        let peer_channel_index = PeerChannelIndex::build(&self.core.store);
 
         // Conditionally start GossipService based on sync_network_graph config
         let (gossip_actor, gossip_handle_opt) = if config.sync_network_graph() {
@@ -8055,9 +8155,9 @@ where
             gossip_config.pubkey = Some(private_key.pubkey());
             let (gossip_service, gossip_handle) = GossipService::start(
                 gossip_config,
-                self.store.clone(),
-                self.chain_actor.clone(),
-                self.chain_client.clone(),
+                self.core.store.clone(),
+                self.core.chain_actor.clone(),
+                self.core.chain_client.clone(),
                 Some(myself.clone()),
                 peer_channel_index.clone(),
                 myself.get_cell(),
@@ -8065,7 +8165,7 @@ where
             .await;
 
             let graph_subscribing_cursor = get_latest_startup_broadcast_message_cursor(
-                &self.store,
+                &self.core.store,
                 Some(&private_key.pubkey()),
             )
             .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
@@ -8221,6 +8321,7 @@ where
         #[cfg(not(target_arch = "wasm32"))]
         let onion_service_token = if config.onion.listen_on_onion {
             match self
+                .core
                 .start_onion_service(
                     &config,
                     &listening_addr,
@@ -8281,31 +8382,46 @@ where
             debug!("Tentacle service stopped");
         });
         let features = config.gen_node_features();
-        let mut state = self.build_coordinator_state(
+        let state_to_be_persisted = self
+            .core
+            .store
+            .get_network_actor_state(&private_key.pubkey())
+            .unwrap_or_default();
+        let mut state = self.core.build_actor_state(
             &config,
-            private_key,
-            entropy,
-            default_shutdown_script,
-            myself.clone(),
-            NetworkActorRuntime {
-                node_name: config.announced_node_name,
-                announced_addrs,
-                auto_announce: config.auto_announce_node(),
-                control: Some(control),
-                peer_message_policy,
+            FiberActorStateArgs {
+                private_key,
+                entropy,
+                default_shutdown_script,
+                network: myself.clone(),
                 peer_channel_index,
-                #[cfg(not(target_arch = "wasm32"))]
-                onion_service_token,
-                gossip_actor,
-                max_inbound_peers: config.max_inbound_peers(),
-                min_outbound_peers: config.min_outbound_peers(),
-                enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),
                 features,
+                public_runtime: Some(Box::new(PublicNetworkRuntimeState {
+                    state_to_be_persisted,
+                    node_name: config.announced_node_name,
+                    announced_addrs,
+                    auto_announce: config.auto_announce_node(),
+                    last_node_announcement_message: None,
+                    control,
+                    peer_message_policy,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    onion_service_token,
+                    peer_session_map: Default::default(),
+                    pending_save_peer_addresses: Default::default(),
+                    gossip_actor,
+                    max_inbound_peers: config.max_inbound_peers(),
+                    min_outbound_peers: config.min_outbound_peers(),
+                    enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),
+                    peer_reconnect_backoff_attempts: Default::default(),
+                    requested_disconnect_peers: Default::default(),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    lsp_service: None,
+                })),
             },
         );
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
-            let mut graph = self.network_graph.write().await;
+            let mut graph = self.core.network_graph.write().await;
             graph.process_node_announcement(node_announcement);
         }
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
@@ -8367,7 +8483,7 @@ where
         });
 
         // Trigger hold tlc fulfill retry and timeout checks at startup.
-        self.retry_hold_tlc_sets(&myself);
+        self.core.retry_hold_tlc_sets(&myself);
         debug_event!(myself, "network actor started");
         Ok(())
     }
@@ -8386,12 +8502,12 @@ where
         );
         match message {
             NetworkActorMessage::Event(event) => {
-                if let Err(err) = self.handle_event(myself, state, event).await {
+                if let Err(err) = self.core.handle_event(myself, state, event).await {
                     error!("Failed to handle fiber network event: {}", err);
                 }
             }
             NetworkActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(myself, state, command).await {
+                if let Err(err) = self.core.handle_command(myself, state, command).await {
                     error!("Failed to handle fiber network command: {}", err);
                 }
             }
@@ -8413,7 +8529,7 @@ where
                         _ => {}
                     }
                 }
-                if let Err(err) = self.event_sender.send(event).await {
+                if let Err(err) = self.core.event_sender.send(event).await {
                     error!("Failed to notify outside observers: {}", err);
                 }
             }
@@ -8439,10 +8555,8 @@ where
             .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
             .await;
 
-        if let Some(control) = state.control.as_ref() {
-            if let Err(err) = control.close().await {
-                error!("Failed to close tentacle service: {}", err);
-            }
+        if let Err(err) = state.control.close().await {
+            error!("Failed to close tentacle service: {}", err);
         }
         let local_pubkey = state.get_public_key();
         debug!("Saving network actor state for {:?}", local_pubkey);
@@ -8451,6 +8565,7 @@ where
         // The event receiver may have been closed already.
         // We ignore the error here.
         let _ = self
+            .core
             .event_sender
             .send(NetworkServiceEvent::NetworkStopped(local_pubkey))
             .await;
@@ -8804,7 +8919,7 @@ pub(crate) async fn start_hosted_tenant_actor<
     let actor_name = format!("HostedTenant {:?}", config.public_key());
     Actor::spawn_linked(
         Some(actor_name),
-        HostedTenantActor::new(NetworkActor::new(
+        HostedTenantActor::new(FiberActorCore::new(
             event_sender,
             chain_actor,
             store,
