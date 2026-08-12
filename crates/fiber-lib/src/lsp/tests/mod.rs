@@ -979,6 +979,77 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
 }
 
 #[test]
+fn payment_delivery_status_accepts_only_declared_transitions() {
+    let statuses = [
+        ("Deferred", LspPaymentDeliveryStatus::Deferred),
+        ("Dispatching", LspPaymentDeliveryStatus::Dispatching),
+        ("InFlight", LspPaymentDeliveryStatus::InFlight),
+        ("Succeeded", LspPaymentDeliveryStatus::Succeeded),
+        (
+            "Failed",
+            LspPaymentDeliveryStatus::Failed {
+                reason: "failed".to_string(),
+            },
+        ),
+        (
+            "SettlingUpstream",
+            LspPaymentDeliveryStatus::SettlingUpstream {
+                payment_status: PaymentStatus::Success,
+                failure: None,
+            },
+        ),
+        (
+            "Cancelled",
+            LspPaymentDeliveryStatus::Cancelled {
+                reason: "cancelled".to_string(),
+            },
+        ),
+        (
+            "ExpiringUpstream",
+            LspPaymentDeliveryStatus::ExpiringUpstream {
+                reason: "expiring".to_string(),
+            },
+        ),
+        (
+            "Expired",
+            LspPaymentDeliveryStatus::Expired {
+                reason: "expired".to_string(),
+            },
+        ),
+    ];
+    let valid_transitions = [
+        ("Deferred", "Dispatching"),
+        ("Deferred", "Failed"),
+        ("Deferred", "SettlingUpstream"),
+        ("Deferred", "Cancelled"),
+        ("Deferred", "ExpiringUpstream"),
+        ("Dispatching", "Deferred"),
+        ("Dispatching", "InFlight"),
+        ("Dispatching", "Failed"),
+        ("Dispatching", "SettlingUpstream"),
+        ("Dispatching", "Cancelled"),
+        ("Dispatching", "ExpiringUpstream"),
+        ("InFlight", "Deferred"),
+        ("InFlight", "SettlingUpstream"),
+        ("SettlingUpstream", "InFlight"),
+        ("SettlingUpstream", "Succeeded"),
+        ("SettlingUpstream", "Failed"),
+        ("ExpiringUpstream", "InFlight"),
+        ("ExpiringUpstream", "Expired"),
+    ];
+
+    for (current_name, current) in &statuses {
+        for (next_name, next) in &statuses {
+            assert_eq!(
+                current.check_next_valid(next),
+                valid_transitions.contains(&(*current_name, *next_name)),
+                "unexpected transition decision from {current_name} to {next_name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));

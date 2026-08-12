@@ -50,14 +50,20 @@ impl Default for LspPaymentDeliveryLimits {
 /// Durable lifecycle of one hosted incoming payment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LspPaymentDeliveryStatus {
+    /// The upstream TLC is buffered, waiting for the tenant to become ready or for a retry.
     Deferred,
+    /// The service is creating the downstream payment.
+    ///
+    /// Persisting this state before dispatch prevents duplicate payments after a restart.
     Dispatching,
+    /// The downstream payment exists and is still running.
     InFlight,
+    /// The downstream payment succeeded and the upstream TLC was fulfilled. Final state.
     Succeeded,
-    Failed {
-        reason: String,
-    },
-    /// The downstream outcome is durable and Public T is resolving the upstream TLC.
+    /// A permanent downstream failure was propagated to the upstream TLC. Final state.
+    Failed { reason: String },
+    /// The downstream result is known, but Public T is still fulfilling or failing the upstream
+    /// TLC.
     ///
     /// This variant is appended to preserve the bincode discriminants of records written by
     /// earlier hosted-LSP prototypes.
@@ -65,27 +71,79 @@ pub enum LspPaymentDeliveryStatus {
         payment_status: PaymentStatus,
         failure: Option<String>,
     },
-    /// The upstream TLC disappeared before downstream dispatch started.
+    /// The upstream TLC disappeared before the downstream payment became active. Final state.
     ///
     /// This variant is appended to preserve persisted bincode discriminants.
-    Cancelled {
-        reason: String,
-    },
-    /// Public T is failing the upstream TLC because the buffering window elapsed.
+    Cancelled { reason: String },
+    /// The buffer deadline elapsed and Public T is failing the upstream TLC.
     ///
     /// This variant is appended to preserve persisted bincode discriminants.
-    ExpiringUpstream {
-        reason: String,
-    },
-    /// The buffering window elapsed before downstream dispatch could start.
+    ExpiringUpstream { reason: String },
+    /// The buffer deadline elapsed and the upstream TLC was failed. Final state.
     ///
     /// This variant is appended to preserve persisted bincode discriminants.
-    Expired {
-        reason: String,
-    },
+    Expired { reason: String },
 }
 
 impl LspPaymentDeliveryStatus {
+    /// Checks whether `next` is a valid state transition.
+    ///
+    /// Simplified lifecycle (the matcher below remains the complete transition table):
+    ///
+    /// ```mermaid
+    /// stateDiagram-v2
+    ///     [*] --> Deferred
+    ///     Deferred --> Dispatching
+    ///     Dispatching --> InFlight
+    ///     InFlight --> SettlingUpstream
+    ///     SettlingUpstream --> Succeeded
+    ///     SettlingUpstream --> Failed
+    ///
+    ///     Dispatching --> Deferred: retry
+    ///     InFlight --> Deferred: retry
+    ///
+    ///     Deferred --> ExpiringUpstream: buffer timeout
+    ///     ExpiringUpstream --> Expired
+    ///
+    ///     Deferred --> Cancelled: upstream TLC removed
+    /// ```
+    ///
+    /// Recovery may enter `SettlingUpstream` directly or return from `SettlingUpstream` and
+    /// `ExpiringUpstream` to `InFlight` when a concurrent downstream payment is discovered.
+    ///
+    /// Re-entering the same state is handled as an idempotent update by the delivery manager and
+    /// therefore is not considered a transition here. Final states have no outgoing transitions.
+    pub(crate) fn check_next_valid(&self, next: &Self) -> bool {
+        matches!(
+            (self, next),
+            (
+                Self::Deferred,
+                Self::Dispatching
+                    | Self::Failed { .. }
+                    | Self::Cancelled { .. }
+                    | Self::ExpiringUpstream { .. }
+                    | Self::SettlingUpstream { .. }
+            ) | (
+                Self::Dispatching,
+                Self::Deferred
+                    | Self::InFlight
+                    | Self::Failed { .. }
+                    | Self::Cancelled { .. }
+                    | Self::ExpiringUpstream { .. }
+                    | Self::SettlingUpstream { .. }
+            ) | (
+                Self::InFlight,
+                Self::Deferred | Self::SettlingUpstream { .. }
+            ) | (
+                Self::SettlingUpstream { .. },
+                Self::InFlight | Self::Succeeded | Self::Failed { .. }
+            ) | (
+                Self::ExpiringUpstream { .. },
+                Self::InFlight | Self::Expired { .. }
+            )
+        )
+    }
+
     pub fn is_final(&self) -> bool {
         matches!(
             self,
@@ -469,38 +527,7 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
             }
             return Ok(delivery);
         }
-        let valid = matches!(
-            (&delivery.status, &status),
-            (
-                LspPaymentDeliveryStatus::Deferred,
-                LspPaymentDeliveryStatus::Dispatching
-                    | LspPaymentDeliveryStatus::Failed { .. }
-                    | LspPaymentDeliveryStatus::Cancelled { .. }
-                    | LspPaymentDeliveryStatus::ExpiringUpstream { .. }
-                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
-            ) | (
-                LspPaymentDeliveryStatus::Dispatching,
-                LspPaymentDeliveryStatus::Deferred
-                    | LspPaymentDeliveryStatus::InFlight
-                    | LspPaymentDeliveryStatus::Failed { .. }
-                    | LspPaymentDeliveryStatus::Cancelled { .. }
-                    | LspPaymentDeliveryStatus::ExpiringUpstream { .. }
-                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
-            ) | (
-                LspPaymentDeliveryStatus::InFlight,
-                LspPaymentDeliveryStatus::Deferred
-                    | LspPaymentDeliveryStatus::SettlingUpstream { .. }
-            ) | (
-                LspPaymentDeliveryStatus::SettlingUpstream { .. },
-                LspPaymentDeliveryStatus::InFlight
-                    | LspPaymentDeliveryStatus::Succeeded
-                    | LspPaymentDeliveryStatus::Failed { .. }
-            ) | (
-                LspPaymentDeliveryStatus::ExpiringUpstream { .. },
-                LspPaymentDeliveryStatus::InFlight | LspPaymentDeliveryStatus::Expired { .. }
-            )
-        );
-        if !valid {
+        if !delivery.status.check_next_valid(&status) {
             return Err(format!(
                 "invalid hosted payment delivery transition from {:?} to {:?}",
                 delivery.status, status
