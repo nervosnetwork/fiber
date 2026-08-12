@@ -525,7 +525,24 @@ where
         + 'static,
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
-        let mut network_graph = Self {
+        let mut network_graph = Self::empty(store, source, announce_private_addr);
+        network_graph.load_from_store();
+        network_graph
+    }
+
+    /// Build a graph view for a local-only hosted tenant.
+    ///
+    /// The view starts empty and is populated only by owned-channel events. It
+    /// deliberately does not load public gossip from the shared physical store;
+    /// the tenant only needs its private first-hop channel to the public LSP
+    /// node when constructing a trampoline payment.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_local(store: S, source: Pubkey) -> Self {
+        Self::empty(store, source, false)
+    }
+
+    fn empty(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
+        Self {
             #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
@@ -541,9 +558,7 @@ where
             fixed_rand_expiry_delta: None,
             #[cfg(any(feature = "metrics", test, feature = "bench"))]
             payment_find_path_stats: Default::default(),
-        };
-        network_graph.load_from_store();
-        network_graph
+        }
     }
 
     pub fn get_latest_cursor(&self) -> &Cursor {

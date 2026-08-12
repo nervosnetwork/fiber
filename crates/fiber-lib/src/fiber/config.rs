@@ -112,12 +112,6 @@ pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
 pub struct FiberConfig {
-    /// Internal runtime mode used by hosted tenants. It keeps Fiber channel and
-    /// payment actors but does not expose a listening P2P endpoint.
-    #[arg(skip)]
-    #[serde(default, skip)]
-    pub(crate) in_process_transport_only: bool,
-
     /// ckb base directory
     #[arg(
         name = "FIBER_BASE_DIR",
@@ -532,7 +526,6 @@ impl FiberConfig {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn hosted_tenant_config(&self, base_dir: PathBuf) -> Self {
         let mut config = self.clone();
-        config.in_process_transport_only = true;
         config.base_dir = Some(base_dir);
         config.listening_addr = Some("/ip4/127.0.0.1/tcp/0".to_string());
         config.announce_listening_addr = Some(false);
@@ -545,11 +538,6 @@ impl FiberConfig {
         config.min_outbound_peers = Some(0);
         config.reuse_port_for_websocket = false;
         config
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn in_process_transport_only(&self) -> bool {
-        self.in_process_transport_only
     }
 
     pub fn listening_addr(&self) -> &str {

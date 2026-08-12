@@ -218,12 +218,8 @@ async fn tenant_dispatcher_isolates_same_channel_id_between_tenants() {
         .await
         .unwrap()
         .0;
-    let tenant_u1_runtime = HostedTenantRuntime::network_backed(tenant_u1_key, tenant_u1_actor)
-        .await
-        .unwrap();
-    let tenant_u2_runtime = HostedTenantRuntime::network_backed(tenant_u2_key, tenant_u2_actor)
-        .await
-        .unwrap();
+    let tenant_u1_runtime = HostedTenantRuntime::network_backed(tenant_u1_key, tenant_u1_actor);
+    let tenant_u2_runtime = HostedTenantRuntime::network_backed(tenant_u2_key, tenant_u2_actor);
     dispatcher
         .register_runtime(
             tenant_u1_id.clone(),
@@ -371,7 +367,10 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
             .await
             .map_err(|error| error.to_string())?
             .0;
-        HostedTenantRuntime::network_backed(record.invoice_pubkey, actor).await
+        Ok(HostedTenantRuntime::network_backed(
+            record.invoice_pubkey,
+            actor,
+        ))
     }
 }
 
@@ -398,7 +397,10 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
             .map_err(|error| error.to_string())?
             .0;
         self.actors.lock().unwrap().push(actor.clone());
-        HostedTenantRuntime::network_backed(record.invoice_pubkey, actor).await
+        Ok(HostedTenantRuntime::network_backed(
+            record.invoice_pubkey,
+            actor,
+        ))
     }
 }
 
@@ -420,7 +422,10 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             .await
             .map_err(|error| error.to_string())?
             .0;
-        HostedTenantRuntime::network_backed(record.invoice_pubkey, actor).await
+        Ok(HostedTenantRuntime::network_backed(
+            record.invoice_pubkey,
+            actor,
+        ))
     }
 }
 
@@ -501,7 +506,6 @@ fn hosted_tenant_config_is_private() {
 
     assert!(!u1.sync_network_graph());
     assert!(!u1.auto_announce_node());
-    assert!(u1.in_process_transport_only());
     assert_eq!(u1.listening_addr(), "/ip4/127.0.0.1/tcp/0");
     assert_ne!(u1.store_path(), u2.store_path());
     assert_ne!(u1.public_key().inner_ref(), u2.public_key().inner_ref());

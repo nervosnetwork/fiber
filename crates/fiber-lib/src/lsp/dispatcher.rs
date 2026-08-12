@@ -8,18 +8,18 @@ use crate::fiber::{
 };
 use crate::fiber_types::{Hash256, Pubkey};
 
-use super::{runtime::HostedTenantRuntimeMessage, TenantId};
+use super::TenantId;
 
 #[derive(Clone)]
 struct TenantRoute {
     invoice_pubkey: Pubkey,
-    runtime_actor: ActorRef<HostedTenantRuntimeMessage>,
+    runtime_actor: ActorRef<NetworkActorMessage>,
 }
 
 #[derive(Default)]
 struct TenantDispatcherState {
     runtimes: HashMap<TenantId, TenantRoute>,
-    channels: HashMap<(TenantId, Hash256), ActorRef<HostedTenantRuntimeMessage>>,
+    channels: HashMap<(TenantId, Hash256), ActorRef<NetworkActorMessage>>,
 }
 
 /// Routes co-located Fiber messages through a tenant and channel scoped
@@ -34,7 +34,7 @@ impl TenantMessageDispatcher {
         &self,
         tenant_id: TenantId,
         invoice_pubkey: Pubkey,
-        runtime_actor: ActorRef<HostedTenantRuntimeMessage>,
+        runtime_actor: ActorRef<NetworkActorMessage>,
     ) -> Result<(), String> {
         let mut state = self
             .state
@@ -71,7 +71,7 @@ impl TenantMessageDispatcher {
     pub(crate) fn unregister_runtime(
         &self,
         tenant_id: &TenantId,
-        runtime_actor: &ActorRef<HostedTenantRuntimeMessage>,
+        runtime_actor: &ActorRef<NetworkActorMessage>,
     ) {
         if let Ok(mut state) = self.state.write() {
             if state
@@ -122,10 +122,9 @@ impl TenantMessageDispatcher {
             }
         };
         runtime_actor
-            .send_message(HostedTenantRuntimeMessage::FiberMessage {
-                source: public_node_id,
-                message,
-            })
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::FiberMessage(public_node_id, message, None),
+            ))
             .map_err(|error| format!("failed to dispatch message to tenant {tenant_id}: {error}"))
     }
 

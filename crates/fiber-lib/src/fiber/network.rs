@@ -1508,6 +1508,22 @@ pub struct NetworkActor<S, C> {
     chain_client: C,
 }
 
+struct NetworkActorRuntime {
+    node_name: Option<AnnouncedNodeName>,
+    announced_addrs: Vec<Multiaddr>,
+    auto_announce: bool,
+    control: Option<ServiceAsyncControl>,
+    peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
+    peer_channel_index: PeerChannelIndex,
+    #[cfg(not(target_arch = "wasm32"))]
+    onion_service_token: Option<tokio_util::sync::CancellationToken>,
+    gossip_actor: Option<ActorRef<GossipActorMessage>>,
+    max_inbound_peers: usize,
+    min_outbound_peers: usize,
+    enable_peer_reconnect_backoff: bool,
+    features: FeatureVector,
+}
+
 impl<S, C> NetworkActor<S, C>
 where
     S: NetworkActorStateStore
@@ -1538,6 +1554,128 @@ where
             store_actor,
             network_graph,
             chain_client,
+        }
+    }
+
+    fn build_coordinator_state(
+        &self,
+        config: &FiberConfig,
+        private_key: Privkey,
+        entropy: [u8; 32],
+        default_shutdown_script: Script,
+        network: ActorRef<NetworkActorMessage>,
+        runtime: NetworkActorRuntime,
+    ) -> NetworkActorState<S, C> {
+        let NetworkActorRuntime {
+            node_name,
+            announced_addrs,
+            auto_announce,
+            control,
+            peer_message_policy,
+            peer_channel_index,
+            #[cfg(not(target_arch = "wasm32"))]
+            onion_service_token,
+            gossip_actor,
+            max_inbound_peers,
+            min_outbound_peers,
+            enable_peer_reconnect_backoff,
+            features,
+        } = runtime;
+        let state_to_be_persisted = self
+            .store
+            .get_network_actor_state(&private_key.pubkey())
+            .unwrap_or_default();
+        let mut pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>> = HashMap::new();
+        for session in self.store.get_all_payment_sessions() {
+            let Some(context) = session.request.trampoline_context.as_ref() else {
+                continue;
+            };
+            if !session.status.is_final() {
+                continue;
+            }
+            for previous_tlc in &context.previous_tlcs {
+                let unresolved = self
+                    .store
+                    .get_channel_actor_state(&previous_tlc.prev_channel_id)
+                    .is_some_and(|state| {
+                        trampoline_upstream_tlc_needs_settlement(
+                            &state,
+                            session.request.payment_hash,
+                            previous_tlc,
+                        )
+                    });
+                if unresolved {
+                    pending_trampoline_settlements
+                        .entry(previous_tlc.prev_channel_id)
+                        .or_default()
+                        .insert(session.request.payment_hash);
+                }
+            }
+        }
+
+        NetworkActorState {
+            store: self.store.clone(),
+            state_to_be_persisted,
+            store_actor: self.store_actor.clone(),
+            node_name,
+            announced_addrs,
+            auto_announce,
+            last_node_announcement_message: None,
+            private_key,
+            entropy,
+            default_shutdown_script,
+            network,
+            control,
+            peer_message_policy,
+            #[cfg(not(target_arch = "wasm32"))]
+            onion_service_token,
+            peer_session_map: Default::default(),
+            in_process_peers: Default::default(),
+            pending_save_peer_addresses: Default::default(),
+            peer_channel_index,
+            channels: Default::default(),
+            channels_funding_lock_script_cache: Default::default(),
+            outpoint_channel_map: Default::default(),
+            to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(config),
+            pending_channels: Default::default(),
+            chain_actor: self.chain_actor.clone(),
+            chain_client: self.chain_client.clone(),
+            open_channel_auto_accept_min_ckb_funding_amount: config
+                .open_channel_auto_accept_min_ckb_funding_amount(),
+            auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
+            pending_channels_number_limit: config
+                .pending_channels_number_limit
+                .unwrap_or(DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT),
+            tlc_expiry_delta: config.tlc_expiry_delta(),
+            tlc_min_value: config.tlc_min_value(),
+            tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
+            gossip_actor,
+            max_inbound_peers,
+            min_outbound_peers,
+            enable_peer_reconnect_backoff,
+            peer_reconnect_backoff_attempts: Default::default(),
+            requested_disconnect_peers: Default::default(),
+            features,
+            channel_ephemeral_config: ChannelEphemeralConfig {
+                funding_timeout_seconds: config.funding_timeout_seconds,
+                external_funding_timeout_seconds: config.external_funding_timeout_seconds,
+                external_funding: Default::default(),
+            },
+            inflight_payments: Default::default(),
+            pending_trampoline_settlements,
+            #[cfg(not(target_arch = "wasm32"))]
+            lsp_service: None,
+            pending_external_funding_replies: Default::default(),
+            last_channel_ready_scan: Default::default(),
+            pending_channel_ready_retry_scans: Default::default(),
+            pending_remove_tlcs: Default::default(),
+            inflight_tracers: Default::default(),
+            #[cfg(test)]
+            test_fiber_message_hold: None,
+            #[cfg(test)]
+            test_held_fiber_messages: Default::default(),
+            #[cfg(test)]
+            test_trampoline_settlement_paused: false,
         }
     }
 
@@ -2436,6 +2574,12 @@ where
                 let _ = reply.send(());
             }
             NetworkActorCommand::ConnectPeer(addr, save, source, rpc_reply) => {
+                let Some(control) = state.control.clone() else {
+                    if let Some(reply) = rpc_reply {
+                        let _ = reply.send(Err("network service is disabled".to_string()));
+                    }
+                    return Ok(());
+                };
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 if matches!(source, PeerConnectSource::Manual) {
@@ -2444,7 +2588,7 @@ where
                 if save {
                     state.enqueue_peer_address_to_save(addr.clone());
                 }
-                match state.control.dial(addr, TargetProtocol::All).await {
+                match control.dial(addr, TargetProtocol::All).await {
                     Ok(()) => {
                         if let Some(reply) = rpc_reply {
                             let _ = reply.send(Ok(()));
@@ -2463,6 +2607,10 @@ where
                 // may receive errors like DialerError.
             }
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, source, reply) => {
+                let Some(control) = state.control.clone() else {
+                    let _ = reply.send(Err("network service is disabled".to_string()));
+                    return Ok(());
+                };
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
                 let has_known_addresses = !addresses.is_empty();
                 let address = select_connect_peer_address(addresses, addr_type);
@@ -2480,7 +2628,7 @@ where
                 if matches!(source, PeerConnectSource::Manual) {
                     state.resume_peer_auto_reconnect(pubkey);
                 }
-                match state.control.dial(addr, TargetProtocol::All).await {
+                match control.dial(addr, TargetProtocol::All).await {
                     Ok(()) => {
                         let _ = reply.send(Ok(()));
                     }
@@ -2499,11 +2647,17 @@ where
                     state.requested_disconnect_peers.insert(pubkey);
                 }
                 if let Some(session) = session {
+                    let Some(control) = state.control.clone() else {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err("network service is disabled".to_string()));
+                        }
+                        return Ok(());
+                    };
                     debug!(
                         "Disconnecting peer {:?} session {:?} with reason {:?}",
                         &pubkey, &session, &reason
                     );
-                    state.control.disconnect(session).await?;
+                    control.disconnect(session).await?;
                     if let Some(reply) = reply {
                         let _ = reply.send(Ok(()));
                     }
@@ -5361,7 +5515,9 @@ pub struct NetworkActorState<S, C> {
     network: ActorRef<NetworkActorMessage>,
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
-    control: ServiceAsyncControl,
+    // Hosted tenants reuse the channel/payment coordinator without starting a
+    // Tentacle service, so only public network actors have a service control.
+    control: Option<ServiceAsyncControl>,
     peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
     // Cancellation token for the onion service background task.
     #[cfg(not(target_arch = "wasm32"))]
@@ -5943,14 +6099,12 @@ where
             max_tlc_number_in_flight,
         } = command;
 
-        let remote_pubkey = self
-            .peer_session_map
-            .contains_key(&pubkey)
-            .then_some(pubkey)
-            .ok_or(ProcessingChannelError::InvalidParameter(format!(
+        let remote_pubkey = self.is_peer_available(&pubkey).then_some(pubkey).ok_or(
+            ProcessingChannelError::InvalidParameter(format!(
                 "Peer {:?} is not connected",
                 &pubkey
-            )))?;
+            )),
+        )?;
 
         self.check_feature_compatibility(&remote_pubkey)?;
 
@@ -6379,7 +6533,11 @@ where
                 "Disconnecting inbound no-channel peer {:?} on session {:?} immediately after connect",
                 pubkey, session_id
             );
-            match self.control.disconnect(session_id).await {
+            let Some(control) = self.control.as_ref() else {
+                debug!("Skipping inbound peer budget enforcement without a network service");
+                return;
+            };
+            match control.disconnect(session_id).await {
                 Ok(()) => {
                     if matches!(
                         self.peer_session_map.get(&pubkey),
@@ -6519,6 +6677,8 @@ where
         message: FiberMessage,
     ) -> crate::Result<()> {
         self.control
+            .as_ref()
+            .ok_or_else(|| Error::InternalError(anyhow::anyhow!("network service is disabled")))?
             .send_message_to(session_id, FIBER_PROTOCOL_ID, message.to_molecule_bytes())
             .await?;
         Ok(())
@@ -6960,7 +7120,10 @@ where
             session = format!("{session_id:?}"),
             "Temporarily banning peer after repeated invalid Fiber messages"
         );
-        if let Err(err) = self.control.disconnect(session_id).await {
+        let Some(control) = self.control.as_ref() else {
+            return;
+        };
+        if let Err(err) = control.disconnect(session_id).await {
             error!(
                 peer = format!("{pubkey:?}"),
                 session = format!("{session_id:?}"),
@@ -7660,6 +7823,180 @@ pub struct NetworkActorStartArguments {
     pub default_shutdown_script: Script,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct HostedTenantActorStartArguments {
+    pub config: FiberConfig,
+    pub default_shutdown_script: Script,
+}
+
+/// A local-only Fiber data-plane actor for one hosted tenant.
+///
+/// It intentionally reuses the existing NetworkActor coordinator and message
+/// protocol so ChannelActor and PaymentActor keep a single implementation. Its
+/// startup path does not construct Tentacle, gossip or onion services and the
+/// only available peer is the public LSP node through an in-process transport.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct HostedTenantActor<S, C> {
+    coordinator: NetworkActor<S, C>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<S, C> HostedTenantActor<S, C>
+where
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    pub(crate) fn new(coordinator: NetworkActor<S, C>) -> Self {
+        Self { coordinator }
+    }
+
+    async fn build_state(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        args: HostedTenantActorStartArguments,
+    ) -> Result<NetworkActorState<S, C>, ActorProcessingErr> {
+        let HostedTenantActorStartArguments {
+            config,
+            default_shutdown_script,
+        } = args;
+        let kp = config
+            .read_or_generate_secret_key()
+            .expect("read or generate hosted tenant secret key");
+        let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
+            .expect("valid length for hosted tenant key")
+            .into();
+        let mut entropy_rand = [0u8; 32];
+        getrandom::fill(&mut entropy_rand).expect("getrandom fill should not fail");
+        let entropy = blake2b_hash_with_salt(
+            [kp.as_ref(), entropy_rand.as_slice()].concat().as_slice(),
+            b"FIBER_NETWORK_ENTROPY",
+        );
+        let state = self.coordinator.build_coordinator_state(
+            &config,
+            private_key,
+            entropy,
+            default_shutdown_script,
+            myself,
+            NetworkActorRuntime {
+                node_name: None,
+                announced_addrs: Vec::new(),
+                auto_announce: false,
+                control: None,
+                peer_message_policy: Arc::new(StdMutex::new(PeerMessagePolicy::new())),
+                peer_channel_index: PeerChannelIndex::build(&self.coordinator.store),
+                onion_service_token: None,
+                gossip_actor: None,
+                max_inbound_peers: 0,
+                min_outbound_peers: 0,
+                enable_peer_reconnect_backoff: false,
+                features: config.gen_node_features(),
+            },
+        );
+        state.persist_state();
+        Ok(state)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl<S, C> Actor for HostedTenantActor<S, C>
+where
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    type Msg = NetworkActorMessage;
+    type State = NetworkActorState<S, C>;
+    type Arguments = HostedTenantActorStartArguments;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        self.build_state(myself, args).await
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        state.restore_persisted_offline_channels().await;
+        myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+        });
+        myself.send_interval(CHECK_CHANNELS_SHUTDOWN_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
+        });
+        self.coordinator.retry_hold_tlc_sets(&myself);
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            NetworkActorMessage::Event(event) => {
+                if let Err(error) = self.coordinator.handle_event(myself, state, event).await {
+                    error!("Failed to handle hosted tenant event: {error}");
+                }
+            }
+            NetworkActorMessage::Command(command) => {
+                if let Err(error) = self
+                    .coordinator
+                    .handle_command(myself, state, command)
+                    .await
+                {
+                    error!("Failed to handle hosted tenant command: {error}");
+                }
+            }
+            NetworkActorMessage::Notification(event) => {
+                if let Err(error) = self.coordinator.event_sender.send(event).await {
+                    error!("Failed to notify hosted tenant observer: {error}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        state.persist_live_channels_offline_for_shutdown();
+        myself
+            .get_cell()
+            .stop_children_and_wait(Some("Hosted tenant actor stopped".to_string()), None)
+            .await;
+        state.persist_state();
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl<S, C> Actor for NetworkActor<S, C>
 where
@@ -7695,8 +8032,6 @@ where
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
-        #[cfg(not(target_arch = "wasm32"))]
-        let in_process_transport_only = config.in_process_transport_only();
         let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
             .expect("valid length for key")
             .into();
@@ -7818,12 +8153,8 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut addresses_to_listen = if in_process_transport_only {
-                Vec::new()
-            } else {
-                vec![MultiAddr::from_str(config.listening_addr())
-                    .expect("valid tentacle listening address")]
-            };
+            let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
+                .expect("valid tentacle listening address")];
             if config.reuse_port_for_websocket {
                 // Re-use the same port for websocket
                 let ws_listens = addresses_to_listen
@@ -7888,7 +8219,7 @@ where
 
         // Start Tor onion hidden service if configured
         #[cfg(not(target_arch = "wasm32"))]
-        let onion_service_token = if config.onion.listen_on_onion && !in_process_transport_only {
+        let onion_service_token = if config.onion.listen_on_onion {
             match self
                 .start_onion_service(
                     &config,
@@ -7949,104 +8280,29 @@ where
             service.run().await;
             debug!("Tentacle service stopped");
         });
-        let state_to_be_persisted = self
-            .store
-            .get_network_actor_state(&private_key.pubkey())
-            .unwrap_or_default();
-
-        let chain_actor = self.chain_actor.clone();
         let features = config.gen_node_features();
-        let mut pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>> = HashMap::new();
-        for session in self.store.get_all_payment_sessions() {
-            let Some(context) = session.request.trampoline_context.as_ref() else {
-                continue;
-            };
-            if session.status.is_final() {
-                for previous_tlc in &context.previous_tlcs {
-                    let upstream_tlc_is_unresolved = self
-                        .store
-                        .get_channel_actor_state(&previous_tlc.prev_channel_id)
-                        .is_some_and(|state| {
-                            trampoline_upstream_tlc_needs_settlement(
-                                &state,
-                                session.request.payment_hash,
-                                previous_tlc,
-                            )
-                        });
-                    if !upstream_tlc_is_unresolved {
-                        continue;
-                    }
-                    pending_trampoline_settlements
-                        .entry(previous_tlc.prev_channel_id)
-                        .or_default()
-                        .insert(session.request.payment_hash);
-                }
-            }
-        }
-        let mut state = NetworkActorState {
-            store: self.store.clone(),
-            state_to_be_persisted,
-            store_actor: self.store_actor.clone(),
-            node_name: config.announced_node_name,
-            announced_addrs,
-            auto_announce: config.auto_announce_node(),
-            last_node_announcement_message: None,
+        let mut state = self.build_coordinator_state(
+            &config,
             private_key,
             entropy,
             default_shutdown_script,
-            network: myself.clone(),
-            control,
-            peer_message_policy,
-            #[cfg(not(target_arch = "wasm32"))]
-            onion_service_token,
-            peer_session_map: Default::default(),
-            in_process_peers: Default::default(),
-            pending_save_peer_addresses: Default::default(),
-            peer_channel_index,
-            channels: Default::default(),
-            outpoint_channel_map: Default::default(),
-            channels_funding_lock_script_cache: Default::default(),
-            to_be_accepted_channels: ToBeAcceptedChannels::new_with_config(&config),
-            pending_channels: Default::default(),
-            chain_actor,
-            chain_client: self.chain_client.clone(),
-            open_channel_auto_accept_min_ckb_funding_amount: config
-                .open_channel_auto_accept_min_ckb_funding_amount(),
-            auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            pending_channels_number_limit: config
-                .pending_channels_number_limit
-                .unwrap_or(DEFAULT_PENDING_CHANNELS_NUMBER_LIMIT),
-            tlc_expiry_delta: config.tlc_expiry_delta(),
-            tlc_min_value: config.tlc_min_value(),
-            tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
-            gossip_actor,
-            max_inbound_peers: config.max_inbound_peers(),
-            min_outbound_peers: config.min_outbound_peers(),
-            enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),
-            peer_reconnect_backoff_attempts: Default::default(),
-            requested_disconnect_peers: Default::default(),
-            features,
-            channel_ephemeral_config: ChannelEphemeralConfig {
-                funding_timeout_seconds: config.funding_timeout_seconds,
-                external_funding_timeout_seconds: config.external_funding_timeout_seconds,
-                external_funding: Default::default(),
+            myself.clone(),
+            NetworkActorRuntime {
+                node_name: config.announced_node_name,
+                announced_addrs,
+                auto_announce: config.auto_announce_node(),
+                control: Some(control),
+                peer_message_policy,
+                peer_channel_index,
+                #[cfg(not(target_arch = "wasm32"))]
+                onion_service_token,
+                gossip_actor,
+                max_inbound_peers: config.max_inbound_peers(),
+                min_outbound_peers: config.min_outbound_peers(),
+                enable_peer_reconnect_backoff: config.enable_peer_reconnect_backoff(),
+                features,
             },
-            inflight_payments: Default::default(),
-            pending_trampoline_settlements,
-            #[cfg(not(target_arch = "wasm32"))]
-            lsp_service: None,
-            pending_external_funding_replies: Default::default(),
-            last_channel_ready_scan: Default::default(),
-            pending_channel_ready_retry_scans: Default::default(),
-            pending_remove_tlcs: Default::default(),
-            inflight_tracers: Default::default(),
-            #[cfg(test)]
-            test_fiber_message_hold: None,
-            #[cfg(test)]
-            test_held_fiber_messages: Default::default(),
-            #[cfg(test)]
-            test_trampoline_settlement_paused: false,
-        };
+        );
 
         if let Some(node_announcement) = state.get_or_create_new_node_announcement_message() {
             let mut graph = self.network_graph.write().await;
@@ -8183,8 +8439,10 @@ where
             .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
             .await;
 
-        if let Err(err) = state.control.close().await {
-            error!("Failed to close tentacle service: {}", err);
+        if let Some(control) = state.control.as_ref() {
+            if let Err(err) = control.close().await {
+                error!("Failed to close tentacle service: {}", err);
+            }
         }
         let local_pubkey = state.get_public_key();
         debug!("Saving network actor state for {:?}", local_pubkey);
@@ -8515,6 +8773,54 @@ pub async fn start_network<
     .expect("Failed to start network actor");
 
     actor
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_hosted_tenant_actor<
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+>(
+    config: FiberConfig,
+    chain_client: C,
+    chain_actor: ActorRef<CkbChainMessage>,
+    event_sender: mpsc::Sender<NetworkServiceEvent>,
+    root_actor: ActorCell,
+    store: S,
+    store_actor: Option<ActorRef<StoreActorMessage>>,
+    network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    default_shutdown_script: Script,
+) -> Result<ActorRef<NetworkActorMessage>, String> {
+    let actor_name = format!("HostedTenant {:?}", config.public_key());
+    Actor::spawn_linked(
+        Some(actor_name),
+        HostedTenantActor::new(NetworkActor::new(
+            event_sender,
+            chain_actor,
+            store,
+            store_actor,
+            network_graph,
+            chain_client,
+        )),
+        HostedTenantActorStartArguments {
+            config,
+            default_shutdown_script,
+        },
+        root_actor,
+    )
+    .await
+    .map(|(actor, _)| actor)
+    .map_err(|error| format!("failed to start hosted tenant actor: {error}"))
 }
 
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {

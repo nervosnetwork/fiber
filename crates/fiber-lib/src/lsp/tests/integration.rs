@@ -32,7 +32,7 @@ use crate::lsp::dispatcher::{
 use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
-        network::{NetworkActorCommand, NetworkActorMessage},
+        network::{NetworkActorCommand, NetworkActorMessage, PeerConnectSource},
         payment::SendPaymentCommand,
     },
     gen_rand_sha256_hash,
@@ -130,8 +130,7 @@ impl TenantRuntimeFactory for ExistingRuntimeFactory {
         let runtime = HostedTenantRuntime::network_backed(
             record.invoice_pubkey,
             existing.network_actor.clone(),
-        )
-        .await?;
+        );
         Ok(match &existing.rpc_context {
             Some(rpc_context) => runtime.with_rpc_context(rpc_context.clone()),
             None => runtime,
@@ -188,9 +187,7 @@ async fn hosted_tenant_endpoint(
     tenant: &NetworkNode,
 ) -> (TenantMessageDispatcher, ActorRef<NetworkActorMessage>) {
     let dispatcher = TenantMessageDispatcher::default();
-    let runtime = HostedTenantRuntime::network_backed(tenant.pubkey, tenant.network_actor.clone())
-        .await
-        .expect("start hosted tenant runtime adapter");
+    let runtime = HostedTenantRuntime::network_backed(tenant.pubkey, tenant.network_actor.clone());
     dispatcher
         .register_runtime(tenant_id.clone(), tenant.pubkey, runtime.actor())
         .unwrap();
@@ -682,6 +679,31 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     assert_eq!(status.registered_tenants, 1);
     assert_eq!(status.active_tenants, 1);
     assert_eq!(public_t.network_actor.get_id(), public_network_actor_id);
+    let tenant_rpc_context = ractor::call_t!(
+        lsp_actor,
+        |reply| LspServiceMessage::GetTenantRpcContext(tenant_id.clone(), reply),
+        5_000
+    )
+    .expect("get hosted tenant RPC context")
+    .expect("hosted tenant RPC context");
+    let tenant_actor_name = tenant_rpc_context
+        .network_actor
+        .get_name()
+        .expect("hosted tenant actor has a name");
+    assert!(tenant_actor_name.starts_with("HostedTenant "));
+    assert!(!tenant_actor_name.starts_with("Network "));
+    let connect_result = ractor::call_t!(
+        tenant_rpc_context.network_actor,
+        |reply| NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeer(
+            "/ip4/127.0.0.1/tcp/1".parse().expect("valid test address"),
+            false,
+            PeerConnectSource::Manual,
+            Some(reply),
+        )),
+        5_000
+    )
+    .expect("hosted tenant connect reply");
+    assert_eq!(connect_result.unwrap_err(), "network service is disabled");
 
     let impostor = Actor::spawn(None, NoopNetworkActor, ())
         .await
@@ -966,6 +988,51 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     assert!(wrong_peer_error
         .to_string()
         .contains("hosted tenants may only open a channel to the public LSP node"));
+
+    let opened: fiber_json_types::OpenChannelResult = tenant_client
+        .request(
+            "open_channel",
+            rpc_params![fiber_json_types::OpenChannelParams {
+                pubkey: public_t.pubkey.into(),
+                funding_amount: MIN_RESERVED_CKB,
+                public: Some(false),
+                one_way: None,
+                shutdown_script: None,
+                commitment_delay_epoch: None,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            }],
+        )
+        .await
+        .expect("open tenant private channel through the standard RPC");
+    let temporary_channel_id = opened.temporary_channel_id.into();
+    wait_until_async_timeout(|| {
+        let public_network_actor = public_t.network_actor.clone();
+        async move {
+            ractor::call_t!(
+                public_network_actor,
+                |reply| NetworkActorMessage::new_command(
+                    NetworkActorCommand::GetPendingAcceptChannels(reply)
+                ),
+                5_000
+            )
+            .ok()
+            .and_then(Result::ok)
+            .is_some_and(|pending| {
+                pending.iter().any(|channel| {
+                    channel.channel_id == temporary_channel_id
+                        && channel.pubkey == expected_tenant.invoice_pubkey
+                })
+            })
+        }
+    })
+    .await;
 
     let invoice: fiber_json_types::InvoiceResult = tenant_client
         .request(

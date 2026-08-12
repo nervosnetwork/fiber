@@ -53,6 +53,30 @@ fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     keys
 }
 
+#[test]
+fn test_local_graph_does_not_load_public_gossip() {
+    let (store, _dir) = generate_store();
+    let (public_secret_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+    store.save_node_announcement(NodeAnnouncement::new_signed(
+        "public-node".into(),
+        FeatureVector::default(),
+        vec![],
+        &public_secret_key.into(),
+        get_chain_hash(),
+        now_timestamp_as_millis_u64(),
+        0,
+        Default::default(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    ));
+
+    let public_graph = NetworkGraph::new(store.clone(), public_key.into(), true);
+    assert_eq!(public_graph.num_of_nodes(), 1);
+
+    let (_, tenant_key) = gen_rand_secp256k1_keypair_tuple();
+    let tenant_graph = NetworkGraph::new_local(store, tenant_key.into());
+    assert_eq!(tenant_graph.num_of_nodes(), 0);
+}
+
 struct MockNetworkGraph {
     pub keys: Vec<PublicKey>,
     pub secret_keys: Vec<SecretKey>,
