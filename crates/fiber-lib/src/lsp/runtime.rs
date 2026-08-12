@@ -125,6 +125,12 @@ impl HostedTenantRuntime {
         self.runtime_actor.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_rpc_context(mut self, rpc_context: HostedTenantRpcContext) -> Self {
+        self.rpc_context = Some(rpc_context);
+        self
+    }
+
     fn is_running(&self) -> bool {
         self.runtime_actor.get_status() < ActorStatus::Stopping
             && self
