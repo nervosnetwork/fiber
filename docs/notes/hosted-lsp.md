@@ -104,7 +104,10 @@ not a request to fail or buffer the payment.
 4. Once the private channel is online, Public T creates the normal downstream
    payment session and sends the TLC to U through the existing trampoline
    forwarding path. Channel protocol messages cross an in-process actor route,
-   while retaining their existing wire-level structures and semantics.
+   while retaining their existing wire-level structures and semantics. If the
+   trampoline request permits multiple parts, Public T may split this one
+   upstream TLC over multiple downstream routes with the existing payment MPP
+   implementation.
 5. Success or failure settles the upstream TLC through the existing payment
    session and trampoline settlement logic.
 
@@ -125,7 +128,7 @@ min(
 ```
 
 The last term preserves enough expiry budget to fail safely upstream. The
-delivery state machine is persisted in the LSP database:
+delivery state machine is persisted in the shared Fiber store:
 
 ```text
 Deferred -> Dispatching -> InFlight -> SettlingUpstream -> Succeeded | Failed
@@ -159,7 +162,24 @@ final amount/expiry mismatches, follow the same settlement path. Deadline
 processing first persists `ExpiringUpstream`, then fails
 the upstream TLC and records `Expired`; a restart between those operations
 resumes the same settlement instead of collapsing expiry into a generic payment
-failure. Buffered MPP is rejected in this phase.
+failure.
+
+Each durable delivery is keyed by `(incoming_channel_id, incoming_tlc_id)`, the
+identity of the concrete payer-to-Public-T TLC being held. Replaying the same
+TLC is idempotent, while another TLC with the same `payment_hash` is a distinct
+execution record. `payment_hash` remains a secondary index for invoice lookup,
+PaymentActor outcome callbacks, and the payment-delivery RPC. The RPC returns
+the active execution when one exists, otherwise the most recently updated final
+execution. A successfully delivered payment hash cannot be accepted again.
+
+This phase supports downstream MPP: one upstream trampoline TLC may be split by
+Public T into multiple downstream payment attempts when `max_parts > 1`. It does
+not yet aggregate upstream MPP. Multiple concurrently active incoming TLCs with
+the same payment hash are rejected because the existing PaymentActor and its
+outcome callbacks identify one payment session by `payment_hash`. Supporting
+upstream MPP requires a payment-level aggregation state machine that validates
+the total amount and compatible deadlines, records every upstream TLC, and
+settles all parts from one downstream outcome.
 
 ## Configuration
 

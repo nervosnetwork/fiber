@@ -194,6 +194,12 @@ pub enum LspPaymentDeliveryStatus {
 pub struct LspPaymentDelivery {
     /// Payment hash of the hosted invoice.
     pub payment_hash: Hash256,
+    /// Public T channel on which the incoming TLC was received.
+    pub incoming_channel_id: Hash256,
+    /// Incoming TLC identifier, unique within `incoming_channel_id`.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub incoming_tlc_id: u64,
     /// Tenant that owns the payment.
     pub tenant_id: String,
     /// Private channel selected internally for tenant delivery.

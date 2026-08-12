@@ -1004,6 +1004,9 @@ Retrieves an outgoing payment owned by a hosted tenant runtime.
 
 Retrieves durable delivery state for a hosted incoming payment.
 
+ Returns the active incoming-TLC execution when present, otherwise the
+ most recently updated final execution for the payment hash.
+
 ##### Params
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the hosted invoice.
@@ -1011,6 +1014,8 @@ Retrieves durable delivery state for a hosted incoming payment.
 ##### Returns
 
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash of the hosted invoice.
+* `incoming_channel_id` - <em>[Hash256](#type-hash256)</em>, Public T channel on which the incoming TLC was received.
+* `incoming_tlc_id` - <em>`u64`</em>, Incoming TLC identifier, unique within `incoming_channel_id`.
 * `tenant_id` - <em>`String`</em>, Tenant that owns the payment.
 * `private_channel_id` - <em>[Hash256](#type-hash256)</em>, Private channel selected internally for tenant delivery.
 * `buffer_deadline` - <em>`u64`</em>, Last instant at which an undispatched payment may remain buffered.

@@ -88,6 +88,9 @@ trait LspRpc {
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Retrieves durable delivery state for a hosted incoming payment.
+    ///
+    /// Returns the active incoming-TLC execution when present, otherwise the
+    /// most recently updated final execution for the payment hash.
     #[method(name = "lsp_get_payment_delivery")]
     async fn lsp_get_payment_delivery(
         &self,
@@ -383,6 +386,7 @@ impl From<InternalInvoiceRegistration> for LspInvoiceRegistration {
 
 impl From<InternalPaymentDelivery> for LspPaymentDelivery {
     fn from(delivery: InternalPaymentDelivery) -> Self {
+        let execution_key = delivery.key();
         let (status, failure_reason) = match delivery.status {
             InternalPaymentDeliveryStatus::Deferred => (LspPaymentDeliveryStatus::Deferred, None),
             InternalPaymentDeliveryStatus::Dispatching => {
@@ -408,6 +412,8 @@ impl From<InternalPaymentDelivery> for LspPaymentDelivery {
         };
         Self {
             payment_hash: delivery.payment_hash.into(),
+            incoming_channel_id: execution_key.incoming_channel_id.into(),
+            incoming_tlc_id: execution_key.incoming_tlc_id,
             tenant_id: delivery.tenant_id.to_string(),
             private_channel_id: delivery.private_channel_id.into(),
             buffer_deadline: delivery.buffer_deadline,

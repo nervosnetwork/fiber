@@ -718,6 +718,11 @@ fn hosted_forwarding_request(
     now: u64,
 ) -> TrampolineForwardingRequest {
     let downstream_expiry = 60_000;
+    let incoming_tlc_id = u64::from_be_bytes(
+        payment_hash.as_ref()[..8]
+            .try_into()
+            .expect("payment hash prefix"),
+    );
     TrampolineForwardingRequest {
         payment_hash,
         next_node_id: tenant.invoice_pubkey,
@@ -729,7 +734,12 @@ fn hosted_forwarding_request(
         max_parts: None,
         udt_type_script: None,
         remaining_trampoline_onion: vec![1, 2, 3],
-        previous_tlc: PrevTlcInfo::new_with_shared_secret(Hash256::from([5; 32]), 1, 10, [6; 32]),
+        previous_tlc: PrevTlcInfo::new_with_shared_secret(
+            Hash256::from([5; 32]),
+            incoming_tlc_id,
+            10,
+            [6; 32],
+        ),
         max_outgoing_tlc_expiry: now + downstream_expiry + LSP_DELIVERY_SAFETY_MARGIN_MS + 120_000,
     }
 }
@@ -776,6 +786,155 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
 }
 
 #[test]
+fn payment_delivery_uses_incoming_tlc_as_primary_key() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let invoices = LspInvoiceRegistry::new(store.clone());
+    let deliveries = LspPaymentDeliveryManager::new(store.clone());
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        invoice_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(Hash256::from([22; 32])),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([29; 32]);
+    let registration = invoices
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, payment_hash),
+            None,
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let first_request = hosted_forwarding_request(&tenant, payment_hash, now);
+    let first = deliveries
+        .accept(&registration, &tenant, first_request.clone(), now)
+        .unwrap();
+
+    assert_eq!(
+        deliveries
+            .accept(&registration, &tenant, first_request.clone(), now + 1)
+            .unwrap(),
+        first
+    );
+    let mut conflicting_request = first_request.clone();
+    conflicting_request.remaining_trampoline_onion.push(4);
+    assert_eq!(
+        deliveries
+            .accept(&registration, &tenant, conflicting_request, now + 2)
+            .unwrap_err(),
+        "hosted payment execution already exists with different data"
+    );
+    let mut second_request = first_request.clone();
+    second_request.previous_tlc.prev_tlc_id += 1;
+    assert!(deliveries
+        .accept(&registration, &tenant, second_request.clone(), now + 3,)
+        .unwrap_err()
+        .contains("multiple active incoming TLCs"));
+
+    deliveries
+        .transition(
+            &first.key(),
+            LspPaymentDeliveryStatus::Cancelled {
+                reason: "payer replaced the incoming TLC".to_string(),
+            },
+            now + 4,
+        )
+        .unwrap();
+    let second = deliveries
+        .accept(&registration, &tenant, second_request.clone(), now + 5)
+        .unwrap();
+    assert_ne!(first.key(), second.key());
+    assert_eq!(
+        deliveries
+            .get_by_payment_hash(&payment_hash)
+            .unwrap()
+            .unwrap()
+            .key(),
+        second.key()
+    );
+
+    deliveries
+        .transition(
+            &second.key(),
+            LspPaymentDeliveryStatus::Cancelled {
+                reason: "payer replaced the incoming channel".to_string(),
+            },
+            now + 6,
+        )
+        .unwrap();
+    let mut third_request = first_request;
+    third_request.previous_tlc.prev_channel_id = Hash256::from([30; 32]);
+    let third = deliveries
+        .accept(&registration, &tenant, third_request, now + 7)
+        .unwrap();
+    assert_ne!(first.key(), third.key());
+    assert_ne!(second.key(), third.key());
+
+    deliveries
+        .transition(&third.key(), LspPaymentDeliveryStatus::Dispatching, now + 8)
+        .and_then(|_| {
+            deliveries.transition(&third.key(), LspPaymentDeliveryStatus::InFlight, now + 9)
+        })
+        .and_then(|_| {
+            deliveries.transition(
+                &third.key(),
+                LspPaymentDeliveryStatus::SettlingUpstream {
+                    payment_status: PaymentStatus::Success,
+                    failure: None,
+                },
+                now + 10,
+            )
+        })
+        .and_then(|_| {
+            deliveries.transition(&third.key(), LspPaymentDeliveryStatus::Succeeded, now + 11)
+        })
+        .unwrap();
+    let mut replay_after_success = second_request;
+    replay_after_success.previous_tlc.prev_tlc_id += 1;
+    assert!(deliveries
+        .accept(&registration, &tenant, replay_after_success, now + 12,)
+        .unwrap_err()
+        .contains("already delivered successfully"));
+
+    let reopened = LspPaymentDeliveryManager::new(store);
+    let indexed = reopened.list_by_payment_hash(&payment_hash).unwrap();
+    let indexed_keys = indexed
+        .iter()
+        .map(|delivery| delivery.key())
+        .collect::<Vec<_>>();
+    assert_eq!(indexed.len(), 3);
+    assert!(indexed_keys.contains(&first.key()));
+    assert!(indexed_keys.contains(&second.key()));
+    assert!(indexed_keys.contains(&third.key()));
+    assert_eq!(
+        reopened.get(&first.key()).unwrap().unwrap().payment_hash,
+        payment_hash
+    );
+    assert_eq!(
+        reopened.get(&second.key()).unwrap().unwrap().payment_hash,
+        payment_hash
+    );
+    assert_eq!(
+        reopened.get(&third.key()).unwrap().unwrap().payment_hash,
+        payment_hash
+    );
+    assert_eq!(
+        reopened
+            .get_by_payment_hash(&payment_hash)
+            .unwrap()
+            .unwrap()
+            .key(),
+        third.key()
+    );
+}
+
+#[test]
 fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
@@ -801,7 +960,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
         )
         .unwrap();
     let now = crate::now_timestamp_as_millis_u64();
-    deliveries
+    let delivery = deliveries
         .accept(
             &registration,
             &tenant,
@@ -809,15 +968,10 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
             now,
         )
         .unwrap();
+    let key = delivery.key();
     let in_flight = deliveries
-        .transition(
-            &payment_hash,
-            LspPaymentDeliveryStatus::Dispatching,
-            now + 1,
-        )
-        .and_then(|_| {
-            deliveries.transition(&payment_hash, LspPaymentDeliveryStatus::InFlight, now + 2)
-        })
+        .transition(&key, LspPaymentDeliveryStatus::Dispatching, now + 1)
+        .and_then(|_| deliveries.transition(&key, LspPaymentDeliveryStatus::InFlight, now + 2))
         .unwrap();
 
     assert_eq!(in_flight.status, LspPaymentDeliveryStatus::InFlight);
@@ -825,7 +979,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
 }
 
 #[test]
-fn payment_delivery_rejects_invalid_state_transition_and_mpp() {
+fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
@@ -852,18 +1006,17 @@ fn payment_delivery_rejects_invalid_state_transition_and_mpp() {
     let now = crate::now_timestamp_as_millis_u64();
     let mut request = hosted_forwarding_request(&tenant, payment_hash, now);
     request.max_parts = Some(2);
-    assert_eq!(
-        deliveries
-            .accept(&registration, &tenant, request.clone(), now)
-            .unwrap_err(),
-        "buffered hosted delivery does not support MPP"
-    );
-    request.max_parts = None;
-    deliveries
-        .accept(&registration, &tenant, request, now)
+    let delivery = deliveries
+        .accept(&registration, &tenant, request.clone(), now)
         .unwrap();
+    assert_eq!(delivery.request.max_parts, Some(2));
+    assert!(request.into_send_payment_data().unwrap().allow_mpp);
     assert!(deliveries
-        .transition(&payment_hash, LspPaymentDeliveryStatus::Succeeded, now + 1,)
+        .transition(
+            &delivery.key(),
+            LspPaymentDeliveryStatus::Succeeded,
+            now + 1,
+        )
         .unwrap_err()
         .contains("invalid hosted payment delivery transition"));
 }
@@ -1186,7 +1339,7 @@ async fn wait_for_delivery_status(
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if manager
-                .get(&payment_hash)
+                .get_by_payment_hash(&payment_hash)
                 .unwrap()
                 .is_some_and(|delivery| delivery.status == expected)
             {
@@ -1267,8 +1420,13 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 1);
 
+    let key = manager
+        .get_by_payment_hash(&payment_hash)
+        .unwrap()
+        .unwrap()
+        .key();
     service
-        .send_message(LspServiceMessage::ExpireDelivery(payment_hash))
+        .send_message(LspServiceMessage::ExpireDelivery(key))
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(failures.load(Ordering::Relaxed), 0);
@@ -1372,7 +1530,11 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
     )
     .await;
     assert_eq!(
-        manager.get(&u1_payment_hash).unwrap().unwrap().status,
+        manager
+            .get_by_payment_hash(&u1_payment_hash)
+            .unwrap()
+            .unwrap()
+            .status,
         LspPaymentDeliveryStatus::Deferred
     );
     assert_eq!(starts.load(Ordering::Relaxed), 1);
@@ -1511,9 +1673,14 @@ async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
     })
     .unwrap()
     .unwrap();
+    let key = manager
+        .get_by_payment_hash(&payment_hash)
+        .unwrap()
+        .unwrap()
+        .key();
     manager
         .transition(
-            &payment_hash,
+            &key,
             LspPaymentDeliveryStatus::ExpiringUpstream {
                 reason: "hosted tenant was unavailable before the buffer deadline".to_string(),
             },
@@ -1522,7 +1689,7 @@ async fn expiring_delivery_resumes_upstream_failure_after_restart_marker() {
         .unwrap();
 
     service
-        .send_message(LspServiceMessage::ResumeDelivery(payment_hash))
+        .send_message(LspServiceMessage::ResumeDelivery(key))
         .unwrap();
     wait_for_delivery_status(
         &manager,
@@ -1683,7 +1850,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         .unwrap(),
         LspDeliveryDecision::NotHosted
     );
-    assert_eq!(manager.get(&payment_hash).unwrap(), None);
+    assert_eq!(manager.get_by_payment_hash(&payment_hash).unwrap(), None);
     assert_eq!(starts.load(Ordering::Relaxed), 0);
     assert_eq!(dispatches.load(Ordering::Relaxed), 0);
     assert_eq!(failures.load(Ordering::Relaxed), 0);
@@ -1800,7 +1967,7 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
     assert_eq!(dispatches.load(Ordering::Relaxed), 2);
     assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
-    let delivery = manager.get(&payment_hash).unwrap().unwrap();
+    let delivery = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(delivery.attempt_count, 2);
     assert_eq!(
         delivery.last_error.as_deref(),
@@ -1871,7 +2038,7 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
     )
     .await;
     tokio::time::sleep(Duration::from_millis(1_100)).await;
-    let delivery = manager.get(&payment_hash).unwrap().unwrap();
+    let delivery = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(delivery.attempt_count, 1);
     assert_eq!(delivery.last_error.as_deref(), Some("invoice is cancelled"));
     assert_eq!(
@@ -1942,13 +2109,13 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         .unwrap(),
         LspPaymentOutcomeDecision::RetryDelivery
     );
-    let deferred = manager.get(&payment_hash).unwrap().unwrap();
+    let deferred = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(deferred.status, LspPaymentDeliveryStatus::Deferred);
     assert_eq!(deferred.attempt_count, 1);
     assert_eq!(deferred.last_error.as_deref(), Some("peer is offline"));
 
     wait_for_delivery_status(&manager, payment_hash, LspPaymentDeliveryStatus::InFlight).await;
-    let retried = manager.get(&payment_hash).unwrap().unwrap();
+    let retried = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(retried.attempt_count, 2);
     assert_eq!(dispatches.load(Ordering::Relaxed), 2);
     assert_eq!(upstream_failures.load(Ordering::Relaxed), 0);
@@ -2037,7 +2204,7 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
             LspPaymentOutcomeDecision::SettleUpstream,
             "{error_code:?} must not be retried"
         );
-        let settling = manager.get(&payment_hash).unwrap().unwrap();
+        let settling = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
         assert_eq!(
             settling.status,
             LspPaymentDeliveryStatus::SettlingUpstream {
@@ -2120,15 +2287,20 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
     })
     .unwrap()
     .unwrap();
+    let key = manager
+        .get_by_payment_hash(&payment_hash)
+        .unwrap()
+        .unwrap()
+        .key();
     manager
         .transition(
-            &payment_hash,
+            &key,
             LspPaymentDeliveryStatus::Dispatching,
             crate::now_timestamp_as_millis_u64(),
         )
         .and_then(|_| {
             manager.transition(
-                &payment_hash,
+                &key,
                 LspPaymentDeliveryStatus::InFlight,
                 crate::now_timestamp_as_millis_u64(),
             )
@@ -2149,7 +2321,7 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
             LspPaymentOutcomeDecision::SettleUpstream
         );
     }
-    let settling = manager.get(&payment_hash).unwrap().unwrap();
+    let settling = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
     assert_eq!(
         settling.status,
         LspPaymentDeliveryStatus::SettlingUpstream {
@@ -2158,7 +2330,10 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         }
     );
     let reopened = LspPaymentDeliveryManager::new(store);
-    assert_eq!(reopened.get(&payment_hash).unwrap(), Some(settling));
+    assert_eq!(
+        reopened.get_by_payment_hash(&payment_hash).unwrap(),
+        Some(settling)
+    );
 
     service
         .send_message(LspServiceMessage::PaymentOutcomeSettled {

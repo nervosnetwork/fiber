@@ -1,5 +1,5 @@
 use bincode::{deserialize, serialize};
-use fiber_store::backend::StorageBackend;
+use fiber_store::backend::{BatchWriter, StorageBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::fiber_types::{Hash256, PaymentStatus, TlcErrorCode};
@@ -8,6 +8,7 @@ use crate::store::{FiberStore, Store};
 use super::{LspInvoiceRegistration, TenantId, TrampolineForwardingRequest};
 
 const PAYMENT_DELIVERY_PREFIX: &[u8] = b"\xf2lsp/delivery/";
+const PAYMENT_DELIVERY_HASH_INDEX_PREFIX: &[u8] = b"\xf2lsp/delivery-by-hash/";
 /// Time retained between the end of buffering and the downstream expiry budget.
 pub const LSP_DELIVERY_SAFETY_MARGIN_MS: u64 = 30_000;
 
@@ -15,6 +16,25 @@ pub const LSP_DELIVERY_SAFETY_MARGIN_MS: u64 = 30_000;
 pub struct LspPaymentDeliveryLimits {
     pub max_pending_deliveries: usize,
     pub max_pending_deliveries_per_tenant: usize,
+}
+
+/// Identifies one concrete incoming TLC handled by the hosted delivery service.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct LspPaymentDeliveryKey {
+    /// Channel on which Public T received the upstream TLC.
+    pub incoming_channel_id: Hash256,
+    /// Identifier of the upstream TLC within `incoming_channel_id`.
+    pub incoming_tlc_id: u64,
+}
+
+impl LspPaymentDeliveryKey {
+    /// Derives the execution identity from the request's upstream TLC.
+    pub fn from_request(request: &TrampolineForwardingRequest) -> Self {
+        Self {
+            incoming_channel_id: request.previous_tlc.prev_channel_id,
+            incoming_tlc_id: request.previous_tlc.prev_tlc_id,
+        }
+    }
 }
 
 impl Default for LspPaymentDeliveryLimits {
@@ -93,33 +113,86 @@ pub struct LspPaymentDelivery {
     pub updated_at: u64,
 }
 
+impl LspPaymentDelivery {
+    pub fn key(&self) -> LspPaymentDeliveryKey {
+        LspPaymentDeliveryKey::from_request(&self.request)
+    }
+}
+
 /// Persistence interface for hosted payment delivery records.
 pub trait LspPaymentDeliveryStore: Clone + Send + Sync + 'static {
     fn get_lsp_payment_delivery(
         &self,
-        payment_hash: &Hash256,
+        key: &LspPaymentDeliveryKey,
     ) -> Result<Option<LspPaymentDelivery>, String>;
     fn put_lsp_payment_delivery(&self, delivery: &LspPaymentDelivery) -> Result<(), String>;
     fn list_lsp_payment_deliveries(&self) -> Result<Vec<LspPaymentDelivery>, String>;
+    fn list_lsp_payment_deliveries_by_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<Vec<LspPaymentDelivery>, String>;
 }
 
-fn delivery_key(payment_hash: &Hash256) -> Vec<u8> {
-    [PAYMENT_DELIVERY_PREFIX, payment_hash.as_ref()].concat()
+fn append_execution_key(bytes: &mut Vec<u8>, key: &LspPaymentDeliveryKey) {
+    bytes.extend_from_slice(key.incoming_channel_id.as_ref());
+    bytes.extend_from_slice(&key.incoming_tlc_id.to_be_bytes());
+}
+
+fn delivery_key(key: &LspPaymentDeliveryKey) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(PAYMENT_DELIVERY_PREFIX.len() + 40);
+    bytes.extend_from_slice(PAYMENT_DELIVERY_PREFIX);
+    append_execution_key(&mut bytes, key);
+    bytes
+}
+
+fn payment_hash_index_prefix(payment_hash: &Hash256) -> Vec<u8> {
+    [PAYMENT_DELIVERY_HASH_INDEX_PREFIX, payment_hash.as_ref()].concat()
+}
+
+fn payment_hash_index_key(payment_hash: &Hash256, key: &LspPaymentDeliveryKey) -> Vec<u8> {
+    let mut bytes = payment_hash_index_prefix(payment_hash);
+    append_execution_key(&mut bytes, key);
+    bytes
+}
+
+fn parse_indexed_execution_key(bytes: &[u8]) -> Result<LspPaymentDeliveryKey, String> {
+    let key_offset = PAYMENT_DELIVERY_HASH_INDEX_PREFIX.len() + 32;
+    if bytes.len() != key_offset + 40 {
+        return Err(format!(
+            "invalid hosted payment delivery index key length: {}",
+            bytes.len()
+        ));
+    }
+    let incoming_channel_id = Hash256::try_from(&bytes[key_offset..key_offset + 32])
+        .map_err(|error| error.to_string())?;
+    let incoming_tlc_id = u64::from_be_bytes(
+        bytes[key_offset + 32..]
+            .try_into()
+            .map_err(|error: std::array::TryFromSliceError| error.to_string())?,
+    );
+    Ok(LspPaymentDeliveryKey {
+        incoming_channel_id,
+        incoming_tlc_id,
+    })
 }
 
 impl LspPaymentDeliveryStore for Store {
     fn get_lsp_payment_delivery(
         &self,
-        payment_hash: &Hash256,
+        key: &LspPaymentDeliveryKey,
     ) -> Result<Option<LspPaymentDelivery>, String> {
-        self.get(delivery_key(payment_hash))
+        self.get(delivery_key(key))
             .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
             .transpose()
     }
 
     fn put_lsp_payment_delivery(&self, delivery: &LspPaymentDelivery) -> Result<(), String> {
         let bytes = serialize(delivery).map_err(|error| error.to_string())?;
-        self.put(delivery_key(&delivery.payment_hash), bytes);
+        let key = delivery.key();
+        let mut batch = self.batch();
+        batch.put(delivery_key(&key), bytes);
+        batch.put(payment_hash_index_key(&delivery.payment_hash, &key), []);
+        batch.commit();
         Ok(())
     }
 
@@ -127,6 +200,24 @@ impl LspPaymentDeliveryStore for Store {
         self.collect_by_prefix(PAYMENT_DELIVERY_PREFIX)
             .into_iter()
             .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn list_lsp_payment_deliveries_by_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<Vec<LspPaymentDelivery>, String> {
+        self.collect_by_prefix(&payment_hash_index_prefix(payment_hash))
+            .into_iter()
+            .map(|pair| {
+                let key = parse_indexed_execution_key(&pair.key)?;
+                self.get_lsp_payment_delivery(&key)?.ok_or_else(|| {
+                    format!(
+                        "hosted payment delivery index points to missing execution {:?}",
+                        key
+                    )
+                })
+            })
             .collect()
     }
 }
@@ -150,8 +241,54 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         Self { store, limits }
     }
 
-    pub fn get(&self, payment_hash: &Hash256) -> Result<Option<LspPaymentDelivery>, String> {
-        self.store.get_lsp_payment_delivery(payment_hash)
+    pub fn get(&self, key: &LspPaymentDeliveryKey) -> Result<Option<LspPaymentDelivery>, String> {
+        self.store.get_lsp_payment_delivery(key)
+    }
+
+    pub fn list_by_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<Vec<LspPaymentDelivery>, String> {
+        self.store
+            .list_lsp_payment_deliveries_by_payment_hash(payment_hash)
+    }
+
+    pub fn get_active_by_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<Option<LspPaymentDelivery>, String> {
+        let mut active = self
+            .list_by_payment_hash(payment_hash)?
+            .into_iter()
+            .filter(|delivery| !delivery.status.is_final());
+        let delivery = active.next();
+        if active.next().is_some() {
+            return Err(format!(
+                "multiple active hosted payment deliveries found for {payment_hash}"
+            ));
+        }
+        Ok(delivery)
+    }
+
+    pub fn get_by_payment_hash(
+        &self,
+        payment_hash: &Hash256,
+    ) -> Result<Option<LspPaymentDelivery>, String> {
+        let deliveries = self.list_by_payment_hash(payment_hash)?;
+        let mut active = deliveries
+            .iter()
+            .filter(|delivery| !delivery.status.is_final());
+        if let Some(delivery) = active.next() {
+            if active.next().is_some() {
+                return Err(format!(
+                    "multiple active hosted payment deliveries found for {payment_hash}"
+                ));
+            }
+            return Ok(Some(delivery.clone()));
+        }
+        Ok(deliveries
+            .into_iter()
+            .max_by_key(|delivery| (delivery.updated_at, delivery.created_at)))
     }
 
     pub fn list_pending(&self) -> Result<Vec<LspPaymentDelivery>, String> {
@@ -172,12 +309,12 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
 
     pub fn begin_dispatch(
         &self,
-        payment_hash: &Hash256,
+        key: &LspPaymentDeliveryKey,
         now: u64,
     ) -> Result<LspPaymentDelivery, String> {
         let mut delivery = self
-            .get(payment_hash)?
-            .ok_or_else(|| format!("hosted payment delivery {payment_hash} not found"))?;
+            .get(key)?
+            .ok_or_else(|| format!("hosted payment delivery {key:?} not found"))?;
         if !matches!(
             delivery.status,
             LspPaymentDeliveryStatus::Deferred | LspPaymentDeliveryStatus::Dispatching
@@ -213,9 +350,6 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if registration.tenant_id != tenant.tenant_id {
             return Err("hosted invoice registration does not match tenant".to_string());
         }
-        if request.max_parts.is_some_and(|max_parts| max_parts > 1) {
-            return Err("buffered hosted delivery does not support MPP".to_string());
-        }
         let private_channel_id = tenant
             .private_channel_id
             .ok_or_else(|| "hosted tenant has no private channel".to_string())?;
@@ -231,14 +365,32 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if registration.invoice.udt_type_script() != request.udt_type_script.as_ref() {
             return Err("delivery asset does not match hosted invoice".to_string());
         }
-        if let Some(existing) = self.get(&request.payment_hash)? {
+        let key = LspPaymentDeliveryKey::from_request(&request);
+        if let Some(existing) = self.get(&key)? {
             if existing.tenant_id == registration.tenant_id
                 && existing.private_channel_id == private_channel_id
                 && existing.request == request
             {
                 return Ok(existing);
             }
-            return Err("hosted payment delivery already exists with different data".to_string());
+            return Err("hosted payment execution already exists with different data".to_string());
+        }
+        if let Some(existing) = self.get_active_by_payment_hash(&request.payment_hash)? {
+            return Err(format!(
+                "hosted payment {} already has active execution {:?}; multiple active incoming TLCs per payment hash are not supported",
+                request.payment_hash,
+                existing.key()
+            ));
+        }
+        if self
+            .list_by_payment_hash(&request.payment_hash)?
+            .iter()
+            .any(|delivery| delivery.status == LspPaymentDeliveryStatus::Succeeded)
+        {
+            return Err(format!(
+                "hosted payment {} was already delivered successfully",
+                request.payment_hash
+            ));
         }
 
         let pending = self.list_pending()?;
@@ -291,23 +443,23 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
 
     pub fn transition(
         &self,
-        payment_hash: &Hash256,
+        key: &LspPaymentDeliveryKey,
         status: LspPaymentDeliveryStatus,
         now: u64,
     ) -> Result<LspPaymentDelivery, String> {
-        self.transition_with_error(payment_hash, status, None, now)
+        self.transition_with_error(key, status, None, now)
     }
 
     pub fn transition_with_error(
         &self,
-        payment_hash: &Hash256,
+        key: &LspPaymentDeliveryKey,
         status: LspPaymentDeliveryStatus,
         error: Option<(String, Option<TlcErrorCode>)>,
         now: u64,
     ) -> Result<LspPaymentDelivery, String> {
         let mut delivery = self
-            .get(payment_hash)?
-            .ok_or_else(|| format!("hosted payment delivery {payment_hash} not found"))?;
+            .get(key)?
+            .ok_or_else(|| format!("hosted payment delivery {key:?} not found"))?;
         if delivery.status == status {
             if let Some((reason, error_code)) = error {
                 delivery.last_error = Some(reason);

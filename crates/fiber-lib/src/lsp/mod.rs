@@ -115,7 +115,7 @@ mod tenant;
 pub use config::{LspConfig, DEFAULT_MAX_ACTIVE_TENANTS};
 #[cfg(not(target_arch = "wasm32"))]
 pub use delivery::{
-    LspPaymentDelivery, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
+    LspPaymentDelivery, LspPaymentDeliveryKey, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
     LspPaymentDeliveryStatus, LspPaymentDeliveryStore, LSP_DELIVERY_SAFETY_MARGIN_MS,
 };
 #[cfg(not(target_arch = "wasm32"))]
