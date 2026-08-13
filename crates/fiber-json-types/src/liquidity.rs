@@ -111,6 +111,7 @@ pub struct LiquidityQuoteEnvelope {
     /// Refund lock script encoded as Molecule script bytes in `0x` hex.
     pub refund_lock: String,
     /// Client invoice required for Loop In and absent for Loop Out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_invoice: Option<String>,
 }
 
@@ -478,7 +479,7 @@ mod tests {
 
         assert_eq!(value["amount"], "0x64");
         assert_eq!(decoded.provider_pubkey, provider_pubkey);
-        assert_eq!(value["client_invoice"], serde_json::Value::Null);
+        assert!(value.get("client_invoice").is_none());
         assert!(decoded.client_invoice.is_none());
         assert_eq!(value["claimant_lock"], "0x0102");
         assert_eq!(value["refund_lock"], "0x0304");
