@@ -848,7 +848,8 @@ Starts a registered tenant execution context if it is currently cold.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
+ it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
@@ -870,7 +871,8 @@ Stops a tenant execution context while retaining its persistent state and keys.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
+ it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
@@ -1867,7 +1869,8 @@ Hosted tenant state boundary and liveness information.
 #### Fields
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
-* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Key authenticating tenant invoices; it is not a public routing node identity.
+* `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
+ it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
