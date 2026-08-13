@@ -218,6 +218,10 @@ pub fn liquidity_quote_envelope_from_terms(terms: &LoopOutQuoteTerms) -> Liquidi
 }
 
 /// Validate an independently received quote envelope and convert it to internal terms.
+///
+/// The quote expiration must be strictly greater than `now_ms`. Provider and routing fees may
+/// equal their respective caps. Malformed provider keys, assets, scripts, and Loop In invoices are
+/// rejected. This function only validates and converts the quote; it does not persist any state.
 pub fn validate_imported_quote(
     envelope: LiquidityQuoteEnvelope,
     max_provider_fee: u128,
@@ -242,6 +246,9 @@ pub fn validate_imported_quote(
         fiber_json_types::LiquiditySwapKind::LoopIn => LiquiditySwapKind::LoopIn,
     };
     let payment_hash: Hash256 = envelope.payment_hash.into();
+    let provider = Pubkey::try_from(envelope.provider_pubkey).map_err(|error| {
+        LiquidityLoopOutError::Store(format!("invalid provider pubkey: {error}"))
+    })?;
 
     match swap_kind {
         LiquiditySwapKind::LoopOut => {
@@ -280,7 +287,7 @@ pub fn validate_imported_quote(
     let terms = LoopOutQuoteTerms {
         quote_id: envelope.quote_id.into(),
         swap_kind,
-        provider: Pubkey(envelope.provider_pubkey.0),
+        provider,
         asset,
         amount: envelope.amount,
         provider_fee: envelope.provider_fee,
@@ -462,6 +469,7 @@ mod tests {
         asset: LiquidityAsset,
     ) -> LoopOutQuoteTerms {
         let payment_hash = Hash256::from([3; 32]);
+        let (_, provider_public_key) = gen_deterministic_secp256k1_keypair_tuple();
         let client_invoice = (swap_kind == fiber_types::LiquiditySwapKind::LoopIn).then(|| {
             client_invoice(
                 payment_hash,
@@ -473,7 +481,7 @@ mod tests {
         LoopOutQuoteTerms {
             quote_id: Hash256::from([1; 32]),
             swap_kind,
-            provider: Pubkey([2; 33]),
+            provider: provider_public_key.into(),
             asset,
             amount: 100,
             provider_fee: 2,
@@ -565,6 +573,17 @@ mod tests {
             imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
         routing_fee.routing_fee_limit = 4;
         assert_imported_quote_rejected(routing_fee, "routing fee");
+    }
+
+    #[test]
+    fn imported_quote_rejects_invalid_provider_pubkey() {
+        let mut envelope =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        let mut invalid_compressed_key = [0xff; 33];
+        invalid_compressed_key[0] = 0x02;
+        envelope.provider_pubkey = fiber_json_types::Pubkey(invalid_compressed_key);
+
+        assert_imported_quote_rejected(envelope, "invalid provider pubkey");
     }
 
     #[test]
