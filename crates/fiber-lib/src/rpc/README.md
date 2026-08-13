@@ -812,7 +812,8 @@ Request a Loop Out quote from a provider.
 * `provider` - <em>`String`</em>, Provider node identifier or endpoint.
 * `asset_id` - <em>`String`</em>, Provider asset registry identifier.
 * `amount` - <em>`u128`</em>, Raw on-chain destination amount before routing fees.
-* `receiver` - <em>`String`</em>, CKB address or UDT receiver descriptor.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
+* `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
 * `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
@@ -966,7 +967,8 @@ Provider-side quote endpoint for a Loop Out request.
 
 * `asset_id` - <em>`String`</em>, Provider asset registry identifier.
 * `amount` - <em>`u128`</em>, Raw on-chain destination amount before routing fees.
-* `receiver` - <em>`String`</em>, CKB address or UDT receiver descriptor.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
+* `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
 * `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
@@ -1000,8 +1002,6 @@ Provider-side accept endpoint for a Loop Out quote.
 ##### Params
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
-* `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
-* `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
 
 ##### Returns
 

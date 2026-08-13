@@ -5566,6 +5566,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_quote_loop_out_rejects_malformed_claimant_before_side_effects() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+
+        let error = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                claimant_lock: "not-hex".to_string(),
+                refund_lock: script_hex(&script("valid-refund")),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("claimant_lock"));
+        assert!(harness.store.quotes.borrow().is_empty());
+        assert_eq!(*harness.store.quote_writes.borrow(), 0);
+        assert!(harness.events().is_empty());
+        assert!(harness.chain.payout_locks.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_quote_loop_out_rejects_malformed_refund_before_side_effects() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+
+        let error = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                claimant_lock: script_hex(&script("valid-claimant")),
+                refund_lock: "not-hex".to_string(),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("refund_lock"));
+        assert!(harness.store.quotes.borrow().is_empty());
+        assert_eq!(*harness.store.quote_writes.borrow(), 0);
+        assert!(harness.events().is_empty());
+        assert!(harness.chain.payout_locks.borrow().is_empty());
+    }
+
+    #[tokio::test]
     async fn provider_loop_out_quote_persists_final_scripts() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
         let claimant_lock = script("quote-final-claimant");
