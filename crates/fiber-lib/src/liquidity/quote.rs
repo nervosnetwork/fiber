@@ -1,3 +1,6 @@
+use ckb_types::packed::Script;
+use ckb_types::prelude::Entity;
+use fiber_json_types::{LiquidityAssetInfo, LiquidityQuoteEnvelope};
 use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, LiquiditySwapKind, Pubkey};
 
 use crate::invoice::CkbInvoice;
@@ -124,6 +127,189 @@ fn validate_loop_in_invoice(
     Ok(())
 }
 
+pub(crate) fn parse_script_hex(value: &str, field: &str) -> Result<Script, LiquidityLoopOutError> {
+    let Some(hex_value) = value.strip_prefix("0x") else {
+        return Err(LiquidityLoopOutError::Store(format!(
+            "invalid {field}: script hex must start with 0x"
+        )));
+    };
+    let bytes = hex::decode(hex_value).map_err(|error| {
+        LiquidityLoopOutError::Store(format!(
+            "invalid {field}: script hex decode failed: {error}"
+        ))
+    })?;
+    Script::from_slice(&bytes).map_err(|error| {
+        LiquidityLoopOutError::Store(format!("invalid {field}: script decode failed: {error}"))
+    })
+}
+
+pub(crate) fn script_hex(script: &Script) -> String {
+    format!("0x{}", hex::encode(script.as_slice()))
+}
+
+pub(crate) fn json_asset_to_liquidity_asset(
+    info: &LiquidityAssetInfo,
+) -> Result<LiquidityAsset, LiquidityLoopOutError> {
+    if info.asset_id.trim().is_empty() {
+        return Err(LiquidityLoopOutError::Store(
+            "asset_id must not be empty".to_string(),
+        ));
+    }
+    let asset = LiquidityAsset {
+        asset_id: info.asset_id.clone(),
+        kind: match info.kind {
+            fiber_json_types::LiquidityAssetKind::Ckb => LiquidityAssetKind::Ckb,
+            fiber_json_types::LiquidityAssetKind::Udt => LiquidityAssetKind::Udt,
+        },
+        udt_type_script: info.udt_type_script.clone(),
+        min_amount: info.min_amount,
+        max_amount: info.max_amount,
+        available_capacity: info.available_capacity,
+        base_fee: info.base_fee,
+        proportional_fee_ppm: info.proportional_fee_ppm,
+        enabled: info.enabled,
+    };
+    asset
+        .validate()
+        .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
+    Ok(asset)
+}
+
+pub(crate) fn liquidity_asset_to_json_info(asset: &LiquidityAsset) -> LiquidityAssetInfo {
+    LiquidityAssetInfo {
+        asset_id: asset.asset_id.clone(),
+        kind: match asset.kind {
+            LiquidityAssetKind::Ckb => fiber_json_types::LiquidityAssetKind::Ckb,
+            LiquidityAssetKind::Udt => fiber_json_types::LiquidityAssetKind::Udt,
+        },
+        udt_type_script: asset.udt_type_script.clone(),
+        min_amount: asset.min_amount,
+        max_amount: asset.max_amount,
+        available_capacity: asset.available_capacity,
+        base_fee: asset.base_fee,
+        proportional_fee_ppm: asset.proportional_fee_ppm,
+        enabled: asset.enabled,
+    }
+}
+
+/// Convert persisted internal quote terms to their lossless transport envelope.
+pub fn liquidity_quote_envelope_from_terms(terms: &LoopOutQuoteTerms) -> LiquidityQuoteEnvelope {
+    LiquidityQuoteEnvelope {
+        quote_id: terms.quote_id.into(),
+        swap_kind: match terms.swap_kind {
+            LiquiditySwapKind::LoopOut => fiber_json_types::LiquiditySwapKind::LoopOut,
+            LiquiditySwapKind::LoopIn => fiber_json_types::LiquiditySwapKind::LoopIn,
+        },
+        provider_pubkey: fiber_json_types::Pubkey(terms.provider.0),
+        asset: liquidity_asset_to_json_info(&terms.asset),
+        amount: terms.amount,
+        provider_fee: terms.provider_fee,
+        routing_fee_limit: terms.routing_fee_limit,
+        onchain_fee_estimate_ckb: terms.onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: terms.capacity_requirement_ckb,
+        payment_hash: terms.payment_hash.into(),
+        expires_at: terms.expires_at,
+        payout_deadline: terms.payout_deadline,
+        refund_after_lock_time: terms.refund_after_lock_time,
+        claimant_lock: script_hex(&terms.claimant_lock),
+        refund_lock: script_hex(&terms.refund_lock),
+        client_invoice: terms.client_invoice.clone(),
+    }
+}
+
+/// Validate an independently received quote envelope and convert it to internal terms.
+pub fn validate_imported_quote(
+    envelope: LiquidityQuoteEnvelope,
+    max_provider_fee: u128,
+    max_routing_fee: u128,
+    now_ms: u64,
+) -> Result<LoopOutQuoteTerms, LiquidityLoopOutError> {
+    if envelope.expires_at <= now_ms {
+        return Err(LiquidityLoopOutError::QuoteExpired);
+    }
+    if envelope.provider_fee > max_provider_fee {
+        return Err(LiquidityLoopOutError::ProviderFeeTooHigh);
+    }
+    if envelope.routing_fee_limit > max_routing_fee {
+        return Err(LiquidityLoopOutError::RoutingFeeTooHigh);
+    }
+
+    let asset = json_asset_to_liquidity_asset(&envelope.asset)?;
+    let claimant_lock = parse_script_hex(&envelope.claimant_lock, "claimant_lock")?;
+    let refund_lock = parse_script_hex(&envelope.refund_lock, "refund_lock")?;
+    let swap_kind = match envelope.swap_kind {
+        fiber_json_types::LiquiditySwapKind::LoopOut => LiquiditySwapKind::LoopOut,
+        fiber_json_types::LiquiditySwapKind::LoopIn => LiquiditySwapKind::LoopIn,
+    };
+    let payment_hash: Hash256 = envelope.payment_hash.into();
+
+    match swap_kind {
+        LiquiditySwapKind::LoopOut => {
+            if claimant_lock == Script::default() {
+                return Err(LiquidityLoopOutError::Store(
+                    "invalid claimant_lock: Loop Out requires a non-default script".to_string(),
+                ));
+            }
+            if refund_lock == Script::default() {
+                return Err(LiquidityLoopOutError::Store(
+                    "invalid refund_lock: Loop Out requires a non-default script".to_string(),
+                ));
+            }
+            if envelope.client_invoice.is_some() {
+                return Err(LiquidityLoopOutError::PaymentFailed(
+                    "Loop Out quote must not include client invoice".to_string(),
+                ));
+            }
+        }
+        LiquiditySwapKind::LoopIn => {
+            let invoice_text = envelope.client_invoice.as_deref().ok_or_else(|| {
+                LiquidityLoopOutError::PaymentFailed(
+                    "Loop In quote requires client invoice".to_string(),
+                )
+            })?;
+            let invoice = parse_client_invoice(invoice_text)?;
+            if invoice.payment_hash() != &payment_hash {
+                return Err(LiquidityLoopOutError::PaymentFailed(
+                    "invoice payment hash does not match quote payment hash".to_string(),
+                ));
+            }
+            validate_loop_in_invoice(&invoice, envelope.amount, asset.udt_type_script.as_ref())?;
+        }
+    }
+
+    let terms = LoopOutQuoteTerms {
+        quote_id: envelope.quote_id.into(),
+        swap_kind,
+        provider: Pubkey(envelope.provider_pubkey.0),
+        asset,
+        amount: envelope.amount,
+        provider_fee: envelope.provider_fee,
+        routing_fee_limit: envelope.routing_fee_limit,
+        onchain_fee_estimate_ckb: envelope.onchain_fee_estimate_ckb,
+        capacity_requirement_ckb: envelope.capacity_requirement_ckb,
+        payment_hash,
+        expires_at: envelope.expires_at,
+        payout_deadline: envelope.payout_deadline,
+        refund_after_lock_time: envelope.refund_after_lock_time,
+        claimant_lock,
+        refund_lock,
+        client_invoice: envelope.client_invoice,
+    };
+    match terms.swap_kind {
+        LiquiditySwapKind::LoopOut => {
+            loop_out_gross_payment_amount(
+                terms.amount,
+                terms.provider_fee,
+                terms.routing_fee_limit,
+            )?;
+        }
+        LiquiditySwapKind::LoopIn => {
+            loop_in_gross_onchain_amount(&terms)?;
+        }
+    }
+    Ok(terms)
+}
+
 /// Build quote terms for a Loop In request after provider-side validation.
 pub fn build_loop_in_quote_terms(
     quote_id: Hash256,
@@ -201,6 +387,9 @@ pub fn build_loop_in_quote_terms(
 #[cfg(test)]
 mod tests {
     use ckb_jsonrpc_types::Script;
+    use ckb_types::packed;
+    use ckb_types::prelude::Entity;
+    use fiber_json_types::LiquidityQuoteEnvelope;
     use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, Pubkey};
     use secp256k1::Secp256k1;
 
@@ -266,6 +455,207 @@ mod tests {
 
     fn ckb_client_invoice(payment_hash: Hash256) -> crate::invoice::CkbInvoice {
         client_invoice(payment_hash, Some(1_000), None)
+    }
+
+    fn imported_quote_terms(
+        swap_kind: fiber_types::LiquiditySwapKind,
+        asset: LiquidityAsset,
+    ) -> LoopOutQuoteTerms {
+        let payment_hash = Hash256::from([3; 32]);
+        let client_invoice = (swap_kind == fiber_types::LiquiditySwapKind::LoopIn).then(|| {
+            client_invoice(
+                payment_hash,
+                Some(100),
+                asset.udt_type_script.clone().map(Into::into),
+            )
+            .to_string()
+        });
+        LoopOutQuoteTerms {
+            quote_id: Hash256::from([1; 32]),
+            swap_kind,
+            provider: Pubkey([2; 33]),
+            asset,
+            amount: 100,
+            provider_fee: 2,
+            routing_fee_limit: 3,
+            onchain_fee_estimate_ckb: 4,
+            capacity_requirement_ckb: 5,
+            payment_hash,
+            expires_at: 20_000,
+            payout_deadline: 17_777,
+            refund_after_lock_time: 30_000,
+            claimant_lock: udt_script("0x11").into(),
+            refund_lock: udt_script("0x22").into(),
+            client_invoice,
+        }
+    }
+
+    fn imported_quote_envelope(
+        swap_kind: fiber_types::LiquiditySwapKind,
+        asset: LiquidityAsset,
+    ) -> LiquidityQuoteEnvelope {
+        liquidity_quote_envelope_from_terms(&imported_quote_terms(swap_kind, asset))
+    }
+
+    fn assert_imported_quote_rejected(envelope: LiquidityQuoteEnvelope, message: &str) {
+        let error = validate_imported_quote(envelope, 2, 3, 10_000).unwrap_err();
+        assert!(
+            error.to_string().contains(message),
+            "expected error containing {message:?}, got {error}"
+        );
+    }
+
+    #[test]
+    fn imported_quote_round_trips_loop_out_ckb_and_preserves_payout_deadline() {
+        let terms = imported_quote_terms(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        let envelope = liquidity_quote_envelope_from_terms(&terms);
+        assert_eq!(envelope.payout_deadline, 17_777);
+        assert_eq!(
+            validate_imported_quote(envelope, 2, 3, 10_000).unwrap(),
+            terms
+        );
+    }
+
+    #[test]
+    fn imported_quote_round_trips_loop_out_udt_with_exact_script() {
+        let terms = imported_quote_terms(fiber_types::LiquiditySwapKind::LoopOut, udt_asset());
+        let envelope = liquidity_quote_envelope_from_terms(&terms);
+        assert_eq!(envelope.asset.udt_type_script, terms.asset.udt_type_script);
+        assert_eq!(
+            validate_imported_quote(envelope, 2, 3, 10_000).unwrap(),
+            terms
+        );
+    }
+
+    #[test]
+    fn imported_quote_round_trips_loop_in_ckb_invoice_and_payout_deadline() {
+        let terms = imported_quote_terms(fiber_types::LiquiditySwapKind::LoopIn, ckb_asset(true));
+        let envelope = liquidity_quote_envelope_from_terms(&terms);
+        assert_eq!(envelope.client_invoice, terms.client_invoice);
+        assert_eq!(envelope.payout_deadline, 17_777);
+        assert_eq!(
+            validate_imported_quote(envelope, 2, 3, 10_000).unwrap(),
+            terms
+        );
+    }
+
+    #[test]
+    fn imported_quote_round_trips_loop_in_udt_with_matching_invoice_udt() {
+        let terms = imported_quote_terms(fiber_types::LiquiditySwapKind::LoopIn, udt_asset());
+        let envelope = liquidity_quote_envelope_from_terms(&terms);
+        assert_eq!(
+            validate_imported_quote(envelope, 2, 3, 10_000).unwrap(),
+            terms
+        );
+    }
+
+    #[test]
+    fn imported_quote_rejects_expiration_and_fee_caps() {
+        let mut expired =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        expired.expires_at = 10_000;
+        assert_imported_quote_rejected(expired, "expired");
+
+        let mut provider_fee =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        provider_fee.provider_fee = 3;
+        assert_imported_quote_rejected(provider_fee, "provider fee");
+
+        let mut routing_fee =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        routing_fee.routing_fee_limit = 4;
+        assert_imported_quote_rejected(routing_fee, "routing fee");
+    }
+
+    #[test]
+    fn imported_quote_rejects_malformed_claimant_and_refund_scripts() {
+        let mut claimant =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        claimant.claimant_lock = "0xzz".to_string();
+        assert_imported_quote_rejected(claimant, "claimant_lock");
+
+        let mut refund =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        refund.refund_lock = "0x00".to_string();
+        assert_imported_quote_rejected(refund, "refund_lock");
+    }
+
+    #[test]
+    fn imported_quote_rejects_invalid_asset_script_combinations() {
+        let script = udt_script("0x01");
+        let mut ckb =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        ckb.asset.udt_type_script = Some(script);
+        assert_imported_quote_rejected(ckb, "CKB liquidity asset");
+
+        let mut udt = imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, udt_asset());
+        udt.asset.udt_type_script = None;
+        assert_imported_quote_rejected(udt, "UDT liquidity asset");
+    }
+
+    #[test]
+    fn imported_quote_rejects_checked_gross_amount_overflow() {
+        let mut loop_out =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        loop_out.amount = u128::MAX;
+        assert_imported_quote_rejected(loop_out, "overflow");
+
+        let mut loop_in =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopIn, ckb_asset(true));
+        loop_in.amount = u128::MAX;
+        loop_in.client_invoice =
+            Some(client_invoice(loop_in.payment_hash.into(), Some(u128::MAX), None).to_string());
+        assert_imported_quote_rejected(loop_in, "overflow");
+    }
+
+    #[test]
+    fn imported_quote_rejects_invalid_loop_out_direction_fields() {
+        let mut missing_claimant =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        missing_claimant.claimant_lock =
+            format!("0x{}", hex::encode(packed::Script::default().as_slice()));
+        assert_imported_quote_rejected(missing_claimant, "claimant_lock");
+
+        let mut missing_refund =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        missing_refund.refund_lock =
+            format!("0x{}", hex::encode(packed::Script::default().as_slice()));
+        assert_imported_quote_rejected(missing_refund, "refund_lock");
+
+        let mut invoice =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopOut, ckb_asset(true));
+        invoice.client_invoice = Some("unexpected".to_string());
+        assert_imported_quote_rejected(invoice, "must not include client invoice");
+    }
+
+    #[test]
+    fn imported_quote_rejects_missing_or_mismatched_loop_in_invoice() {
+        let mut missing =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopIn, ckb_asset(true));
+        missing.client_invoice = None;
+        assert_imported_quote_rejected(missing, "requires client invoice");
+
+        let mut payment_hash =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopIn, ckb_asset(true));
+        payment_hash.client_invoice = Some(ckb_client_invoice(Hash256::from([9; 32])).to_string());
+        assert_imported_quote_rejected(payment_hash, "payment hash");
+
+        let mut amount =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopIn, ckb_asset(true));
+        amount.client_invoice =
+            Some(client_invoice(amount.payment_hash.into(), Some(99), None).to_string());
+        assert_imported_quote_rejected(amount, "invoice amount");
+
+        let mut udt = imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopIn, udt_asset());
+        udt.client_invoice = Some(
+            client_invoice(
+                udt.payment_hash.into(),
+                Some(100),
+                Some(udt_script("0x02").into()),
+            )
+            .to_string(),
+        );
+        assert_imported_quote_rejected(udt, "UDT type script");
     }
 
     #[test]
