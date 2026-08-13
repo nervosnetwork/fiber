@@ -7,25 +7,24 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use ckb_types::packed::{OutPoint, Script};
-use ckb_types::prelude::Entity;
+use ckb_types::packed::OutPoint;
 use fiber_json_types::{
     AddLiquidityAssetParams, LiquidityAssetInfo, LiquidityProviderStatus, LiquidityQuoteResponse,
     LiquiditySwapResponse, ListLiquidityAssetsResponse, LoopInParams, LoopOutParams,
     ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
     QuoteLoopInParams, QuoteLoopOutParams, UpdateLiquidityAssetParams,
 };
-use fiber_types::{
-    Hash256, LiquidityAsset, LiquidityAssetKind, LiquidityChainTxRole, LiquidityChainTxStatus,
-    LiquiditySwapState,
-};
+use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use secp256k1::{SecretKey, SECP256K1};
 
 pub use crate::liquidity::chain::{
     LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimPlan, LoopOutClaimRequest,
 };
-use crate::liquidity::quote::{build_loop_in_quote_terms, validate_loop_out_quote_request};
+use crate::liquidity::quote::{
+    build_loop_in_quote_terms, json_asset_to_liquidity_asset, liquidity_asset_to_json_info,
+    parse_script_hex, script_hex, validate_loop_out_quote_request,
+};
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
     LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
@@ -1569,26 +1568,6 @@ fn ensure_loop_out_quote_terms(quote: &LoopOutQuoteTerms) -> Result<(), Liquidit
     Ok(())
 }
 
-fn parse_script_hex(value: &str, field: &str) -> Result<Script, LiquidityLoopOutError> {
-    let Some(hex_value) = value.strip_prefix("0x") else {
-        return Err(LiquidityLoopOutError::Store(format!(
-            "invalid {field}: script hex must start with 0x"
-        )));
-    };
-    let bytes = hex::decode(hex_value).map_err(|error| {
-        LiquidityLoopOutError::Store(format!(
-            "invalid {field}: script hex decode failed: {error}"
-        ))
-    })?;
-    Script::from_slice(&bytes).map_err(|error| {
-        LiquidityLoopOutError::Store(format!("invalid {field}: script decode failed: {error}"))
-    })
-}
-
-fn script_hex(script: &Script) -> String {
-    format!("0x{}", hex::encode(script.as_slice()))
-}
-
 /// Restart recovery action planned for a persisted Loop Out swap state.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RecoveryAction {
@@ -2446,63 +2425,6 @@ fn map_store_error(error: LiquidityStoreError) -> LiquidityLoopOutError {
             LiquidityLoopOutError::InvalidStateTransition { from, to }
         }
         error => LiquidityLoopOutError::Store(error.to_string()),
-    }
-}
-
-fn json_asset_to_liquidity_asset(
-    info: &LiquidityAssetInfo,
-) -> Result<LiquidityAsset, LiquidityLoopOutError> {
-    if info.asset_id.trim().is_empty() {
-        return Err(LiquidityLoopOutError::Store(
-            "asset_id must not be empty".to_string(),
-        ));
-    }
-    if info.min_amount > info.max_amount {
-        return Err(LiquidityLoopOutError::Store(
-            "min_amount must not exceed max_amount".to_string(),
-        ));
-    }
-    let kind = match info.kind {
-        fiber_json_types::LiquidityAssetKind::Ckb => LiquidityAssetKind::Ckb,
-        fiber_json_types::LiquidityAssetKind::Udt => LiquidityAssetKind::Udt,
-    };
-    let udt_type_script = match (kind, &info.udt_type_script) {
-        (LiquidityAssetKind::Udt, Some(script)) => Some(script.clone()),
-        (LiquidityAssetKind::Udt, None) => {
-            return Err(LiquidityLoopOutError::Store(
-                "UDT asset must have a udt_type_script".to_string(),
-            ));
-        }
-        _ => None,
-    };
-    Ok(LiquidityAsset {
-        asset_id: info.asset_id.clone(),
-        kind,
-        udt_type_script,
-        min_amount: info.min_amount,
-        max_amount: info.max_amount,
-        available_capacity: info.available_capacity,
-        base_fee: info.base_fee,
-        proportional_fee_ppm: info.proportional_fee_ppm,
-        enabled: info.enabled,
-    })
-}
-
-fn liquidity_asset_to_json_info(asset: &LiquidityAsset) -> LiquidityAssetInfo {
-    let kind = match asset.kind {
-        LiquidityAssetKind::Ckb => fiber_json_types::LiquidityAssetKind::Ckb,
-        LiquidityAssetKind::Udt => fiber_json_types::LiquidityAssetKind::Udt,
-    };
-    LiquidityAssetInfo {
-        asset_id: asset.asset_id.clone(),
-        kind,
-        udt_type_script: asset.udt_type_script.clone().map(|s| s.into()),
-        min_amount: asset.min_amount,
-        max_amount: asset.max_amount,
-        available_capacity: asset.available_capacity,
-        base_fee: asset.base_fee,
-        proportional_fee_ppm: asset.proportional_fee_ppm,
-        enabled: asset.enabled,
     }
 }
 
