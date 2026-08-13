@@ -9,10 +9,11 @@ use async_trait::async_trait;
 
 use ckb_types::packed::OutPoint;
 use fiber_json_types::{
-    AddLiquidityAssetParams, LiquidityAssetInfo, LiquidityProviderStatus, LiquidityQuoteResponse,
-    LiquiditySwapResponse, ListLiquidityAssetsResponse, LoopInParams, LoopOutParams,
-    ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
-    QuoteLoopInParams, QuoteLoopOutParams, UpdateLiquidityAssetParams,
+    AddLiquidityAssetParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
+    LiquidityProviderStatus, LiquidityQuoteEnvelope, LiquidityQuoteResponse, LiquiditySwapResponse,
+    ListLiquidityAssetsResponse, LoopInParams, LoopOutParams, ProviderAcceptLoopInParams,
+    ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
+    UpdateLiquidityAssetParams,
 };
 use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -23,7 +24,8 @@ pub use crate::liquidity::chain::{
 };
 use crate::liquidity::quote::{
     build_loop_in_quote_terms, json_asset_to_liquidity_asset, liquidity_asset_to_json_info,
-    parse_script_hex, script_hex, validate_loop_out_quote_request,
+    liquidity_quote_envelope_from_terms, parse_script_hex, script_hex, validate_imported_quote,
+    validate_loop_out_quote_request,
 };
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
@@ -52,6 +54,11 @@ pub enum LiquidityActorMessage {
     QuoteLoopIn(
         QuoteLoopInParams,
         RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+    ),
+    /// Import complete quote terms received from another node.
+    ImportLiquidityQuote(
+        ImportLiquidityQuoteParams,
+        RpcReplyPort<Result<LiquidityQuoteEnvelope, LiquidityLoopOutError>>,
     ),
     /// Client-side acceptance/execution of a Loop Out quote.
     LoopOut(
@@ -125,6 +132,7 @@ impl LiquidityActorMessage {
         &[
             "quote_loop_out",
             "quote_loop_in",
+            "import_liquidity_quote",
             "loop_out",
             "loop_in",
             "provider_quote_loop_out",
@@ -313,6 +321,10 @@ where
                 let result = state.handle_quote_loop_out(params);
                 let _ = reply.send(result);
             }
+            LiquidityActorMessage::ImportLiquidityQuote(params, reply) => {
+                let result = state.handle_import_liquidity_quote(params);
+                let _ = reply.send(result);
+            }
             LiquidityActorMessage::ProviderQuoteLoopOut(params, reply) => {
                 let result = state.handle_provider_quote_loop_out(params);
                 let _ = reply.send(result);
@@ -493,6 +505,39 @@ where
             max_routing_fee,
             expires_after_seconds,
         })
+    }
+
+    fn handle_import_liquidity_quote(
+        &mut self,
+        params: ImportLiquidityQuoteParams,
+    ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
+        let now_ms = now_ms();
+        let terms = validate_imported_quote(
+            params.quote,
+            params.max_provider_fee,
+            params.max_routing_fee,
+            now_ms,
+        )?;
+        let existing = self
+            .store
+            .get_loop_out_quote(&terms.quote_id)
+            .map_err(map_store_error)?;
+
+        match existing {
+            Some(existing) if existing == terms => {
+                Ok(liquidity_quote_envelope_from_terms(&existing))
+            }
+            Some(_) => Err(LiquidityLoopOutError::Store(format!(
+                "liquidity quote import conflict for quote ID {:?}",
+                terms.quote_id
+            ))),
+            None => {
+                self.store
+                    .insert_loop_out_quote(terms.clone(), now_ms)
+                    .map_err(map_store_error)?;
+                Ok(liquidity_quote_envelope_from_terms(&terms))
+            }
+        }
     }
 
     fn handle_add_liquidity_asset(
@@ -2509,6 +2554,7 @@ mod tests {
             &[
                 "quote_loop_out",
                 "quote_loop_in",
+                "import_liquidity_quote",
                 "loop_out",
                 "loop_in",
                 "provider_quote_loop_out",
@@ -4535,6 +4581,138 @@ mod tests {
             claimant_lock: Default::default(),
             refund_lock: Default::default(),
             client_invoice: None,
+        }
+    }
+
+    fn import_liquidity_quote_params(
+        terms: &LoopOutQuoteTerms,
+    ) -> fiber_json_types::ImportLiquidityQuoteParams {
+        fiber_json_types::ImportLiquidityQuoteParams {
+            quote: crate::liquidity::quote::liquidity_quote_envelope_from_terms(terms),
+            max_provider_fee: terms.provider_fee,
+            max_routing_fee: terms.routing_fee_limit,
+        }
+    }
+
+    async fn import_liquidity_quote(
+        harness: &RuntimeActorHarness,
+        params: fiber_json_types::ImportLiquidityQuoteParams,
+    ) -> Result<fiber_json_types::LiquidityQuoteEnvelope, LiquidityLoopOutError> {
+        let actor = harness.spawn_actor().await;
+        ractor::call!(actor, |reply| LiquidityActorMessage::ImportLiquidityQuote(
+            params, reply
+        ))
+        .unwrap()
+    }
+
+    fn importable_loop_out_quote(expires_at: u64) -> LoopOutQuoteTerms {
+        let mut terms = test_loop_out_quote(expires_at);
+        terms.claimant_lock = script("import-claimant");
+        terms.refund_lock = script("import-refund");
+        terms
+    }
+
+    fn assert_same_envelope(
+        actual: &fiber_json_types::LiquidityQuoteEnvelope,
+        expected: &fiber_json_types::LiquidityQuoteEnvelope,
+    ) {
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_persists_first_quote() {
+        let harness = RuntimeActorHarness::new_client();
+        let terms = importable_loop_out_quote(now_ms() + 60_000);
+
+        let envelope = import_liquidity_quote(&harness, import_liquidity_quote_params(&terms))
+            .await
+            .unwrap();
+
+        assert_same_envelope(
+            &envelope,
+            &crate::liquidity::quote::liquidity_quote_envelope_from_terms(&terms),
+        );
+        assert_eq!(
+            harness.store.get_loop_out_quote(&terms.quote_id).unwrap(),
+            Some(terms)
+        );
+        assert_eq!(*harness.store.quote_writes.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_is_idempotent_for_identical_terms() {
+        let harness = RuntimeActorHarness::new_client();
+        let terms = importable_loop_out_quote(now_ms() + 60_000);
+        let params = import_liquidity_quote_params(&terms);
+
+        let first = import_liquidity_quote(&harness, params.clone())
+            .await
+            .unwrap();
+        let second = import_liquidity_quote(&harness, params).await.unwrap();
+
+        assert_same_envelope(&second, &first);
+        assert_eq!(
+            harness.store.get_loop_out_quote(&terms.quote_id).unwrap(),
+            Some(terms)
+        );
+        assert_eq!(*harness.store.quote_writes.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_rejects_conflicting_terms() {
+        let harness = RuntimeActorHarness::new_client();
+        let terms = importable_loop_out_quote(now_ms() + 60_000);
+        import_liquidity_quote(&harness, import_liquidity_quote_params(&terms))
+            .await
+            .unwrap();
+        let mut conflicting = terms.clone();
+        conflicting.amount += 1;
+
+        let error = import_liquidity_quote(&harness, import_liquidity_quote_params(&conflicting))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("conflict"));
+        assert!(error.to_string().contains(&format!("{:?}", terms.quote_id)));
+        assert_eq!(
+            harness.store.get_loop_out_quote(&terms.quote_id).unwrap(),
+            Some(terms)
+        );
+        assert_eq!(*harness.store.quote_writes.borrow(), 1);
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_rejects_invalid_before_persistence() {
+        let cases = [
+            {
+                let terms = importable_loop_out_quote(now_ms());
+                import_liquidity_quote_params(&terms)
+            },
+            {
+                let mut params =
+                    import_liquidity_quote_params(&importable_loop_out_quote(now_ms() + 60_000));
+                params.max_provider_fee -= 1;
+                params
+            },
+            {
+                let mut params =
+                    import_liquidity_quote_params(&importable_loop_out_quote(now_ms() + 60_000));
+                params.max_routing_fee -= 1;
+                params
+            },
+        ];
+
+        for params in cases {
+            let harness = RuntimeActorHarness::new_client();
+            let quote_id = params.quote.quote_id.into();
+
+            import_liquidity_quote(&harness, params).await.unwrap_err();
+
+            assert_eq!(harness.store.get_loop_out_quote(&quote_id).unwrap(), None);
+            assert_eq!(*harness.store.quote_writes.borrow(), 0);
         }
     }
 
