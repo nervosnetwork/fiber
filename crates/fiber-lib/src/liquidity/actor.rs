@@ -4595,14 +4595,37 @@ mod tests {
     }
 
     async fn import_liquidity_quote(
-        harness: &RuntimeActorHarness,
+        actor: &ActorRef<LiquidityActorMessage>,
         params: fiber_json_types::ImportLiquidityQuoteParams,
     ) -> Result<fiber_json_types::LiquidityQuoteEnvelope, LiquidityLoopOutError> {
-        let actor = harness.spawn_actor().await;
-        ractor::call!(actor, |reply| LiquidityActorMessage::ImportLiquidityQuote(
-            params, reply
-        ))
+        ractor::call!(actor.clone(), |reply| {
+            LiquidityActorMessage::ImportLiquidityQuote(params, reply)
+        })
         .unwrap()
+    }
+
+    async fn spawn_import_liquidity_quote_actor(
+        harness: &RuntimeActorHarness,
+    ) -> (ActorRef<LiquidityActorMessage>, tokio::task::JoinHandle<()>) {
+        ractor::Actor::spawn(
+            None,
+            LiquidityActor::<_, _, _>(std::marker::PhantomData),
+            LiquidityActorArguments {
+                store: harness.store.clone(),
+                payment: harness.payment.clone(),
+                chain: harness.chain.clone(),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn stop_import_liquidity_quote_actor(
+        actor: ActorRef<LiquidityActorMessage>,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        actor.stop(None);
+        handle.await.unwrap();
     }
 
     fn importable_loop_out_quote(expires_at: u64) -> LoopOutQuoteTerms {
@@ -4626,10 +4649,11 @@ mod tests {
     async fn import_liquidity_quote_persists_first_quote() {
         let harness = RuntimeActorHarness::new_client();
         let terms = importable_loop_out_quote(now_ms() + 60_000);
+        let (actor, handle) = spawn_import_liquidity_quote_actor(&harness).await;
 
-        let envelope = import_liquidity_quote(&harness, import_liquidity_quote_params(&terms))
-            .await
-            .unwrap();
+        let envelope = import_liquidity_quote(&actor, import_liquidity_quote_params(&terms)).await;
+        stop_import_liquidity_quote_actor(actor, handle).await;
+        let envelope = envelope.unwrap();
 
         assert_same_envelope(
             &envelope,
@@ -4647,13 +4671,19 @@ mod tests {
         let harness = RuntimeActorHarness::new_client();
         let terms = importable_loop_out_quote(now_ms() + 60_000);
         let params = import_liquidity_quote_params(&terms);
+        let expected = crate::liquidity::quote::liquidity_quote_envelope_from_terms(&terms);
+        let (actor, handle) = spawn_import_liquidity_quote_actor(&harness).await;
 
-        let first = import_liquidity_quote(&harness, params.clone())
-            .await
-            .unwrap();
-        let second = import_liquidity_quote(&harness, params).await.unwrap();
+        let (first, second) = tokio::join!(
+            import_liquidity_quote(&actor, params.clone()),
+            import_liquidity_quote(&actor, params),
+        );
+        stop_import_liquidity_quote_actor(actor, handle).await;
+        let first = first.unwrap();
+        let second = second.unwrap();
 
-        assert_same_envelope(&second, &first);
+        assert_same_envelope(&first, &expected);
+        assert_same_envelope(&second, &expected);
         assert_eq!(
             harness.store.get_loop_out_quote(&terms.quote_id).unwrap(),
             Some(terms)
@@ -4665,15 +4695,16 @@ mod tests {
     async fn import_liquidity_quote_rejects_conflicting_terms() {
         let harness = RuntimeActorHarness::new_client();
         let terms = importable_loop_out_quote(now_ms() + 60_000);
-        import_liquidity_quote(&harness, import_liquidity_quote_params(&terms))
-            .await
-            .unwrap();
+        let (actor, handle) = spawn_import_liquidity_quote_actor(&harness).await;
+        let first = import_liquidity_quote(&actor, import_liquidity_quote_params(&terms)).await;
         let mut conflicting = terms.clone();
         conflicting.amount += 1;
 
-        let error = import_liquidity_quote(&harness, import_liquidity_quote_params(&conflicting))
-            .await
-            .unwrap_err();
+        let error =
+            import_liquidity_quote(&actor, import_liquidity_quote_params(&conflicting)).await;
+        stop_import_liquidity_quote_actor(actor, handle).await;
+        first.unwrap();
+        let error = error.unwrap_err();
 
         assert!(error.to_string().contains("conflict"));
         assert!(error.to_string().contains(&format!("{:?}", terms.quote_id)));
@@ -4708,8 +4739,11 @@ mod tests {
         for params in cases {
             let harness = RuntimeActorHarness::new_client();
             let quote_id = params.quote.quote_id.into();
+            let (actor, handle) = spawn_import_liquidity_quote_actor(&harness).await;
 
-            import_liquidity_quote(&harness, params).await.unwrap_err();
+            let error = import_liquidity_quote(&actor, params).await;
+            stop_import_liquidity_quote_actor(actor, handle).await;
+            error.unwrap_err();
 
             assert_eq!(harness.store.get_loop_out_quote(&quote_id).unwrap(), None);
             assert_eq!(*harness.store.quote_writes.borrow(), 0);
