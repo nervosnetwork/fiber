@@ -7,7 +7,7 @@ use crate::fiber::{
         AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
         PendingAcceptChannel,
     },
-    NetworkActorCommand, NetworkActorMessage,
+    FiberActorMessage, FiberActorRef, NetworkActorCommand, NetworkActorMessage,
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
@@ -140,7 +140,7 @@ fn pending_accept_channel_to_rpc(pending: PendingAcceptChannel) -> Channel {
 }
 
 pub struct ChannelRpcServerImpl<S> {
-    actor: ActorRef<NetworkActorMessage>,
+    actor: FiberActorRef,
     store: S,
     #[cfg(not(target_arch = "wasm32"))]
     lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
@@ -148,6 +148,10 @@ pub struct ChannelRpcServerImpl<S> {
 
 impl<S> ChannelRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        Self::new_fiber(FiberActorRef::from_network(&actor), store)
+    }
+
+    pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         ChannelRpcServerImpl {
             actor,
             store,
@@ -195,7 +199,7 @@ where
             if params.public.unwrap_or(true) {
                 return Err(rpc_error("hosted tenant channels must be private"));
             }
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .open_channel(params)
                 .await;
         }
@@ -209,7 +213,7 @@ where
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .accept_channel(params)
                 .await;
         }
@@ -224,7 +228,7 @@ where
         params: AbandonChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .abandon_channel(params)
                 .await;
         }
@@ -238,7 +242,7 @@ where
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .list_channels(params)
                 .await;
         }
@@ -252,7 +256,7 @@ where
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .shutdown_channel(params)
                 .await;
         }
@@ -266,7 +270,7 @@ where
         params: UpdateChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .update_channel(params)
                 .await;
         }
@@ -289,7 +293,7 @@ where
             if params.public.unwrap_or(true) {
                 return Err(rpc_error("hosted tenant channels must be private"));
             }
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .open_channel_with_external_funding(params)
                 .await;
         }
@@ -303,7 +307,7 @@ where
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new(context.network_actor, context.store)
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .submit_signed_funding_tx(params)
                 .await;
         }
@@ -320,7 +324,7 @@ where
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
         let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            FiberActorMessage::new_command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     pubkey,
                     funding_amount: params.funding_amount,
@@ -356,7 +360,7 @@ where
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
         let temp_channel_id = params.temporary_channel_id.into();
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            FiberActorMessage::new_command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id,
                     funding_amount: params.funding_amount,
@@ -382,7 +386,9 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
+            FiberActorMessage::new_command(NetworkActorCommand::AbandonChannel(
+                channel_id, rpc_reply,
+            ))
         };
         handle_actor_call!(self.actor, message, params)
     }
@@ -568,7 +574,7 @@ where
             // Include inbound channel requests that are waiting for acceptance
             // (held in the network actor's `to_be_accepted_channels`).
             let pending_accept_msg = |rpc_reply| {
-                NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(
+                FiberActorMessage::new_command(NetworkActorCommand::GetPendingAcceptChannels(
                     rpc_reply,
                 ))
             };
@@ -616,8 +622,8 @@ where
         let close_script = params.close_script.clone().map(|s| s.into());
         let fee_rate = params.fee_rate.map(FeeRate::from_u64);
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Shutdown(
@@ -639,8 +645,8 @@ where
         params: UpdateChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Update(
@@ -672,7 +678,7 @@ where
             .map(Into::into)
             .collect();
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            FiberActorMessage::new_command(NetworkActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
                     pubkey,
                     funding_amount: params.funding_amount,
@@ -716,7 +722,7 @@ where
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         let signed_tx: packed::Transaction = params.signed_funding_tx.clone().into();
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            FiberActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
                 channel_id,
                 signed_tx: signed_tx.clone(),
                 reply: rpc_reply,

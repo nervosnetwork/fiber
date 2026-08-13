@@ -438,7 +438,7 @@ fn create_invalid_node_announcement_message() -> BroadcastMessage {
 
 async fn list_connected_peers(node: &NetworkNode) -> Vec<crate::fiber::network::PeerInfo> {
     call!(node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(NetworkActorCommand::ListPeers((), rpc_reply))
     })
     .expect("node alive")
     .expect("list peers")
@@ -1145,7 +1145,7 @@ async fn test_query_missing_broadcast_message() {
 
     node1
         .network_actor
-        .send_message(NetworkActorMessage::Command(
+        .send_message(NetworkActorMessage::new_command(
             NetworkActorCommand::BroadcastMessages(vec![
                 BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
             ]),
@@ -1857,7 +1857,7 @@ async fn test_exceeding_inbound_peer_budget_evicts_oldest_no_channel_peer_immedi
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(NetworkActorCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -1902,7 +1902,7 @@ async fn test_inbound_peer_with_channel_does_not_consume_no_channel_peer_budget(
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(NetworkActorCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -1958,7 +1958,7 @@ async fn test_inbound_peer_with_only_closed_channels_consumes_no_channel_peer_bu
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(NetworkActorCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -2005,7 +2005,7 @@ async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channe
         .await;
 
     let peers = call!(target.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ListPeers((), rpc_reply))
+        NetworkActorMessage::new_command(NetworkActorCommand::ListPeers((), rpc_reply))
     })
     .expect("target alive")
     .expect("list peers");
@@ -2021,7 +2021,7 @@ async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channe
 
     let target_pubkey = target.pubkey;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: target_pubkey,
                 public: true,
@@ -2569,7 +2569,7 @@ async fn test_abort_funding_on_building_funding_tx() {
 
     // Use a huge amount to fail the funding
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -2603,7 +2603,7 @@ async fn test_abort_funding_on_building_funding_tx() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: funding_amount_b,
@@ -2699,7 +2699,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
     node_a.connect_to(&mut node_b).await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -2733,7 +2733,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: funding_amount_b,
@@ -2790,7 +2790,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
     node_a.connect_to(&mut node_b).await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -2825,7 +2825,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: funding_amount_b,
@@ -2893,7 +2893,7 @@ async fn test_to_be_accepted_channels_number_limit() {
     let node_pubkey = node.pubkey;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_pubkey,
                 public: true,
@@ -2958,7 +2958,7 @@ async fn test_to_be_accepted_channels_number_limit() {
 
 async fn open_channel_from_peer(peer: &NetworkNode, target_pubkey: Pubkey, funding_amount: u128) {
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: target_pubkey,
                 public: true,
@@ -3090,17 +3090,19 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
     };
 
     node.network_actor
-        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
-            peer.pubkey,
-            FiberMessage::ChannelInitialization(open_channel),
-            None,
-        )))
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::FiberMessage(
+                peer.pubkey,
+                FiberMessage::ChannelInitialization(open_channel),
+                None,
+            ),
+        ))
         .expect("network actor alive");
 
     node.expect_debug_event("ChannelPendingToBeRejected").await;
 
     let pending = call!(node.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
+        NetworkActorMessage::new_command(NetworkActorCommand::GetPendingAcceptChannels(rpc_reply))
     })
     .expect("network actor alive")
     .expect("pending channels");
@@ -3166,7 +3168,7 @@ async fn test_to_be_accepted_channels_bytes_limit() {
     let node_pubkey = node.pubkey;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_pubkey,
                 public: true,

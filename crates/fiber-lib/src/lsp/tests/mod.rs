@@ -13,7 +13,8 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
 
 use crate::fiber::network::{
-    HostedTenantActivity, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+    FiberActorMessage, HostedTenantActivity, NetworkActorCommand, NetworkActorEvent,
+    NetworkActorMessage,
 };
 use crate::fiber::types::FiberMessage;
 use crate::fiber_types::{
@@ -136,8 +137,9 @@ impl Actor for NoopNetworkActor {
         message: Self::Msg,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Command(NetworkActorCommand::GetHostedTenantActivity(reply)) =
-            message
+        if let NetworkActorMessage::Fiber(FiberActorMessage::Command(
+            NetworkActorCommand::GetHostedTenantActivity(reply),
+        )) = message
         {
             let _ = reply.send(Default::default());
         }
@@ -167,7 +169,7 @@ impl Actor for RecordingNetworkActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+        if let NetworkActorMessage::PublicEvent(NetworkActorEvent::FiberMessage(
             source,
             FiberMessage::ChannelNormalOperation(message),
             _,
@@ -336,8 +338,9 @@ impl Actor for BusyNetworkActor {
         message: Self::Msg,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Command(NetworkActorCommand::GetHostedTenantActivity(reply)) =
-            message
+        if let NetworkActorMessage::Fiber(FiberActorMessage::Command(
+            NetworkActorCommand::GetHostedTenantActivity(reply),
+        )) = message
         {
             let _ = reply.send(HostedTenantActivity {
                 inflight_payments: 1,
@@ -1176,7 +1179,7 @@ impl Actor for MockPublicNetworkActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let NetworkActorMessage::Command(command) = message else {
+        let NetworkActorMessage::Fiber(FiberActorMessage::Command(command)) = message else {
             return Ok(());
         };
         match command {

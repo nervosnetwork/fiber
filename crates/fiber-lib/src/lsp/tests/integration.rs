@@ -32,7 +32,7 @@ use crate::lsp::dispatcher::{
 use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
-        network::{NetworkActorCommand, NetworkActorMessage, PeerConnectSource},
+        network::{FiberActorMessage, FiberActorRef, NetworkActorCommand, NetworkActorMessage},
         payment::SendPaymentCommand,
     },
     gen_rand_sha256_hash,
@@ -147,7 +147,7 @@ async fn register_in_process_endpoint(
         local.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
             pubkey: remote_pubkey,
-            actor: endpoint.clone(),
+            actor: crate::fiber::FiberActorRef::from_network(endpoint),
             features: crate::fiber_types::FeatureVector::default(),
             reply,
         },),
@@ -427,7 +427,7 @@ async fn create_lsp_test_network(
                 rpc_context: Some(HostedTenantRpcContext {
                     tenant_id: tenant_id.clone(),
                     config: tenant.fiber_config.clone(),
-                    network_actor: tenant.network_actor.clone(),
+                    fiber_actor: FiberActorRef::from_network(&tenant.network_actor),
                     public_node_id: nodes[*lsp_node_index].pubkey,
                     store: tenant.store.clone(),
                 }),
@@ -687,34 +687,17 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     .expect("get hosted tenant RPC context")
     .expect("hosted tenant RPC context");
     let tenant_actor_name = tenant_rpc_context
-        .network_actor
+        .fiber_actor
         .get_name()
         .expect("hosted tenant actor has a name");
     assert!(tenant_actor_name.starts_with("HostedTenant "));
     assert!(!tenant_actor_name.starts_with("Network "));
-    let connect_result = ractor::call_t!(
-        tenant_rpc_context.network_actor,
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeer(
-            "/ip4/127.0.0.1/tcp/1".parse().expect("valid test address"),
-            false,
-            PeerConnectSource::Manual,
-            Some(reply),
-        )),
-        5_000
-    )
-    .expect("hosted tenant connect reply");
-    assert_eq!(
-        connect_result.unwrap_err(),
-        "public network service is disabled for hosted tenant"
-    );
     let activity = ractor::call_t!(
-        tenant_rpc_context.network_actor.clone(),
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
-            reply
-        )),
+        tenant_rpc_context.fiber_actor.clone(),
+        |reply| FiberActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(reply)),
         5_000
     )
-    .expect("hosted tenant remains alive after rejecting public network command");
+    .expect("hosted tenant accepts Fiber core commands");
     assert!(activity.is_idle());
 
     let impostor = Actor::spawn(None, NoopNetworkActor, ())
@@ -725,7 +708,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         public_t.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
             pubkey: expected_tenant.invoice_pubkey,
-            actor: impostor,
+            actor: crate::fiber::FiberActorRef::from_network(&impostor),
             features: crate::fiber_types::FeatureVector::default(),
             reply,
         },),
@@ -1138,7 +1121,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         public_t.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
             pubkey: tenant.pubkey,
-            actor: payer.network_actor.clone(),
+            actor: crate::fiber::FiberActorRef::from_network(&payer.network_actor),
             features: crate::fiber_types::FeatureVector::default(),
             reply,
         },),

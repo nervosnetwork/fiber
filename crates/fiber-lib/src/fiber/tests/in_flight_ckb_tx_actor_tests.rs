@@ -19,8 +19,8 @@ use crate::ckb::{
     CkbTxTracingResult,
 };
 use crate::fiber::{
-    InFlightCkbTxActor, InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind,
-    NetworkActorEvent, NetworkActorMessage,
+    FiberActorMessage, FiberActorRef, InFlightCkbTxActor, InFlightCkbTxActorArguments,
+    InFlightCkbTxActorMessage, InFlightCkbTxKind, NetworkActorEvent, NetworkActorMessage,
 };
 
 fn permanent_send_tx_error() -> RpcError {
@@ -150,7 +150,7 @@ impl Actor for TestNetworkActor {
         message: Self::Msg,
         sender: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let NetworkActorMessage::Event(event) = message {
+        if let NetworkActorMessage::Fiber(FiberActorMessage::Event(event)) = message {
             let _ = sender.send(event);
         }
         Ok(())
@@ -210,7 +210,7 @@ async fn spawn_test_actors(
             chain_client: MockChainClient {
                 tx_status: tx_status.clone(),
             },
-            network_actor,
+            network_actor: FiberActorRef::from_network(&network_actor),
             tx_hash,
             tx_kind: InFlightCkbTxKind::Funding(channel_id),
             confirmations: 1,

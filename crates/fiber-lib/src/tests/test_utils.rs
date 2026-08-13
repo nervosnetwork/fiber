@@ -454,7 +454,7 @@ pub(crate) async fn create_channel_with_nodes(
     params: ChannelParameters,
 ) -> Result<(Hash256, Hash256), String> {
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: params.public,
@@ -490,7 +490,7 @@ pub(crate) async fn create_channel_with_nodes(
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: params.node_b_funding_amount,
@@ -881,7 +881,9 @@ impl NetworkNode {
         channel_id: Hash256,
     ) -> Option<ActorRef<ChannelActorMessage>> {
         let message = |reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::GetChannelActor(channel_id, reply))
+            NetworkActorMessage::new_command(NetworkActorCommand::GetChannelActor(
+                channel_id, reply,
+            ))
         };
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, message)
@@ -945,7 +947,7 @@ impl NetworkNode {
         preimage: Hash256,
     ) -> Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+            NetworkActorMessage::new_command(NetworkActorCommand::SettleInvoice(
                 *payment_hash,
                 preimage,
                 rpc_reply,
@@ -962,7 +964,7 @@ impl NetworkNode {
         command: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
+            NetworkActorMessage::new_command(NetworkActorCommand::SendPayment(command, rpc_reply))
         };
 
         call!(self.network_actor, message).expect("source_node alive")
@@ -1053,7 +1055,7 @@ impl NetworkNode {
         command: SendPaymentWithRouterCommand,
     ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+            NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentWithRouter(
                 command, rpc_reply,
             ))
         };
@@ -1063,7 +1065,7 @@ impl NetworkNode {
 
     pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+            NetworkActorMessage::new_command(NetworkActorCommand::BuildPaymentRouter(
                 command, rpc_reply,
             ))
         };
@@ -1073,7 +1075,9 @@ impl NetworkNode {
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(channel_id, rpc_reply))
+            NetworkActorMessage::new_command(NetworkActorCommand::AbandonChannel(
+                channel_id, rpc_reply,
+            ))
         };
         call!(self.network_actor, message).expect("node_a alive")
     }
@@ -1084,7 +1088,7 @@ impl NetworkNode {
         force: bool,
     ) -> std::result::Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Shutdown(
@@ -1113,7 +1117,7 @@ impl NetworkNode {
         let tx_hash = TransactionBuilder::default().build().hash();
         let event = ClosingTransactionConfirmed(pubkey, channel_id, tx_hash, force, true);
         self.network_actor
-            .send_message(NetworkActorMessage::Event(event))
+            .send_message(NetworkActorMessage::new_event(event))
             .expect("network actor alive");
     }
 
@@ -1166,7 +1170,9 @@ impl NetworkNode {
 
     pub async fn get_inflight_payment_count(&self) -> u32 {
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::GetInflightPaymentCount(rpc_reply))
+            NetworkActorMessage::new_command(NetworkActorCommand::GetInflightPaymentCount(
+                rpc_reply,
+            ))
         };
         call!(self.network_actor, message)
             .expect("source_node alive")
@@ -1289,7 +1295,10 @@ impl NetworkNode {
 
     pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+            NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
+                payment_hash,
+                rpc_reply,
+            ))
         };
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1436,8 +1445,9 @@ impl NetworkNode {
     }
 
     pub async fn node_info(&self) -> NodeInfoResponse {
-        let message =
-            |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
+        let message = |rpc_reply| {
+            NetworkActorMessage::new_command(NetworkActorCommand::NodeInfo((), rpc_reply))
+        };
 
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1452,7 +1462,7 @@ impl NetworkNode {
         let channel_id = state.id;
         self.store.insert_channel_actor_state(state);
         self.network_actor
-            .send_message(NetworkActorMessage::Command(
+            .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::ReloadState(reload_params.unwrap_or_default()),
@@ -1547,7 +1557,7 @@ impl NetworkNode {
 
     pub async fn update_channel_with_command(&self, channel_id: Hash256, command: UpdateCommand) {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Update(command, rpc_reply),
@@ -1560,7 +1570,8 @@ impl NetworkNode {
     }
 
     pub async fn update_node_features(&self, features: FeatureVector) {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::UpdateFeatures(features));
+        let message =
+            NetworkActorMessage::new_command(NetworkActorCommand::UpdateFeatures(features));
 
         self.network_actor
             .send_message(message)
@@ -1580,7 +1591,7 @@ impl NetworkNode {
     }
 
     pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
-        let message = NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(
+        let message = NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
             payment_hash,
             attempt_id,
         ));
@@ -1972,7 +1983,7 @@ impl NetworkNode {
         );
 
         let result = call!(self.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeer(
                 peer_addr.clone(),
                 false,
                 crate::fiber::network::PeerConnectSource::Manual,

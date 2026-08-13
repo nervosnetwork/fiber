@@ -141,7 +141,7 @@ async fn send_manual_trampoline_final_keysend_tlc(
     .expect("create payment onion packet");
 
     call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2106,7 +2106,7 @@ async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
     };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let msg = NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(
+    let msg = NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
         command,
         RpcReplyPort::from(tx),
     ));
@@ -2274,7 +2274,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     // 3. Assert Error
@@ -2374,7 +2374,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     let res = receiver.await.expect("recv result");
@@ -2498,7 +2498,7 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(command))
+        .send_message(NetworkActorMessage::new_command(command))
         .expect("send command");
 
     let res = receiver.await.expect("recv result");
@@ -2562,7 +2562,7 @@ async fn test_trampoline_final_rejects_expiry_below_inner_delta() {
     .expect("create payment onion");
 
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3579,7 +3579,7 @@ async fn test_trampoline_node_restart() {
     // Trigger C to settle.
     node_c
         .network_actor
-        .send_message(NetworkActorMessage::Command(
+        .send_message(NetworkActorMessage::new_command(
             NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("Failed to send settle command");
@@ -3854,8 +3854,9 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     // 3. Send the command to NetworkActor
     let (tx, rx) = tokio::sync::oneshot::channel();
     let port = ractor::RpcReplyPort::from(tx);
-    let msg =
-        NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(command, port));
+    let msg = NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
+        command, port,
+    ));
 
     node.network_actor.send_message(msg).expect("send message");
 
@@ -3944,8 +3945,9 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     // 3. Send the command to NetworkActor
     let (tx, rx) = tokio::sync::oneshot::channel();
     let port = ractor::RpcReplyPort::from(tx);
-    let msg =
-        NetworkActorMessage::Command(NetworkActorCommand::SendPaymentOnionPacket(command, port));
+    let msg = NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
+        command, port,
+    ));
 
     node.network_actor.send_message(msg).expect("send message");
 

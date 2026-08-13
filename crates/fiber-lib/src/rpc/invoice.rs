@@ -5,7 +5,7 @@
 //!
 
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{FiberActorMessage, FiberActorRef, NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{
     CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
@@ -74,7 +74,7 @@ trait InvoiceRpc {
 
 pub struct InvoiceRpcServerImpl<S> {
     store: S,
-    network_actor: Option<ActorRef<NetworkActorMessage>>,
+    fiber_actor: Option<FiberActorRef>,
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
@@ -87,6 +87,18 @@ impl<S> InvoiceRpcServerImpl<S> {
     pub fn new(
         store: S,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
+        config: Option<FiberConfig>,
+    ) -> Self {
+        Self::new_fiber(
+            store,
+            network_actor.map(|actor| FiberActorRef::from_network(&actor)),
+            config,
+        )
+    }
+
+    pub(crate) fn new_fiber(
+        store: S,
+        fiber_actor: Option<FiberActorRef>,
         config: Option<FiberConfig>,
     ) -> Self {
         let (keypair, currency, node_features) = if let Some(config) = config {
@@ -115,7 +127,7 @@ impl<S> InvoiceRpcServerImpl<S> {
         };
         Self {
             store,
-            network_actor,
+            fiber_actor,
             keypair,
             currency,
             node_features,
@@ -161,9 +173,9 @@ where
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
             let tenant_id = context.tenant_id.clone();
-            let result = InvoiceRpcServerImpl::new(
+            let result = InvoiceRpcServerImpl::new_fiber(
                 context.store,
-                Some(context.network_actor),
+                Some(context.fiber_actor),
                 Some(context.config),
             )
             .with_trampoline_route_hint(context.public_node_id.into())
@@ -209,9 +221,9 @@ where
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return InvoiceRpcServerImpl::new(
+            return InvoiceRpcServerImpl::new_fiber(
                 context.store,
-                Some(context.network_actor),
+                Some(context.fiber_actor),
                 Some(context.config),
             )
             .get_invoice(payment_hash)
@@ -227,9 +239,9 @@ where
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return InvoiceRpcServerImpl::new(
+            return InvoiceRpcServerImpl::new_fiber(
                 context.store,
-                Some(context.network_actor),
+                Some(context.fiber_actor),
                 Some(context.config),
             )
             .cancel_invoice(payment_hash)
@@ -245,9 +257,9 @@ where
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return InvoiceRpcServerImpl::new(
+            return InvoiceRpcServerImpl::new_fiber(
                 context.store,
-                Some(context.network_actor),
+                Some(context.fiber_actor),
                 Some(context.config),
             )
             .settle_invoice(settle_invoice)
@@ -428,21 +440,21 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let network_actor = self
-            .network_actor
+        let fiber_actor = self
+            .fiber_actor
             .as_ref()
             .ok_or_else(|| rpc_error("network actor not initialized"))?;
 
         let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
-                let message = move |rpc_reply| -> NetworkActorMessage {
-                    NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+                let message = move |rpc_reply| -> FiberActorMessage {
+                    FiberActorMessage::new_command(NetworkActorCommand::CancelInvoice(
                         payment_hash,
                         rpc_reply,
                     ))
                 };
-                handle_actor_call!(network_actor, message, params)?;
+                handle_actor_call!(fiber_actor, message, params)?;
 
                 let status = match self
                     .store
@@ -467,22 +479,22 @@ where
         &self,
         params: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
-        let network_actor = self
-            .network_actor
+        let fiber_actor = self
+            .fiber_actor
             .as_ref()
             .ok_or_else(|| rpc_error("network actor not initialized"))?;
 
         let payment_hash = params.payment_hash.into();
         let payment_preimage = params.payment_preimage.into();
 
-        let message = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+        let message = move |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::SettleInvoice(
                 payment_hash,
                 payment_preimage,
                 rpc_reply,
             ))
         };
 
-        handle_actor_call!(network_actor, message, params).map(|_| SettleInvoiceResult {})
+        handle_actor_call!(fiber_actor, message, params).map(|_| SettleInvoiceResult {})
     }
 }

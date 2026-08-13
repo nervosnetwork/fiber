@@ -24,7 +24,7 @@ use crate::fiber::{
     graph::NetworkGraphStateStore,
     network::SendPaymentResponse,
     payment::{PaymentSessionExt, SendPaymentCommand, SendPaymentDataBuilder},
-    NetworkActorCommand, NetworkActorMessage,
+    FiberActorMessage, NetworkActorCommand, NetworkActorMessage,
 };
 use crate::invoice::{
     Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceData, InvoiceError, PreimageStore,
@@ -498,7 +498,7 @@ impl Actor for MockNetworkActor {
         state: &mut Self::State,
     ) -> Result<(), ractor::ActorProcessingErr> {
         match message {
-            NetworkActorMessage::Command(cmd) => match cmd {
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(cmd)) => match cmd {
                 NetworkActorCommand::AddInvoice(invoice, _opt_hash, reply) => {
                     let delay = *state.add_invoice_delay.lock().unwrap();
                     let reconciliation = *state

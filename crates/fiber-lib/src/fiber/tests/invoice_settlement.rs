@@ -349,7 +349,7 @@ async fn test_settle_invoice_status_checks() {
     assert!(res.is_ok());
 
     let cancel_res = call!(node.network_actor, |reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+        NetworkActorMessage::new_command(NetworkActorCommand::CancelInvoice(
             payment_hash_success,
             reply,
         ))
@@ -693,7 +693,7 @@ async fn test_mpp_force_close_keeps_preimage_for_onchain_split() {
     let tx_hash = TransactionBuilder::default().build().hash();
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
+        .send_message(NetworkActorMessage::new_event(
             NetworkActorEvent::ClosingTransactionConfirmed(
                 node_0.pubkey,
                 channels[0],
@@ -809,7 +809,7 @@ async fn test_mpp_payer_force_close_keeps_watchtower_preimage_for_onchain_split(
     let tx_hash = TransactionBuilder::default().build().hash();
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
+        .send_message(NetworkActorMessage::new_event(
             NetworkActorEvent::ClosingTransactionConfirmed(
                 node_0.pubkey,
                 channels[0],

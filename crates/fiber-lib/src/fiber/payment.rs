@@ -17,7 +17,7 @@ use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_TRY_LIMIT,
 };
 use crate::fiber::{
-    KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+    FiberActorMessage, FiberActorRef, KeyPair, NetworkActorCommand, NetworkActorEvent,
     ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore, PreimageStore};
@@ -869,7 +869,7 @@ pub struct PaymentActor<S> {
     // An event emitter to notify outside observers.
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
-    network: ActorRef<NetworkActorMessage>,
+    network: FiberActorRef,
 }
 
 #[async_trait::async_trait]
@@ -923,7 +923,7 @@ where
     ) -> Result<(), ActorProcessingErr> {
         debug!("Payment actor is stopped {:?}", myself.get_name());
         self.network
-            .send_message(NetworkActorMessage::Event(
+            .send_message(FiberActorMessage::Event(
                 NetworkActorEvent::PaymentActorStopped(
                     state.payment_hash,
                     state.last_error_packet.clone(),
@@ -974,7 +974,7 @@ where
     pub fn new(
         store: S,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
-        network: ActorRef<NetworkActorMessage>,
+        network: FiberActorRef,
     ) -> Self {
         Self {
             store: store.clone(),
@@ -1160,11 +1160,7 @@ where
         }
     }
 
-    async fn update_graph_with_tlc_fail(
-        &self,
-        network: &ActorRef<NetworkActorMessage>,
-        tlc_error_detail: &TlcErr,
-    ) {
+    async fn update_graph_with_tlc_fail(&self, network: &FiberActorRef, tlc_error_detail: &TlcErr) {
         let error_code = tlc_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
@@ -1175,7 +1171,7 @@ where
             }) = &tlc_error_detail.extra_data
             {
                 network
-                    .send_message(NetworkActorMessage::new_command(
+                    .send_message(FiberActorMessage::new_command(
                         NetworkActorCommand::BroadcastMessages(vec![
                             BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
                         ]),
@@ -1553,7 +1549,7 @@ where
         match call_t!(
             self.network,
             |tx| {
-                NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
+                FiberActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
                     SendOnionPacketCommand {
                         peeled_onion_packet,
                         previous_tlc: None,

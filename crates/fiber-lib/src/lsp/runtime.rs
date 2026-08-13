@@ -8,7 +8,10 @@ use tokio::sync::{mpsc, RwLock};
 use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
 use crate::fiber::{
     graph::NetworkGraph,
-    network::{start_hosted_tenant_actor, NetworkActorCommand, NetworkActorMessage},
+    network::{
+        start_hosted_tenant_actor, FiberActorMessage, FiberActorRef, NetworkActorCommand,
+        NetworkActorMessage,
+    },
     types::pubkey_from_tentacle,
     FiberConfig,
 };
@@ -30,7 +33,7 @@ pub(crate) struct HostedTenantTransport {
 pub struct HostedTenantRpcContext {
     pub(crate) tenant_id: TenantId,
     pub(crate) config: FiberConfig,
-    pub(crate) network_actor: ActorRef<NetworkActorMessage>,
+    pub(crate) fiber_actor: FiberActorRef,
     pub(crate) public_node_id: Pubkey,
     pub(crate) store: Store,
 }
@@ -39,20 +42,21 @@ pub struct HostedTenantRpcContext {
 /// coordinator but has no listening P2P endpoint or gossip service.
 pub struct HostedTenantRuntime {
     pub invoice_pubkey: Pubkey,
-    runtime_actor: ActorRef<NetworkActorMessage>,
+    runtime_actor: FiberActorRef,
     pub public_network_actor: Option<ActorRef<NetworkActorMessage>>,
     pub(crate) transport: Option<HostedTenantTransport>,
     rpc_context: Option<HostedTenantRpcContext>,
 }
 
 impl HostedTenantRuntime {
+    #[cfg(test)]
     pub(crate) fn network_backed(
         invoice_pubkey: Pubkey,
         network_actor: ActorRef<NetworkActorMessage>,
     ) -> Self {
         Self {
             invoice_pubkey,
-            runtime_actor: network_actor,
+            runtime_actor: FiberActorRef::from_network(&network_actor),
             public_network_actor: None,
             transport: None,
             rpc_context: None,
@@ -60,7 +64,7 @@ impl HostedTenantRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn actor(&self) -> ActorRef<NetworkActorMessage> {
+    pub(crate) fn actor(&self) -> FiberActorRef {
         self.runtime_actor.clone()
     }
 
@@ -77,7 +81,7 @@ impl HostedTenantRuntime {
     async fn ensure_idle(&self) -> Result<(), String> {
         let activity = ractor::call_t!(
             self.runtime_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
+            |reply| FiberActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
                 reply
             )),
             5_000
@@ -221,7 +225,13 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         .await?;
         tokio::spawn(async move { while event_receiver.recv().await.is_some() {} });
 
-        let mut runtime = HostedTenantRuntime::network_backed(invoice_pubkey, actor.clone());
+        let mut runtime = HostedTenantRuntime {
+            invoice_pubkey,
+            runtime_actor: actor.clone(),
+            public_network_actor: None,
+            transport: None,
+            rpc_context: None,
+        };
         if let Err(error) = self.dispatcher.register_runtime(
             record.tenant_id.clone(),
             invoice_pubkey,
@@ -256,10 +266,10 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         let activation_result = async {
             ractor::call_t!(
                 actor,
-                |reply| NetworkActorMessage::new_command(
+                |reply| FiberActorMessage::new_command(
                     NetworkActorCommand::RegisterInProcessPeer {
                         pubkey: public_node_id,
-                        actor: endpoint.clone(),
+                        actor: FiberActorRef::from_network(&endpoint),
                         features: public_features,
                         reply,
                     },
@@ -273,7 +283,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
                 |reply| NetworkActorMessage::new_command(
                     NetworkActorCommand::RegisterInProcessPeer {
                         pubkey: invoice_pubkey,
-                        actor: endpoint.clone(),
+                        actor: FiberActorRef::from_network(&endpoint),
                         features: tenant_features,
                         reply,
                     },
@@ -284,9 +294,10 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
 
             ractor::call_t!(
                 actor,
-                |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::ActivateInProcessPeer(public_node_id, reply,)
-                ),
+                |reply| FiberActorMessage::new_command(NetworkActorCommand::ActivateInProcessPeer(
+                    public_node_id,
+                    reply,
+                )),
                 10_000
             )
             .map_err(|error| format!("failed to activate Public T with tenant: {error}"))??;
@@ -319,7 +330,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         runtime.rpc_context = Some(HostedTenantRpcContext {
             tenant_id: record.tenant_id.clone(),
             config,
-            network_actor: actor,
+            fiber_actor: actor,
             public_node_id,
             store,
         });

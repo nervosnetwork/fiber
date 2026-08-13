@@ -29,8 +29,8 @@ pub use in_flight_ckb_tx_actor::{
 };
 pub use key::KeyPair;
 pub use network::{
-    start_network, NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
-    NetworkServiceEvent,
+    start_network, FiberActorMessage, FiberActorRef, NetworkActor, NetworkActorCommand,
+    NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
 };
 pub use settle_tlc_set_command::SettleTlcSetCommand;
 

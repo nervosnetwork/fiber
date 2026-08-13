@@ -10,7 +10,8 @@ use either::Either;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
-    call_t, forward, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
+    call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, DerivedActorRef, RpcReplyPort,
+    SupervisionEvent,
 };
 use rand::seq::{IteratorRandom, SliceRandom};
 use secp256k1::SECP256K1;
@@ -490,6 +491,41 @@ mod tests {
             completed
         ));
     }
+
+    #[test]
+    fn network_message_envelope_separates_public_runtime_from_fiber_core() {
+        assert!(matches!(
+            NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections),
+            NetworkActorMessage::PublicCommand(NetworkActorCommand::MaintainConnections)
+        ));
+        assert!(matches!(
+            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels),
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                NetworkActorCommand::CheckChannels
+            ))
+        ));
+
+        let peer = Privkey::from_slice(&[23u8; 32]).pubkey();
+        assert!(matches!(
+            NetworkActorMessage::new_event(NetworkActorEvent::FiberMessage(
+                peer,
+                FiberMessage::init(Init {
+                    features: FeatureVector::default(),
+                    chain_hash: get_chain_hash(),
+                }),
+                None,
+            )),
+            NetworkActorMessage::PublicEvent(NetworkActorEvent::FiberMessage(..))
+        ));
+        assert!(matches!(
+            NetworkActorMessage::new_event(NetworkActorEvent::RetryPendingPaymentsForChannel(
+                OutPoint::default(),
+            )),
+            NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                NetworkActorEvent::RetryPendingPaymentsForChannel(..)
+            ))
+        ));
+    }
 }
 
 /// Handles a `FundingError` with retry logic.  If the error is temporary and
@@ -497,7 +533,7 @@ mod tests {
 /// provided `retry_msg_fn` and returns `false`.  Otherwise logs the exhaustion
 /// and returns `true` so the caller can perform its own abort.
 fn schedule_funding_retry(
-    myself: &ActorRef<NetworkActorMessage>,
+    myself: &FiberActorRef,
     err: &FundingError,
     retry_count: u32,
     channel_id: Hash256,
@@ -520,7 +556,7 @@ fn schedule_funding_retry(
         );
         let myself = myself.clone();
         myself.send_after(delay, move || {
-            NetworkActorMessage::new_command(retry_msg_fn(retry_count + 1))
+            FiberActorMessage::new_command(retry_msg_fn(retry_count + 1))
         });
         false
     } else {
@@ -968,7 +1004,7 @@ pub enum NetworkActorCommand {
     /// delivered directly to its actor without Tentacle encoding or a socket.
     RegisterInProcessPeer {
         pubkey: Pubkey,
-        actor: ActorRef<NetworkActorMessage>,
+        actor: FiberActorRef,
         features: FeatureVector,
         reply: RpcReplyPort<Result<(), String>>,
     },
@@ -1176,6 +1212,12 @@ enum NetworkActorCommandHandler {
     FiberCore,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkActorEventHandler {
+    PublicNetwork,
+    FiberCore,
+}
+
 impl NetworkActorCommand {
     /// Selects the component that must handle this command.
     ///
@@ -1257,6 +1299,18 @@ impl NetworkActorCommand {
             | Self::DispatchBufferedTrampoline { .. }
             | Self::ReconcileBufferedTrampolineSettlement { .. }
             | Self::FailBufferedTrampoline { .. } => FiberCore,
+        }
+    }
+}
+
+impl NetworkActorEvent {
+    fn handler(&self) -> NetworkActorEventHandler {
+        match self {
+            Self::PeerConnected(..)
+            | Self::PeerDisconnected(..)
+            | Self::GossipMessageUpdates(..)
+            | Self::FiberMessage(..) => NetworkActorEventHandler::PublicNetwork,
+            _ => NetworkActorEventHandler::FiberCore,
         }
     }
 }
@@ -1350,20 +1404,6 @@ pub struct OpenChannelWithExternalFundingResponse {
     pub unsigned_funding_tx: Transaction,
 }
 
-impl NetworkActorMessage {
-    pub fn new_event(event: NetworkActorEvent) -> Self {
-        Self::Event(event)
-    }
-
-    pub fn new_command(command: NetworkActorCommand) -> Self {
-        Self::Command(command)
-    }
-
-    pub fn new_notification(service_event: NetworkServiceEvent) -> Self {
-        Self::Notification(service_event)
-    }
-}
-
 #[cfg(any(debug_assertions, feature = "bench"))]
 #[derive(Clone, Debug)]
 pub enum DebugEvent {
@@ -1378,7 +1418,7 @@ macro_rules! debug_event {
     ($network:expr, $debug_event:expr) => {
         #[cfg(any(debug_assertions, feature = "bench"))]
         $network
-            .send_message(NetworkActorMessage::new_notification(
+            .send_message($crate::fiber::network::FiberActorMessage::new_notification(
                 $crate::fiber::network::NetworkServiceEvent::DebugEvent(
                     $crate::fiber::network::DebugEvent::Common($debug_event.to_string()),
                 ),
@@ -1549,13 +1589,27 @@ pub enum NetworkActorEvent {
 }
 
 #[derive(Debug)]
-pub enum NetworkActorMessage {
+pub enum FiberActorMessage {
     Command(NetworkActorCommand),
     Event(NetworkActorEvent),
     Notification(NetworkServiceEvent),
 }
 
-impl Display for NetworkActorMessage {
+impl FiberActorMessage {
+    pub fn new_command(command: NetworkActorCommand) -> Self {
+        Self::Command(command)
+    }
+
+    pub fn new_event(event: NetworkActorEvent) -> Self {
+        Self::Event(event)
+    }
+
+    pub fn new_notification(event: NetworkServiceEvent) -> Self {
+        Self::Notification(event)
+    }
+}
+
+impl Display for FiberActorMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Command(command) => write!(f, "Command.{}", command.as_ref()),
@@ -1564,6 +1618,100 @@ impl Display for NetworkActorMessage {
         }
     }
 }
+
+/// Public node mailbox. Public-runtime work and Fiber data-plane work have
+/// different envelope variants, so dispatch does not need to classify the
+/// command again in `NetworkActor::handle`.
+#[derive(Debug)]
+pub enum NetworkActorMessage {
+    PublicCommand(NetworkActorCommand),
+    PublicEvent(NetworkActorEvent),
+    Fiber(FiberActorMessage),
+}
+
+impl NetworkActorMessage {
+    pub fn new_command(command: NetworkActorCommand) -> Self {
+        FiberActorMessage::new_command(command).into()
+    }
+
+    pub fn new_event(event: NetworkActorEvent) -> Self {
+        FiberActorMessage::new_event(event).into()
+    }
+
+    pub fn new_notification(event: NetworkServiceEvent) -> Self {
+        Self::Fiber(FiberActorMessage::new_notification(event))
+    }
+}
+
+impl From<FiberActorMessage> for NetworkActorMessage {
+    fn from(message: FiberActorMessage) -> Self {
+        match message {
+            FiberActorMessage::Command(command)
+                if command.handler() == NetworkActorCommandHandler::PublicNetwork =>
+            {
+                Self::PublicCommand(command)
+            }
+            FiberActorMessage::Event(event)
+                if event.handler() == NetworkActorEventHandler::PublicNetwork =>
+            {
+                Self::PublicEvent(event)
+            }
+            message => Self::Fiber(message),
+        }
+    }
+}
+
+impl TryFrom<NetworkActorMessage> for FiberActorMessage {
+    type Error = NetworkActorMessage;
+
+    fn try_from(message: NetworkActorMessage) -> Result<Self, Self::Error> {
+        match message {
+            NetworkActorMessage::Fiber(message) => Ok(message),
+            NetworkActorMessage::PublicCommand(command) => Ok(Self::Command(command)),
+            NetworkActorMessage::PublicEvent(event) => Ok(Self::Event(event)),
+        }
+    }
+}
+
+impl Display for NetworkActorMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PublicCommand(command) => write!(f, "PublicCommand.{}", command.as_ref()),
+            Self::PublicEvent(event) => write!(f, "PublicEvent.{}", event.as_ref()),
+            Self::Fiber(message) => message.fmt(f),
+        }
+    }
+}
+
+/// Restricted handle accepted by the Fiber channel/payment data plane.
+#[derive(Clone, Debug)]
+pub struct FiberActorRef(DerivedActorRef<FiberActorMessage>);
+
+impl FiberActorRef {
+    pub fn from_network(actor: &ActorRef<NetworkActorMessage>) -> Self {
+        Self(actor.get_derived())
+    }
+
+    pub fn from_fiber(actor: &ActorRef<FiberActorMessage>) -> Self {
+        Self(actor.get_derived())
+    }
+}
+
+impl std::ops::Deref for FiberActorRef {
+    type Target = DerivedActorRef<FiberActorMessage>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq for FiberActorRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.get_cell() == other.get_cell()
+    }
+}
+
+impl Eq for FiberActorRef {}
 
 #[derive(Debug)]
 pub struct FiberMessageWithTarget {
@@ -1628,7 +1776,7 @@ struct FiberActorStateArgs {
     private_key: Privkey,
     entropy: [u8; 32],
     default_shutdown_script: Script,
-    network: ActorRef<NetworkActorMessage>,
+    network: FiberActorRef,
     peer_channel_index: PeerChannelIndex,
     features: FeatureVector,
 }
@@ -1943,7 +2091,7 @@ where
 
     async fn handle_peer_message(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         peer_pubkey: Pubkey,
         message: FiberMessage,
@@ -2050,7 +2198,7 @@ where
 
     async fn handle_event(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
@@ -2086,7 +2234,7 @@ where
                     // TODO: Here we implies the one who receives AcceptChannel message
                     //  (i.e. the channel initiator) will send TxUpdate message first.
                     myself
-                        .send_message(NetworkActorMessage::new_command(
+                        .send_message(FiberActorMessage::new_command(
                             NetworkActorCommand::UpdateChannelFunding(
                                 new,
                                 Default::default(),
@@ -2124,7 +2272,7 @@ where
 
                 // Notify outside observers.
                 myself
-                    .send_message(NetworkActorMessage::new_notification(
+                    .send_message(FiberActorMessage::new_notification(
                         NetworkServiceEvent::ChannelReady(
                             pubkey,
                             channel_id,
@@ -2155,7 +2303,7 @@ where
                             delay.as_millis()
                         );
                         myself.send_after(delay, move || {
-                            NetworkActorMessage::new_event(
+                            FiberActorMessage::new_event(
                                 NetworkActorEvent::RetryPendingPaymentsForChannel(ch_outpoint),
                             )
                         });
@@ -2553,7 +2701,7 @@ where
 
     async fn handle_command(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
@@ -3353,7 +3501,7 @@ where
 
     fn forward_remove_tlc_to_channel<F>(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         remove_tlc_command: RemoveTlcCommand,
@@ -3374,28 +3522,34 @@ where
                     "Channel {channel_id:?} not found"
                 )))
             };
-            let _ = myself.send_message(NetworkActorMessage::new_command(completion(result)));
+            let _ = myself.send_message(FiberActorMessage::new_command(completion(result)));
             return;
         };
 
         let forward_target = myself.clone();
         ractor::concurrency::spawn(async move {
             let completion_for_result = completion.clone();
-            let result = forward!(
+            let result = ractor::call_t!(
                 channel_actor,
                 |reply| ChannelActorMessage::Command(ChannelCommand::RemoveTlc(
                     remove_tlc_command,
                     reply,
                 )),
-                forward_target,
-                move |result| NetworkActorMessage::new_command(completion_for_result(result))
+                DEFAULT_CHAIN_ACTOR_TIMEOUT
             );
-            if let Err(err) = result {
-                let _ = myself.send_message(NetworkActorMessage::new_command(completion(Err(
-                    ProcessingChannelError::InvalidState(format!(
-                        "RemoveTlc reply dropped for channel {channel_id:?}: {err}"
-                    )),
-                ))));
+            match result {
+                Ok(result) => {
+                    let _ = forward_target.send_message(FiberActorMessage::new_command(
+                        completion_for_result(result),
+                    ));
+                }
+                Err(err) => {
+                    let _ = myself.send_message(FiberActorMessage::new_command(completion(Err(
+                        ProcessingChannelError::InvalidState(format!(
+                            "RemoveTlc reply dropped for channel {channel_id:?}: {err}"
+                        )),
+                    ))));
+                }
             }
         });
     }
@@ -3403,7 +3557,7 @@ where
     #[allow(clippy::too_many_arguments)]
     fn forward_onchain_tlc_remove_upstream(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         network_state: &mut FiberActorState<S, C>,
         downstream_channel_id: Hash256,
         downstream_tlc_id: TLCId,
@@ -3592,7 +3746,7 @@ where
                 OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
                     state
                         .network
-                        .send_message(NetworkActorMessage::new_event(
+                        .send_message(FiberActorMessage::new_event(
                             NetworkActorEvent::TlcRemoveReceived(
                                 tlc.payment_hash,
                                 attempt_id,
@@ -3760,12 +3914,12 @@ where
         SettleOnChainFulfilledInvoiceCommand::new(payment_hash, &self.store).run();
     }
 
-    fn retry_hold_tlc_sets(&self, myself: &ActorRef<NetworkActorMessage>) {
+    fn retry_hold_tlc_sets(&self, myself: &FiberActorRef) {
         let current_time = now_timestamp_as_millis_u64();
         for (payment_hash, hold_tlcs) in self.store.get_node_hold_tlcs() {
             if self.store.get_preimage(&payment_hash).is_some() {
                 myself
-                    .send_message(NetworkActorMessage::new_command(
+                    .send_message(FiberActorMessage::new_command(
                         NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -3779,7 +3933,7 @@ where
                 debug!("Timeout {payment_hash} hold tlcs {}", hold_tlcs.len());
                 for hold_tlc in hold_tlcs {
                     myself
-                        .send_message(NetworkActorMessage::new_command(
+                        .send_message(FiberActorMessage::new_command(
                             NetworkActorCommand::TimeoutHoldTlc(
                                 payment_hash,
                                 hold_tlc.channel_id,
@@ -3794,7 +3948,7 @@ where
 
     fn timeout_hold_tlc(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         channel_id: Hash256,
@@ -3864,7 +4018,7 @@ where
 
     fn settle_hold_tlc_set(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
     ) {
@@ -3874,7 +4028,7 @@ where
 
     fn settle_received_hold_tlc_set(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
     ) {
@@ -3885,7 +4039,7 @@ where
 
     fn settle_tlc_set(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         channel_tlc_ids: Vec<(Hash256, u64)>,
@@ -3897,7 +4051,7 @@ where
 
     fn apply_tlc_settlements(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         settlements: Vec<TlcSettlement>,
         hold_payment_hash: Option<Hash256>,
@@ -3924,13 +4078,13 @@ where
     /// Checks if the channel funding cell has been spent (indicating remote force close).
     async fn check_channel_shutdown(
         chain_client: C,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         channel_id: Hash256,
         funding_lock_script: Script,
     ) {
         match chain_client.get_shutdown_tx(funding_lock_script).await {
             Ok(shutdown_tx) => {
-                let _ = myself.send_message(NetworkActorMessage::Command(
+                let _ = myself.send_message(FiberActorMessage::Command(
                     NetworkActorCommand::RemoteForceShutdownChannel(channel_id, shutdown_tx),
                 ));
             }
@@ -3944,7 +4098,7 @@ where
     /// Checks if the commitment transaction outputs have been spent (indicating settlement complete).
     async fn check_channel_shutdown_settlement(
         chain_client: C,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: ChannelActorState,
     ) {
         let channel_id = state.get_id();
@@ -4023,7 +4177,7 @@ where
                 let response = crate::ckb::GetCellsResponse::from(response);
                 if response.objects.is_empty() {
                     // Notify actor that settlement is complete
-                    let _ = myself.send_message(NetworkActorMessage::new_event(
+                    let _ = myself.send_message(FiberActorMessage::new_event(
                         NetworkActorEvent::ChannelSettlementCompleted(channel_id),
                     ));
                 }
@@ -4040,7 +4194,7 @@ where
     // Check shutdown tx of a channel, shutdown channel if channel is force closed by remote
     async fn handle_remote_channel_shutdown(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         channel_id: Hash256,
         response: GetShutdownTxResponse,
     ) {
@@ -4073,7 +4227,7 @@ where
                         let tx_hash = tx.hash();
                         tracing::debug!("channel {channel_id:?} is shutdown by remote");
                         myself
-                            .send_message(NetworkActorMessage::Event(
+                            .send_message(FiberActorMessage::Event(
                                 NetworkActorEvent::ClosingTransactionConfirmed(
                                     pubkey, channel_id, tx_hash, true, false,
                                 ),
@@ -4099,7 +4253,7 @@ where
 
     pub fn settle_invoice(
         &self,
-        myself: &ActorRef<NetworkActorMessage>,
+        myself: &FiberActorRef,
         payment_hash: Hash256,
         payment_preimage: Hash256,
     ) -> Result<(), SettleInvoiceError> {
@@ -4138,12 +4292,12 @@ where
         // Notify watchtower about the preimage so it can settle TLCs on-chain if needed
         // (e.g., after force close).
         myself
-            .send_message(NetworkActorMessage::new_notification(
+            .send_message(FiberActorMessage::new_notification(
                 NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         // We will send network actor a message to settle the invoice immediately if possible.
-        let _ = myself.send_message(NetworkActorMessage::new_command(
+        let _ = myself.send_message(FiberActorMessage::new_command(
             NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ));
 
@@ -4152,7 +4306,7 @@ where
 
     pub fn cancel_invoice(
         &self,
-        myself: &ActorRef<NetworkActorMessage>,
+        myself: &FiberActorRef,
         payment_hash: Hash256,
     ) -> Result<(), CancelInvoiceError> {
         let invoice = self
@@ -4181,7 +4335,7 @@ where
             .update_invoice_status(&payment_hash, CkbInvoiceStatus::Cancelled)
             .map_err(|err| CancelInvoiceError::InternalError(err.to_string()))?;
 
-        let _ = myself.send_message(NetworkActorMessage::new_command(
+        let _ = myself.send_message(FiberActorMessage::new_command(
             NetworkActorCommand::SettleHoldTlcSet(payment_hash),
         ));
 
@@ -4575,7 +4729,7 @@ where
 
     async fn on_remove_tlc_event(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
@@ -4724,7 +4878,7 @@ where
 
     async fn on_add_tlc_result_event(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         attempt_id: Option<u64>,
@@ -4738,7 +4892,7 @@ where
         }) = previous_tlc
         {
             myself
-                .send_message(NetworkActorMessage::new_command(
+                .send_message(FiberActorMessage::new_command(
                     NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
                         channel_id,
                         command: ChannelCommand::NotifyEvent(ChannelEvent::ForwardTlcResult(
@@ -4769,7 +4923,7 @@ where
 
     async fn resume_payment_actor_and_send_command(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         message: PaymentActorMessage,
@@ -4796,7 +4950,7 @@ where
 
     async fn start_payment_actor(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         payment_hash: Hash256,
         init_command: PaymentActorMessage,
@@ -4877,7 +5031,7 @@ where
     /// `RetryUpdateChannelFunding` (retry_count>0).
     async fn do_update_channel_funding(
         &self,
-        myself: &ActorRef<NetworkActorMessage>,
+        myself: &FiberActorRef,
         state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         retry_count: u32,
@@ -4969,7 +5123,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn do_sign_funding_tx(
         &self,
-        myself: &ActorRef<NetworkActorMessage>,
+        myself: &FiberActorRef,
         state: &mut FiberActorState<S, C>,
         channel_id: Hash256,
         retry_count: u32,
@@ -5049,7 +5203,7 @@ where
                         ),
                     };
                     myself
-                        .send_message(NetworkActorMessage::new_command(
+                        .send_message(FiberActorMessage::new_command(
                             NetworkActorCommand::SendFiberMessage(abort_msg),
                         ))
                         .expect("network actor alive");
@@ -5108,7 +5262,7 @@ where
                 .expect("funding tx output exists");
 
             myself
-                .send_message(NetworkActorMessage::new_event(
+                .send_message(FiberActorMessage::new_event(
                     NetworkActorEvent::FundingTransactionPending(
                         funding_tx.data(),
                         outpoint,
@@ -5136,7 +5290,7 @@ where
             .await?;
 
         myself
-            .send_message(NetworkActorMessage::new_command(
+            .send_message(FiberActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
             ))
             .expect("network actor alive");
@@ -5233,7 +5387,10 @@ where
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.core.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
-                debug_event!(myself, "Received gossip message updates");
+                debug_event!(
+                    FiberActorRef::from_network(&myself),
+                    "Received gossip message updates"
+                );
                 Ok(())
             }
             NetworkActorEvent::FiberMessage(pubkey, FiberMessage::Init(init), ingress_permit) => {
@@ -5245,9 +5402,10 @@ where
                 result
             }
             NetworkActorEvent::FiberMessage(pubkey, message, ingress_permit) => {
+                let fiber = FiberActorRef::from_network(&myself);
                 let result = self
                     .core
-                    .handle_peer_message(myself, &mut state.fiber, pubkey, message)
+                    .handle_peer_message(fiber, &mut state.fiber, pubkey, message)
                     .await;
                 drop(ingress_permit);
                 if matches!(result, Ok(FiberMessageDisposition::UnknownChannel)) {
@@ -5259,9 +5417,8 @@ where
                 result.map(|_| ())
             }
             event => {
-                self.core
-                    .handle_event(myself, &mut state.fiber, event)
-                    .await
+                let fiber = FiberActorRef::from_network(&myself);
+                self.core.handle_event(fiber, &mut state.fiber, event).await
             }
         }
     }
@@ -5354,7 +5511,10 @@ where
             }
             NetworkActorCommand::PeerReconnectBackoffTick(peer_id, attempt) => {
                 let Some(pubkey) = state.fiber.peer_channel_index.get_pubkey(&peer_id) else {
-                    debug_event!(myself, "PeerReconnectBackoffSkippedNoDirectChannel");
+                    debug_event!(
+                        FiberActorRef::from_network(&myself),
+                        "PeerReconnectBackoffSkippedNoDirectChannel"
+                    );
                     return Ok(());
                 };
                 if state.public.peer_session_map.contains_key(&pubkey) {
@@ -5363,7 +5523,10 @@ where
                 }
                 if state.public.requested_disconnect_peers.contains(&pubkey) {
                     state.public.peer_reconnect_backoff_attempts.remove(&pubkey);
-                    debug_event!(myself, "PeerReconnectBackoffSkippedRequested");
+                    debug_event!(
+                        FiberActorRef::from_network(&myself),
+                        "PeerReconnectBackoffSkippedRequested"
+                    );
                     return Ok(());
                 }
                 let Some(current_attempt) = state
@@ -5377,7 +5540,10 @@ where
                 if current_attempt != attempt {
                     return Ok(());
                 }
-                debug_event!(myself, "PeerReconnectBackoffAttempt");
+                debug_event!(
+                    FiberActorRef::from_network(&myself),
+                    "PeerReconnectBackoffAttempt"
+                );
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
                 if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
                     myself
@@ -5425,7 +5591,7 @@ where
                     state
                         .fiber
                         .network
-                        .send_message(NetworkActorMessage::new_command(
+                        .send_message(FiberActorMessage::new_command(
                             NetworkActorCommand::DisconnectPeer(
                                 pubkey,
                                 PeerDisconnectReason::InitMessageTimeout,
@@ -5538,24 +5704,6 @@ where
         }
     }
 
-    async fn handle_command(
-        &self,
-        myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState<S, C>,
-        command: NetworkActorCommand,
-    ) -> crate::Result<()> {
-        match command.handler() {
-            NetworkActorCommandHandler::PublicNetwork => {
-                self.handle_public_command(myself, state, command).await
-            }
-            NetworkActorCommandHandler::FiberCore => {
-                self.core
-                    .handle_command(myself, &mut state.fiber, command)
-                    .await
-            }
-        }
-    }
-
     async fn maintain_public_connections(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -5627,7 +5775,7 @@ where
                 state
                     .fiber
                     .network
-                    .send_message(NetworkActorMessage::new_command(
+                    .send_message(FiberActorMessage::new_command(
                         NetworkActorCommand::ConnectPeer(
                             addr.clone(),
                             false,
@@ -5652,7 +5800,7 @@ pub struct FiberActorState<S, C> {
     entropy: [u8; 32],
     // The default lock script to be used when closing a channel, may be overridden by the shutdown command.
     default_shutdown_script: Script,
-    network: ActorRef<NetworkActorMessage>,
+    network: FiberActorRef,
     // Outbound transport capabilities required by channel/payment logic. Public peer metadata,
     // admission policy and reconnect state remain in `PublicNetworkRuntimeState`.
     p2p_peers: HashMap<Pubkey, P2pFiberPeer>,
@@ -5729,7 +5877,7 @@ pub struct ConnectedPeer {
 
 #[derive(Clone, Debug)]
 struct InProcessPeer {
-    actor: ActorRef<NetworkActorMessage>,
+    actor: FiberActorRef,
     features: FeatureVector,
 }
 
@@ -6060,7 +6208,7 @@ where
                 let _ = self
                     .fiber
                     .network
-                    .send_message(NetworkActorMessage::new_command(
+                    .send_message(FiberActorMessage::new_command(
                         NetworkActorCommand::BroadcastMessages(vec![
                             BroadcastMessageWithTimestamp::NodeAnnouncement(message),
                         ]),
@@ -6086,7 +6234,7 @@ where
         self.fiber
             .network
             .send_after(CHECK_PEER_INIT_INTERVAL, move || {
-                NetworkActorMessage::new_command(NetworkActorCommand::CheckPeerInit(
+                FiberActorMessage::new_command(NetworkActorCommand::CheckPeerInit(
                     remote_pubkey,
                     session_id,
                 ))
@@ -6197,7 +6345,7 @@ where
                 warn!("Peer {peer_pubkey:?} sent a duplicate Init message, disconnecting");
                 self.fiber
                     .network
-                    .send_message(NetworkActorMessage::new_command(
+                    .send_message(FiberActorMessage::new_command(
                         NetworkActorCommand::DisconnectPeer(
                             peer_pubkey,
                             PeerDisconnectReason::DuplicateInitMessage,
@@ -6212,7 +6360,7 @@ where
         check_chain_hash(&init_msg.chain_hash).map_err(|error| {
             self.fiber
                 .network
-                .send_message(NetworkActorMessage::new_command(
+                .send_message(FiberActorMessage::new_command(
                     NetworkActorCommand::DisconnectPeer(
                         peer_pubkey,
                         PeerDisconnectReason::ChainHashMismatch,
@@ -6235,7 +6383,7 @@ where
             .p2p_peer_features
             .insert(peer_pubkey, init_msg.features.clone());
         info.features = Some(init_msg.features);
-        debug_event!(myself, "PeerInit");
+        debug_event!(FiberActorRef::from_network(&myself), "PeerInit");
         if let Some(channels) = self.fiber.peer_channel_index.get_channels(&peer_pubkey) {
             let channel_ids = channels.into_iter().collect::<Vec<_>>();
             if !channel_ids.is_empty() {
@@ -6312,7 +6460,7 @@ where
 
     fn retry_pending_payments_for_channel(
         &self,
-        myself: &ActorRef<NetworkActorMessage>,
+        myself: &FiberActorRef,
         channel_outpoint: &OutPoint,
     ) {
         for attempt in self
@@ -6323,7 +6471,7 @@ where
                 "Retrying payment attempt {:?} for channel {:?} reestablished",
                 attempt.payment_hash, channel_outpoint
             );
-            if let Err(err) = myself.send_message(NetworkActorMessage::new_event(
+            if let Err(err) = myself.send_message(FiberActorMessage::new_event(
                 NetworkActorEvent::RetrySendPayment(attempt.payment_hash, Some(attempt.id)),
             )) {
                 debug!(
@@ -7094,7 +7242,7 @@ where
         let delay = compute_peer_reconnect_delay(attempt);
         debug_event!(self.network, "PeerReconnectBackoffScheduled");
         self.network.send_after(delay, move || {
-            NetworkActorMessage::new_command(NetworkActorCommand::PeerReconnectBackoffTick(
+            FiberActorMessage::new_command(NetworkActorCommand::PeerReconnectBackoffTick(
                 peer_id, attempt,
             ))
         });
@@ -7106,9 +7254,11 @@ where
         message: FiberMessage,
     ) -> crate::Result<()> {
         if let Some(peer) = self.in_process_peers.get(pubkey) {
-            peer.actor.send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::FiberMessage(self.get_public_key(), message, None),
-            ))?;
+            peer.actor
+                .send_message(FiberActorMessage::new_event(
+                    NetworkActorEvent::FiberMessage(self.get_public_key(), message, None),
+                ))
+                .map_err(|error| Error::InternalError(anyhow::anyhow!(error.to_string())))?;
             return Ok(());
         }
         if let Some(peer) = self.p2p_peers.get(pubkey) {
@@ -7146,7 +7296,7 @@ where
                 let payment_hash = tlc.payment_hash;
                 self.store.insert_preimage(payment_hash, *payment_preimage);
                 self.network
-                    .send_message(NetworkActorMessage::new_notification(
+                    .send_message(FiberActorMessage::new_notification(
                         NetworkServiceEvent::PreimageCreated(payment_hash, *payment_preimage),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -7215,7 +7365,7 @@ where
                             };
 
                             self.network
-                                .send_message(NetworkActorMessage::new_event(
+                                .send_message(FiberActorMessage::new_event(
                                     NetworkActorEvent::ClosingTransactionPending(
                                         state.get_id(),
                                         state.get_remote_pubkey(),
@@ -7427,7 +7577,7 @@ where
         debug!("Channel {:x} created", &id);
         // Notify outside observers.
         self.network
-            .send_message(NetworkActorMessage::new_notification(
+            .send_message(FiberActorMessage::new_notification(
                 NetworkServiceEvent::ChannelCreated(pubkey, id),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -7513,7 +7663,7 @@ where
         if !force {
             // Notify outside observers.
             self.network
-                .send_message(NetworkActorMessage::new_notification(
+                .send_message(FiberActorMessage::new_notification(
                     NetworkServiceEvent::ChannelClosed(*pubkey, *channel_id, tx_hash.clone()),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -7551,7 +7701,7 @@ where
             }
             // notify event observers, such as remove from watchtower
             self.network
-                .send_message(NetworkActorMessage::new_notification(
+                .send_message(FiberActorMessage::new_notification(
                     if reason == StopReason::Abandon {
                         NetworkServiceEvent::ChannelAbandon(channel_id)
                     } else {
@@ -7616,7 +7766,7 @@ where
 
                 // Notify outside observers.
                 self.network
-                    .send_message(NetworkActorMessage::new_notification(
+                    .send_message(FiberActorMessage::new_notification(
                         NetworkServiceEvent::ChannelPendingToBeAccepted(peer_pubkey, id),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -8013,7 +8163,7 @@ where
 
     async fn build_state(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: ActorRef<FiberActorMessage>,
         args: HostedTenantActorStartArguments,
     ) -> Result<FiberActorState<S, C>, ActorProcessingErr> {
         let HostedTenantActorStartArguments {
@@ -8038,7 +8188,7 @@ where
                 private_key,
                 entropy,
                 default_shutdown_script,
-                network: myself,
+                network: FiberActorRef::from_fiber(&myself),
                 peer_channel_index: PeerChannelIndex::build(&self.core.store),
                 features: config.gen_node_features(),
             },
@@ -8048,7 +8198,7 @@ where
 
     async fn handle_event(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
@@ -8070,7 +8220,7 @@ where
 
     async fn handle_command(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
+        myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
@@ -8145,7 +8295,7 @@ where
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 {
-    type Msg = NetworkActorMessage;
+    type Msg = FiberActorMessage;
     type State = FiberActorState<S, C>;
     type Arguments = HostedTenantActorStartArguments;
 
@@ -8164,12 +8314,13 @@ where
     ) -> Result<(), ActorProcessingErr> {
         state.restore_persisted_offline_channels().await;
         myself.send_interval(CHECK_CHANNELS_INTERVAL, || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+            FiberActorMessage::new_command(NetworkActorCommand::CheckChannels)
         });
         myself.send_interval(CHECK_CHANNELS_SHUTDOWN_INTERVAL, || {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
+            FiberActorMessage::new_command(NetworkActorCommand::CheckChannelsShutdown)
         });
-        self.core.retry_hold_tlc_sets(&myself);
+        self.core
+            .retry_hold_tlc_sets(&FiberActorRef::from_fiber(&myself));
         Ok(())
     }
 
@@ -8180,17 +8331,23 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            NetworkActorMessage::Event(event) => {
-                if let Err(error) = self.handle_event(myself, state, event).await {
+            FiberActorMessage::Event(event) => {
+                if let Err(error) = self
+                    .handle_event(FiberActorRef::from_fiber(&myself), state, event)
+                    .await
+                {
                     error!("Failed to handle hosted tenant event: {error}");
                 }
             }
-            NetworkActorMessage::Command(command) => {
-                if let Err(error) = self.handle_command(myself, state, command).await {
+            FiberActorMessage::Command(command) => {
+                if let Err(error) = self
+                    .handle_command(FiberActorRef::from_fiber(&myself), state, command)
+                    .await
+                {
                     error!("Failed to handle hosted tenant command: {error}");
                 }
             }
-            NetworkActorMessage::Notification(event) => {
+            FiberActorMessage::Notification(event) => {
                 if let Err(error) = self.core.event_sender.send(event).await {
                     error!("Failed to notify hosted tenant observer: {error}");
                 }
@@ -8509,7 +8666,7 @@ where
                 private_key,
                 entropy,
                 default_shutdown_script,
-                network: myself.clone(),
+                network: FiberActorRef::from_network(&myself),
                 peer_channel_index,
                 features,
             },
@@ -8598,8 +8755,12 @@ where
         });
 
         // Trigger hold tlc fulfill retry and timeout checks at startup.
-        self.core.retry_hold_tlc_sets(&myself);
-        debug_event!(myself, "network actor started");
+        self.core
+            .retry_hold_tlc_sets(&FiberActorRef::from_network(&myself));
+        debug_event!(
+            FiberActorRef::from_network(&myself),
+            "network actor started"
+        );
         Ok(())
     }
 
@@ -8616,17 +8777,43 @@ where
             ACTOR_HANDLE_WARN_THRESHOLD_MS,
         );
         match message {
-            NetworkActorMessage::Event(event) => {
+            NetworkActorMessage::PublicEvent(event) => {
                 if let Err(err) = self.handle_public_event(myself, state, event).await {
                     error!("Failed to handle fiber network event: {}", err);
                 }
             }
-            NetworkActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(myself, state, command).await {
+            NetworkActorMessage::PublicCommand(command) => {
+                if let Err(err) = self.handle_public_command(myself, state, command).await {
                     error!("Failed to handle fiber network command: {}", err);
                 }
             }
-            NetworkActorMessage::Notification(event) => {
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(command)) => {
+                if let Err(err) = self
+                    .core
+                    .handle_command(
+                        FiberActorRef::from_network(&myself),
+                        &mut state.fiber,
+                        command,
+                    )
+                    .await
+                {
+                    error!("Failed to handle Fiber core command: {}", err);
+                }
+            }
+            NetworkActorMessage::Fiber(FiberActorMessage::Event(event)) => {
+                if let Err(err) = self
+                    .core
+                    .handle_event(
+                        FiberActorRef::from_network(&myself),
+                        &mut state.fiber,
+                        event,
+                    )
+                    .await
+                {
+                    error!("Failed to handle Fiber core event: {}", err);
+                }
+            }
+            NetworkActorMessage::Fiber(FiberActorMessage::Notification(event)) => {
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(lsp_service) = state.fiber.lsp_service.as_ref() {
                     match &event {
@@ -9030,7 +9217,7 @@ pub(crate) async fn start_hosted_tenant_actor<
     store_actor: Option<ActorRef<StoreActorMessage>>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     default_shutdown_script: Script,
-) -> Result<ActorRef<NetworkActorMessage>, String> {
+) -> Result<FiberActorRef, String> {
     let actor_name = format!("HostedTenant {:?}", config.public_key());
     Actor::spawn_linked(
         Some(actor_name),
@@ -9049,7 +9236,7 @@ pub(crate) async fn start_hosted_tenant_actor<
         root_actor,
     )
     .await
-    .map(|(actor, _)| actor)
+    .map(|(actor, _)| FiberActorRef::from_fiber(&actor))
     .map_err(|error| format!("failed to start hosted tenant actor: {error}"))
 }
 

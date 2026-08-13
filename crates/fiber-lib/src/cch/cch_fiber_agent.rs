@@ -509,7 +509,7 @@ impl CchFiberAgent {
         let Self::InProcess { network_actor } = self;
         let invoice_cloned = invoice.clone();
         let message = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
+            NetworkActorMessage::new_command(NetworkActorCommand::AddInvoice(
                 invoice.clone(),
                 None,
                 rpc_reply,
@@ -528,7 +528,7 @@ impl CchFiberAgent {
     ) -> Result<PaymentStatus> {
         let Self::InProcess { network_actor } = self;
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            NetworkActorMessage::new_command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
                     invoice: Some(pay_req),
                     tlc_expiry_limit,
@@ -552,7 +552,7 @@ impl CchFiberAgent {
     ) -> Result<(), CchFiberSettleInvoiceError> {
         let Self::InProcess { network_actor } = self;
         let command = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+            NetworkActorMessage::new_command(NetworkActorCommand::SettleInvoice(
                 payment_hash,
                 payment_preimage,
                 rpc_reply,
@@ -570,7 +570,7 @@ impl CchFiberAgent {
     ) -> Result<(), CchFiberCancelInvoiceError> {
         let Self::InProcess { network_actor } = self;
         let command = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+            NetworkActorMessage::new_command(NetworkActorCommand::CancelInvoice(
                 payment_hash,
                 rpc_reply,
             ))
@@ -618,7 +618,7 @@ impl CchFiberAgentRef {
                 let invoice_cloned = invoice.clone();
                 let payment_hash = *invoice.payment_hash();
                 let msg = move |tx: RpcReplyPort<Result<(), crate::invoice::InvoiceError>>| {
-                    NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
+                    NetworkActorMessage::new_command(NetworkActorCommand::AddInvoice(
                         invoice.clone(),
                         None,
                         tx,
@@ -671,7 +671,7 @@ impl CchFiberAgentRef {
                 let result = ractor::call_t!(
                     network_actor,
                     |port| {
-                        NetworkActorMessage::Command(NetworkActorCommand::GetInvoice(
+                        NetworkActorMessage::new_command(NetworkActorCommand::GetInvoice(
                             payment_hash,
                             port,
                         ))
@@ -720,7 +720,7 @@ impl CchFiberAgentRef {
         match self {
             Self::InProcess(network_actor) => {
                 let msg = move |tx| {
-                    NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                    NetworkActorMessage::new_command(NetworkActorCommand::SendPayment(
                         SendPaymentCommand {
                             invoice: Some(outgoing_pay_req.clone()),
                             tlc_expiry_limit: tlc_limit,
@@ -777,7 +777,7 @@ impl CchFiberAgentRef {
                 let pay_req = outgoing_pay_req.clone();
                 forward!(
                     network_actor,
-                    |tx| NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                    |tx| NetworkActorMessage::new_command(NetworkActorCommand::SendPayment(
                         SendPaymentCommand {
                             invoice: Some(pay_req),
                             tlc_expiry_limit: tlc_limit,
@@ -828,7 +828,7 @@ impl CchFiberAgentRef {
         match self {
             Self::InProcess(network_actor) => forward!(
                 network_actor,
-                |port| NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
+                |port| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
                     payment_hash,
                     port,
                 )),
@@ -877,7 +877,7 @@ impl CchFiberAgentRef {
         match self {
             Self::InProcess(network_actor) => {
                 let cmd = move |tx: RpcReplyPort<Result<(), SettleInvoiceError>>| {
-                    NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+                    NetworkActorMessage::new_command(NetworkActorCommand::SettleInvoice(
                         payment_hash,
                         payment_preimage,
                         tx,
@@ -907,7 +907,7 @@ impl CchFiberAgentRef {
         match self {
             Self::InProcess(network_actor) => {
                 let cmd = move |tx: RpcReplyPort<Result<(), CancelInvoiceError>>| {
-                    NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+                    NetworkActorMessage::new_command(NetworkActorCommand::CancelInvoice(
                         payment_hash,
                         tx,
                     ))

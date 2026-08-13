@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use ractor::{Actor, ActorProcessingErr, ActorRef, ActorStatus};
 
 use crate::fiber::{
-    network::{NetworkActorEvent, NetworkActorMessage},
+    network::{FiberActorMessage, FiberActorRef, NetworkActorEvent, NetworkActorMessage},
     types::FiberMessage,
 };
 use crate::fiber_types::{Hash256, Pubkey};
@@ -13,13 +13,13 @@ use super::TenantId;
 #[derive(Clone)]
 struct TenantRoute {
     invoice_pubkey: Pubkey,
-    runtime_actor: ActorRef<NetworkActorMessage>,
+    runtime_actor: FiberActorRef,
 }
 
 #[derive(Default)]
 struct TenantDispatcherState {
     runtimes: HashMap<TenantId, TenantRoute>,
-    channels: HashMap<(TenantId, Hash256), ActorRef<NetworkActorMessage>>,
+    channels: HashMap<(TenantId, Hash256), FiberActorRef>,
 }
 
 /// Routes co-located Fiber messages through a tenant and channel scoped
@@ -34,7 +34,7 @@ impl TenantMessageDispatcher {
         &self,
         tenant_id: TenantId,
         invoice_pubkey: Pubkey,
-        runtime_actor: ActorRef<NetworkActorMessage>,
+        runtime_actor: FiberActorRef,
     ) -> Result<(), String> {
         let mut state = self
             .state
@@ -68,11 +68,7 @@ impl TenantMessageDispatcher {
         Ok(())
     }
 
-    pub(crate) fn unregister_runtime(
-        &self,
-        tenant_id: &TenantId,
-        runtime_actor: &ActorRef<NetworkActorMessage>,
-    ) {
+    pub(crate) fn unregister_runtime(&self, tenant_id: &TenantId, runtime_actor: &FiberActorRef) {
         if let Ok(mut state) = self.state.write() {
             if state
                 .runtimes
@@ -122,7 +118,7 @@ impl TenantMessageDispatcher {
             }
         };
         runtime_actor
-            .send_message(NetworkActorMessage::new_event(
+            .send_message(FiberActorMessage::new_event(
                 NetworkActorEvent::FiberMessage(public_node_id, message, None),
             ))
             .map_err(|error| format!("failed to dispatch message to tenant {tenant_id}: {error}"))
@@ -209,8 +205,11 @@ impl Actor for HostedTenantEndpoint {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(source, message, _)) =
-            message
+        let NetworkActorMessage::Fiber(FiberActorMessage::Event(NetworkActorEvent::FiberMessage(
+            source,
+            message,
+            _,
+        ))) = message
         else {
             tracing::warn!(tenant_id = %state.tenant_id, "Ignoring non-Fiber message sent to hosted tenant endpoint");
             return Ok(());

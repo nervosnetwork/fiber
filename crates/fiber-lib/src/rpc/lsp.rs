@@ -180,9 +180,9 @@ impl LspRpcServerImpl {
     ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
         let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
         let context = self.tenant_rpc_context(tenant_id.clone()).await?;
-        let result = InvoiceRpcServerImpl::new(
+        let result = InvoiceRpcServerImpl::new_fiber(
             context.store,
-            Some(context.network_actor),
+            Some(context.fiber_actor),
             Some(context.config),
         )
         .with_trampoline_route_hint(context.public_node_id.into())
@@ -207,9 +207,9 @@ impl LspRpcServerImpl {
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
         let context = self.tenant_rpc_context(tenant_id).await?;
-        InvoiceRpcServerImpl::new(
+        InvoiceRpcServerImpl::new_fiber(
             context.store,
-            Some(context.network_actor),
+            Some(context.fiber_actor),
             Some(context.config),
         )
         .get_invoice(fiber_json_types::InvoiceParams {
@@ -224,7 +224,7 @@ impl LspRpcServerImpl {
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
         let context = self.tenant_rpc_context(tenant_id).await?;
-        PaymentRpcServerImpl::new(context.network_actor, context.store)
+        PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
             .send_payment(params.payment)
             .await
     }
@@ -235,7 +235,7 @@ impl LspRpcServerImpl {
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
         let context = self.tenant_rpc_context(tenant_id).await?;
-        PaymentRpcServerImpl::new(context.network_actor, context.store)
+        PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
             .get_payment(params.payment)
             .await
     }

@@ -2,8 +2,8 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::{
-    channel::ChannelActorStateStore, payment::SendPaymentCommand, NetworkActorCommand,
-    NetworkActorMessage,
+    channel::ChannelActorStateStore, payment::SendPaymentCommand, FiberActorMessage, FiberActorRef,
+    NetworkActorCommand, NetworkActorMessage,
 };
 use crate::rpc::utils::RpcResultExt;
 use crate::{handle_actor_call, log_and_error};
@@ -80,7 +80,7 @@ trait PaymentRpc {
 }
 
 pub struct PaymentRpcServerImpl<S> {
-    actor: ActorRef<NetworkActorMessage>,
+    actor: FiberActorRef,
     store: S,
     #[cfg(not(target_arch = "wasm32"))]
     lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
@@ -88,6 +88,10 @@ pub struct PaymentRpcServerImpl<S> {
 
 impl<S> PaymentRpcServerImpl<S> {
     pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        Self::new_fiber(FiberActorRef::from_network(&actor), store)
+    }
+
+    pub(crate) fn new_fiber(actor: FiberActorRef, store: S) -> Self {
         PaymentRpcServerImpl {
             actor,
             store,
@@ -126,7 +130,7 @@ where
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .send_payment(params)
                 .await;
         }
@@ -140,7 +144,7 @@ where
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .get_payment(params)
                 .await;
         }
@@ -154,7 +158,7 @@ where
         params: BuildRouterParams,
     ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .build_router(params)
                 .await;
         }
@@ -170,7 +174,7 @@ where
         params: SendPaymentWithRouterParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .send_payment_with_router(params)
                 .await;
         }
@@ -184,7 +188,7 @@ where
         params: ListPaymentsParams,
     ) -> Result<ListPaymentsResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return PaymentRpcServerImpl::new(context.network_actor, context.store)
+            return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .list_payments(params)
                 .await;
         }
@@ -261,8 +265,8 @@ where
             .transpose()
             .rpc_err()?;
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
                     target_pubkey,
                     amount: params.amount,
@@ -294,8 +298,8 @@ where
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let payment_hash = params.payment_hash.into();
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
         };
         handle_actor_call!(self.actor, message, params)
             .map(|response| send_payment_response_to_json(&response))
@@ -313,8 +317,8 @@ where
             .collect::<Result<Vec<_>, _>>()
             .rpc_err()?;
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::BuildPaymentRouter(
                 BuildRouterCommand {
                     amount: params.amount,
                     hops_info,
@@ -351,8 +355,8 @@ where
             .clone()
             .map(fiber_types::PaymentCustomRecords::from);
 
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SendPaymentWithRouter(
+        let message = |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(NetworkActorCommand::SendPaymentWithRouter(
                 SendPaymentWithRouterCommand {
                     payment_hash,
                     router,
