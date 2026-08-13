@@ -171,6 +171,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "get_channel_signing_status",
         r#"allow if read("channels");"#,
     );
+    b.rule("get_channel_binding", r#"allow if read("channels");"#);
     b.rule("submit_channel_signature", r#"allow if write("channels");"#);
     // dev
     b.rule("commitment_signed", r#"allow if write("dev");"#);
@@ -408,6 +409,8 @@ mod tests {
         auth.check_permission("send_payment", &token).unwrap();
         auth.check_permission("get_channel_signing_status", &token)
             .unwrap();
+        auth.check_permission("get_channel_binding", &token)
+            .unwrap();
         auth.check_permission("submit_channel_signature", &token)
             .unwrap();
         assert!(auth
@@ -621,6 +624,12 @@ mod tests {
         assert!(auth
             .check_permission("get_channel_signing_status", &read_token)
             .is_ok());
+        assert!(auth
+            .check_permission("get_channel_binding", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_channel_binding", &write_token)
+            .is_err());
         assert!(auth
             .check_permission("get_channel_signing_status", &write_token)
             .is_err());

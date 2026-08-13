@@ -18,6 +18,7 @@ jobs:
           - external-funding-open
           - invoice-ops
           - lsp
+          - lsp-remote-signer
           - open-use-close-a-channel
           - udt
           - reestablish

@@ -698,6 +698,28 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     .expect("hosted tenant accepts Fiber core commands");
     assert!(activity.is_idle());
 
+    // Funding and closing transaction tracers are linked children which stop normally once their
+    // result is delivered. Their termination must not cascade into the hosted tenant runtime.
+    let (completed_child, completed_child_handle) = Actor::spawn_linked(
+        None,
+        NoopNetworkActor,
+        (),
+        tenant_rpc_context.fiber_actor.get_cell(),
+    )
+    .await
+    .expect("start hosted tenant child");
+    completed_child.stop(Some("test child completed".to_string()));
+    completed_child_handle
+        .await
+        .expect("join completed hosted tenant child");
+    let activity = ractor::call_t!(
+        tenant_rpc_context.fiber_actor.clone(),
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetHostedTenantActivity(reply)),
+        5_000
+    )
+    .expect("hosted tenant survives linked child termination");
+    assert!(activity.is_idle());
+
     let impostor = Actor::spawn(None, NoopNetworkActor, ())
         .await
         .expect("start impostor endpoint")

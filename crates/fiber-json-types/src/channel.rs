@@ -616,6 +616,35 @@ pub struct GetChannelSigningStatusResult {
     pub status: ChannelSigningStatus,
 }
 
+/// Parameters for reading the immutable identity an external signer should bind.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetChannelBindingParams {
+    /// The channel whose funding identity should be read.
+    pub channel_id: Hash256,
+}
+
+/// Immutable Fiber channel identity recorded by an external signer.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelBinding {
+    /// Fiber channel id assigned by the node.
+    pub channel_id: Hash256,
+    /// Funding transaction outpoint locked by this channel.
+    #[serde_as(as = "EntityHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub funding_outpoint: OutPoint,
+    /// Counterparty funding and TLC base public keys.
+    pub remote_public_keys: ChannelBasePublicKeys,
+    /// On-chain funding lock script.
+    pub funding_lock_script: Script,
+    /// Local cooperative-close shutdown script.
+    pub local_shutdown_script: Script,
+    /// Commitment delay encoded as a full epoch value.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub commitment_delay_epoch: u64,
+}
+
 /// Read-only projection of a channel's signer sub-state.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

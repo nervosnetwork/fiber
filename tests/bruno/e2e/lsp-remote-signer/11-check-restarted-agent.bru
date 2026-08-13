@@ -1,0 +1,32 @@
+meta {
+  name: verify signer identity after restart
+  type: http
+  seq: 11
+}
+
+get {
+  url: http://127.0.0.1:21917/status
+  body: none
+  auth: none
+}
+
+vars:post-response {
+  RESTART_MAX_ITERATIONS: 30
+}
+
+script:post-response {
+  const iteration = Number(bru.getVar("RESTART_ITERATION") || 0);
+  if (res.status === 200 && res.body.root_signer_pubkey === bru.getVar("REMOTE_ROOT_PUBKEY")) {
+    if (res.body.tenant_id !== bru.getVar("REMOTE_TENANT_ID")) throw new Error("tenant identity changed after restart");
+    if (res.body.tenant_token !== bru.getVar("REMOTE_TENANT_TOKEN")) throw new Error("tenant token changed after restart");
+    if (!res.body.bound_channel_ids.includes(bru.getVar("REMOTE_CHANNEL_ID"))) throw new Error("binding was not restored");
+    return;
+  }
+  if (iteration + 1 < Number(bru.getVar("RESTART_MAX_ITERATIONS"))) {
+    bru.setVar("RESTART_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("verify signer identity after restart");
+    return;
+  }
+  throw new Error(`SDK agent did not recover: ${JSON.stringify(res.body)}`);
+}

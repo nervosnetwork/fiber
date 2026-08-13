@@ -1,0 +1,19 @@
+meta {
+  name: restart independent SDK agent
+  type: http
+  seq: 10
+}
+
+post {
+  url: http://127.0.0.1:21917/shutdown
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+}

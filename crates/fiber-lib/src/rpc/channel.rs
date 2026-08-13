@@ -1,7 +1,7 @@
 use crate::fiber::{
     channel::{
-        ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,
-        ShutdownCommand, SubmitChannelSignatureCommand, UpdateCommand,
+        ChannelActorState, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+        ChannelOpenRecordStore, ShutdownCommand, SubmitChannelSignatureCommand, UpdateCommand,
     },
     network::{
         AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
@@ -36,12 +36,13 @@ use ractor::{call, ActorRef};
 use std::cmp::Reverse;
 
 pub use fiber_json_types::{
-    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelSigningStatus,
-    ChannelState, GetChannelSigningStatusParams, GetChannelSigningStatusResult, Hash256, Htlc,
-    ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
-    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    ShutdownChannelParams, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
-    SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, UpdateChannelParams,
+    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelBinding,
+    ChannelSigningStatus, ChannelState, GetChannelBindingParams, GetChannelSigningStatusParams,
+    GetChannelSigningStatusResult, Hash256, Htlc, ListChannelsParams, ListChannelsResult,
+    OpenChannelParams, OpenChannelResult, OpenChannelWithExternalFundingParams,
+    OpenChannelWithExternalFundingResult, ShutdownChannelParams, SubmitChannelSignatureParams,
+    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+    UpdateChannelParams,
 };
 
 /// RPC module for channel management.
@@ -124,6 +125,13 @@ trait ChannelRpc {
         &self,
         params: GetChannelSigningStatusParams,
     ) -> Result<GetChannelSigningStatusResult, ErrorObjectOwned>;
+
+    /// Reads the immutable channel identity an external signer binds before signing.
+    #[method(name = "get_channel_binding", with_extensions)]
+    async fn get_channel_binding(
+        &self,
+        params: GetChannelBindingParams,
+    ) -> Result<ChannelBinding, ErrorObjectOwned>;
 
     /// Submits a partial signature for the channel's current outstanding signing request.
     ///
@@ -359,6 +367,19 @@ where
                 .await;
         }
         self.get_channel_signing_status(params).await
+    }
+
+    async fn get_channel_binding(
+        &self,
+        extensions: &Extensions,
+        params: GetChannelBindingParams,
+    ) -> Result<ChannelBinding, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
+                .get_channel_binding(params)
+                .await;
+        }
+        self.get_channel_binding(params).await
     }
 
     async fn submit_channel_signature(
@@ -814,6 +835,18 @@ where
         })
     }
 
+    /// Reads the immutable channel identity required by bound SDK signing.
+    pub async fn get_channel_binding(
+        &self,
+        params: GetChannelBindingParams,
+    ) -> Result<ChannelBinding, ErrorObjectOwned> {
+        let channel_id: fiber_types::Hash256 = params.channel_id.into();
+        let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+            return Err(rpc_error(format!("channel {channel_id:?} not found")));
+        };
+        to_rpc_channel_binding(&state).rpc_err()
+    }
+
     /// Submits a verified external signature and resumes the channel actor.
     pub async fn submit_channel_signature(
         &self,
@@ -1083,6 +1116,42 @@ fn try_into_channel_open_signer_material(
             .channel_announcement_nonce
             .map(try_into_pub_nonce)
             .transpose()?,
+    })
+}
+
+pub(crate) fn to_rpc_channel_binding(state: &ChannelActorState) -> Result<ChannelBinding, String> {
+    let funding_outpoint_is_stable = state
+        .external_funding
+        .as_ref()
+        .is_some_and(|funding| funding.signed_submitted)
+        || !matches!(
+            state.state,
+            fiber_types::ChannelState::NegotiatingFunding(_)
+                | fiber_types::ChannelState::CollaboratingFundingTx(_)
+        );
+    if !funding_outpoint_is_stable {
+        return Err(
+            "channel funding outpoint is not stable until the signed funding transaction is submitted"
+                .to_string(),
+        );
+    }
+    let funding_outpoint = state
+        .get_funding_transaction_outpoint()
+        .ok_or_else(|| "channel funding outpoint is not available yet".to_string())?;
+    let remote_public_keys = state
+        .remote_channel_public_keys
+        .clone()
+        .ok_or_else(|| "remote channel public keys are not available yet".to_string())?;
+    Ok(ChannelBinding {
+        channel_id: state.get_id().into(),
+        funding_outpoint,
+        remote_public_keys: fiber_json_types::ChannelBasePublicKeys {
+            funding_pubkey: remote_public_keys.funding_pubkey.into(),
+            tlc_base_key: remote_public_keys.tlc_base_key.into(),
+        },
+        funding_lock_script: state.get_funding_lock_script().into(),
+        local_shutdown_script: state.get_local_shutdown_script().into(),
+        commitment_delay_epoch: state.commitment_delay_epoch,
     })
 }
 

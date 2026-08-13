@@ -32,8 +32,9 @@ use crate::fiber::{FiberActorMessage, FiberActorRef};
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::channel::{
-    to_rpc_channel_open_signer_material, to_rpc_next_channel_signer_material,
-    try_into_musig2_signing_content, GetChannelSigningStatusParams, GetChannelSigningStatusResult,
+    to_rpc_channel_binding, to_rpc_channel_open_signer_material,
+    to_rpc_next_channel_signer_material, try_into_musig2_signing_content,
+    GetChannelSigningStatusParams, GetChannelSigningStatusResult,
     OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
     SubmitChannelSignatureParams, SubmitChannelSignatureResult, SubmitSignedFundingTxParams,
     SubmitSignedFundingTxResult,
@@ -12053,6 +12054,51 @@ fn test_external_funding_hydrate_restores_early_peer_commitment_signed_state() {
     assert!(
         persisted_state.is_waiting_for_external_funding_submission(),
         "pre-submit external funding should still use the external funding timeout after hydrate"
+    );
+}
+
+#[test]
+fn test_channel_binding_waits_for_stable_external_funding_outpoint() {
+    let mut state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state should exist");
+    let funding_tx = Transaction::default();
+    state.funding_tx = Some(funding_tx.clone());
+    state.state = ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty());
+    state.remote_channel_public_keys = Some(fiber_types::ChannelBasePublicKeys {
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_base_key: gen_rand_fiber_public_key(),
+    });
+    state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: funding_tx.clone(),
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: false,
+        peer_commitment_signed_received: false,
+    });
+
+    let error = to_rpc_channel_binding(&state)
+        .expect_err("pre-submit external funding outpoint must not be exposed");
+    assert!(error.contains("not stable"));
+
+    state.external_funding = None;
+    assert!(to_rpc_channel_binding(&state).is_err());
+    state.external_funding = Some(fiber_types::ExternalFundingPersistState {
+        funding_lock_script: Script::default(),
+        funding_lock_script_cell_deps: vec![],
+        unsigned_funding_tx: funding_tx,
+        started_at_ms: now_timestamp_as_millis_u64(),
+        signed_submitted: true,
+        peer_commitment_signed_received: false,
+    });
+
+    let binding = to_rpc_channel_binding(&state)
+        .expect("submitted external funding outpoint should be stable");
+    assert_eq!(
+        binding.funding_outpoint,
+        state.must_get_funding_transaction_outpoint()
     );
 }
 

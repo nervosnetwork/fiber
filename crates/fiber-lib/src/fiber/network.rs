@@ -8205,6 +8205,29 @@ where
             .await;
         Ok(())
     }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        // Channel, payment, and transaction-tracing actors are linked children. A child finishing
+        // its work must not stop the tenant data-plane actor that owns all of the other channels.
+        match message {
+            SupervisionEvent::ActorTerminated(who, _state, reason) => {
+                debug!(
+                    "Hosted tenant child {:?} terminated with reason {:?}",
+                    who, reason
+                );
+            }
+            SupervisionEvent::ActorFailed(who, error) => {
+                log_actor_failed(who, error);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]

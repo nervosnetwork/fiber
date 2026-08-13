@@ -2350,6 +2350,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-lsp-sdk-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ckb-types",
+ "clap",
+ "fiber-json-types",
+ "fiber-lsp-sdk",
+ "fiber-types 0.9.0",
+ "hex",
+ "molecule",
+ "musig2",
+ "reqwest",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fiber-sphinx"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
