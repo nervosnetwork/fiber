@@ -1456,19 +1456,7 @@ where
         &self,
         swap_id: &Hash256,
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
-        let swap = self
-            .store
-            .get_liquidity_swap(swap_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| {
-                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
-            })?;
-        Ok(LiquiditySwapResponse {
-            swap_id: swap.swap_id.into(),
-            state: "onchain_lock_pending".to_string(),
-            payment_hash: swap.payment_hash.into(),
-            created_at: swap.created_at,
-        })
+        self.swap_response(swap_id)
     }
 }
 
@@ -3631,7 +3619,16 @@ mod tests {
         }
 
         async fn spawn_actor(&self) -> ractor::ActorRef<LiquidityActorMessage> {
-            let (actor, _handle) = ractor::Actor::spawn(
+            self.spawn_actor_with_handle().await.0
+        }
+
+        async fn spawn_actor_with_handle(
+            &self,
+        ) -> (
+            ractor::ActorRef<LiquidityActorMessage>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            ractor::Actor::spawn(
                 None,
                 LiquidityActor::<_, _, _>(std::marker::PhantomData),
                 LiquidityActorArguments {
@@ -3641,8 +3638,7 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
-            actor
+            .unwrap()
         }
     }
 
@@ -4692,7 +4688,7 @@ mod tests {
         .unwrap()
     }
 
-    async fn stop_import_liquidity_quote_actor(
+    async fn stop_liquidity_actor(
         actor: ActorRef<LiquidityActorMessage>,
         handle: tokio::task::JoinHandle<()>,
     ) {
@@ -4724,7 +4720,7 @@ mod tests {
         let (actor, handle) = spawn_import_liquidity_quote_actor(&harness).await;
 
         let envelope = import_liquidity_quote(&actor, import_liquidity_quote_params(&terms)).await;
-        stop_import_liquidity_quote_actor(actor, handle).await;
+        stop_liquidity_actor(actor, handle).await;
         let envelope = envelope.unwrap();
 
         assert_same_envelope(
@@ -4750,7 +4746,7 @@ mod tests {
             import_liquidity_quote(&actor, params.clone()),
             import_liquidity_quote(&actor, params),
         );
-        stop_import_liquidity_quote_actor(actor, handle).await;
+        stop_liquidity_actor(actor, handle).await;
         let first = first.unwrap();
         let second = second.unwrap();
 
@@ -4774,7 +4770,7 @@ mod tests {
 
         let error =
             import_liquidity_quote(&actor, import_liquidity_quote_params(&conflicting)).await;
-        stop_import_liquidity_quote_actor(actor, handle).await;
+        stop_liquidity_actor(actor, handle).await;
         first.unwrap();
         let error = error.unwrap_err();
 
@@ -4814,7 +4810,7 @@ mod tests {
             let (actor, handle) = spawn_import_liquidity_quote_actor(&harness).await;
 
             let error = import_liquidity_quote(&actor, params).await;
-            stop_import_liquidity_quote_actor(actor, handle).await;
+            stop_liquidity_actor(actor, handle).await;
             error.unwrap_err();
 
             assert_eq!(harness.store.get_loop_out_quote(&quote_id).unwrap(), None);
@@ -4851,7 +4847,7 @@ mod tests {
 
         let response = call_loop_in(actor, quote.quote_id).await.unwrap();
 
-        assert_eq!(response.state, "onchain_lock_pending");
+        assert_eq!(response.state, "OnchainLockPending");
         assert_eq!(
             events.borrow().as_slice(),
             ["client_insert_swap", "broadcast_loop_in_lock"]
@@ -4902,7 +4898,7 @@ mod tests {
 
         let response = call_loop_in(actor, quote.quote_id).await.unwrap();
 
-        assert_eq!(response.state, "onchain_lock_pending");
+        assert_eq!(response.state, "OnchainLockPending");
     }
 
     #[tokio::test]
@@ -5026,7 +5022,7 @@ mod tests {
 
         let retry = call_loop_in(actor, quote.quote_id).await.unwrap();
 
-        assert_eq!(retry.state, "onchain_lock_pending");
+        assert_eq!(retry.state, "OnchainLockPending");
         assert_eq!(event_count(&events, "client_insert_swap"), 1);
         assert_eq!(event_count(&events, "broadcast_loop_in_lock"), 2);
     }
@@ -6024,10 +6020,21 @@ mod tests {
             .unwrap();
         let quote_id: Hash256 = quote.quote_id.into();
         let lock_tx_hash: Hash256 = [53u8; 32].into();
-        let actor = harness.spawn_actor().await;
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
 
         let first_response = call_provider_accept_loop_in(&actor, quote_id, lock_tx_hash, 2)
             .await
+            .unwrap();
+        harness
+            .store
+            .update_liquidity_swap_state(
+                &quote_id,
+                LiquidityStateTransition {
+                    state: LiquiditySwapState::OnchainLocked,
+                    updated_at: now_ms(),
+                    reason: None,
+                },
+            )
             .unwrap();
         let original_swap = harness
             .store
@@ -6043,7 +6050,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(second_response.swap_id, first_response.swap_id);
-        assert_eq!(second_response.state, first_response.state);
+        assert_eq!(second_response.state, "OnchainLocked");
         assert_eq!(second_response.payment_hash, first_response.payment_hash);
         assert_eq!(second_response.created_at, first_response.created_at);
         assert_eq!(harness.events(), events_after_first_accept);
@@ -6071,6 +6078,7 @@ mod tests {
             Some(original_tx)
         );
         assert_eq!(harness.events(), events_after_first_accept);
+        stop_liquidity_actor(actor, handle).await;
     }
 
     #[tokio::test]
@@ -6242,7 +6250,7 @@ mod tests {
         let harness = RuntimeActorHarness::new_provider();
         let quote = harness.loop_out_quote_terms();
         harness.store_quote(quote.clone());
-        let actor = harness.spawn_actor().await;
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
 
         let first_response = call_provider_accept_loop_out(&actor, quote.quote_id)
             .await
@@ -6264,6 +6272,7 @@ mod tests {
         assert_eq!(event_count(&harness.events, "send_payment"), 0);
         assert_eq!(harness.chain.payout_locks.borrow().len(), 1);
         assert_eq!(*harness.store.quote_writes.borrow(), 1);
+        stop_liquidity_actor(actor, handle).await;
     }
 
     #[tokio::test]
