@@ -401,6 +401,8 @@ where
             .ok_or_else(|| LiquidityLoopOutError::AssetNotFound(params.asset_id.clone()))?;
         let now_ms = now_ms();
         let expires_at = quote_expires_at(now_ms, params.expires_after_seconds)?;
+        let claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
+        let refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
         let validated = validate_loop_out_quote_request(
             &asset,
             params.amount,
@@ -424,8 +426,8 @@ where
             expires_at: validated.expires_at,
             payout_deadline: validated.expires_at.saturating_add(10_000),
             refund_after_lock_time: validated.expires_at.saturating_add(20_000),
-            claimant_lock: Default::default(),
-            refund_lock: Default::default(),
+            claimant_lock,
+            refund_lock,
             client_invoice: None,
         };
         self.store
@@ -476,7 +478,8 @@ where
             provider: _,
             asset_id,
             amount,
-            receiver,
+            claimant_lock,
+            refund_lock,
             max_provider_fee,
             max_routing_fee,
             expires_after_seconds,
@@ -485,7 +488,8 @@ where
         self.handle_provider_quote_loop_out(ProviderQuoteLoopOutParams {
             asset_id,
             amount,
-            receiver,
+            claimant_lock,
+            refund_lock,
             max_provider_fee,
             max_routing_fee,
             expires_after_seconds,
@@ -834,14 +838,9 @@ where
                 "loop out quote already accepted: {quote_id:?}"
             )));
         }
-        let mut quote = self.quote_terms(&quote_id)?;
+        let quote = self.quote_terms(&quote_id)?;
         ensure_loop_out_quote_terms(&quote)?;
-        quote.claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
-        quote.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
         let now_ms = now_ms();
-        self.store
-            .insert_loop_out_quote(quote.clone(), now_ms)
-            .map_err(map_store_error)?;
         let swap_id =
             accept_provider_loop_out(&self.store, &mut self.chain, quote, now_ms, myself.clone())
                 .await?;
@@ -1481,7 +1480,8 @@ fn loop_out_quote_hash(params: &ProviderQuoteLoopOutParams, now_ms: u64, domain:
     seed.extend_from_slice(domain);
     seed.extend_from_slice(params.asset_id.as_bytes());
     seed.extend_from_slice(&params.amount.to_le_bytes());
-    seed.extend_from_slice(params.receiver.as_bytes());
+    seed.extend_from_slice(params.claimant_lock.as_bytes());
+    seed.extend_from_slice(params.refund_lock.as_bytes());
     seed.extend_from_slice(&params.max_provider_fee.to_le_bytes());
     seed.extend_from_slice(&params.max_routing_fee.to_le_bytes());
     seed.extend_from_slice(&params.expires_after_seconds.to_le_bytes());
@@ -2651,6 +2651,7 @@ mod tests {
     struct TestLiquidityStore {
         swaps: Shared<HashMap<Hash256, LiquiditySwapRecord>>,
         quotes: Shared<HashMap<Hash256, LoopOutQuoteTerms>>,
+        quote_writes: Shared<usize>,
         assets: Shared<HashMap<String, LiquidityAsset>>,
         chain_txs: Shared<HashMap<(Hash256, LiquidityChainTxRole), LiquidityChainTxRecord>>,
         events: Shared<Vec<&'static str>>,
@@ -2664,6 +2665,7 @@ mod tests {
             Self {
                 swaps: Shared::new(HashMap::new()),
                 quotes: Shared::new(HashMap::new()),
+                quote_writes: Shared::new(0),
                 assets: Shared::new(HashMap::new()),
                 chain_txs: Shared::new(HashMap::new()),
                 events,
@@ -2789,6 +2791,7 @@ mod tests {
             quote: LoopOutQuoteTerms,
             _created_at: u64,
         ) -> Result<(), LiquidityStoreError> {
+            *self.quote_writes.borrow_mut() += 1;
             self.quotes.borrow_mut().insert(quote.quote_id, quote);
             Ok(())
         }
@@ -3597,27 +3600,11 @@ mod tests {
             &self,
             quote_id: Hash256,
         ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
-            self.call_provider_accept_with_locks(
-                quote_id,
-                script_hex(&Default::default()),
-                script_hex(&Default::default()),
-            )
-            .await
-        }
-
-        async fn call_provider_accept_with_locks(
-            &self,
-            quote_id: Hash256,
-            claimant_lock: String,
-            refund_lock: String,
-        ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
             ractor::call!(actor, |reply| {
                 LiquidityActorMessage::ProviderAcceptLoopOut(
                     ProviderAcceptLoopOutParams {
                         quote_id: quote_id.into(),
-                        claimant_lock,
-                        refund_lock,
                     },
                     reply,
                 )
@@ -5552,7 +5539,8 @@ mod tests {
             .call_provider_quote(ProviderQuoteLoopOutParams {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
-                receiver: "ckt1receiver".to_string(),
+                claimant_lock: script_hex(&script("provider-quote-claimant")),
+                refund_lock: script_hex(&script("provider-quote-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -5578,6 +5566,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_loop_out_quote_persists_final_scripts() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let claimant_lock = script("quote-final-claimant");
+        let refund_lock = script("quote-final-refund");
+
+        let quote = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                claimant_lock: script_hex(&claimant_lock),
+                refund_lock: script_hex(&refund_lock),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.claimant_lock, claimant_lock);
+        assert_eq!(persisted.refund_lock, refund_lock);
+    }
+
+    #[tokio::test]
+    async fn provider_loop_out_accept_does_not_mutate_quote() {
+        let harness = RuntimeActorHarness::new_provider();
+        let mut quote = harness.loop_out_quote_terms();
+        quote.claimant_lock = script("immutable-claimant");
+        quote.refund_lock = script("immutable-refund");
+        harness.store_quote(quote.clone());
+        let writes_before_accept = *harness.store.quote_writes.borrow();
+
+        harness.call_provider_accept(quote.quote_id).await.unwrap();
+
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted, quote);
+        assert_eq!(*harness.store.quote_writes.borrow(), writes_before_accept);
+    }
+
+    #[tokio::test]
     async fn quote_loop_out_uses_local_provider_quote_path() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
 
@@ -5586,7 +5622,8 @@ mod tests {
                 provider: "local".to_string(),
                 asset_id: "ckb".to_string(),
                 amount: 1000,
-                receiver: "ckt1receiver".to_string(),
+                claimant_lock: script_hex(&script("local-quote-claimant")),
+                refund_lock: script_hex(&script("local-quote-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -5650,7 +5687,8 @@ mod tests {
             .call_provider_quote(ProviderQuoteLoopOutParams {
                 asset_id: "ckb".to_string(),
                 amount: 100,
-                receiver: "ckt1receiver".to_string(),
+                claimant_lock: script_hex(&script("disabled-claimant")),
+                refund_lock: script_hex(&script("disabled-refund")),
                 max_provider_fee: 10,
                 max_routing_fee: 5,
                 expires_after_seconds: 60,
@@ -5820,7 +5858,8 @@ mod tests {
             .call_provider_quote(ProviderQuoteLoopOutParams {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
-                receiver: "ckt1receiver".to_string(),
+                claimant_lock: script_hex(&script("manual-claimant")),
+                refund_lock: script_hex(&script("manual-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -5852,21 +5891,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_accept_loop_out_uses_submitted_lock_scripts() {
+    async fn provider_accept_loop_out_uses_quoted_lock_scripts() {
         let harness = RuntimeActorHarness::new_provider();
-        let quote = harness.loop_out_quote_terms();
+        let mut quote = harness.loop_out_quote_terms();
         let claimant_lock = script("claimant-submitted");
         let refund_lock = script("refund-submitted");
+        quote.claimant_lock = claimant_lock.clone();
+        quote.refund_lock = refund_lock.clone();
         harness.store_quote(quote.clone());
 
-        harness
-            .call_provider_accept_with_locks(
-                quote.quote_id,
-                script_hex(&claimant_lock),
-                script_hex(&refund_lock),
-            )
-            .await
-            .unwrap();
+        harness.call_provider_accept(quote.quote_id).await.unwrap();
 
         assert_eq!(
             harness.chain.payout_locks.borrow().as_slice(),
@@ -5882,34 +5916,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_accept_loop_out_rejects_invalid_lock_before_side_effects() {
-        let harness = RuntimeActorHarness::new_provider();
-        let quote = harness.loop_out_quote_terms();
-        harness.store_quote(quote.clone());
-
-        let error = harness
-            .call_provider_accept_with_locks(
-                quote.quote_id,
-                "not-hex".to_string(),
-                script_hex(&Default::default()),
-            )
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("claimant_lock"));
-        assert!(harness.events().is_empty());
-        assert!(harness.chain.payout_locks.borrow().is_empty());
-    }
-
-    #[tokio::test]
     async fn provider_accept_loop_out_rejects_missing_quote_before_side_effects() {
         let harness = RuntimeActorHarness::new_provider();
         let error = harness
-            .call_provider_accept_with_locks(
-                [9u8; 32].into(),
-                script_hex(&Default::default()),
-                script_hex(&Default::default()),
-            )
+            .call_provider_accept([9u8; 32].into())
             .await
             .unwrap_err();
 
@@ -5923,29 +5933,18 @@ mod tests {
     #[tokio::test]
     async fn provider_accept_loop_out_rejects_duplicate_without_changing_locks() {
         let harness = RuntimeActorHarness::new_provider();
-        let quote = harness.loop_out_quote_terms();
+        let mut quote = harness.loop_out_quote_terms();
         let first_claimant_lock = script("claimant-first");
         let first_refund_lock = script("refund-first");
-        let second_claimant_lock = script("claimant-second");
-        let second_refund_lock = script("refund-second");
+        quote.claimant_lock = first_claimant_lock.clone();
+        quote.refund_lock = first_refund_lock.clone();
         harness.store_quote(quote.clone());
 
-        harness
-            .call_provider_accept_with_locks(
-                quote.quote_id,
-                script_hex(&first_claimant_lock),
-                script_hex(&first_refund_lock),
-            )
-            .await
-            .unwrap();
+        harness.call_provider_accept(quote.quote_id).await.unwrap();
         let events_after_first_accept = harness.events();
 
         let error = harness
-            .call_provider_accept_with_locks(
-                quote.quote_id,
-                script_hex(&second_claimant_lock),
-                script_hex(&second_refund_lock),
-            )
+            .call_provider_accept(quote.quote_id)
             .await
             .unwrap_err();
 
