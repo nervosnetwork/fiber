@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/fiber-lsp-sdk",
     "crates/fiber-lib",
     "crates/fiber-bin",
     "crates/fiber-store",

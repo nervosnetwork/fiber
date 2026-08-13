@@ -17,8 +17,11 @@
 #[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
+#[cfg(feature = "watchtower")]
+pub mod channel_signer;
 pub mod config;
 pub mod gen;
+pub mod hosted_lsp;
 pub mod invoice;
 pub mod network;
 pub mod onion;
@@ -36,7 +39,10 @@ pub use cch::{
     CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation,
 };
 pub use channel::*;
+#[cfg(feature = "watchtower")]
+pub use channel_signer::*;
 pub use config::*;
+pub use hosted_lsp::*;
 pub use invoice::*;
 pub use network::{HopRequire, PersistentNetworkActorState};
 pub use onion::*;
