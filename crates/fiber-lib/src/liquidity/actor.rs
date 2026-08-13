@@ -872,15 +872,20 @@ where
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
         ensure_provider_mode(&self.store)?;
         let quote_id: Hash256 = params.quote_id.into();
-        if self
+        if let Some(existing) = self
             .store
             .get_liquidity_swap(&quote_id)
             .map_err(map_store_error)?
-            .is_some()
         {
-            return Err(LiquidityLoopOutError::Store(format!(
-                "loop out quote already accepted: {quote_id:?}"
-            )));
+            if existing.role != LiquiditySwapRole::Provider
+                || existing.swap_kind != LiquiditySwapKind::LoopOut
+            {
+                return Err(LiquidityLoopOutError::Store(format!(
+                    "existing swap conflicts with provider loop out accept for quote {quote_id:?}: expected provider loop out, found {:?} {:?}",
+                    existing.role, existing.swap_kind
+                )));
+            }
+            return self.swap_response(&quote_id);
         }
         let quote = self.quote_terms(&quote_id)?;
         ensure_loop_out_quote_terms(&quote)?;
@@ -902,6 +907,39 @@ where
     ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
         ensure_provider_mode(&self.store)?;
         let quote_id: Hash256 = params.quote_id.into();
+        if let Some(existing) = self
+            .store
+            .get_liquidity_swap(&quote_id)
+            .map_err(map_store_error)?
+        {
+            if existing.role != LiquiditySwapRole::Provider
+                || existing.swap_kind != LiquiditySwapKind::LoopIn
+            {
+                return Err(LiquidityLoopOutError::Store(format!(
+                    "existing swap conflicts with provider loop in accept for quote {quote_id:?}: expected provider loop in, found {:?} {:?}",
+                    existing.role, existing.swap_kind
+                )));
+            }
+            let lock_tx_hash: Hash256 = params.lock_tx_hash.into();
+            let outpoint = OutPoint::new(lock_tx_hash.into(), params.lock_output_index);
+            let existing_tx = self
+                .store
+                .get_liquidity_chain_tx(&quote_id, LiquidityChainTxRole::Payout)
+                .map_err(map_store_error)?
+                .ok_or_else(|| {
+                    LiquidityLoopOutError::Store(format!(
+                        "existing provider loop in swap conflicts with accept params for quote {quote_id:?}: persisted lock outpoint is missing"
+                    ))
+                })?;
+            if existing_tx.tx_hash != lock_tx_hash
+                || existing_tx.outpoint.as_ref() != Some(&outpoint)
+            {
+                return Err(LiquidityLoopOutError::Store(format!(
+                    "existing provider loop in lock transaction does not match accept params for quote {quote_id:?}"
+                )));
+            }
+            return self.loop_in_swap_response(&quote_id);
+        }
         let quote = self.quote_terms(&quote_id)?;
         ensure_loop_in_quote_terms(&quote)?;
         let now_ms = now_ms();
@@ -3685,6 +3723,40 @@ mod tests {
         .unwrap()
     }
 
+    async fn call_provider_accept_loop_out(
+        actor: &ractor::ActorRef<LiquidityActorMessage>,
+        quote_id: Hash256,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        ractor::call!(actor, |reply| {
+            LiquidityActorMessage::ProviderAcceptLoopOut(
+                ProviderAcceptLoopOutParams {
+                    quote_id: quote_id.into(),
+                },
+                reply,
+            )
+        })
+        .unwrap()
+    }
+
+    async fn call_provider_accept_loop_in(
+        actor: &ractor::ActorRef<LiquidityActorMessage>,
+        quote_id: Hash256,
+        lock_tx_hash: Hash256,
+        lock_output_index: u32,
+    ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+        ractor::call!(actor, |reply| {
+            LiquidityActorMessage::ProviderAcceptLoopIn(
+                ProviderAcceptLoopInParams {
+                    quote_id: quote_id.into(),
+                    lock_tx_hash: lock_tx_hash.into(),
+                    lock_output_index,
+                },
+                reply,
+            )
+        })
+        .unwrap()
+    }
+
     async fn wait_for_event(events: &Shared<Vec<&'static str>>, expected: &'static str) {
         for _ in 0..250 {
             if events.borrow().contains(&expected) {
@@ -5934,6 +6006,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_accept_loop_in_is_idempotent() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let quote = harness
+            .call_quote_loop_in(QuoteLoopInParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                client_invoice: valid_client_invoice(100, [52u8; 32].into()),
+                claimant_lock: script_hex(&script("loop-in-idempotent-provider-claim")),
+                refund_lock: script_hex(&script("loop-in-idempotent-client-refund")),
+                max_provider_fee: 100,
+                max_routing_fee: 17,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+        let quote_id: Hash256 = quote.quote_id.into();
+        let lock_tx_hash: Hash256 = [53u8; 32].into();
+        let actor = harness.spawn_actor().await;
+
+        let first_response = call_provider_accept_loop_in(&actor, quote_id, lock_tx_hash, 2)
+            .await
+            .unwrap();
+        let original_swap = harness
+            .store
+            .get_liquidity_swap(&quote_id)
+            .unwrap()
+            .unwrap();
+        let original_tx = harness
+            .chain_tx_record(quote_id, LiquidityChainTxRole::Payout)
+            .unwrap();
+        let events_after_first_accept = harness.events();
+        let second_response = call_provider_accept_loop_in(&actor, quote_id, lock_tx_hash, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(second_response.swap_id, first_response.swap_id);
+        assert_eq!(second_response.state, first_response.state);
+        assert_eq!(second_response.payment_hash, first_response.payment_hash);
+        assert_eq!(second_response.created_at, first_response.created_at);
+        assert_eq!(harness.events(), events_after_first_accept);
+        assert_eq!(event_count(&harness.events, "provider_insert_created"), 1);
+        assert_eq!(event_count(&harness.events, "provider_persist_outpoint"), 1);
+        assert_eq!(event_count(&harness.events, "persist_payout_tx"), 1);
+        assert_eq!(
+            event_count(&harness.events, "validate_observed_loop_in_lock"),
+            1
+        );
+        assert_eq!(event_count(&harness.events, "watch_loop_in_lock"), 1);
+        assert_eq!(event_count(&harness.events, "send_payment"), 0);
+        assert_eq!(*harness.store.quote_writes.borrow(), 1);
+
+        let error = call_provider_accept_loop_in(&actor, quote_id, [54u8; 32].into(), 3)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match accept params"));
+        assert_eq!(
+            harness.store.get_liquidity_swap(&quote_id).unwrap(),
+            Some(original_swap)
+        );
+        assert_eq!(
+            harness.chain_tx_record(quote_id, LiquidityChainTxRole::Payout),
+            Some(original_tx)
+        );
+        assert_eq!(harness.events(), events_after_first_accept);
+    }
+
+    #[tokio::test]
     async fn provider_accept_loop_in_rejects_invalid_observed_lock_before_persistence() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "provider");
@@ -6098,6 +6238,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_accept_loop_out_is_idempotent() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+        let actor = harness.spawn_actor().await;
+
+        let first_response = call_provider_accept_loop_out(&actor, quote.quote_id)
+            .await
+            .unwrap();
+        let events_after_first_accept = harness.events();
+        let second_response = call_provider_accept_loop_out(&actor, quote.quote_id)
+            .await
+            .unwrap();
+
+        assert_eq!(second_response.swap_id, first_response.swap_id);
+        assert_eq!(second_response.state, first_response.state);
+        assert_eq!(second_response.payment_hash, first_response.payment_hash);
+        assert_eq!(second_response.created_at, first_response.created_at);
+        assert_eq!(harness.events(), events_after_first_accept);
+        assert_eq!(event_count(&harness.events, "provider_insert_created"), 1);
+        assert_eq!(event_count(&harness.events, "reserve_payout"), 1);
+        assert_eq!(event_count(&harness.events, "broadcast_payout"), 1);
+        assert_eq!(event_count(&harness.events, "watch_payout"), 1);
+        assert_eq!(event_count(&harness.events, "send_payment"), 0);
+        assert_eq!(harness.chain.payout_locks.borrow().len(), 1);
+        assert_eq!(*harness.store.quote_writes.borrow(), 1);
+    }
+
+    #[tokio::test]
     async fn provider_accept_loop_out_rejects_missing_quote_before_side_effects() {
         let harness = RuntimeActorHarness::new_provider();
         let error = harness
@@ -6113,7 +6282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_accept_loop_out_rejects_duplicate_without_changing_locks() {
+    async fn provider_accept_loop_out_rejects_conflicting_swap_without_changing_locks() {
         let harness = RuntimeActorHarness::new_provider();
         let mut quote = harness.loop_out_quote_terms();
         let first_claimant_lock = script("claimant-first");
@@ -6124,13 +6293,21 @@ mod tests {
 
         harness.call_provider_accept(quote.quote_id).await.unwrap();
         let events_after_first_accept = harness.events();
+        harness
+            .store
+            .swaps
+            .borrow_mut()
+            .get_mut(&quote.quote_id)
+            .unwrap()
+            .role = LiquiditySwapRole::Client;
 
         let error = harness
             .call_provider_accept(quote.quote_id)
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("already") || error.to_string().contains("exists"));
+        assert!(error.to_string().contains("conflicts"));
+        assert!(error.to_string().contains("expected provider loop out"));
         assert_eq!(harness.events(), events_after_first_accept);
         assert_eq!(
             harness.chain.payout_locks.borrow().as_slice(),
