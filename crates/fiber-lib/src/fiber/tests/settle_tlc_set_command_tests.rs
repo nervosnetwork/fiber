@@ -353,6 +353,9 @@ pub(crate) fn create_test_channel_state_with_tlc(
     ChannelActorState {
         core: ChannelActorData {
             state: ChannelState::ChannelReady,
+            signer_state: fiber_types::ChannelSignerState::Internal,
+            local_commitment_points: HashMap::new(),
+            local_public_nonces: HashMap::new(),
             public_channel_info: None,
             local_tlc_info: ChannelTlcInfo::default(),
             remote_tlc_info: None,
@@ -414,6 +417,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
     }
 }
 

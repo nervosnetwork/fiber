@@ -1031,6 +1031,69 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     })
     .await;
 
+    let accept = ractor::call!(public_t.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
+            crate::fiber::network::AcceptChannelCommand {
+                temp_channel_id: temporary_channel_id,
+                funding_amount: MIN_RESERVED_CKB,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            reply,
+        ))
+    })
+    .expect("public LSP network actor alive")
+    .expect("accept tenant channel");
+    let channel_id = accept.new_channel_id;
+    wait_until_async_timeout(|| {
+        let tenant_store = public_t
+            .store
+            .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+        async move {
+            crate::fiber::channel::ChannelActorStateStore::get_channel_actor_state(
+                &tenant_store,
+                &channel_id,
+            )
+            .is_some()
+        }
+    })
+    .await;
+
+    let signing_status: fiber_json_types::GetChannelSigningStatusResult = tenant_client
+        .request(
+            "get_channel_signing_status",
+            rpc_params![fiber_json_types::GetChannelSigningStatusParams {
+                channel_id: channel_id.into(),
+            }],
+        )
+        .await
+        .expect("read signing status from the tenant channel namespace");
+    assert!(matches!(
+        signing_status.status,
+        fiber_json_types::ChannelSigningStatus::Internal
+    ));
+
+    let submit_error = tenant_client
+        .request::<fiber_json_types::SubmitChannelSignatureResult, _>(
+            "submit_channel_signature",
+            rpc_params![fiber_json_types::SubmitChannelSignatureParams {
+                channel_id: channel_id.into(),
+                request_id: crate::fiber_types::Hash256::from([9; 32]).into(),
+                channel_revision: 1,
+                partial_signature: [1; 32],
+                next_material: None,
+            }],
+        )
+        .await
+        .expect_err("an internal tenant channel must reject external signatures");
+    assert!(submit_error
+        .to_string()
+        .contains("channel does not use an external signer"));
+
     let invoice: fiber_json_types::InvoiceResult = tenant_client
         .request(
             "new_invoice",

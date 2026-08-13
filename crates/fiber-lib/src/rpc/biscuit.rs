@@ -167,6 +167,11 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         r#"allow if write("channels");"#,
     );
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
+    b.rule(
+        "get_channel_signing_status",
+        r#"allow if read("channels");"#,
+    );
+    b.rule("submit_channel_signature", r#"allow if write("channels");"#);
     // dev
     b.rule("commitment_signed", r#"allow if write("dev");"#);
     b.rule("add_tlc", r#"allow if write("dev");"#);
@@ -401,6 +406,10 @@ mod tests {
         );
         auth.check_permission("new_invoice", &token).unwrap();
         auth.check_permission("send_payment", &token).unwrap();
+        auth.check_permission("get_channel_signing_status", &token)
+            .unwrap();
+        auth.check_permission("submit_channel_signature", &token)
+            .unwrap();
         assert!(auth
             .check_permission("lsp_register_tenant", &token)
             .is_err());
@@ -592,6 +601,35 @@ mod tests {
             assert!(auth.check_permission(method, &write_token).is_ok());
             assert!(auth.check_permission(method, &read_token).is_err());
         }
+    }
+
+    #[test]
+    fn test_biscuit_auth_channel_signing_separates_read_and_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        assert!(auth
+            .check_permission("get_channel_signing_status", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_channel_signing_status", &write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_channel_signature", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_channel_signature", &read_token)
+            .is_err());
     }
 
     #[test]

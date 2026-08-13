@@ -587,7 +587,9 @@ mod watchtower_convert {
                 payment_amount: tlc.payment_amount,
                 payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
-                local_key: tlc.local_key.into(),
+                local_key: tlc.local_key.map(Into::into),
+                local_key_pubkey: tlc.local_key_pubkey.map(Into::into),
+                local_key_commitment_number: tlc.local_key_commitment_number,
                 remote_key: tlc.remote_key.into(),
             }
         }
@@ -602,7 +604,13 @@ mod watchtower_convert {
                 payment_amount: tlc.payment_amount,
                 payment_hash: tlc.payment_hash.into(),
                 expiry: tlc.expiry,
-                local_key: tlc.local_key.try_into()?,
+                local_key: tlc.local_key.map(TryInto::try_into).transpose()?,
+                local_key_pubkey: tlc
+                    .local_key_pubkey
+                    .map(Pubkey::try_from)
+                    .transpose()
+                    .map_err(|e| format!("invalid local_key_pubkey: {e}"))?,
+                local_key_commitment_number: tlc.local_key_commitment_number,
                 remote_key: Pubkey::try_from(tlc.remote_key)
                     .map_err(|e| format!("invalid remote_key: {e}"))?,
             })

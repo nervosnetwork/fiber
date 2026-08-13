@@ -125,12 +125,12 @@ pub use fiber_types::HopRequire;
 use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    UdtCfgInfos, NO_SHARED_SECRET,
+    ChannelOpenSignerMaterial, ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags,
+    EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords,
+    PaymentSession, PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState,
+    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevocationData, RouterHop, SettlementData, ShuttingDownFlags, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1274,6 +1274,7 @@ pub struct OpenChannelWithExternalFundingCommand {
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
+    pub external_channel_signer: Option<ChannelOpenSignerMaterial>,
 }
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1351,7 +1352,8 @@ pub enum NetworkServiceEvent {
         Pubkey,
         Hash256,
         Option<Script>,
-        Privkey,
+        Option<Privkey>,
+        Pubkey,
         Pubkey,
         Pubkey,
         Pubkey,
@@ -6752,6 +6754,7 @@ where
             tlc_fee_proportional_millionths,
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
+            external_channel_signer,
         } = command;
 
         let remote_pubkey = self.is_peer_available(&pubkey).then_some(pubkey).ok_or(
@@ -6825,6 +6828,7 @@ where
                             .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                         max_tlc_number_in_flight: max_tlc_number_in_flight
                             .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                        external_channel_signer,
                     },
                 ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),

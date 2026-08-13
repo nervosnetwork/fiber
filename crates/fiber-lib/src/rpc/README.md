@@ -29,6 +29,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_channel`](#channel-update_channel)
         * [Method `open_channel_with_external_funding`](#channel-open_channel_with_external_funding)
         * [Method `submit_signed_funding_tx`](#channel-submit_signed_funding_tx)
+        * [Method `get_channel_signing_status`](#channel-get_channel_signing_status)
+        * [Method `submit_channel_signature`](#channel-submit_channel_signature)
     * [Module Dev](#module-dev)
         * [Method `commitment_signed`](#dev-commitment_signed)
         * [Method `add_tlc`](#dev-add_tlc)
@@ -85,7 +87,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
+    * [Type `ChannelBasePublicKeys`](#type-channelbasepublickeys)
     * [Type `ChannelInfo`](#type-channelinfo)
+    * [Type `ChannelOpenSignerMaterial`](#type-channelopensignermaterial)
+    * [Type `ChannelSigningStatus`](#type-channelsigningstatus)
     * [Type `ChannelState`](#type-channelstate)
     * [Type `ChannelUpdateInfo`](#type-channelupdateinfo)
     * [Type `CkbInvoice`](#type-ckbinvoice)
@@ -104,6 +109,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `LspTenantRuntimeStatus`](#type-lsptenantruntimestatus)
     * [Type `LspTenantStatus`](#type-lsptenantstatus)
     * [Type `NewInvoiceParams`](#type-newinvoiceparams)
+    * [Type `NextChannelSignerMaterial`](#type-nextchannelsignermaterial)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
@@ -446,6 +452,8 @@ Opens a channel with external funding. The node will negotiate the channel with 
  This parameter can not be updated after channel is opened.
 * `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
  This parameter can not be updated after channel is opened.
+* `external_channel_signer` - <em>Option<[ChannelOpenSignerMaterial](#type-channelopensignermaterial)></em>, Optional public channel-signer material. When present, the node treats the
+ channel as externally signed and never holds or falls back to local channel keys.
 
 ##### Returns
 
@@ -478,6 +486,56 @@ Submits a signed funding transaction for an externally funded channel.
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID.
 * `funding_tx_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the funding transaction that was submitted.
+
+---
+
+
+
+<a id="channel-get_channel_signing_status"></a>
+#### Method `get_channel_signing_status`
+
+Reads the current external signing status for a channel.
+
+ This method reads persisted channel state and does not require the channel actor
+ to process a command. When the status is `SignatureRequired`, the response includes
+ the structured MuSig2 plaintext. An external signer hashes that plaintext independently
+ and submits the resulting partial signature with `submit_channel_signature`.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel whose signer state should be read.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel whose signer state was read.
+* `status` - <em>[ChannelSigningStatus](#type-channelsigningstatus)</em>, Current signer status for this channel.
+
+---
+
+
+
+<a id="channel-submit_channel_signature"></a>
+#### Method `submit_channel_signature`
+
+Submits a partial signature for the channel's current outstanding signing request.
+
+ The node verifies `request_id` and `channel_revision` against the persisted request,
+ checks the partial signature against the saved plaintext, then resumes the channel
+ state machine. The caller cannot replace the transaction or signing content.
+ Optional `next_material` supplies the next commitment point and public nonces.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel that produced the outstanding signature request.
+* `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
+* `channel_revision` - <em>`u64`</em>, Channel signer revision that must match the current request.
+* `partial_signature` - <em>``</em>, MuSig2 partial signature over the persisted plaintext (32 bytes, `0x`-prefixed hex).
+* `next_material` - <em>Option<[NextChannelSignerMaterial](#type-nextchannelsignermaterial)></em>, Optional next-round public commitment point and nonces.
+
+##### Returns
+
+* `Applied` - <em>``</em>, The signature was verified and the channel state machine resumed.
+* `AlreadyApplied` - <em>``</em>, The same signature was already applied for this request.
 
 ---
 
@@ -1387,7 +1445,10 @@ Create a new watched channel
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, Funding UDT type script
-* `local_settlement_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to settle the commitment transaction (hex without 0x prefix)
+* `local_settlement_key` - <em>Option<[Privkey](#type-privkey)></em>, The local party's private key used to settle the commitment transaction.
+ Omitted when an external signer owns the key.
+* `local_settlement_key_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, Public key committed to the local settlement path. Required when the
+ private key is omitted; legacy callers may omit it when providing the key.
 * `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
@@ -1606,6 +1667,19 @@ The channel data structure.
  Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
 ---
 
+<a id="#type-channelbasepublickeys"></a>
+### Type `ChannelBasePublicKeys`
+
+One counterparty's public keys which do not change over the life of a channel.
+
+
+#### Fields
+
+* `funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key used to sign commitment transactions, as it appears in the
+ on-chain 2-of-2 MuSig2 funding output.
+* `tlc_base_key` - <em>[Pubkey](#type-pubkey)</em>, The base point used to derive per-commitment TLC public keys.
+---
+
 <a id="#type-channelinfo"></a>
 ### Type `ChannelInfo`
 
@@ -1624,6 +1698,36 @@ The Channel information.
 * `capacity` - <em>`u128`</em>, The capacity of the channel.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the channel.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel.
+---
+
+<a id="#type-channelopensignermaterial"></a>
+### Type `ChannelOpenSignerMaterial`
+
+Public channel-signer material required to send Fiber's `OpenChannel` message.
+
+
+#### Fields
+
+* `base_public_keys` - <em>[ChannelBasePublicKeys](#type-channelbasepublickeys)</em>, Static funding and TLC public keys for this channel.
+* `first_commitment_point` - <em>[Pubkey](#type-pubkey)</em>, Per-commitment point for commitment number 1.
+* `second_commitment_point` - <em>[Pubkey](#type-pubkey)</em>, Per-commitment point for commitment number 2.
+* `commitment_nonce` - <em>`Vec<u8>`</em>, Commitment public nonce at the initial local commitment number, encoded as `0x`-prefixed hex.
+* `next_commitment_nonce` - <em>`Vec<u8>`</em>, Commitment public nonce published in `TxComplete`, encoded as `0x`-prefixed hex.
+* `revocation_nonce` - <em>`Vec<u8>`</em>, Revocation public nonce published with `OpenChannel`, encoded as `0x`-prefixed hex.
+* `channel_announcement_nonce` - <em>`Option<Vec<u8>>`</em>, Channel-announcement public nonce; required for public channels and forbidden for private ones.
+---
+
+<a id="#type-channelsigningstatus"></a>
+### Type `ChannelSigningStatus`
+
+Read-only projection of a channel's signer sub-state.
+
+
+#### Enum with values of
+
+* `Internal` - This channel uses the node's local signer.
+* `NoSignatureRequired` - This channel uses an external signer, but no signature is currently required.
+* `SignatureRequired` - Channel processing is paused until this exact signature is submitted.
 ---
 
 <a id="#type-channelstate"></a>
@@ -1930,6 +2034,19 @@ The parameter struct for generating a new invoice.
 * `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
 ---
 
+<a id="#type-nextchannelsignermaterial"></a>
+### Type `NextChannelSignerMaterial`
+
+Follow-up public signer material submitted together with a channel signature.
+
+
+#### Fields
+
+* `next_commitment_point` - <em>Option<[Pubkey](#type-pubkey)></em>, Next local per-commitment point the node will need.
+* `next_commitment_nonce` - <em>`Option<Vec<u8>>`</em>, Next commitment public nonce, encoded as `0x`-prefixed hex.
+* `next_revocation_nonce` - <em>`Option<Vec<u8>>`</em>, Next revocation public nonce, encoded as `0x`-prefixed hex.
+---
+
 <a id="#type-nodeinfo"></a>
 ### Type `NodeInfo`
 
@@ -2135,7 +2252,10 @@ Data needed to authorize and execute a Time-Locked Contract (TLC) settlement tra
 * `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
 * `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
-* `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC (hex without 0x prefix)
+* `local_key` - <em>Option<[Privkey](#type-privkey)></em>, The local party's private key used to sign the TLC (hex without 0x prefix).
+ Omitted when an external signer owns the channel keys.
+* `local_key_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The signer-owned TLC public key.
+* `local_key_commitment_number` - <em>`Option<u64>`</em>, Commitment point index used to derive an external TLC key.
 * `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC (hex without 0x prefix)
 ---
 

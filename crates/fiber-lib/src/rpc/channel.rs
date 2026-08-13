@@ -1,7 +1,7 @@
 use crate::fiber::{
     channel::{
         ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,
-        ShutdownCommand, UpdateCommand,
+        ShutdownCommand, SubmitChannelSignatureCommand, UpdateCommand,
     },
     network::{
         AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
@@ -16,22 +16,32 @@ use ckb_types::{
     packed::{self},
     prelude::{IntoTransactionView, Unpack},
 };
-use fiber_types::{ChannelOpeningStatus, Pubkey, TLCId};
+use fiber_types::{
+    ChannelBasePublicKeys, ChannelOpenSignerMaterial, ChannelOpeningStatus,
+    ChannelSigningStatus as InternalChannelSigningStatus, NextChannelSignerMaterial, Pubkey,
+    SignatureRequestId, TLCId,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 
 use jsonrpsee::types::ErrorObjectOwned;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::Extensions;
+#[cfg(test)]
+use molecule::prelude::Entity;
+#[cfg(test)]
+use musig2::{AggNonce, KeyAggContext};
+use musig2::{PartialSignature, PubNonce};
 use ractor::{call, ActorRef};
 use std::cmp::Reverse;
 
 pub use fiber_json_types::{
-    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelState, Hash256,
-    Htlc, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
+    AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, Channel, ChannelSigningStatus,
+    ChannelState, GetChannelSigningStatusParams, GetChannelSigningStatusResult, Hash256, Htlc,
+    ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
     OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    ShutdownChannelParams, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
-    UpdateChannelParams,
+    ShutdownChannelParams, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
+    SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, UpdateChannelParams,
 };
 
 /// RPC module for channel management.
@@ -102,6 +112,30 @@ trait ChannelRpc {
         &self,
         params: SubmitSignedFundingTxParams,
     ) -> Result<SubmitSignedFundingTxResult, ErrorObjectOwned>;
+
+    /// Reads the current external signing status for a channel.
+    ///
+    /// This method reads persisted channel state and does not require the channel actor
+    /// to process a command. When the status is `SignatureRequired`, the response includes
+    /// the structured MuSig2 plaintext. An external signer hashes that plaintext independently
+    /// and submits the resulting partial signature with `submit_channel_signature`.
+    #[method(name = "get_channel_signing_status", with_extensions)]
+    async fn get_channel_signing_status(
+        &self,
+        params: GetChannelSigningStatusParams,
+    ) -> Result<GetChannelSigningStatusResult, ErrorObjectOwned>;
+
+    /// Submits a partial signature for the channel's current outstanding signing request.
+    ///
+    /// The node verifies `request_id` and `channel_revision` against the persisted request,
+    /// checks the partial signature against the saved plaintext, then resumes the channel
+    /// state machine. The caller cannot replace the transaction or signing content.
+    /// Optional `next_material` supplies the next commitment point and public nonces.
+    #[method(name = "submit_channel_signature", with_extensions)]
+    async fn submit_channel_signature(
+        &self,
+        params: SubmitChannelSignatureParams,
+    ) -> Result<SubmitChannelSignatureResult, ErrorObjectOwned>;
 }
 
 /// Convert a `PendingAcceptChannel` (inbound, not yet accepted) into a minimal `Channel`
@@ -312,6 +346,32 @@ where
                 .await;
         }
         self.submit_signed_funding_tx(params).await
+    }
+
+    async fn get_channel_signing_status(
+        &self,
+        extensions: &Extensions,
+        params: GetChannelSigningStatusParams,
+    ) -> Result<GetChannelSigningStatusResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
+                .get_channel_signing_status(params)
+                .await;
+        }
+        self.get_channel_signing_status(params).await
+    }
+
+    async fn submit_channel_signature(
+        &self,
+        extensions: &Extensions,
+        params: SubmitChannelSignatureParams,
+    ) -> Result<SubmitChannelSignatureResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
+                .submit_channel_signature(params)
+                .await;
+        }
+        self.submit_channel_signature(params).await
     }
 }
 impl<S> ChannelRpcServerImpl<S>
@@ -675,6 +735,12 @@ where
             .into_iter()
             .map(Into::into)
             .collect();
+        let external_channel_signer = params
+            .external_channel_signer
+            .clone()
+            .map(try_into_channel_open_signer_material)
+            .transpose()
+            .rpc_err()?;
         let message = |rpc_reply| {
             FiberActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
@@ -698,6 +764,7 @@ where
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+                    external_channel_signer: external_channel_signer.clone(),
                 },
                 rpc_reply,
             ))
@@ -730,5 +797,352 @@ where
             channel_id: channel_id.into(),
             funding_tx_hash: tx_hash.into(),
         })
+    }
+
+    /// Reads persisted signer state for one channel.
+    pub async fn get_channel_signing_status(
+        &self,
+        params: GetChannelSigningStatusParams,
+    ) -> Result<GetChannelSigningStatusResult, ErrorObjectOwned> {
+        let channel_id: fiber_types::Hash256 = params.channel_id.into();
+        let Some(state) = self.store.get_channel_actor_state(&channel_id) else {
+            return Err(rpc_error(format!("channel {channel_id:?} not found")));
+        };
+        Ok(GetChannelSigningStatusResult {
+            channel_id: channel_id.into(),
+            status: to_rpc_channel_signing_status(state.signer_state.signing_status()).rpc_err()?,
+        })
+    }
+
+    /// Submits a verified external signature and resumes the channel actor.
+    pub async fn submit_channel_signature(
+        &self,
+        params: SubmitChannelSignatureParams,
+    ) -> Result<SubmitChannelSignatureResult, ErrorObjectOwned> {
+        let channel_id: fiber_types::Hash256 = params.channel_id.into();
+        let request_id = SignatureRequestId(params.request_id.into());
+        let revision = params.channel_revision;
+        let partial_signature =
+            PartialSignature::from_slice(&params.partial_signature).rpc_err()?;
+        let next_material = params
+            .next_material
+            .clone()
+            .map(try_into_next_channel_signer_material)
+            .transpose()
+            .rpc_err()?;
+        let message = |rpc_reply| {
+            FiberActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::SubmitChannelSignature(
+                        SubmitChannelSignatureCommand {
+                            request_id,
+                            revision,
+                            partial_signature,
+                            next_material: next_material.clone(),
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|outcome| match outcome {
+            fiber_types::SubmitSignatureOutcome::Applied => SubmitChannelSignatureResult::Applied,
+            fiber_types::SubmitSignatureOutcome::AlreadyApplied => {
+                SubmitChannelSignatureResult::AlreadyApplied
+            }
+        })
+    }
+}
+
+fn to_rpc_channel_signing_status(
+    status: InternalChannelSigningStatus,
+) -> Result<ChannelSigningStatus, String> {
+    Ok(match status {
+        InternalChannelSigningStatus::Internal => ChannelSigningStatus::Internal,
+        InternalChannelSigningStatus::NoSignatureRequired => {
+            ChannelSigningStatus::NoSignatureRequired
+        }
+        InternalChannelSigningStatus::SignatureRequired {
+            request_id,
+            revision,
+            transition,
+            content,
+        } => ChannelSigningStatus::SignatureRequired {
+            request_id: request_id.0.into(),
+            revision,
+            transition: to_rpc_signing_transition(transition),
+            content: to_rpc_musig2_signing_content(content)?,
+        },
+    })
+}
+
+fn to_rpc_signing_transition(
+    transition: fiber_types::ChannelSigningTransition,
+) -> fiber_json_types::ChannelSigningTransition {
+    match transition {
+        fiber_types::ChannelSigningTransition::SendCommitmentSigned => {
+            fiber_json_types::ChannelSigningTransition::SendCommitmentSigned
+        }
+        fiber_types::ChannelSigningTransition::CompleteReceivedCommitment => {
+            fiber_json_types::ChannelSigningTransition::CompleteReceivedCommitment
+        }
+        fiber_types::ChannelSigningTransition::SendRevokeAndAck => {
+            fiber_json_types::ChannelSigningTransition::SendRevokeAndAck
+        }
+        fiber_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck => {
+            fiber_json_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck
+        }
+        fiber_types::ChannelSigningTransition::SendClosingSigned => {
+            fiber_json_types::ChannelSigningTransition::SendClosingSigned
+        }
+        fiber_types::ChannelSigningTransition::SignChannelAnnouncement => {
+            fiber_json_types::ChannelSigningTransition::SignChannelAnnouncement
+        }
+    }
+}
+
+fn to_rpc_musig2_signing_content(
+    content: fiber_types::Musig2SigningContent,
+) -> Result<fiber_json_types::Musig2SigningContent, String> {
+    Ok(fiber_json_types::Musig2SigningContent {
+        slot: fiber_json_types::NonceSlot {
+            purpose: to_rpc_nonce_purpose(content.slot.purpose),
+            commitment_number: content.slot.commitment_number,
+        },
+        commitment_counter: content.commitment_counter.map(to_rpc_commitment_counter),
+        key_agg_ctx: content.key_agg_ctx.serialize(),
+        agg_nonce: content.agg_nonce.serialize().to_vec(),
+        content: to_rpc_musig2_signable_content(content.content),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn try_into_musig2_signing_content(
+    content: fiber_json_types::Musig2SigningContent,
+) -> Result<fiber_types::Musig2SigningContent, String> {
+    Ok(fiber_types::Musig2SigningContent {
+        slot: fiber_types::NonceSlot {
+            purpose: from_rpc_nonce_purpose(content.slot.purpose),
+            commitment_number: content.slot.commitment_number,
+        },
+        commitment_counter: content.commitment_counter.map(from_rpc_commitment_counter),
+        key_agg_ctx: KeyAggContext::from_bytes(&content.key_agg_ctx)
+            .map_err(|error| error.to_string())?,
+        agg_nonce: AggNonce::from_bytes(&content.agg_nonce).map_err(|error| error.to_string())?,
+        content: try_into_musig2_signable_content(content.content)?,
+    })
+}
+
+fn to_rpc_nonce_purpose(purpose: fiber_types::NoncePurpose) -> fiber_json_types::NoncePurpose {
+    match purpose {
+        fiber_types::NoncePurpose::Commitment => fiber_json_types::NoncePurpose::Commitment,
+        fiber_types::NoncePurpose::Revocation => fiber_json_types::NoncePurpose::Revocation,
+        fiber_types::NoncePurpose::ChannelAnnouncement => {
+            fiber_json_types::NoncePurpose::ChannelAnnouncement
+        }
+    }
+}
+
+#[cfg(test)]
+fn from_rpc_nonce_purpose(purpose: fiber_json_types::NoncePurpose) -> fiber_types::NoncePurpose {
+    match purpose {
+        fiber_json_types::NoncePurpose::Commitment => fiber_types::NoncePurpose::Commitment,
+        fiber_json_types::NoncePurpose::Revocation => fiber_types::NoncePurpose::Revocation,
+        fiber_json_types::NoncePurpose::ChannelAnnouncement => {
+            fiber_types::NoncePurpose::ChannelAnnouncement
+        }
+    }
+}
+
+fn to_rpc_commitment_counter(
+    counter: fiber_types::CommitmentCounter,
+) -> fiber_json_types::CommitmentCounter {
+    match counter {
+        fiber_types::CommitmentCounter::Local => fiber_json_types::CommitmentCounter::Local,
+        fiber_types::CommitmentCounter::Remote => fiber_json_types::CommitmentCounter::Remote,
+    }
+}
+
+#[cfg(test)]
+fn from_rpc_commitment_counter(
+    counter: fiber_json_types::CommitmentCounter,
+) -> fiber_types::CommitmentCounter {
+    match counter {
+        fiber_json_types::CommitmentCounter::Local => fiber_types::CommitmentCounter::Local,
+        fiber_json_types::CommitmentCounter::Remote => fiber_types::CommitmentCounter::Remote,
+    }
+}
+
+fn to_rpc_musig2_signable_content(
+    content: fiber_types::Musig2SignableContent,
+) -> fiber_json_types::Musig2SignableContent {
+    if matches!(
+        content,
+        fiber_types::Musig2SignableContent::ChannelAnnouncement(_)
+    ) {
+        return fiber_json_types::Musig2SignableContent::ChannelAnnouncement {
+            unsigned_announcement: content.canonical_bytes(),
+        };
+    }
+    match content {
+        fiber_types::Musig2SignableContent::CommitmentTransaction(transaction) => {
+            fiber_json_types::Musig2SignableContent::CommitmentTransaction {
+                transaction: transaction.into(),
+            }
+        }
+        fiber_types::Musig2SignableContent::CooperativeCloseTransaction(transaction) => {
+            fiber_json_types::Musig2SignableContent::CooperativeCloseTransaction {
+                transaction: transaction.into(),
+            }
+        }
+        fiber_types::Musig2SignableContent::Revocation {
+            output,
+            output_data,
+            commitment_lock_script_args,
+        } => fiber_json_types::Musig2SignableContent::Revocation {
+            output,
+            output_data,
+            commitment_lock_script_args,
+        },
+        fiber_types::Musig2SignableContent::ChannelAnnouncement(_) => {
+            unreachable!("ChannelAnnouncement is converted from canonical bytes before this match")
+        }
+    }
+}
+
+#[cfg(test)]
+fn try_into_musig2_signable_content(
+    content: fiber_json_types::Musig2SignableContent,
+) -> Result<fiber_types::Musig2SignableContent, String> {
+    Ok(match content {
+        fiber_json_types::Musig2SignableContent::CommitmentTransaction { transaction } => {
+            fiber_types::Musig2SignableContent::CommitmentTransaction(transaction.into())
+        }
+        fiber_json_types::Musig2SignableContent::CooperativeCloseTransaction { transaction } => {
+            fiber_types::Musig2SignableContent::CooperativeCloseTransaction(transaction.into())
+        }
+        fiber_json_types::Musig2SignableContent::Revocation {
+            output,
+            output_data,
+            commitment_lock_script_args,
+        } => fiber_types::Musig2SignableContent::Revocation {
+            output,
+            output_data,
+            commitment_lock_script_args,
+        },
+        fiber_json_types::Musig2SignableContent::ChannelAnnouncement {
+            unsigned_announcement,
+        } => {
+            let molecule =
+                fiber_types::gen::gossip::ChannelAnnouncement::from_slice(&unsigned_announcement)
+                    .map_err(|error| error.to_string())?;
+            use ckb_types::prelude::Unpack;
+            fiber_types::Musig2SignableContent::ChannelAnnouncement(
+                fiber_types::ChannelAnnouncement {
+                    node1_signature: None,
+                    node2_signature: None,
+                    ckb_signature: None,
+                    features: molecule.features().unpack(),
+                    capacity: molecule.capacity().unpack(),
+                    chain_hash: molecule.chain_hash().into(),
+                    channel_outpoint: molecule.channel_outpoint(),
+                    udt_type_script: molecule.udt_type_script().to_opt(),
+                    node1_id: molecule
+                        .node1_id()
+                        .try_into()
+                        .map_err(|error: secp256k1::Error| error.to_string())?,
+                    node2_id: molecule
+                        .node2_id()
+                        .try_into()
+                        .map_err(|error: secp256k1::Error| error.to_string())?,
+                    ckb_key: molecule
+                        .ckb_key()
+                        .try_into()
+                        .map_err(|error: secp256k1::Error| error.to_string())?,
+                },
+            )
+        }
+    })
+}
+
+fn try_into_pub_nonce(bytes: Vec<u8>) -> Result<PubNonce, String> {
+    PubNonce::from_bytes(&bytes).map_err(|error| error.to_string())
+}
+
+fn try_into_channel_open_signer_material(
+    material: fiber_json_types::ChannelOpenSignerMaterial,
+) -> Result<ChannelOpenSignerMaterial, String> {
+    Ok(ChannelOpenSignerMaterial {
+        base_public_keys: ChannelBasePublicKeys {
+            funding_pubkey: Pubkey::try_from(material.base_public_keys.funding_pubkey)?,
+            tlc_base_key: Pubkey::try_from(material.base_public_keys.tlc_base_key)?,
+        },
+        first_commitment_point: Pubkey::try_from(material.first_commitment_point)?,
+        second_commitment_point: Pubkey::try_from(material.second_commitment_point)?,
+        commitment_nonce: try_into_pub_nonce(material.commitment_nonce)?,
+        next_commitment_nonce: try_into_pub_nonce(material.next_commitment_nonce)?,
+        revocation_nonce: try_into_pub_nonce(material.revocation_nonce)?,
+        channel_announcement_nonce: material
+            .channel_announcement_nonce
+            .map(try_into_pub_nonce)
+            .transpose()?,
+    })
+}
+
+fn try_into_next_channel_signer_material(
+    material: fiber_json_types::NextChannelSignerMaterial,
+) -> Result<NextChannelSignerMaterial, String> {
+    Ok(NextChannelSignerMaterial {
+        next_commitment_point: material
+            .next_commitment_point
+            .map(Pubkey::try_from)
+            .transpose()?,
+        next_commitment_nonce: material
+            .next_commitment_nonce
+            .map(try_into_pub_nonce)
+            .transpose()?,
+        next_revocation_nonce: material
+            .next_revocation_nonce
+            .map(try_into_pub_nonce)
+            .transpose()?,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn to_rpc_channel_open_signer_material(
+    material: &ChannelOpenSignerMaterial,
+) -> fiber_json_types::ChannelOpenSignerMaterial {
+    fiber_json_types::ChannelOpenSignerMaterial {
+        base_public_keys: fiber_json_types::ChannelBasePublicKeys {
+            funding_pubkey: material.base_public_keys.funding_pubkey.into(),
+            tlc_base_key: material.base_public_keys.tlc_base_key.into(),
+        },
+        first_commitment_point: material.first_commitment_point.into(),
+        second_commitment_point: material.second_commitment_point.into(),
+        commitment_nonce: material.commitment_nonce.serialize().to_vec(),
+        next_commitment_nonce: material.next_commitment_nonce.serialize().to_vec(),
+        revocation_nonce: material.revocation_nonce.serialize().to_vec(),
+        channel_announcement_nonce: material
+            .channel_announcement_nonce
+            .as_ref()
+            .map(|nonce| nonce.serialize().to_vec()),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn to_rpc_next_channel_signer_material(
+    material: &NextChannelSignerMaterial,
+) -> fiber_json_types::NextChannelSignerMaterial {
+    fiber_json_types::NextChannelSignerMaterial {
+        next_commitment_point: material.next_commitment_point.map(Into::into),
+        next_commitment_nonce: material
+            .next_commitment_nonce
+            .as_ref()
+            .map(|nonce| nonce.serialize().to_vec()),
+        next_revocation_nonce: material
+            .next_revocation_nonce
+            .as_ref()
+            .map(|nonce| nonce.serialize().to_vec()),
     }
 }

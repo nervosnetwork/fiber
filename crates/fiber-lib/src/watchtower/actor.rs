@@ -97,7 +97,8 @@ pub enum WatchtowerMessage {
     CreateChannel(
         Hash256,
         Option<Script>,
-        Privkey,
+        Option<Privkey>,
+        Pubkey,
         Pubkey,
         Pubkey,
         Pubkey,
@@ -159,6 +160,7 @@ where
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
+                local_settlement_key_pubkey,
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
@@ -168,6 +170,7 @@ where
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
+                local_settlement_key_pubkey,
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
@@ -798,7 +801,9 @@ fn tracked_settlement_tlcs(
     let settlement_witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
-        channel_data.local_settlement_key.clone(),
+        channel_data
+            .local_settlement_key_pubkey
+            .expect("watch channel must contain a local settlement pubkey"),
         channel_data.remote_settlement_key,
     );
     if blake160(&settlement_witness).as_ref() != committed_witness_hash {
@@ -1270,6 +1275,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             }
 
                             if pending_tlcs_count == 0 {
+                                let Some(local_settlement_key) =
+                                    channel_data.local_settlement_key.clone()
+                                else {
+                                    return Ok(None);
+                                };
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: 0xFF,
@@ -1278,13 +1288,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         preimage: None,
                                     },
                                     sw.settlement_local_amount,
-                                    channel_data.local_settlement_key.clone(),
+                                    local_settlement_key,
                                 ));
                             }
 
                             if let Some((unlock, unlock_amount, private_key)) = unlock_option {
                                 debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                                (unlock, unlock_amount, private_key, sw.to_witness())
+                                (unlock, unlock_amount, Some(private_key), sw.to_witness())
                             } else {
                                 return Ok(None);
                             }
@@ -1371,6 +1381,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         }
 
                         if pending_tlcs_count == 0 {
+                            let Some(local_settlement_key) =
+                                channel_data.local_settlement_key.clone()
+                            else {
+                                return Ok(None);
+                            };
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: 0xFE,
@@ -1379,13 +1394,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     preimage: None,
                                 },
                                 sw.settlement_remote_amount,
-                                channel_data.local_settlement_key.clone(),
+                                local_settlement_key,
                             ));
                         }
 
                         if let Some((unlock, unlock_amount, private_key)) = unlock_option {
                             debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                            (unlock, unlock_amount, private_key, sw.to_witness())
+                            (unlock, unlock_amount, Some(private_key), sw.to_witness())
                         } else {
                             return Ok(None);
                         }
@@ -1505,7 +1520,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     settlement_data_to_witness(
                         &settlement_data,
                         for_remote,
-                        channel_data.local_settlement_key.clone(),
+                        channel_data
+                            .local_settlement_key_pubkey
+                            .expect("watch channel must contain a local settlement pubkey"),
                         channel_data.remote_settlement_key,
                     ),
                 )
@@ -1685,6 +1702,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     vec![new_commitment_output, adjusted_settlement_output]
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
+                let Some(unlock_key) = unlock_key else {
+                    return Ok(None);
+                };
                 let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
             }
@@ -1916,6 +1936,9 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs(outputs)
                     .set_outputs_data(outputs_data)
                     .build();
+                let Some(unlock_key) = unlock_key else {
+                    return Ok(None);
+                };
                 let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
             }
@@ -2124,7 +2147,9 @@ impl Htlc {
                     self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
                 }
             };
-            (payment_hash_matches && pubkey_hash_matches).then_some(&settlement_tlc.local_key)
+            (payment_hash_matches && pubkey_hash_matches)
+                .then_some(settlement_tlc.local_key.as_ref())
+                .flatten()
         })
     }
 }
@@ -2339,7 +2364,8 @@ mod tests {
             _node_id: NodeId,
             _channel_id: Hash256,
             _funding_udt_type_script: Option<Script>,
-            _local_settlement_key: Privkey,
+            _local_settlement_key: Option<Privkey>,
+            _local_settlement_key_pubkey: Pubkey,
             _remote_settlement_key: Pubkey,
             _local_funding_pubkey: Pubkey,
             _remote_funding_pubkey: Pubkey,
@@ -2606,7 +2632,9 @@ mod tests {
             payment_amount: 1_000,
             payment_hash: queried_payment_hash,
             expiry: 60_000,
-            local_key: Privkey::from(&[3; 32]),
+            local_key: Some(Privkey::from(&[3; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[4; 32]).pubkey(),
         };
         let tracked_tlcs = vec![TrackedSettlementTlc {
@@ -2623,7 +2651,8 @@ mod tests {
         let channel_data = ChannelData {
             channel_id: [9u8; 32].into(),
             funding_udt_type_script: None,
-            local_settlement_key: local_settlement_key.clone(),
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
             remote_settlement_key,
             local_funding_pubkey: Privkey::from(&[5; 32]).pubkey(),
             remote_funding_pubkey: Privkey::from(&[6; 32]).pubkey(),
@@ -2638,7 +2667,7 @@ mod tests {
                 settlement_data_to_witness(
                     &settlement_data,
                     false,
-                    local_settlement_key,
+                    local_settlement_key.pubkey(),
                     remote_settlement_key,
                 )
                 .as_slice(),

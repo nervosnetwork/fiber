@@ -151,8 +151,35 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
         let channel_id = params.channel_id.into();
-        let local_settlement_key: fiber_types::Privkey =
-            params.local_settlement_key.try_into().map_err(rpc_error)?;
+        let local_settlement_key = params
+            .local_settlement_key
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(rpc_error)?;
+        let supplied_local_settlement_pubkey = params
+            .local_settlement_key_pubkey
+            .map(Pubkey::try_from)
+            .transpose()
+            .rpc_err()?;
+        let local_settlement_key_pubkey = supplied_local_settlement_pubkey
+            .or_else(|| {
+                local_settlement_key
+                    .as_ref()
+                    .map(fiber_types::Privkey::pubkey)
+            })
+            .ok_or_else(|| {
+                rpc_error(
+                    "local_settlement_key_pubkey is required when local_settlement_key is omitted",
+                )
+            })?;
+        if local_settlement_key
+            .as_ref()
+            .is_some_and(|key| key.pubkey() != local_settlement_key_pubkey)
+        {
+            return Err(rpc_error(
+                "local_settlement_key_pubkey does not match local_settlement_key",
+            ));
+        }
         let remote_settlement_key = Pubkey::try_from(params.remote_settlement_key).rpc_err()?;
         let local_funding_pubkey = Pubkey::try_from(params.local_funding_pubkey).rpc_err()?;
         let remote_funding_pubkey = Pubkey::try_from(params.remote_funding_pubkey).rpc_err()?;
@@ -167,6 +194,7 @@ where
             channel_id,
             funding_udt_type_script.map(Into::into),
             local_settlement_key,
+            local_settlement_key_pubkey,
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,

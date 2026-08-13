@@ -1,4 +1,4 @@
-//! Watchtower types (feature-gated).
+//! Settlement and watchtower persistence types.
 //!
 //! Contains the data structures used by the watchtower service to monitor channels
 //! and handle force-close scenarios.
@@ -53,10 +53,32 @@ pub struct SettlementTlc {
     pub payment_hash: Hash256,
     /// The expiry time for the TLC in milliseconds
     pub expiry: u64,
-    /// The local party's private key used to sign the TLC
-    pub local_key: Privkey,
+    /// The local party's private key used to sign the TLC.
+    ///
+    /// External signer channels leave this empty so channel private keys never
+    /// enter the node or watchtower store.
+    #[serde(default)]
+    pub local_key: Option<Privkey>,
+    /// Public key corresponding to the signer-owned TLC key.
+    ///
+    /// `None` preserves the legacy local-signer representation and derives the
+    /// public key from `local_key`. External signer channels always set it.
+    #[serde(default)]
+    pub local_key_pubkey: Option<Pubkey>,
+    /// Commitment point index used to derive an external signer TLC key.
+    #[serde(default)]
+    pub local_key_commitment_number: Option<u64>,
     /// The remote party's public key used to verify the TLC
     pub remote_key: Pubkey,
+}
+
+impl SettlementTlc {
+    /// Return the actual local TLC public key for witness construction.
+    pub fn local_pubkey(&self) -> Pubkey {
+        self.local_key_pubkey
+            .or_else(|| self.local_key.as_ref().map(Privkey::pubkey))
+            .expect("settlement TLC must contain a local public or private key")
+    }
 }
 
 /// The data of a channel that the watchtower is monitoring.
@@ -68,8 +90,13 @@ pub struct ChannelData {
     /// The UDT type script if this is a UDT channel, None for CKB channels
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
-    /// The local party's private key used to settle the commitment transaction
-    pub local_settlement_key: Privkey,
+    /// The local party's private key used to settle the commitment transaction.
+    /// External signer channels leave this empty.
+    #[serde(default)]
+    pub local_settlement_key: Option<Privkey>,
+    /// Public key used by the local settlement path.
+    #[serde(default)]
+    pub local_settlement_key_pubkey: Option<Pubkey>,
     /// The remote party's public key used to settle the commitment transaction
     pub remote_settlement_key: Pubkey,
     /// The local party's funding public key
@@ -85,4 +112,13 @@ pub struct ChannelData {
     pub local_settlement_data: SettlementData,
     /// Data needed to revoke an outdated commitment transaction
     pub revocation_data: Option<RevocationData>,
+}
+
+impl ChannelData {
+    /// Return the public key committed to the local settlement path.
+    pub fn local_settlement_pubkey(&self) -> Pubkey {
+        self.local_settlement_key_pubkey
+            .or_else(|| self.local_settlement_key.as_ref().map(Privkey::pubkey))
+            .expect("watch channel must contain a local settlement public or private key")
+    }
 }

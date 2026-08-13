@@ -133,6 +133,24 @@ pub mod channel {
             .map(result)
             .map_err(error)
     }
+    #[wasm_bindgen]
+    pub async fn get_channel_signing_status(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .channel
+            .get_channel_signing_status(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
+    #[wasm_bindgen]
+    pub async fn submit_channel_signature(params: JsValue) -> Result<JsValue, JsValue> {
+        fiber_wasm()?
+            .channel
+            .submit_channel_signature(param(params)?)
+            .await
+            .map(result)
+            .map_err(error)
+    }
 }
 
 pub mod graph {

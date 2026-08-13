@@ -26,7 +26,8 @@ pub trait WatchtowerStore {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
+        local_settlement_key: Option<Privkey>,
+        local_settlement_key_pubkey: Pubkey,
         remote_settlement_key: Pubkey,
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
@@ -112,7 +113,11 @@ pub fn channel_data_x_only_aggregated_pubkey(cd: &ChannelData, for_remote: bool)
 ///
 /// Free function replacement for `ChannelData::local_settlement_pubkey_hash()`.
 pub fn channel_data_local_settlement_pubkey_hash(cd: &ChannelData) -> [u8; 20] {
-    blake160(cd.local_settlement_key.pubkey().serialize().as_ref()).0
+    let pubkey = cd
+        .local_settlement_key_pubkey
+        .or_else(|| cd.local_settlement_key.as_ref().map(Privkey::pubkey))
+        .expect("watch channel must contain a local settlement public or private key");
+    blake160(pubkey.serialize().as_ref()).0
 }
 
 /// Compute the funding transaction lock script for a channel.

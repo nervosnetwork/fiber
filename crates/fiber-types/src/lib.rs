@@ -17,7 +17,6 @@
 #[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
-#[cfg(feature = "watchtower")]
 pub mod channel_signer;
 pub mod config;
 pub mod gen;
@@ -39,7 +38,6 @@ pub use cch::{
     CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation,
 };
 pub use channel::*;
-#[cfg(feature = "watchtower")]
 pub use channel_signer::*;
 pub use config::*;
 pub use hosted_lsp::*;
@@ -50,10 +48,8 @@ pub use payment::*;
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
 pub use protocol::*;
 
-#[cfg(feature = "watchtower")]
 pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};
 
-#[cfg(feature = "watchtower")]
 pub mod watchtower;
 
 pub use serde_utils::{
