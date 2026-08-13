@@ -79,8 +79,8 @@ custodial and is the boundary the remote signer integration changes.
 
 The signer prototype provides two related but separate mechanisms:
 
-1. `fiber-signer`, a runtime-independent Rust SDK that owns channel key
-   derivation, secret nonces, signing-safety state, and typed signing;
+1. a runtime-independent signer core that owns channel key derivation, secret
+   nonces, signing-safety state, and typed signing;
 2. persistent Node-side channel and watchtower signer state machines that pause
    on a typed request and resume after an idempotent signature submission.
 
@@ -93,7 +93,7 @@ External / Ready
 ```
 
 The client calls `get_channel_signing_status`, recomputes and reviews the typed
-signing content through `fiber-signer`, and calls
+signing content through `fiber-lsp-sdk`, and calls
 `submit_channel_signature`. A repeated identical submission returns
 `AlreadyApplied`; a conflicting result is rejected.
 
@@ -151,6 +151,38 @@ flowchart TB
 The gateway is a service-level component. It must remain available when a
 tenant runtime is cold. Evicting `HostedTenantActor U` must not invalidate the
 tenant credential, close a mobile signer session, or lose a pending request.
+
+### SDK ownership
+
+The remote signer is part of `fiber-lsp-sdk`; it is not a standalone
+`fiber-signer` crate. The SDK owns the complete client-side LSP workflow:
+
+```text
+fiber-lsp-sdk
+  signer
+    RootKey / RootSigner
+    channel signer and ChannelKeyId
+    signer storage abstraction
+  tenant
+    TenantRegistryPayload signing
+    nonce, registration, and Biscuit lifecycle
+  rpc
+    hosted-LSP RPC client and wire conversion
+  channel
+    signing-status polling, typed review, and signature submission
+```
+
+The signer and storage layers must remain runtime-independent and usable on
+native and WASM targets. Transport and scheduling are adapters above those
+layers so applications can select their own HTTP client, persistence backend,
+and polling or wake-up mechanism.
+
+The Node must not depend on `fiber-lsp-sdk`. Shared canonical payloads, tenant
+ID derivation, public signer material, and signer RPC wire types belong in
+`fiber-types` (and `fiber-json-types` where JSON conversion is required). The
+Node owns durable channel/watchtower signer state machines, signature
+verification, namespace authorization, and actor continuation. It never owns
+SDK channel secrets.
 
 ## Key custody
 
@@ -518,22 +550,32 @@ A tenant runtime may be evicted only when it has no:
 An outstanding request may survive runtime eviction only when all continuation
 data is durable and the signer gateway remains available independently.
 
-## Recommended implementation sequence
+## Implementation sequence and test gates
 
-1. Port signer types, `fiber-signer`, and combined migrations without changing
-   hosted runtime behavior.
-2. Port the deferred `ChannelActor` signer state machine into
-   `FiberActorCore`.
-3. Add tenant-scoped signer RPCs with separate cold-store query and hydrated
-   mutation paths.
-4. Add an end-to-end private U-T channel using external signer material,
-   including restart and idempotent submission tests.
-5. Add gateway/mailbox persistence, tenant session fencing, and readiness
-   synchronization.
-6. Gate hosted delivery dispatch on `TenantSignReady`.
-7. Integrate the tenant-scoped watchtower signer state machine.
-8. Complete invoice authorization, preimage release policy, and strict nonce
-   safety before making non-custodial claims.
+No phase is complete without its paired tests. Tests are implemented in the
+same change as the behavior they cover; a later end-to-end test does not
+replace unit tests for cryptographic encodings, state transitions, namespace
+checks, or crash recovery.
+
+| Phase | Implementation | Required test gate |
+| --- | --- | --- |
+| 1. Shared types and SDK signer core | Add `fiber-lsp-sdk`; move and adapt the prototype signer core; add canonical `TenantRegistryPayload` encoding and TenantId derivation to shared types | Fixed payload/digest and TenantId vectors; RootSigner create/open/restore; channel-key isolation; signer-store persistence; native tests and relevant WASM compile checks |
+| 2. Tenant registration | Add nonce storage and registration RPCs; verify the RootSigner proof; derive TenantId server-side; issue the tenant Biscuit; persist `root_signer_pubkey` | Nonce replacement, consumption, and replay rejection; wrong signature, public key, nonce, and LSP node rejection; derived TenantId cannot be client-controlled; persistence/restart test; nonce-to-registration RPC integration test |
+| 3. Channel signer state | Port the deferred external `ChannelActor` signer state machine into `FiberActorCore`; combine migrations; retain the internal signer path | Request/revision transition tests; wrong request, revision, signature, and next material rejection; `AlreadyApplied` idempotency; migration defaults existing channels to `Internal`; existing internal-signer regression tests |
+| 4. Tenant-scoped signer RPC | Add cold store-only status reads and hydrated signature submission; enforce namespace and private-channel ownership | Tenant A cannot query or submit for Tenant B; cold status query; submission hydrates and resumes the tenant; pending request survives restart |
+| 5. Hosted U-T external signer E2E | Connect SDK registration, Biscuit RPC client, external channel open, polling/signing loop, and payment flow | Registration through channel readiness; outbound and inbound payment; runtime eviction/rehydration; Node and SDK restart; repeated submission remains idempotent |
+| 6. Gateway and readiness | Add durable mailbox/cursors, signer sessions and fencing; gate delivery on `TenantSignReady` | Disconnect/reconnect and old-session fencing; mailbox recovery and cursor tests; delivery remains `Deferred` while signer is not ready; no duplicate downstream dispatch |
+| 7. Remaining signer policy | Integrate watchtower signing; define invoice authorization, preimage release, and strict nonce behavior | Watchtower recovery E2E; invoice/preimage policy tests; nonce reuse fails closed; restart and on-chain recovery tests |
+
+Each phase also runs formatting and targeted clippy checks. A change to shared
+types or persistence additionally runs the applicable native/WASM checks,
+migration-schema checks, and generated RPC documentation checks before the
+phase is accepted.
+
+The signer prototype is ported selectively. Its standalone crate boundary and
+its older network-actor integration are not merged wholesale: client-side code
+moves into `fiber-lsp-sdk`, while Node-side state machines are adapted to the
+hosted branch's restricted `FiberActorCommand` and `FiberActorCore` model.
 
 ## Open Tenant Registry decisions
 
