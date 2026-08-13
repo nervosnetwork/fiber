@@ -54,7 +54,7 @@ fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
 }
 
 #[test]
-fn test_local_graph_does_not_load_public_gossip() {
+fn test_owned_channel_graph_does_not_load_or_accept_public_gossip() {
     let (store, _dir) = generate_store();
     let (public_secret_key, public_key) = gen_rand_secp256k1_keypair_tuple();
     store.save_node_announcement(NodeAnnouncement::new_signed(
@@ -73,7 +73,23 @@ fn test_local_graph_does_not_load_public_gossip() {
     assert_eq!(public_graph.num_of_nodes(), 1);
 
     let (_, tenant_key) = gen_rand_secp256k1_keypair_tuple();
-    let tenant_graph = NetworkGraph::new_local(store, tenant_key.into());
+    let mut tenant_graph = NetworkGraph::new_owned_channels(store, tenant_key.into());
+    assert_eq!(tenant_graph.num_of_nodes(), 0);
+    assert!(!tenant_graph.update_for_messages(vec![
+        crate::fiber::types::BroadcastMessageWithTimestamp::NodeAnnouncement(
+            NodeAnnouncement::new_signed(
+                "another-public-node".into(),
+                FeatureVector::default(),
+                vec![],
+                &public_secret_key.into(),
+                get_chain_hash(),
+                now_timestamp_as_millis_u64() + 1,
+                0,
+                Default::default(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            ),
+        ),
+    ]));
     assert_eq!(tenant_graph.num_of_nodes(), 0);
 }
 

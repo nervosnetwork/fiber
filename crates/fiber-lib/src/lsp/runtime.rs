@@ -183,7 +183,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             .tenant_store
             .namespaced(NodeNamespace::hosted_tenant(record.tenant_id.as_str()));
         store.ensure_current_schema()?;
-        let graph = Arc::new(RwLock::new(NetworkGraph::new_local(
+        let graph = Arc::new(RwLock::new(NetworkGraph::new_owned_channels(
             store.clone(),
             tenant_pubkey,
         )));
