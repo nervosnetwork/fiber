@@ -53,6 +53,7 @@ fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     keys
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_owned_channel_graph_does_not_load_or_accept_public_gossip() {
     let (store, _dir) = generate_store();
