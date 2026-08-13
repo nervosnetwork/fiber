@@ -13,7 +13,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
 
 use crate::fiber::network::{
-    FiberActorMessage, HostedTenantActivity, NetworkActorCommand, NetworkActorMessage,
+    FiberActorCommand, FiberActorMessage, HostedTenantActivity, NetworkActorMessage,
 };
 use crate::fiber_types::{
     Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, TlcErrorCode,
@@ -134,7 +134,7 @@ impl Actor for NoopNetworkActor {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if let NetworkActorMessage::Fiber(FiberActorMessage::Command(
-            NetworkActorCommand::GetHostedTenantActivity(reply),
+            FiberActorCommand::GetHostedTenantActivity(reply),
         )) = message
         {
             let _ = reply.send(Default::default());
@@ -170,7 +170,7 @@ impl Actor for BusyNetworkActor {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if let NetworkActorMessage::Fiber(FiberActorMessage::Command(
-            NetworkActorCommand::GetHostedTenantActivity(reply),
+            FiberActorCommand::GetHostedTenantActivity(reply),
         )) = message
         {
             let _ = reply.send(HostedTenantActivity {
@@ -1014,10 +1014,10 @@ impl Actor for MockPublicNetworkActor {
             return Ok(());
         };
         match command {
-            NetworkActorCommand::GetPayment(_, reply) => {
+            FiberActorCommand::GetPayment(_, reply) => {
                 let _ = reply.send(Err("payment not started".to_string()));
             }
-            NetworkActorCommand::InspectBufferedTrampolineUpstream { reply, .. } => {
+            FiberActorCommand::InspectBufferedTrampolineUpstream { reply, .. } => {
                 let status = if state.upstream_pending.load(Ordering::Relaxed) {
                     crate::fiber::network::BufferedTrampolineUpstreamStatus::Pending
                 } else {
@@ -1025,7 +1025,7 @@ impl Actor for MockPublicNetworkActor {
                 };
                 let _ = reply.send(status);
             }
-            NetworkActorCommand::DispatchBufferedTrampoline { reply, .. } => {
+            FiberActorCommand::DispatchBufferedTrampoline { reply, .. } => {
                 state.dispatches.fetch_add(1, Ordering::Relaxed);
                 let should_fail_permanently = state
                     .permanent_dispatch_failures_remaining
@@ -1052,10 +1052,10 @@ impl Actor for MockPublicNetworkActor {
                     reply.send(Ok(()))
                 };
             }
-            NetworkActorCommand::ReconcileBufferedTrampolineSettlement { reply, .. } => {
+            FiberActorCommand::ReconcileBufferedTrampolineSettlement { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
-            NetworkActorCommand::FailBufferedTrampoline { reply, .. } => {
+            FiberActorCommand::FailBufferedTrampoline { reply, .. } => {
                 state.failures.fetch_add(1, Ordering::Relaxed);
                 let _ = reply.send(Ok(true));
             }

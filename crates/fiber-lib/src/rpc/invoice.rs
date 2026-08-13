@@ -5,7 +5,7 @@
 //!
 
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::{FiberActorMessage, FiberActorRef, NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage};
 use crate::invoice::{
     CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
@@ -449,7 +449,7 @@ where
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
                 let message = move |rpc_reply| -> FiberActorMessage {
-                    FiberActorMessage::new_command(NetworkActorCommand::CancelInvoice(
+                    FiberActorMessage::new_command(FiberActorCommand::CancelInvoice(
                         payment_hash,
                         rpc_reply,
                     ))
@@ -488,7 +488,7 @@ where
         let payment_preimage = params.payment_preimage.into();
 
         let message = move |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::SettleInvoice(
+            FiberActorMessage::new_command(FiberActorCommand::SettleInvoice(
                 payment_hash,
                 payment_preimage,
                 rpc_reply,

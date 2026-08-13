@@ -43,8 +43,8 @@ use crate::{
             StopReason,
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
-        network::{AcceptChannelCommand, NetworkActorEvent, OpenChannelCommand},
-        NetworkActorCommand, NetworkActorMessage,
+        network::{AcceptChannelCommand, FiberActorEvent, OpenChannelCommand},
+        FiberActorCommand, NetworkActorMessage, PublicNetworkCommand, PublicNetworkEvent,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
@@ -101,12 +101,12 @@ impl Actor for CapturingNetworkActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             NetworkActorMessage::Fiber(FiberActorMessage::Command(
-                NetworkActorCommand::SendFiberMessage(message),
+                FiberActorCommand::SendFiberMessage(message),
             )) => {
                 messages.lock().expect("capture lock").push(message);
             }
             NetworkActorMessage::Fiber(FiberActorMessage::Command(
-                NetworkActorCommand::GetTestHeldFiberMessageCount(reply),
+                FiberActorCommand::GetTestHeldFiberMessageCount(reply),
             )) => {
                 let _ = reply.send(messages.lock().expect("capture lock").len());
             }
@@ -139,9 +139,7 @@ async fn take_captured_actor_messages(
 ) -> Vec<FiberMessageWithTarget> {
     let message_count = tokio::time::timeout(event_wait_timeout(), async {
         call!(network, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetTestHeldFiberMessageCount(
-                reply,
-            ))
+            NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(reply))
         })
     })
     .await
@@ -223,7 +221,7 @@ fn create_mock_pending_add_tlc_command(
 fn notify_check_active_channel(node: &NetworkNode, channel_id: Hash256) {
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::CheckActiveChannel),
             }),
@@ -234,7 +232,7 @@ fn notify_check_active_channel(node: &NetworkNode, channel_id: Hash256) {
 fn notify_maintain_channel_tlcs(node: &NetworkNode, channel_id: Hash256) {
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -245,7 +243,7 @@ fn notify_maintain_channel_tlcs(node: &NetworkNode, channel_id: Hash256) {
 fn stop_channel_actor(node: &NetworkNode, channel_id: Hash256) {
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::Stop(StopReason::Closed)),
             }),
@@ -262,7 +260,7 @@ async fn disconnect_peers_and_wait_for_channel_offline(
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -299,7 +297,7 @@ async fn take_held_fiber_messages_bounded(
 ) -> Vec<FiberMessageWithTarget> {
     tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::TakeTestHeldFiberMessages(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(reply))
         })
     })
     .await
@@ -523,7 +521,7 @@ async fn test_revoke_and_ack_rejects_malicious_next_per_commitment_point() {
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::revoke_and_ack(RevokeAndAck {
                     channel_id,
@@ -569,7 +567,7 @@ async fn test_open_channel_to_peer() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -610,7 +608,7 @@ async fn test_open_and_accept_channel() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -646,7 +644,7 @@ async fn test_open_and_accept_channel() {
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
@@ -811,7 +809,7 @@ async fn open_channel_with_underfunded_initial_tx(
     };
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: params.public,
@@ -843,7 +841,7 @@ async fn open_channel_with_underfunded_initial_tx(
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: params.node_b_funding_amount,
@@ -1108,7 +1106,7 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node2.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -1173,7 +1171,7 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node2.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -1722,7 +1720,7 @@ async fn test_network_send_previous_tlc_error() {
     // step1: try to send a invalid onion_packet with add_tlc
     // ==================================================================================
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -1817,7 +1815,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     // step1: try to send a invalid onion_packet with add_tlc
     // ==================================================================================
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2485,7 +2483,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let node_b_funidng_amount = 11800000000;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -2520,7 +2518,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: node_b_funidng_amount,
@@ -2575,7 +2573,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2618,7 +2616,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -2694,7 +2692,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2720,7 +2718,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -2746,7 +2744,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let digest = correct_algorithm.hash(preimage);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2772,7 +2770,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -2844,7 +2842,7 @@ async fn do_test_channel_remote_commitment_error() {
             let payment_hash = hash_algorithm.hash(preimage);
             let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
             let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id: new_channel_id,
                         command: ChannelCommand::AddTlc(
@@ -2870,7 +2868,7 @@ async fn do_test_channel_remote_commitment_error() {
         while all_sent.len() > tlc_number_in_flight_limit - 2 {
             let (preimage, tlc_id) = all_sent.remove(0);
             let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+                NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id: new_channel_id,
                         command: ChannelCommand::RemoveTlc(
@@ -2923,7 +2921,7 @@ async fn do_test_channel_add_tlc_amount_invalid() {
         let hash_algorithm = HashAlgorithm::Sha256;
         let digest = hash_algorithm.hash(preimage);
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(
@@ -3000,7 +2998,7 @@ async fn test_network_add_tlc_amount_overflow_error() {
         let hash_algorithm = HashAlgorithm::Sha256;
         let digest = hash_algorithm.hash(preimage);
         call!(node.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::AddTlc(
@@ -3048,7 +3046,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result_a = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3074,7 +3072,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let digest = algorithm.hash(failed_preimage_b);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3112,7 +3110,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let digest = algorithm.hash(preimage_b);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result_b = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3137,7 +3135,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     loop {
         // remove tlc from node_b
         let res = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::RemoveTlc(
@@ -3193,7 +3191,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     // remove the later tlc from node_b
     let tlc_id_b = add_tlc_result_b.unwrap().tlc_id;
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -3262,7 +3260,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3287,7 +3285,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3312,7 +3310,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3338,7 +3336,7 @@ async fn test_remove_tlc_with_expiry_error() {
     };
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3414,7 +3412,7 @@ async fn test_remove_expired_tlc_in_background() {
     };
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3454,7 +3452,7 @@ async fn test_check_active_channel_event_does_not_remove_expired_received_tlc() 
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3515,7 +3513,7 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3556,7 +3554,7 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::CheckChannels,
+            FiberActorCommand::CheckChannels,
         ))
         .expect("node_b alive");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -3596,7 +3594,7 @@ async fn test_restart_restores_ready_channel_actor_offline() {
     );
 
     let update_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -3655,7 +3653,7 @@ async fn test_restart_restores_shutting_down_channel_actor_for_reestablish() {
     );
 
     let update_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -3791,7 +3789,7 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
     );
 
     let restored_control_result = call!(node_1.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::Update(
@@ -3830,7 +3828,7 @@ async fn test_restarted_offline_channel_registers_expired_received_tlc_remove() 
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3902,7 +3900,7 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3976,7 +3974,7 @@ async fn test_offered_tlc_survives_force_close_transition() {
     let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -4074,7 +4072,7 @@ async fn do_test_add_tlc_duplicated() {
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4117,7 +4115,7 @@ async fn do_test_add_tlc_waiting_ack() {
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4151,7 +4149,7 @@ async fn do_test_add_tlc_waiting_ack() {
             is_trampoline_hop: false,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4206,7 +4204,7 @@ async fn test_open_channel_constraints_limit_incoming_tlcs() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4232,7 +4230,7 @@ async fn test_open_channel_constraints_limit_incoming_tlcs() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4288,7 +4286,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4314,7 +4312,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4369,7 +4367,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4395,7 +4393,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4451,7 +4449,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4476,7 +4474,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4532,7 +4530,7 @@ async fn do_test_add_tlc_value_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4557,7 +4555,7 @@ async fn do_test_add_tlc_value_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4600,7 +4598,7 @@ async fn test_peer_add_tlc_checks_local_incoming_constraints() {
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::add_tlc(AddTlc {
                     channel_id: new_channel_id,
@@ -4639,7 +4637,7 @@ async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation()
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -4671,7 +4669,7 @@ async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation()
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::remove_tlc(RemoveTlc {
                     channel_id,
@@ -4728,7 +4726,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4754,7 +4752,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4780,7 +4778,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4809,7 +4807,7 @@ async fn test_channel_update_tlc_expiry() {
 
     // update channel with new tlc_expiry_delta which is too small
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4833,7 +4831,7 @@ async fn test_channel_update_tlc_expiry() {
 
     // update channel with new tlc_expiry_delta which is too large
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4861,7 +4859,7 @@ async fn test_channel_update_tlc_expiry() {
     // update channel with new tlc_expiry_delta which is still too small
     // for less than 2/3 of the commitment delay
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4887,7 +4885,7 @@ async fn test_channel_update_tlc_expiry() {
     // update tlc_expiry_delta with 2/3 of the commitment delay
     // this should be successful
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4953,7 +4951,7 @@ async fn test_forward_payment_channel_disabled() {
 
     // update channel to disable it from node_b
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::Update(
@@ -5017,7 +5015,7 @@ async fn test_forward_payment_tlc_minimum_value() {
     // update B's ChannelUpdate in channel_b_c with tlc_minimum_value set to our tlc_amount
     // this is used to override the default tlc_minimum_value value.
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::Update(
@@ -5048,7 +5046,7 @@ async fn test_forward_payment_tlc_minimum_value() {
 
     // update B's ChannelUpdate in channel_b_c with new tlc_minimum_value
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::Update(
@@ -5082,7 +5080,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_a_b,
                 command: ChannelCommand::AddTlc(add_tlc_command.clone(), rpc_reply),
@@ -5095,7 +5093,7 @@ async fn test_forward_payment_tlc_minimum_value() {
 
     // AddTlc from B to C is not OK because the forwarding value is too small
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::AddTlc(add_tlc_command.clone(), rpc_reply),
@@ -5204,7 +5202,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -5230,7 +5228,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -5252,7 +5250,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     let fee_rate = FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE);
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -5327,7 +5325,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
 
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -5361,7 +5359,7 @@ async fn test_revoke_old_commitment_transaction() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -5396,7 +5394,7 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: 11800000000,
@@ -5484,7 +5482,7 @@ async fn test_revoke_old_commitment_transaction() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::CommitmentSigned(None),
             }),
@@ -5563,7 +5561,7 @@ async fn test_create_channel() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -5598,7 +5596,7 @@ async fn test_create_channel() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: 11800000000,
@@ -5693,7 +5691,7 @@ async fn test_reestablish_channel() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -5729,7 +5727,7 @@ async fn test_reestablish_channel() {
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: 11800000000,
@@ -5795,7 +5793,7 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -5884,7 +5882,7 @@ async fn test_force_close_channel_when_remote_is_offline() {
         .await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -5924,7 +5922,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
     let old_node_b_balance = node_b_state.to_local_amount;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -5948,7 +5946,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
 
     // node_a send Shutdown
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -5968,7 +5966,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
 
     // node_b send remove tlc
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -6184,7 +6182,7 @@ async fn test_reconnect_resolves_awaiting_channel_ready_when_peer_is_already_rea
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -6385,7 +6383,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
     let disconnect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             node_b.pubkey,
             PeerDisconnectReason::Requested,
             Some(rpc_reply),
@@ -6420,7 +6418,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::MaintainConnections,
+            PublicNetworkCommand::MaintainConnections,
         ))
         .expect("node_a alive");
 
@@ -6439,7 +6437,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     node_b.stop().await;
 
     let connect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeerWithPubkey(
+        NetworkActorMessage::new_command(PublicNetworkCommand::ConnectPeerWithPubkey(
             node_b.pubkey,
             None,
             PeerConnectSource::Manual,
@@ -6469,7 +6467,7 @@ async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
     let first_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             node_b.pubkey,
             PeerDisconnectReason::Requested,
             Some(rpc_reply),
@@ -6489,7 +6487,7 @@ async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
         .await;
 
     let second_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             node_b.pubkey,
             PeerDisconnectReason::Requested,
             Some(rpc_reply),
@@ -6506,7 +6504,7 @@ async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::MaintainConnections,
+            PublicNetworkCommand::MaintainConnections,
         ))
         .expect("node_a alive");
 
@@ -6612,7 +6610,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6640,7 +6638,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     node_a.stop().await;
 
     let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -6700,7 +6698,7 @@ async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
     let expected_preimage: Hash256 = preimage.into();
     let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6733,7 +6731,7 @@ async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
         payment_preimage: preimage.into(),
     });
     let result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -6786,7 +6784,7 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
     let expiry_0 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_0 = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6810,7 +6808,7 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
 
     let expiry_1 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_1 = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6878,7 +6876,7 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -6984,7 +6982,7 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
 
     // test open channel with large size shutdown script
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -7034,7 +7032,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
 
     // test auto accept channel with large size shutdown script
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -7097,7 +7095,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
             .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7119,7 +7117,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
         .contains("Local balance is not enough to pay the fee"));
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7181,7 +7179,7 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
             .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7293,7 +7291,7 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
     assert_eq!(network_channels.len(), 1);
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7337,7 +7335,7 @@ async fn test_shutdown_channel_and_shutdown_transaction_hash() {
             .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -8181,7 +8179,7 @@ async fn test_abandon_failed_channel_without_accept() {
     let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8229,7 +8227,7 @@ async fn test_open_channel_with_invalid_commitment_delay() {
         let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
                 OpenChannelCommand {
                     pubkey: node_b.pubkey,
                     public: false,
@@ -8281,7 +8279,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8311,7 +8309,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
         .contains("TLC expiry delta 13332 is smaller than 2/3 commitment_delay_epoch delay 13333"));
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8341,7 +8339,7 @@ async fn test_abandon_channel_with_peer_accept() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8377,7 +8375,7 @@ async fn test_abandon_channel_with_peer_accept() {
     node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
@@ -8462,7 +8460,7 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
         node_2
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
                     target: target_node.pubkey,
                     message: FiberMessage::add_tlc(AddTlc {
                         channel_id: wrong_channel_id,
@@ -8502,7 +8500,7 @@ async fn test_inbound_add_tlc_rejects_expiry_too_soon() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
                 target: node_b.pubkey,
                 message: FiberMessage::add_tlc(AddTlc {
                     channel_id,
@@ -8540,7 +8538,7 @@ async fn test_funding_timeout() {
     .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: nodes[1].pubkey,
                 public: false,
@@ -8588,7 +8586,7 @@ async fn test_auto_accept_fails_debug_event() {
     .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: nodes[1].pubkey,
                 public: false,
@@ -8695,7 +8693,7 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     ));
 
     let control_result_before_final_settlement = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -8719,7 +8717,7 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_event(
-            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+            FiberActorEvent::ChannelSettlementCompleted(channel_id),
         ))
         .expect("network actor alive");
 
@@ -8734,7 +8732,7 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     .await;
 
     let control_result_after_final_settlement = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -8779,7 +8777,7 @@ async fn test_cooperative_close_stops_channel_actor_immediately() {
 
     wait_until_async_timeout(|| async {
         let control_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Update(
@@ -8807,7 +8805,7 @@ async fn test_cooperative_close_stops_channel_actor_immediately() {
     .await;
 
     let control_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -8846,7 +8844,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
 
     // Step 1: Open a channel from node_a to node_b
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -8893,7 +8891,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
     // This will trigger ChannelAccepted event on node_a, which attempts to fund the channel
     // Since CKB is stopped, the funding will fail with a temporary error
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id,
                 funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
@@ -9455,7 +9453,7 @@ async fn test_reestablish_replays_reverse_commitment_for_different_next_nonce() 
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(replayed_message),
+            FiberActorCommand::SendFiberMessage(replayed_message),
         ))
         .expect("node_b alive");
 
@@ -9979,7 +9977,7 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::SetDeferPeerTlcUpdates(true),
             }),
@@ -9990,7 +9988,7 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
         node_b
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     node_a.pubkey,
                     FiberMessage::add_tlc(create_deferred_replay_test_add_tlc(channel_id, tlc_id)),
                 )),
@@ -10001,7 +9999,7 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::add_tlc(create_deferred_replay_test_add_tlc(
                     channel_id,
@@ -10043,7 +10041,7 @@ async fn test_reestablish_does_not_complete_while_waiting_for_peer_revoke_and_ac
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -10432,7 +10430,7 @@ async fn open_external_funding_channel(
     funding_amount: u128,
 ) -> (Hash256, Transaction) {
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
                 pubkey: node_b.pubkey,
                 funding_amount,
@@ -10704,7 +10702,7 @@ async fn test_submit_signed_funding_tx() {
 
     // Submit the signed funding tx
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -10754,7 +10752,7 @@ async fn test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake() 
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -10828,7 +10826,7 @@ async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_igno
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -10859,7 +10857,7 @@ async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_igno
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 duplicate_tx_complete,
             )),
@@ -10889,7 +10887,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
 
     // Open a NORMAL channel (not external funding)
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -10924,7 +10922,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
     // This should fail because the channel is not in AWAITING_EXTERNAL_FUNDING state.
     let dummy_tx = Transaction::default();
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: dummy_tx.clone(),
             reply: rpc_reply,
@@ -10963,7 +10961,7 @@ async fn test_submit_signed_funding_tx_duplicate() {
 
     // First submission should succeed
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -10974,7 +10972,7 @@ async fn test_submit_signed_funding_tx_duplicate() {
 
     // Second submission should fail with RepeatedProcessing or InvalidState
     let submit_message2 = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11019,7 +11017,7 @@ async fn test_submit_signed_funding_tx_output_mismatch() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: tampered_tx.clone(),
             reply: rpc_reply,
@@ -11056,7 +11054,7 @@ async fn test_submit_signed_funding_tx_input_count_mismatch() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: tampered_tx.clone(),
             reply: rpc_reply,
@@ -11096,7 +11094,7 @@ async fn test_submit_signed_funding_tx_cell_deps_mismatch() {
     let tampered_tx: Transaction = unsigned_tx.as_builder().raw(tampered_raw_tx).build();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: tampered_tx.clone(),
             reply: rpc_reply,
@@ -11123,7 +11121,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
 
     // Use a TLC expiry delta that is too small
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
                 pubkey: node_b.pubkey,
                 funding_amount: 100_000_000_000,
@@ -11168,7 +11166,7 @@ async fn test_external_funding_invalid_commitment_delay() {
     let too_small_epoch = EpochNumberWithFraction::new(0, 0, 1);
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
                 pubkey: node_b.pubkey,
                 funding_amount: 100_000_000_000,
@@ -11216,7 +11214,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
 
     let open_fut = async move {
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
                     pubkey: node_b.pubkey,
                     funding_amount: 100_000_000_000,
@@ -11251,7 +11249,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
         .await;
 
     let abandon_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AbandonChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
             temp_channel_id,
             rpc_reply,
         ))
@@ -11306,7 +11304,7 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11344,7 +11342,7 @@ async fn test_channel_stale_passive_wait_no_proactive_send() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -11375,7 +11373,7 @@ async fn test_channel_stale_audit_success_resumes_ready() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -11385,7 +11383,7 @@ async fn test_channel_stale_audit_success_resumes_ready() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -11434,7 +11432,7 @@ async fn test_channel_stale_audit_failure_blocks_channel() {
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -11473,7 +11471,7 @@ async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11516,7 +11514,7 @@ async fn test_submit_signed_funding_tx_after_acceptor_restart_for_external_fundi
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11663,7 +11661,7 @@ async fn test_external_funding_initiator_restart_after_signed_submit_resumes_han
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11734,7 +11732,7 @@ async fn test_external_funding_initiator_send_tx_signatures_first_preserves_exte
         mock_sign_external_funding_tx_with_witness(&unsigned_tx, external_witness.clone());
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11835,7 +11833,7 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_event(
-            NetworkActorEvent::FiberMessage(
+            PublicNetworkEvent::FiberMessage(
                 node_b.pubkey,
                 FiberMessage::tx_signatures(TxSignatures {
                     channel_id,
@@ -11886,7 +11884,7 @@ async fn test_external_funding_acceptor_restart_after_signed_submit_resumes_hand
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11963,7 +11961,7 @@ async fn test_reproduce_acceptor_restart_race_in_external_funding() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -12053,7 +12051,7 @@ async fn test_external_funding_state_cleared_after_terminal_path() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,

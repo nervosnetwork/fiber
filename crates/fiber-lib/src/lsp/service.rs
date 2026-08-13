@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
 use crate::fiber::network::{
-    BufferedTrampolineUpstreamStatus, NetworkActorCommand, NetworkActorMessage,
+    BufferedTrampolineUpstreamStatus, FiberActorCommand, NetworkActorMessage,
 };
 use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey, TlcErrorCode};
 use crate::invoice::CkbInvoice;
@@ -538,7 +538,7 @@ impl LspService {
         ractor::call_t!(
             state.public_network_actor,
             |reply| NetworkActorMessage::new_command(
-                NetworkActorCommand::InspectBufferedTrampolineUpstream {
+                FiberActorCommand::InspectBufferedTrampolineUpstream {
                     request: delivery.request.clone(),
                     reply,
                 },
@@ -586,7 +586,7 @@ impl LspService {
             .unwrap_or(TlcErrorCode::PermanentNodeFailure);
         let failed = ractor::call_t!(
             state.public_network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::FailBufferedTrampoline {
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
                 request: delivery.request.clone(),
                 reason: reason.clone(),
                 error_code,
@@ -647,7 +647,7 @@ impl LspService {
         ) {
             let existing_payment = ractor::call_t!(
                 state.public_network_actor,
-                |reply| NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
+                |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
                     payment_hash,
                     reply,
                 )),
@@ -672,7 +672,7 @@ impl LspService {
                     let settlement = ractor::call_t!(
                         state.public_network_actor,
                         |reply| NetworkActorMessage::new_command(
-                            NetworkActorCommand::ReconcileBufferedTrampolineSettlement {
+                            FiberActorCommand::ReconcileBufferedTrampolineSettlement {
                                 payment_hash,
                                 reply,
                             },
@@ -778,7 +778,7 @@ impl LspService {
         let dispatch_result = match ractor::call_t!(
             state.public_network_actor,
             |reply| NetworkActorMessage::new_command(
-                NetworkActorCommand::DispatchBufferedTrampoline {
+                FiberActorCommand::DispatchBufferedTrampoline {
                     request: delivery.request.clone(),
                     reply,
                 },

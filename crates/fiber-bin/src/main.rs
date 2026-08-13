@@ -11,7 +11,7 @@ use fnn::ckb::{contracts::try_init_contracts_context, CkbChainActor};
 use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{
     graph::NetworkGraph,
-    network::{init_chain_hash, NetworkActorCommand, NetworkActorMessage},
+    network::{init_chain_hash, NetworkActorMessage, PublicNetworkCommand},
 };
 use fnn::fiber_types::Privkey;
 use fnn::lsp::{FiberTenantRuntimeFactory, LspService, LspServiceArgs};
@@ -498,7 +498,7 @@ async fn run_node(
             .0;
             public_network_actor
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SetLspService(lsp_actor.clone()),
+                    PublicNetworkCommand::SetLspService(lsp_actor.clone()),
                 ))
                 .map_err(|error| {
                     ExitMessage(format!("failed to attach LSP service to Public T: {error}"))

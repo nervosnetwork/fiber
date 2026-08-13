@@ -2,8 +2,8 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::BuildRouterCommand;
 use crate::fiber::payment::SendPaymentWithRouterCommand;
 use crate::fiber::{
-    channel::ChannelActorStateStore, payment::SendPaymentCommand, FiberActorMessage, FiberActorRef,
-    NetworkActorCommand, NetworkActorMessage,
+    channel::ChannelActorStateStore, payment::SendPaymentCommand, FiberActorCommand,
+    FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
 use crate::rpc::utils::RpcResultExt;
 use crate::{handle_actor_call, log_and_error};
@@ -266,7 +266,7 @@ where
             .rpc_err()?;
 
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::SendPayment(
+            FiberActorMessage::new_command(FiberActorCommand::SendPayment(
                 SendPaymentCommand {
                     target_pubkey,
                     amount: params.amount,
@@ -299,7 +299,7 @@ where
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let payment_hash = params.payment_hash.into();
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+            FiberActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))
         };
         handle_actor_call!(self.actor, message, params)
             .map(|response| send_payment_response_to_json(&response))
@@ -318,7 +318,7 @@ where
             .rpc_err()?;
 
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::BuildPaymentRouter(
+            FiberActorMessage::new_command(FiberActorCommand::BuildPaymentRouter(
                 BuildRouterCommand {
                     amount: params.amount,
                     hops_info,
@@ -356,7 +356,7 @@ where
             .map(fiber_types::PaymentCustomRecords::from);
 
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::SendPaymentWithRouter(
+            FiberActorMessage::new_command(FiberActorCommand::SendPaymentWithRouter(
                 SendPaymentWithRouterCommand {
                     payment_hash,
                     router,

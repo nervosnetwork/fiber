@@ -92,7 +92,7 @@ use crate::{
     ckb::CkbChainMessage,
     fiber::graph::NetworkGraph,
     fiber::network::{
-        NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
+        FiberActorCommand, NetworkActor, NetworkActorMessage, NetworkActorStartArguments,
     },
     fiber::Hash256,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
@@ -454,7 +454,7 @@ pub(crate) async fn create_channel_with_nodes(
     params: ChannelParameters,
 ) -> Result<(Hash256, Hash256), String> {
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: params.public,
@@ -490,7 +490,7 @@ pub(crate) async fn create_channel_with_nodes(
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: params.node_b_funding_amount,
@@ -764,7 +764,7 @@ impl NetworkNode {
         let remaining = NonZeroUsize::new(count).expect("positive hold count");
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::SetTestFiberMessageHold(
+                NetworkActorMessage::new_command(FiberActorCommand::SetTestFiberMessageHold(
                     TestFiberMessageHold {
                         target,
                         channel_id,
@@ -798,7 +798,7 @@ impl NetworkNode {
     pub async fn release_held_fiber_messages(&self) {
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::ReleaseTestHeldFiberMessages(
+                NetworkActorMessage::new_command(FiberActorCommand::ReleaseTestHeldFiberMessages(
                     reply,
                 ))
             })
@@ -813,7 +813,7 @@ impl NetworkNode {
     pub async fn discard_held_fiber_messages(&self) {
         let _ = tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::TakeTestHeldFiberMessages(
+                NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(
                     reply,
                 ))
             })
@@ -827,7 +827,7 @@ impl NetworkNode {
     pub async fn get_held_fiber_message_count(&self) -> usize {
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, |reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::GetTestHeldFiberMessageCount(
+                NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(
                     reply,
                 ))
             })
@@ -881,9 +881,7 @@ impl NetworkNode {
         channel_id: Hash256,
     ) -> Option<ActorRef<ChannelActorMessage>> {
         let message = |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetChannelActor(
-                channel_id, reply,
-            ))
+            NetworkActorMessage::new_command(FiberActorCommand::GetChannelActor(channel_id, reply))
         };
         tokio::time::timeout(event_wait_timeout(), async {
             call!(self.network_actor, message)
@@ -932,7 +930,7 @@ impl NetworkNode {
             .expect("cancel success");
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SettleHoldTlcSet(*payment_hash),
+                FiberActorCommand::SettleHoldTlcSet(*payment_hash),
             ))
             .expect("network actor alive");
     }
@@ -947,7 +945,7 @@ impl NetworkNode {
         preimage: Hash256,
     ) -> Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::SettleInvoice(
+            NetworkActorMessage::new_command(FiberActorCommand::SettleInvoice(
                 *payment_hash,
                 preimage,
                 rpc_reply,
@@ -964,7 +962,7 @@ impl NetworkNode {
         command: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::SendPayment(command, rpc_reply))
+            NetworkActorMessage::new_command(FiberActorCommand::SendPayment(command, rpc_reply))
         };
 
         call!(self.network_actor, message).expect("source_node alive")
@@ -1055,7 +1053,7 @@ impl NetworkNode {
         command: SendPaymentWithRouterCommand,
     ) -> Result<SendPaymentResponse, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentWithRouter(
+            NetworkActorMessage::new_command(FiberActorCommand::SendPaymentWithRouter(
                 command, rpc_reply,
             ))
         };
@@ -1065,7 +1063,7 @@ impl NetworkNode {
 
     pub async fn build_router(&self, command: BuildRouterCommand) -> Result<PaymentRouter, String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::BuildPaymentRouter(
+            NetworkActorMessage::new_command(FiberActorCommand::BuildPaymentRouter(
                 command, rpc_reply,
             ))
         };
@@ -1075,7 +1073,7 @@ impl NetworkNode {
 
     pub async fn send_abandon_channel(&self, channel_id: Hash256) -> Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::AbandonChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
                 channel_id, rpc_reply,
             ))
         };
@@ -1088,7 +1086,7 @@ impl NetworkNode {
         force: bool,
     ) -> std::result::Result<(), String> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Shutdown(
@@ -1112,7 +1110,7 @@ impl NetworkNode {
         channel_id: Hash256,
         force: bool,
     ) {
-        use crate::fiber::NetworkActorEvent::ClosingTransactionConfirmed;
+        use crate::fiber::FiberActorEvent::ClosingTransactionConfirmed;
 
         let tx_hash = TransactionBuilder::default().build().hash();
         let event = ClosingTransactionConfirmed(pubkey, channel_id, tx_hash, force, true);
@@ -1170,9 +1168,7 @@ impl NetworkNode {
 
     pub async fn get_inflight_payment_count(&self) -> u32 {
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetInflightPaymentCount(
-                rpc_reply,
-            ))
+            NetworkActorMessage::new_command(FiberActorCommand::GetInflightPaymentCount(rpc_reply))
         };
         call!(self.network_actor, message)
             .expect("source_node alive")
@@ -1295,10 +1291,7 @@ impl NetworkNode {
 
     pub async fn get_payment_result(&self, payment_hash: Hash256) -> SendPaymentResponse {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetPayment(
-                payment_hash,
-                rpc_reply,
-            ))
+            NetworkActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))
         };
         call!(self.network_actor, message)
             .expect("node_a alive")
@@ -1446,7 +1439,7 @@ impl NetworkNode {
 
     pub async fn node_info(&self) -> NodeInfoResponse {
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::NodeInfo((), rpc_reply))
+            NetworkActorMessage::new_command(PublicNetworkCommand::NodeInfo((), rpc_reply))
         };
 
         call!(self.network_actor, message)
@@ -1463,7 +1456,7 @@ impl NetworkNode {
         self.store.insert_channel_actor_state(state);
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::ReloadState(reload_params.unwrap_or_default()),
                 }),
@@ -1521,7 +1514,7 @@ impl NetworkNode {
         let state = self.get_channel_actor_state(channel_id);
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     state.get_remote_pubkey(),
                     FiberMessage::shutdown(Shutdown {
                         channel_id: state.get_id(),
@@ -1547,7 +1540,7 @@ impl NetworkNode {
         let rpc_reply = RpcReplyPort::from(send);
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Shutdown(command, rpc_reply),
                 }),
@@ -1557,7 +1550,7 @@ impl NetworkNode {
 
     pub async fn update_channel_with_command(&self, channel_id: Hash256, command: UpdateCommand) {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Update(command, rpc_reply),
@@ -1571,7 +1564,7 @@ impl NetworkNode {
 
     pub async fn update_node_features(&self, features: FeatureVector) {
         let message =
-            NetworkActorMessage::new_command(NetworkActorCommand::UpdateFeatures(features));
+            NetworkActorMessage::new_command(PublicNetworkCommand::UpdateFeatures(features));
 
         self.network_actor
             .send_message(message)
@@ -1591,7 +1584,7 @@ impl NetworkNode {
     }
 
     pub async fn retry_send_payment(&self, payment_hash: Hash256, attempt_id: Option<u64>) {
-        let message = NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
+        let message = NetworkActorMessage::new_event(FiberActorEvent::RetrySendPayment(
             payment_hash,
             attempt_id,
         ));
@@ -1840,7 +1833,7 @@ impl NetworkNode {
     pub fn send_init_peer_message(&self, remote_pubkey: Pubkey, message: Init) {
         self.network_actor
             .send_message(NetworkActorMessage::new_command(
-                crate::fiber::NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                crate::fiber::FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     remote_pubkey,
                     FiberMessage::Init(message),
                 )),
@@ -1983,7 +1976,7 @@ impl NetworkNode {
         );
 
         let result = call!(self.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeer(
+            NetworkActorMessage::new_command(PublicNetworkCommand::ConnectPeer(
                 peer_addr.clone(),
                 false,
                 crate::fiber::network::PeerConnectSource::Manual,

@@ -10,7 +10,7 @@ use crate::{
     ckb::{
         client::CkbChainClient, CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
     },
-    fiber::{types::Pubkey, NetworkActorEvent},
+    fiber::{types::Pubkey, FiberActorEvent},
     utils::actor::ActorHandleLogGuard,
 };
 
@@ -317,7 +317,7 @@ where
                     .get_block_timestamp(block_hash.clone().into())
                     .await
                 {
-                    NetworkActorEvent::FundingTransactionConfirmed(
+                    FiberActorEvent::FundingTransactionConfirmed(
                         OutPoint::new(self.tx_hash.into(), DUMMY_FUNDING_TX_INDEX),
                         block_hash.clone(),
                         tx_index,
@@ -334,7 +334,7 @@ where
                     self.tx_hash,
                     status
                 );
-                NetworkActorEvent::FundingTransactionFailed(OutPoint::new(
+                FiberActorEvent::FundingTransactionFailed(OutPoint::new(
                     self.tx_hash.into(),
                     DUMMY_FUNDING_TX_INDEX,
                 ))
@@ -347,7 +347,7 @@ where
 
                 // set close_by_us if we broadcast a force close
                 let close_by_us = force_closing;
-                NetworkActorEvent::ClosingTransactionConfirmed(
+                FiberActorEvent::ClosingTransactionConfirmed(
                     pubkey,
                     channel_id,
                     self.tx_hash.into(),
@@ -361,7 +361,7 @@ where
                     self.tx_hash,
                     status
                 );
-                NetworkActorEvent::ClosingTransactionFailed(pubkey, channel_id, self.tx_hash.into())
+                FiberActorEvent::ClosingTransactionFailed(pubkey, channel_id, self.tx_hash.into())
             }
         };
 

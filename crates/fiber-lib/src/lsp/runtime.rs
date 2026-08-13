@@ -9,7 +9,7 @@ use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
 use crate::fiber::{
     graph::NetworkGraph,
     network::{
-        start_hosted_tenant_actor, FiberActorMessage, FiberActorRef, NetworkActorCommand,
+        start_hosted_tenant_actor, FiberActorCommand, FiberActorMessage, FiberActorRef,
         NetworkActorMessage,
     },
     types::pubkey_from_tentacle,
@@ -68,7 +68,7 @@ impl HostedTenantRuntime {
     async fn ensure_idle(&self) -> Result<(), String> {
         let activity = ractor::call_t!(
             self.runtime_actor,
-            |reply| FiberActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(
+            |reply| FiberActorMessage::new_command(FiberActorCommand::GetHostedTenantActivity(
                 reply
             )),
             5_000
@@ -95,7 +95,7 @@ impl HostedTenantRuntime {
     pub fn stop(self) {
         if let Some(public_network_actor) = self.public_network_actor {
             let _ = public_network_actor.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::UnregisterInProcessPeer(self.tenant_pubkey),
+                FiberActorCommand::UnregisterInProcessPeer(self.tenant_pubkey),
             ));
         }
         self.runtime_actor
@@ -212,14 +212,12 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
         let activation_result = async {
             ractor::call_t!(
                 actor,
-                |reply| FiberActorMessage::new_command(
-                    NetworkActorCommand::RegisterInProcessPeer {
-                        pubkey: public_node_id,
-                        actor: FiberActorRef::from_network(&self.public_network_actor),
-                        features: public_features,
-                        reply,
-                    },
-                ),
+                |reply| FiberActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
+                    pubkey: public_node_id,
+                    actor: FiberActorRef::from_network(&self.public_network_actor),
+                    features: public_features,
+                    reply,
+                },),
                 10_000
             )
             .map_err(|error| format!("failed to register Public T with tenant: {error}"))??;
@@ -227,7 +225,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             ractor::call_t!(
                 self.public_network_actor,
                 |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::RegisterInProcessPeer {
+                    FiberActorCommand::RegisterInProcessPeer {
                         pubkey: tenant_pubkey,
                         actor: actor.clone(),
                         features: tenant_features,
@@ -240,7 +238,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
 
             ractor::call_t!(
                 actor,
-                |reply| FiberActorMessage::new_command(NetworkActorCommand::ActivateInProcessPeer(
+                |reply| FiberActorMessage::new_command(FiberActorCommand::ActivateInProcessPeer(
                     public_node_id,
                     reply,
                 )),
@@ -250,9 +248,10 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
 
             ractor::call_t!(
                 self.public_network_actor,
-                |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::ActivateInProcessPeer(tenant_pubkey, reply,)
-                ),
+                |reply| NetworkActorMessage::new_command(FiberActorCommand::ActivateInProcessPeer(
+                    tenant_pubkey,
+                    reply,
+                )),
                 10_000
             )
             .map_err(|error| format!("failed to activate tenant with Public T: {error}"))??;
@@ -263,7 +262,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             let _ = self
                 .public_network_actor
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::UnregisterInProcessPeer(tenant_pubkey),
+                    FiberActorCommand::UnregisterInProcessPeer(tenant_pubkey),
                 ));
             runtime.stop();
             return Err(error);

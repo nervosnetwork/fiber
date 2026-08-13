@@ -17,8 +17,8 @@ use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_TRY_LIMIT,
 };
 use crate::fiber::{
-    FiberActorMessage, FiberActorRef, KeyPair, NetworkActorCommand, NetworkActorEvent,
-    ASSUME_NETWORK_ACTOR_ALIVE,
+    FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef, KeyPair,
+    PublicNetworkCommand, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore, PreimageStore};
 use crate::Error;
@@ -924,7 +924,7 @@ where
         debug!("Payment actor is stopped {:?}", myself.get_name());
         self.network
             .send_message(FiberActorMessage::Event(
-                NetworkActorEvent::PaymentActorStopped(
+                FiberActorEvent::PaymentActorStopped(
                     state.payment_hash,
                     state.last_error_packet.clone(),
                 ),
@@ -1171,11 +1171,9 @@ where
             }) = &tlc_error_detail.extra_data
             {
                 network
-                    .send_message(FiberActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessages(vec![
-                            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
-                        ]),
-                    ))
+                    .send_public_command(PublicNetworkCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+                    ]))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
@@ -1549,7 +1547,7 @@ where
         match call_t!(
             self.network,
             |tx| {
-                FiberActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
+                FiberActorMessage::new_command(FiberActorCommand::SendPaymentOnionPacket(
                     SendOnionPacketCommand {
                         peeled_onion_packet,
                         previous_tlc: None,

@@ -7,7 +7,7 @@ use crate::fiber::{
         AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
         PendingAcceptChannel,
     },
-    FiberActorMessage, FiberActorRef, NetworkActorCommand, NetworkActorMessage,
+    FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
@@ -324,7 +324,7 @@ where
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
         let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(NetworkActorCommand::OpenChannel(
+            FiberActorMessage::new_command(FiberActorCommand::OpenChannel(
                 OpenChannelCommand {
                     pubkey,
                     funding_amount: params.funding_amount,
@@ -360,7 +360,7 @@ where
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
         let temp_channel_id = params.temporary_channel_id.into();
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(NetworkActorCommand::AcceptChannel(
+            FiberActorMessage::new_command(FiberActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id,
                     funding_amount: params.funding_amount,
@@ -386,9 +386,7 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(NetworkActorCommand::AbandonChannel(
-                channel_id, rpc_reply,
-            ))
+            FiberActorMessage::new_command(FiberActorCommand::AbandonChannel(channel_id, rpc_reply))
         };
         handle_actor_call!(self.actor, message, params)
     }
@@ -574,7 +572,7 @@ where
             // Include inbound channel requests that are waiting for acceptance
             // (held in the network actor's `to_be_accepted_channels`).
             let pending_accept_msg = |rpc_reply| {
-                FiberActorMessage::new_command(NetworkActorCommand::GetPendingAcceptChannels(
+                FiberActorMessage::new_command(FiberActorCommand::GetPendingAcceptChannels(
                     rpc_reply,
                 ))
             };
@@ -623,7 +621,7 @@ where
         let fee_rate = params.fee_rate.map(FeeRate::from_u64);
 
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            FiberActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Shutdown(
@@ -646,7 +644,7 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
         let message = |rpc_reply| -> FiberActorMessage {
-            FiberActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            FiberActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Update(
@@ -678,7 +676,7 @@ where
             .map(Into::into)
             .collect();
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            FiberActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
                     pubkey,
                     funding_amount: params.funding_amount,
@@ -722,7 +720,7 @@ where
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         let signed_tx: packed::Transaction = params.signed_funding_tx.clone().into();
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(NetworkActorCommand::SubmitSignedFundingTx {
+            FiberActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
                 channel_id,
                 signed_tx: signed_tx.clone(),
                 reply: rpc_reply,

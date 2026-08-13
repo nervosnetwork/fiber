@@ -19,8 +19,8 @@ use crate::ckb::{
     CkbTxTracingResult,
 };
 use crate::fiber::{
-    FiberActorMessage, FiberActorRef, InFlightCkbTxActor, InFlightCkbTxActorArguments,
-    InFlightCkbTxActorMessage, InFlightCkbTxKind, NetworkActorEvent, NetworkActorMessage,
+    FiberActorEvent, FiberActorMessage, FiberActorRef, InFlightCkbTxActor,
+    InFlightCkbTxActorArguments, InFlightCkbTxActorMessage, InFlightCkbTxKind, NetworkActorMessage,
 };
 
 fn permanent_send_tx_error() -> RpcError {
@@ -133,8 +133,8 @@ struct TestNetworkActor;
 #[async_trait::async_trait]
 impl Actor for TestNetworkActor {
     type Msg = NetworkActorMessage;
-    type State = mpsc::UnboundedSender<NetworkActorEvent>;
-    type Arguments = mpsc::UnboundedSender<NetworkActorEvent>;
+    type State = mpsc::UnboundedSender<FiberActorEvent>;
+    type Arguments = mpsc::UnboundedSender<FiberActorEvent>;
 
     async fn pre_start(
         &self,
@@ -162,7 +162,7 @@ async fn spawn_test_actors(
     send_tx_should_fail: bool,
 ) -> (
     ActorRef<InFlightCkbTxActorMessage>,
-    mpsc::UnboundedReceiver<NetworkActorEvent>,
+    mpsc::UnboundedReceiver<FiberActorEvent>,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
     ActorRef<CkbTxTracingMessage>,
@@ -262,7 +262,7 @@ async fn permanent_send_tx_error_on_unknown_tx_emits_funding_transaction_failed(
         .expect("network event channel open");
     assert!(matches!(
         event,
-        NetworkActorEvent::FundingTransactionFailed(_)
+        FiberActorEvent::FundingTransactionFailed(_)
     ));
     assert_eq!(send_tx_calls.load(Ordering::SeqCst), 1);
     assert!(report_calls.load(Ordering::SeqCst) >= 1);

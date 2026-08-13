@@ -29,7 +29,10 @@ use super::{lsp_config, NoopNetworkActor};
 use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
-        network::{FiberActorMessage, FiberActorRef, NetworkActorCommand, NetworkActorMessage},
+        network::{
+            FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
+            PublicNetworkCommand,
+        },
         payment::SendPaymentCommand,
     },
     gen_rand_sha256_hash,
@@ -142,7 +145,7 @@ async fn register_in_process_endpoint(
 ) {
     ractor::call_t!(
         local.network_actor,
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
+        |reply| NetworkActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
             pubkey: remote_pubkey,
             actor: endpoint,
             features: crate::fiber_types::FeatureVector::default(),
@@ -157,7 +160,7 @@ async fn register_in_process_endpoint(
 async fn activate_in_process_peer(local: &NetworkNode, remote: &NetworkNode) {
     ractor::call_t!(
         local.network_actor,
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::ActivateInProcessPeer(
+        |reply| NetworkActorMessage::new_command(FiberActorCommand::ActivateInProcessPeer(
             remote.pubkey,
             reply,
         )),
@@ -187,13 +190,13 @@ async fn connect_in_process(left: &NetworkNode, right: &NetworkNode) {
 fn disconnect_in_process(left: &NetworkNode, right: &NetworkNode) {
     left.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::UnregisterInProcessPeer(right.pubkey),
+            FiberActorCommand::UnregisterInProcessPeer(right.pubkey),
         ))
         .expect("unregister right in-process peer");
     right
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::UnregisterInProcessPeer(left.pubkey),
+            FiberActorCommand::UnregisterInProcessPeer(left.pubkey),
         ))
         .expect("unregister left in-process peer");
 }
@@ -434,7 +437,7 @@ async fn create_lsp_test_network(
         nodes[lsp_node_index]
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SetLspService(lsp_actor.clone()),
+                PublicNetworkCommand::SetLspService(lsp_actor.clone()),
             ))
             .expect("attach LSP service to public node");
 
@@ -655,7 +658,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     assert!(!tenant_actor_name.starts_with("Network "));
     let activity = ractor::call_t!(
         tenant_rpc_context.fiber_actor.clone(),
-        |reply| FiberActorMessage::new_command(NetworkActorCommand::GetHostedTenantActivity(reply)),
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetHostedTenantActivity(reply)),
         5_000
     )
     .expect("hosted tenant accepts Fiber core commands");
@@ -667,7 +670,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         .0;
     let duplicate = ractor::call_t!(
         public_t.network_actor,
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
+        |reply| NetworkActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
             pubkey: expected_tenant.tenant_pubkey,
             actor: crate::fiber::FiberActorRef::from_network(&impostor),
             features: crate::fiber_types::FeatureVector::default(),
@@ -974,7 +977,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             ractor::call_t!(
                 public_network_actor,
                 |reply| NetworkActorMessage::new_command(
-                    NetworkActorCommand::GetPendingAcceptChannels(reply)
+                    FiberActorCommand::GetPendingAcceptChannels(reply)
                 ),
                 5_000
             )
@@ -1078,7 +1081,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     connect_in_process(&public_t, &tenant).await;
     let replacement = ractor::call_t!(
         public_t.network_actor,
-        |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
+        |reply| NetworkActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
             pubkey: tenant.pubkey,
             actor: crate::fiber::FiberActorRef::from_network(&payer.network_actor),
             features: crate::fiber_types::FeatureVector::default(),
@@ -1131,7 +1134,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     public_t
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SetLspService(lsp_actor.clone()),
+            PublicNetworkCommand::SetLspService(lsp_actor.clone()),
         ))
         .expect("attach LSP service to Public T");
 

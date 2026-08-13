@@ -16,8 +16,8 @@ use crate::{
         network::DebugEvent,
         payment::SendPaymentCommand,
         types::RemoveTlcReason,
-        AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, Hash256, HashAlgorithm,
-        NetworkActorCommand, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
+        AddTlcCommand, AttemptStatus, BasicMppPaymentData, FeatureVector, FiberActorCommand,
+        Hash256, HashAlgorithm, NetworkActorMessage, PaymentCustomRecords, PaymentHopData,
         PaymentStatus, PeeledPaymentOnionPacket, RetryableTlcOperation, TLCId,
         USER_CUSTOM_RECORDS_MAX_INDEX,
     },
@@ -546,7 +546,7 @@ async fn test_mpp_tlc_set() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -570,7 +570,7 @@ async fn test_mpp_tlc_set() {
     .expect("tlc");
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -684,7 +684,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -713,7 +713,7 @@ async fn test_mpp_tlc_set_with_insufficient_total_amount() {
     node_1
         .network_actor
         .send_after(Duration::from_secs(3), move || {
-            NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+            NetworkActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
                 payment_hash,
                 channel_id,
                 tlc_id,
@@ -820,7 +820,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -916,7 +916,7 @@ async fn test_mpp_tlc_set_with_only_1_tlc_without_payment_data_is_rejected() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1027,7 +1027,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1051,7 +1051,7 @@ async fn test_mpp_tlc_set_total_amount_mismatch() {
     .expect("tlc");
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -1187,7 +1187,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
 
     let packet_1 = build_packet(custom_records_1);
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1212,7 +1212,7 @@ async fn test_mpp_tlc_set_total_amount_should_be_consistent() {
 
     let packet_2 = build_packet(custom_records_2);
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -1349,7 +1349,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1373,7 +1373,7 @@ async fn test_mpp_tlc_set_payment_secret_mismatch() {
     .expect("tlc");
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -1501,7 +1501,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1531,7 +1531,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     .await;
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -1562,7 +1562,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         if hold_tlc.channel_id == channels[0] && hold_tlc.tlc_id == add_tlc_result_1.tlc_id {
             ractor::cast!(
                 node_1.network_actor,
-                NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                NetworkActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
                     payment_hash,
                     hold_tlc.channel_id,
                     hold_tlc.tlc_id,
@@ -1601,7 +1601,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
         if hold_tlc.channel_id == channels[1] && hold_tlc.tlc_id == add_tlc_result_2.tlc_id {
             ractor::cast!(
                 node_1.network_actor,
-                NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+                NetworkActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
                     payment_hash,
                     hold_tlc.channel_id,
                     hold_tlc.tlc_id,
@@ -1617,7 +1617,7 @@ async fn test_mpp_tlc_set_timeout_1_of_2() {
     // check channels again
     ractor::cast!(
         node_1.network_actor,
-        NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+        NetworkActorMessage::new_command(FiberActorCommand::CheckChannels)
     )
     .expect("node alive");
 
@@ -1715,7 +1715,7 @@ async fn test_mpp_tlc_set_timeout() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1748,7 +1748,7 @@ async fn test_mpp_tlc_set_timeout() {
     for hold_tlc in node_1.store.get_payment_hold_tlcs(payment_hash) {
         ractor::cast!(
             node_1.network_actor,
-            NetworkActorMessage::new_command(NetworkActorCommand::TimeoutHoldTlc(
+            NetworkActorMessage::new_command(FiberActorCommand::TimeoutHoldTlc(
                 payment_hash,
                 hold_tlc.channel_id,
                 hold_tlc.tlc_id,
@@ -1763,7 +1763,7 @@ async fn test_mpp_tlc_set_timeout() {
     // check channels
     ractor::cast!(
         node_1.network_actor,
-        NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+        NetworkActorMessage::new_command(FiberActorCommand::CheckChannels)
     )
     .expect("node alive");
 
@@ -1771,7 +1771,7 @@ async fn test_mpp_tlc_set_timeout() {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -1887,7 +1887,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -1911,7 +1911,7 @@ async fn test_mpp_tlc_set_without_payment_data() {
     .expect("tlc");
 
     let add_tlc_result_2 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::AddTlc(
@@ -2550,7 +2550,7 @@ async fn test_mpp_tlc_set_without_invoice_should_not_be_accepted() {
         .expect("create peeled packet");
 
         let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: channels[0],
                     command: ChannelCommand::AddTlc(
@@ -2713,7 +2713,7 @@ async fn test_mpp_tlc_with_invoice_not_allow_mpp_should_not_be_accepted() {
     .expect("create peeled packet");
 
     let add_tlc_result_1 = ractor::call!(source_node.network_actor, |rpc_reply| {
-        NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[0],
                 command: ChannelCommand::AddTlc(
@@ -4027,7 +4027,7 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
     node_2
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+            FiberActorCommand::SettleReceivedHoldTlcSet(payment_hash),
         ))
         .expect("network actor alive");
     wait_until_timeout(5_000, || {
@@ -4053,7 +4053,7 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
         node_2
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::TimeoutHoldTlc(
+                FiberActorCommand::TimeoutHoldTlc(
                     payment_hash,
                     hold_tlc.channel_id,
                     hold_tlc.tlc_id,

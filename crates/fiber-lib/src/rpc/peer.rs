@@ -1,5 +1,5 @@
 use crate::fiber::network::{PeerConnectSource, PeerDisconnectReason};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{NetworkActorMessage, PublicNetworkCommand};
 use crate::log_and_error;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 use fiber_types::{Multiaddr, Pubkey};
@@ -80,7 +80,7 @@ impl PeerRpcServerImpl {
             let address = address_str.parse::<Multiaddr>().rpc_err()?;
             let save = params.save.unwrap_or(true);
             let message = |rpc_reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeer(
+                NetworkActorMessage::new_command(PublicNetworkCommand::ConnectPeer(
                     address,
                     save,
                     PeerConnectSource::Manual,
@@ -94,7 +94,7 @@ impl PeerRpcServerImpl {
             let pubkey = Pubkey::try_from(pubkey_str).rpc_err()?;
             let addr_transport = params.addr_type.map(to_transport_type);
             let message = |rpc_reply| {
-                NetworkActorMessage::new_command(NetworkActorCommand::ConnectPeerWithPubkey(
+                NetworkActorMessage::new_command(PublicNetworkCommand::ConnectPeerWithPubkey(
                     pubkey,
                     addr_transport,
                     PeerConnectSource::Manual,
@@ -113,7 +113,7 @@ impl PeerRpcServerImpl {
     ) -> Result<(), ErrorObjectOwned> {
         let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::DisconnectPeer(
+            NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
                 pubkey,
                 PeerDisconnectReason::Requested,
                 Some(rpc_reply),
@@ -124,7 +124,7 @@ impl PeerRpcServerImpl {
 
     pub async fn list_peers(&self) -> Result<ListPeersResult, ErrorObjectOwned> {
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ListPeers((), rpc_reply))
+            NetworkActorMessage::new_command(PublicNetworkCommand::ListPeers((), rpc_reply))
         };
 
         crate::handle_actor_call!(self.actor, message).map(|response| ListPeersResult {

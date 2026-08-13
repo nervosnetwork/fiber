@@ -2,7 +2,7 @@
 // use crate::watchtower::WatchtowerStore;
 use crate::fiber::{
     channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-    NetworkActorCommand, NetworkActorMessage,
+    FiberActorCommand, NetworkActorMessage,
 };
 use crate::rpc::utils::rpc_error;
 use ckb_sdk::util::blake160;
@@ -154,7 +154,7 @@ impl DevRpcServerImpl {
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::CommitmentSigned(Some(rpc_reply)),
@@ -173,7 +173,7 @@ impl DevRpcServerImpl {
             .unwrap_or_default();
 
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::AddTlc(
@@ -226,7 +226,7 @@ impl DevRpcServerImpl {
             }
         };
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::new_command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::RemoveTlc(
@@ -281,7 +281,7 @@ impl DevRpcServerImpl {
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
         let message = |rpc_reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannelShutdown(
+            NetworkActorMessage::new_command(FiberActorCommand::CheckChannelShutdown(
                 channel_id, rpc_reply,
             ))
         };
