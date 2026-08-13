@@ -113,10 +113,7 @@ pub fn channel_data_x_only_aggregated_pubkey(cd: &ChannelData, for_remote: bool)
 ///
 /// Free function replacement for `ChannelData::local_settlement_pubkey_hash()`.
 pub fn channel_data_local_settlement_pubkey_hash(cd: &ChannelData) -> [u8; 20] {
-    let pubkey = cd
-        .local_settlement_key_pubkey
-        .or_else(|| cd.local_settlement_key.as_ref().map(Privkey::pubkey))
-        .expect("watch channel must contain a local settlement public or private key");
+    let pubkey = cd.local_settlement_pubkey();
     blake160(pubkey.serialize().as_ref()).0
 }
 

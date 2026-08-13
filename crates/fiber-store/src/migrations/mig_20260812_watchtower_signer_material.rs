@@ -13,14 +13,15 @@ pub use fiber_types_current::ChannelData as NewChannelData;
 fn convert_settlement_tlc(
     old: fiber_types_090::SettlementTlc,
 ) -> Result<fiber_types_current::SettlementTlc, String> {
+    let local_key: fiber_types_current::Privkey = decode_as_new(old.local_key)?;
     Ok(fiber_types_current::SettlementTlc {
         tlc_id: decode_as_new(old.tlc_id)?,
         hash_algorithm: decode_as_new(old.hash_algorithm)?,
         payment_amount: old.payment_amount,
         payment_hash: decode_as_new(old.payment_hash)?,
         expiry: old.expiry,
-        local_key: Some(decode_as_new(old.local_key)?),
-        local_key_pubkey: None,
+        local_key_pubkey: Some(local_key.pubkey()),
+        local_key: Some(local_key),
         local_key_commitment_number: None,
         remote_key: decode_as_new(old.remote_key)?,
     })
@@ -41,11 +42,13 @@ fn convert_settlement_data(
 }
 
 fn convert_channel_data(old: OldChannelData) -> Result<NewChannelData, String> {
+    let local_settlement_key: fiber_types_current::Privkey =
+        decode_as_new(old.local_settlement_key)?;
     Ok(NewChannelData {
         channel_id: decode_as_new(old.channel_id)?,
         funding_udt_type_script: old.funding_udt_type_script,
-        local_settlement_key: Some(decode_as_new(old.local_settlement_key)?),
-        local_settlement_key_pubkey: None,
+        local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
+        local_settlement_key: Some(local_settlement_key),
         remote_settlement_key: decode_as_new(old.remote_settlement_key)?,
         local_funding_pubkey: decode_as_new(old.local_funding_pubkey)?,
         remote_funding_pubkey: decode_as_new(old.remote_funding_pubkey)?,
@@ -134,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_existing_watch_channels_to_optional_private_keys() {
+    fn migrates_existing_watch_channels_with_derived_public_keys() {
         let store = gen_store();
         let old_samples = OldChannelData::samples(42);
         let expected = old_samples
@@ -172,7 +175,13 @@ mod tests {
                     expected_settlement_pubkey
                 );
                 assert!(migrated.local_settlement_key.is_some());
-                assert!(migrated.local_settlement_key_pubkey.is_none());
+                assert_eq!(
+                    migrated.local_settlement_key_pubkey,
+                    migrated
+                        .local_settlement_key
+                        .as_ref()
+                        .map(fiber_types_current::Privkey::pubkey)
+                );
                 for settlement in [
                     &migrated.remote_settlement_data,
                     &migrated.pending_remote_settlement_data,
@@ -180,7 +189,12 @@ mod tests {
                 ] {
                     for tlc in &settlement.tlcs {
                         assert!(tlc.local_key.is_some());
-                        assert!(tlc.local_key_pubkey.is_none());
+                        assert_eq!(
+                            tlc.local_key_pubkey,
+                            tlc.local_key
+                                .as_ref()
+                                .map(fiber_types_current::Privkey::pubkey)
+                        );
                         assert!(tlc.local_key_commitment_number.is_none());
                     }
                 }

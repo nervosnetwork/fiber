@@ -801,9 +801,7 @@ fn tracked_settlement_tlcs(
     let settlement_witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
-        channel_data
-            .local_settlement_key_pubkey
-            .expect("watch channel must contain a local settlement pubkey"),
+        channel_data.local_settlement_pubkey(),
         channel_data.remote_settlement_key,
     );
     if blake160(&settlement_witness).as_ref() != committed_witness_hash {
@@ -1520,9 +1518,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     settlement_data_to_witness(
                         &settlement_data,
                         for_remote,
-                        channel_data
-                            .local_settlement_key_pubkey
-                            .expect("watch channel must contain a local settlement pubkey"),
+                        channel_data.local_settlement_pubkey(),
                         channel_data.remote_settlement_key,
                     ),
                 )
@@ -2513,6 +2509,49 @@ mod tests {
                 .map(|(index, payment_hash)| tracked_tlc(*payment_hash, index as u64))
                 .collect(),
         )])
+    }
+
+    #[test]
+    fn tracked_settlement_tlcs_accepts_legacy_private_key_only_channel() {
+        let local_settlement_key = Privkey::from(&[1; 32]);
+        let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+        let settlement_data = SettlementData {
+            local_amount: 3_000,
+            remote_amount: 2_000,
+            tlcs: Vec::new(),
+        };
+        let channel_data = ChannelData {
+            channel_id: [9u8; 32].into(),
+            funding_udt_type_script: None,
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: None,
+            remote_settlement_key,
+            local_funding_pubkey: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding_pubkey: Privkey::from(&[4; 32]).pubkey(),
+            remote_settlement_data: settlement_data.clone(),
+            pending_remote_settlement_data: settlement_data.clone(),
+            local_settlement_data: settlement_data.clone(),
+            revocation_data: None,
+        };
+        let witness = settlement_data_to_witness(
+            &settlement_data,
+            false,
+            local_settlement_key.pubkey(),
+            remote_settlement_key,
+        );
+        let mut lock_args = vec![0u8; 28];
+        lock_args.extend_from_slice(&0u64.to_be_bytes());
+        lock_args.extend_from_slice(blake160(&witness).as_ref());
+        let commitment_lock = Script::new_builder()
+            .code_hash(Byte32::from([1u8; 32]))
+            .hash_type(ScriptHashType::Type)
+            .args(lock_args.pack())
+            .build();
+
+        assert_eq!(
+            tracked_settlement_tlcs(&commitment_lock, &channel_data, false),
+            Some(Vec::new())
+        );
     }
 
     fn settlement_witness_with_unlock(payment_hash: [u8; 20], unlock: Unlock) -> Vec<u8> {
