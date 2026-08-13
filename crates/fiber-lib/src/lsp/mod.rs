@@ -99,8 +99,6 @@ mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod delivery;
 #[cfg(not(target_arch = "wasm32"))]
-mod dispatcher;
-#[cfg(not(target_arch = "wasm32"))]
 mod invoice;
 #[cfg(not(target_arch = "wasm32"))]
 mod registry;

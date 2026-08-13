@@ -26,9 +26,6 @@ use secp256k1::SECP256K1;
 use tempfile::{tempdir, TempDir};
 
 use super::{lsp_config, NoopNetworkActor};
-use crate::lsp::dispatcher::{
-    HostedTenantEndpoint, HostedTenantEndpointArgs, TenantMessageDispatcher,
-};
 use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
@@ -141,13 +138,13 @@ impl TenantRuntimeFactory for ExistingRuntimeFactory {
 async fn register_in_process_endpoint(
     local: &NetworkNode,
     remote_pubkey: crate::fiber_types::Pubkey,
-    endpoint: &ActorRef<NetworkActorMessage>,
+    endpoint: FiberActorRef,
 ) {
     ractor::call_t!(
         local.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
             pubkey: remote_pubkey,
-            actor: crate::fiber::FiberActorRef::from_network(endpoint),
+            actor: endpoint,
             features: crate::fiber_types::FeatureVector::default(),
             reply,
         },),
@@ -170,42 +167,21 @@ async fn activate_in_process_peer(local: &NetworkNode, remote: &NetworkNode) {
     .expect("activate in-process peer");
 }
 
-async fn connect_in_process(
-    left: &NetworkNode,
-    right: &NetworkNode,
-    endpoint: &ActorRef<NetworkActorMessage>,
-) {
-    register_in_process_endpoint(left, right.pubkey, endpoint).await;
-    register_in_process_endpoint(right, left.pubkey, endpoint).await;
+async fn connect_in_process(left: &NetworkNode, right: &NetworkNode) {
+    register_in_process_endpoint(
+        left,
+        right.pubkey,
+        FiberActorRef::from_network(&right.network_actor),
+    )
+    .await;
+    register_in_process_endpoint(
+        right,
+        left.pubkey,
+        FiberActorRef::from_network(&left.network_actor),
+    )
+    .await;
     activate_in_process_peer(left, right).await;
     activate_in_process_peer(right, left).await;
-}
-
-async fn hosted_tenant_endpoint(
-    public_t: &NetworkNode,
-    tenant_id: &TenantId,
-    tenant: &NetworkNode,
-) -> (TenantMessageDispatcher, ActorRef<NetworkActorMessage>) {
-    let dispatcher = TenantMessageDispatcher::default();
-    let runtime = HostedTenantRuntime::network_backed(tenant.pubkey, tenant.network_actor.clone());
-    dispatcher
-        .register_runtime(tenant_id.clone(), tenant.pubkey, runtime.actor())
-        .unwrap();
-    let endpoint = Actor::spawn(
-        None,
-        HostedTenantEndpoint,
-        HostedTenantEndpointArgs {
-            tenant_id: tenant_id.clone(),
-            invoice_pubkey: tenant.pubkey,
-            public_node_id: public_t.pubkey,
-            public_network_actor: public_t.network_actor.clone(),
-            dispatcher: dispatcher.clone(),
-        },
-    )
-    .await
-    .expect("start hosted tenant endpoint")
-    .0;
-    (dispatcher, endpoint)
 }
 
 fn disconnect_in_process(left: &NetworkNode, right: &NetworkNode) {
@@ -267,8 +243,6 @@ struct HostedTenantTestNode {
     lsp_node_index: usize,
     node: NetworkNode,
     private_channel_id: crate::fiber_types::Hash256,
-    _dispatcher: TenantMessageDispatcher,
-    _endpoint: ActorRef<NetworkActorMessage>,
 }
 
 struct LspTestService {
@@ -386,13 +360,7 @@ async fn create_lsp_test_network(
 
     let (mut nodes, channel_ids) =
         create_n_nodes_network_with_visibility(network_channels, node_count).await;
-    let mut tenants = Vec::<(
-        TenantId,
-        usize,
-        NetworkNode,
-        TenantMessageDispatcher,
-        ActorRef<NetworkActorMessage>,
-    )>::with_capacity(tenant_channels.len());
+    let mut tenants = Vec::<(TenantId, usize, NetworkNode)>::with_capacity(tenant_channels.len());
     let mut runtimes_by_lsp = HashMap::<usize, HashMap<TenantId, ExistingRuntime>>::new();
 
     for ((lsp_node_index, tenant_name), _) in tenant_channels {
@@ -402,17 +370,13 @@ async fn create_lsp_test_network(
         );
         let tenant_id = TenantId::new(*tenant_name).expect("valid test tenant id");
         assert!(
-            !tenants
-                .iter()
-                .any(|(registered_id, registered_lsp, _, _, _)| {
-                    registered_lsp == lsp_node_index && registered_id == &tenant_id
-                }),
+            !tenants.iter().any(|(registered_id, registered_lsp, _)| {
+                registered_lsp == lsp_node_index && registered_id == &tenant_id
+            }),
             "duplicate test tenant id {tenant_id} on LSP node {lsp_node_index}"
         );
         let tenant = NetworkNode::new_with_node_name(&format!("lsp-tenant-{tenant_name}")).await;
-        let (dispatcher, endpoint) =
-            hosted_tenant_endpoint(&nodes[*lsp_node_index], &tenant_id, &tenant).await;
-        connect_in_process(&nodes[*lsp_node_index], &tenant, &endpoint).await;
+        connect_in_process(&nodes[*lsp_node_index], &tenant).await;
         let record = HostedTenantRecord {
             tenant_id: tenant_id.clone(),
             invoice_pubkey: tenant.pubkey,
@@ -433,7 +397,7 @@ async fn create_lsp_test_network(
                 }),
             },
         );
-        tenants.push((tenant_id, *lsp_node_index, tenant, dispatcher, endpoint));
+        tenants.push((tenant_id, *lsp_node_index, tenant));
     }
 
     let root = tempdir().expect("temporary LSP directory");
@@ -506,7 +470,7 @@ async fn create_lsp_test_network(
         });
     }
 
-    for (tenant_id, lsp_node_index, _, _, _) in &tenants {
+    for (tenant_id, lsp_node_index, _) in &tenants {
         let client = &lsp_services
             .iter()
             .find(|lsp| lsp.node_index == *lsp_node_index)
@@ -524,7 +488,7 @@ async fn create_lsp_test_network(
     }
 
     let mut hosted_tenants = Vec::with_capacity(tenants.len());
-    for ((tenant_id, lsp_node_index, mut tenant, dispatcher, endpoint), (_, funding)) in
+    for ((tenant_id, lsp_node_index, mut tenant), (_, funding)) in
         tenants.into_iter().zip(tenant_channels)
     {
         let private_channel_id = establish_channel_between_nodes(
@@ -539,7 +503,6 @@ async fn create_lsp_test_network(
         )
         .await
         .0;
-        assert!(dispatcher.owns_channel(&tenant_id, &private_channel_id));
         let client = &lsp_services
             .iter()
             .find(|lsp| lsp.node_index == lsp_node_index)
@@ -551,8 +514,6 @@ async fn create_lsp_test_network(
             lsp_node_index,
             node: tenant,
             private_channel_id,
-            _dispatcher: dispatcher,
-            _endpoint: endpoint,
         });
     }
 
@@ -1114,9 +1075,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let mut tenant = NetworkNode::new_with_node_name("lsp-tenant-u1").await;
     payer.connect_to(&mut public_t).await;
     let tenant_id = TenantId::new(TENANT_ID).unwrap();
-    let (tenant_dispatcher, tenant_endpoint) =
-        hosted_tenant_endpoint(&public_t, &tenant_id, &tenant).await;
-    connect_in_process(&public_t, &tenant, &tenant_endpoint).await;
+    connect_in_process(&public_t, &tenant).await;
     let replacement = ractor::call_t!(
         public_t.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
@@ -1249,7 +1208,6 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         },
     )
     .await;
-    assert!(tenant_dispatcher.owns_channel(&tenant_id, &private_channel_id));
     wait_until_node_supports_trampoline_routing(&payer, &public_t).await;
     wait_for_tenant_channel(&client, &tenant_id, true).await;
     let tenants: ListLspTenantsResult = client
@@ -1353,7 +1311,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     ));
     assert!(!tenants.tenants[0].channel_online);
 
-    connect_in_process(&public_t, &tenant, &tenant_endpoint).await;
+    connect_in_process(&public_t, &tenant).await;
     public_t
         .expect_event(|event| {
             matches!(event, NetworkServiceEvent::ChannelOnline(pubkey, channel_id, _) if pubkey == &tenant.pubkey && channel_id == &private_channel_id)

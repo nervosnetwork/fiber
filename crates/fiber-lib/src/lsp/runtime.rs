@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ckb_types::packed::Script;
-use ractor::{Actor, ActorCell, ActorRef, ActorStatus};
+use ractor::{ActorCell, ActorRef, ActorStatus};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
@@ -18,14 +18,7 @@ use crate::fiber::{
 use crate::fiber_types::Pubkey;
 use crate::store::{NodeNamespace, Store};
 
-use super::dispatcher::{HostedTenantEndpoint, HostedTenantEndpointArgs, TenantMessageDispatcher};
 use super::{HostedTenantRecord, LspConfig, TenantId};
-
-pub(crate) struct HostedTenantTransport {
-    tenant_id: TenantId,
-    dispatcher: TenantMessageDispatcher,
-    endpoint: ActorRef<NetworkActorMessage>,
-}
 
 /// Tenant-scoped handles used by the authenticated LSP RPC facade.
 #[doc(hidden)]
@@ -44,7 +37,6 @@ pub struct HostedTenantRuntime {
     pub invoice_pubkey: Pubkey,
     runtime_actor: FiberActorRef,
     pub public_network_actor: Option<ActorRef<NetworkActorMessage>>,
-    pub(crate) transport: Option<HostedTenantTransport>,
     rpc_context: Option<HostedTenantRpcContext>,
 }
 
@@ -58,14 +50,8 @@ impl HostedTenantRuntime {
             invoice_pubkey,
             runtime_actor: FiberActorRef::from_network(&network_actor),
             public_network_actor: None,
-            transport: None,
             rpc_context: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn actor(&self) -> FiberActorRef {
-        self.runtime_actor.clone()
     }
 
     #[cfg(test)]
@@ -111,14 +97,6 @@ impl HostedTenantRuntime {
                 NetworkActorCommand::UnregisterInProcessPeer(self.invoice_pubkey),
             ));
         }
-        if let Some(transport) = self.transport {
-            transport
-                .dispatcher
-                .unregister_runtime(&transport.tenant_id, &self.runtime_actor);
-            transport
-                .endpoint
-                .stop(Some("hosted tenant transport stopped".to_string()));
-        }
         self.runtime_actor
             .stop(Some("hosted tenant runtime evicted".to_string()));
     }
@@ -140,7 +118,6 @@ pub struct FiberTenantRuntimeFactory {
     chain_actor: ActorRef<CkbChainMessage>,
     public_network_actor: ActorRef<NetworkActorMessage>,
     tenant_store: Store,
-    dispatcher: TenantMessageDispatcher,
     root_actor: ActorCell,
     default_shutdown_script: Script,
 }
@@ -164,7 +141,6 @@ impl FiberTenantRuntimeFactory {
             chain_actor,
             public_network_actor,
             tenant_store,
-            dispatcher: TenantMessageDispatcher::default(),
             root_actor,
             default_shutdown_script,
         }
@@ -229,38 +205,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             invoice_pubkey,
             runtime_actor: actor.clone(),
             public_network_actor: None,
-            transport: None,
             rpc_context: None,
-        };
-        if let Err(error) = self.dispatcher.register_runtime(
-            record.tenant_id.clone(),
-            invoice_pubkey,
-            runtime.runtime_actor.clone(),
-        ) {
-            runtime.stop();
-            return Err(error);
-        }
-        let endpoint = match Actor::spawn_linked(
-            None,
-            HostedTenantEndpoint,
-            HostedTenantEndpointArgs {
-                tenant_id: record.tenant_id.clone(),
-                invoice_pubkey,
-                public_node_id,
-                public_network_actor: self.public_network_actor.clone(),
-                dispatcher: self.dispatcher.clone(),
-            },
-            self.root_actor.clone(),
-        )
-        .await
-        {
-            Ok((endpoint, _)) => endpoint,
-            Err(error) => {
-                self.dispatcher
-                    .unregister_runtime(&record.tenant_id, &runtime.runtime_actor);
-                runtime.stop();
-                return Err(format!("failed to start hosted tenant endpoint: {error}"));
-            }
         };
 
         let activation_result = async {
@@ -269,7 +214,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
                 |reply| FiberActorMessage::new_command(
                     NetworkActorCommand::RegisterInProcessPeer {
                         pubkey: public_node_id,
-                        actor: FiberActorRef::from_network(&endpoint),
+                        actor: FiberActorRef::from_network(&self.public_network_actor),
                         features: public_features,
                         reply,
                     },
@@ -283,7 +228,7 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
                 |reply| NetworkActorMessage::new_command(
                     NetworkActorCommand::RegisterInProcessPeer {
                         pubkey: invoice_pubkey,
-                        actor: FiberActorRef::from_network(&endpoint),
+                        actor: actor.clone(),
                         features: tenant_features,
                         reply,
                     },
@@ -319,9 +264,6 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::UnregisterInProcessPeer(invoice_pubkey),
                 ));
-            endpoint.stop(Some("hosted tenant activation failed".to_string()));
-            self.dispatcher
-                .unregister_runtime(&record.tenant_id, &runtime.runtime_actor);
             runtime.stop();
             return Err(error);
         }
@@ -333,11 +275,6 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             fiber_actor: actor,
             public_node_id,
             store,
-        });
-        runtime.transport = Some(HostedTenantTransport {
-            tenant_id: record.tenant_id.clone(),
-            dispatcher: self.dispatcher.clone(),
-            endpoint,
         });
         Ok(runtime)
     }
