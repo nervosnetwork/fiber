@@ -949,7 +949,8 @@ mod tests {
             provider: "provider".to_string(),
             asset_id: "ckb".to_string(),
             amount: 100,
-            receiver: "ckt1receiver".to_string(),
+            claimant_lock: "0x".to_string(),
+            refund_lock: "0x".to_string(),
             max_provider_fee: 10,
             max_routing_fee: 5,
             expires_after_seconds: 60,
@@ -989,7 +990,8 @@ mod tests {
         ProviderQuoteLoopOutParams {
             asset_id: "ckb".to_string(),
             amount: 100,
-            receiver: "ckt1receiver".to_string(),
+            claimant_lock: "0x".to_string(),
+            refund_lock: "0x".to_string(),
             max_provider_fee: 10,
             max_routing_fee: 5,
             expires_after_seconds: 60,
@@ -999,8 +1001,6 @@ mod tests {
     fn provider_accept_loop_out_params() -> ProviderAcceptLoopOutParams {
         ProviderAcceptLoopOutParams {
             quote_id: JsonHash256([1u8; 32]),
-            claimant_lock: "0x".to_string(),
-            refund_lock: "0x".to_string(),
         }
     }
 
