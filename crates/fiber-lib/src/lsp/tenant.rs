@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fiber_types::{Hash256, Pubkey};
 
-/// Stable operator-facing identifier for a hosted tenant.
+/// Stable identifier used for authorization, storage namespaces and runtime lookup.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct TenantId(String);
 
@@ -51,10 +51,12 @@ impl FromStr for TenantId {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostedTenantRecord {
     pub tenant_id: TenantId,
-    /// Key used to authenticate invoices and the tenant side of its channel.
-    /// This is not a public, gossip-routable Fiber node identity.
-    pub invoice_pubkey: Pubkey,
-    /// Private channel bound to this tenant after channel provisioning.
+    /// Fiber protocol key used by the tenant side of its private channel and
+    /// to authenticate its invoices. Public T uses it only for local peer
+    /// addressing; it is never announced as a gossip-routable node identity.
+    pub tenant_pubkey: Pubkey,
+    /// Private channel bound to this tenant. This identifies channel state,
+    /// not the tenant's authorization or transport endpoint.
     pub private_channel_id: Option<Hash256>,
     pub created_at: u64,
 }

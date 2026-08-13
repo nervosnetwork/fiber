@@ -350,7 +350,7 @@ impl From<InternalTenantStatus> for LspTenantStatus {
         };
         Self {
             tenant_id: status.record.tenant_id.to_string(),
-            invoice_pubkey: status.record.invoice_pubkey.into(),
+            invoice_pubkey: status.record.tenant_pubkey.into(),
             private_channel_id: status.record.private_channel_id.map(Into::into),
             created_at: status.record.created_at,
             runtime_status,

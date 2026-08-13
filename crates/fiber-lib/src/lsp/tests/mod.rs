@@ -88,7 +88,7 @@ fn tenant_registry_is_persistent_and_idempotent() {
     let registry = TenantRegistry::new(store.clone());
     let record = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: Privkey::from(&[1; 32]).pubkey(),
+        tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -97,13 +97,13 @@ fn tenant_registry_is_persistent_and_idempotent() {
     assert_eq!(registry.register(record.clone()).unwrap(), record);
     let duplicate_key = HostedTenantRecord {
         tenant_id: TenantId::new("u2").unwrap(),
-        invoice_pubkey: record.invoice_pubkey,
+        tenant_pubkey: record.tenant_pubkey,
         private_channel_id: None,
         created_at: 43,
     };
     assert_eq!(
         registry.register(duplicate_key).unwrap_err(),
-        "invoice key is already registered to tenant u1"
+        "protocol key is already registered to tenant u1"
     );
 
     let reopened = TenantRegistry::new(store);
@@ -190,7 +190,7 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
-            invoice_pubkey: Privkey::from(&[4; 32]).pubkey(),
+            tenant_pubkey: Privkey::from(&[4; 32]).pubkey(),
             private_channel_id: None,
             created_at: 42,
         })
@@ -202,7 +202,7 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
             .map_err(|error| error.to_string())?
             .0;
         Ok(HostedTenantRuntime::network_backed(
-            record.invoice_pubkey,
+            record.tenant_pubkey,
             actor,
         ))
     }
@@ -218,7 +218,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
-            invoice_pubkey: Privkey::from(&[5; 32]).pubkey(),
+            tenant_pubkey: Privkey::from(&[5; 32]).pubkey(),
             private_channel_id: None,
             created_at: 42,
         })
@@ -232,7 +232,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
             .0;
         self.actors.lock().unwrap().push(actor.clone());
         Ok(HostedTenantRuntime::network_backed(
-            record.invoice_pubkey,
+            record.tenant_pubkey,
             actor,
         ))
     }
@@ -244,7 +244,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
         let secret = if tenant_id.as_str() == "u1" { 1 } else { 2 };
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
-            invoice_pubkey: Privkey::from(&[secret; 32]).pubkey(),
+            tenant_pubkey: Privkey::from(&[secret; 32]).pubkey(),
             private_channel_id: None,
             created_at: 42,
         })
@@ -257,7 +257,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             .map_err(|error| error.to_string())?
             .0;
         Ok(HostedTenantRuntime::network_backed(
-            record.invoice_pubkey,
+            record.tenant_pubkey,
             actor,
         ))
     }
@@ -366,7 +366,7 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -401,7 +401,7 @@ fn hosted_invoice_route_hint_must_match_public_t() {
     let other_lsp_key = Privkey::from(&[10; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -433,7 +433,7 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -470,7 +470,7 @@ fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -503,7 +503,7 @@ fn hosted_invoice_buffer_duration_is_shortened_by_operator_policy() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -532,7 +532,7 @@ fn hosted_invoice_must_be_signed_by_registered_tenant() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -563,7 +563,7 @@ fn hosted_forwarding_request(
     );
     TrampolineForwardingRequest {
         payment_hash,
-        next_node_id: tenant.invoice_pubkey,
+        next_node_id: tenant.tenant_pubkey,
         amount_to_forward: 1_000,
         hash_algorithm: HashAlgorithm::Sha256,
         build_max_fee_amount: 10,
@@ -593,7 +593,7 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
     };
@@ -634,7 +634,7 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
     };
@@ -783,7 +783,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
     };
@@ -874,7 +874,7 @@ fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition(
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([25; 32])),
         created_at: 42,
     };
@@ -945,7 +945,7 @@ fn payment_delivery_enforces_per_tenant_pending_limit() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([26; 32])),
         created_at: 42,
     };
@@ -1276,7 +1276,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
     };
@@ -1298,7 +1298,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
 
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
-            tenant.invoice_pubkey,
+            tenant.tenant_pubkey,
             private_channel_id,
         ))
         .unwrap();
@@ -1380,13 +1380,13 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
         .unwrap();
     let u1 = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: u1_key.pubkey(),
+        tenant_pubkey: u1_key.pubkey(),
         private_channel_id: Some(u1_channel),
         created_at: 42,
     };
     let u2 = HostedTenantRecord {
         tenant_id: TenantId::new("u2").unwrap(),
-        invoice_pubkey: u2_key.pubkey(),
+        tenant_pubkey: u2_key.pubkey(),
         private_channel_id: Some(u2_channel),
         created_at: 42,
     };
@@ -1480,7 +1480,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1545,7 +1545,7 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1638,7 +1638,7 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1722,7 +1722,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1784,7 +1784,7 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1842,7 +1842,7 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1907,7 +1907,7 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -1974,7 +1974,7 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -2044,7 +2044,7 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
@@ -2167,7 +2167,7 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
-        invoice_pubkey: tenant_key.pubkey(),
+        tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
     };

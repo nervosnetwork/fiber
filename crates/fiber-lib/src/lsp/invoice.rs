@@ -175,7 +175,7 @@ impl<S: LspInvoiceStore> LspInvoiceRegistry<S> {
             .recover_payee_pub_key()
             .map(Pubkey::from)
             .map_err(|error| format!("failed to recover hosted invoice payee: {error}"))?;
-        if payee != tenant.invoice_pubkey {
+        if payee != tenant.tenant_pubkey {
             return Err(format!(
                 "hosted invoice payee does not match tenant {}",
                 tenant.tenant_id

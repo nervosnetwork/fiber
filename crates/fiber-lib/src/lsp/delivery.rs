@@ -389,7 +389,7 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         let private_channel_id = tenant
             .private_channel_id
             .ok_or_else(|| "hosted tenant has no private channel".to_string())?;
-        request.next_node_id = tenant.invoice_pubkey;
+        request.next_node_id = tenant.tenant_pubkey;
         request.clone().into_send_payment_data()?;
         if registration
             .invoice

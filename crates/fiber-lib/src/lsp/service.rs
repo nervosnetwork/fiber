@@ -430,8 +430,8 @@ impl Actor for LspService {
             LspServiceMessage::ExpireDelivery(key) => {
                 self.expire_delivery(myself, state, key).await?;
             }
-            LspServiceMessage::TenantChannelOnline(invoice_pubkey, channel_id) => {
-                if let Some(tenant) = state.registry.find_by_invoice_pubkey(&invoice_pubkey)? {
+            LspServiceMessage::TenantChannelOnline(tenant_pubkey, channel_id) => {
+                if let Some(tenant) = state.registry.find_by_tenant_pubkey(&tenant_pubkey)? {
                     let tenant = match state
                         .registry
                         .bind_private_channel(&tenant.tenant_id, channel_id)
@@ -460,8 +460,8 @@ impl Actor for LspService {
                     }
                 }
             }
-            LspServiceMessage::TenantChannelOffline(invoice_pubkey, channel_id) => {
-                if let Some(tenant) = state.registry.find_by_invoice_pubkey(&invoice_pubkey)? {
+            LspServiceMessage::TenantChannelOffline(tenant_pubkey, channel_id) => {
+                if let Some(tenant) = state.registry.find_by_tenant_pubkey(&tenant_pubkey)? {
                     if state.ready_tenants.get(&tenant.tenant_id) == Some(&channel_id) {
                         state.ready_tenants.remove(&tenant.tenant_id);
                     }

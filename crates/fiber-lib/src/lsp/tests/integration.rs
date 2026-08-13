@@ -120,12 +120,12 @@ impl TenantRuntimeFactory for ExistingRuntimeFactory {
             .runtimes
             .get(&record.tenant_id)
             .ok_or_else(|| format!("unknown integration-test tenant {}", record.tenant_id))?;
-        if record.invoice_pubkey != existing.record.invoice_pubkey {
+        if record.tenant_pubkey != existing.record.tenant_pubkey {
             return Err("tenant record changed after registration".to_string());
         }
         self.starts.fetch_add(1, Ordering::Relaxed);
         let runtime = HostedTenantRuntime::network_backed(
-            record.invoice_pubkey,
+            record.tenant_pubkey,
             existing.network_actor.clone(),
         );
         Ok(match &existing.rpc_context {
@@ -379,7 +379,7 @@ async fn create_lsp_test_network(
         connect_in_process(&nodes[*lsp_node_index], &tenant).await;
         let record = HostedTenantRecord {
             tenant_id: tenant_id.clone(),
-            invoice_pubkey: tenant.pubkey,
+            tenant_pubkey: tenant.pubkey,
             private_channel_id: None,
             created_at: crate::now_timestamp_as_millis_u64(),
         };
@@ -555,7 +555,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     let expected_tenant = runtime_factory
         .provision(&tenant_id)
         .expect("provision hosted tenant identity");
-    assert_ne!(expected_tenant.invoice_pubkey, public_t.pubkey);
+    assert_ne!(expected_tenant.tenant_pubkey, public_t.pubkey);
 
     let public_network_actor_id = public_t.network_actor.get_id();
     let lsp_actor = Actor::spawn_linked(
@@ -611,7 +611,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         .expect("register hosted tenant");
     assert_eq!(
         registered.tenant.invoice_pubkey,
-        expected_tenant.invoice_pubkey.into()
+        expected_tenant.tenant_pubkey.into()
     );
     assert!(registered.access_token.is_none());
     assert!(matches!(
@@ -668,7 +668,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     let duplicate = ractor::call_t!(
         public_t.network_actor,
         |reply| NetworkActorMessage::new_command(NetworkActorCommand::RegisterInProcessPeer {
-            pubkey: expected_tenant.invoice_pubkey,
+            pubkey: expected_tenant.tenant_pubkey,
             actor: crate::fiber::FiberActorRef::from_network(&impostor),
             features: crate::fiber_types::FeatureVector::default(),
             reply,
@@ -680,7 +680,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         duplicate.unwrap_err(),
         format!(
             "in-process peer {:?} is already owned by another actor",
-            expected_tenant.invoice_pubkey
+            expected_tenant.tenant_pubkey
         )
     );
 
@@ -920,7 +920,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .request::<fiber_json_types::OpenChannelResult, _>(
             "open_channel",
             rpc_params![fiber_json_types::OpenChannelParams {
-                pubkey: expected_tenant.invoice_pubkey.into(),
+                pubkey: expected_tenant.tenant_pubkey.into(),
                 funding_amount: 1_000,
                 public: Some(false),
                 one_way: None,
@@ -983,7 +983,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             .is_some_and(|pending| {
                 pending.iter().any(|channel| {
                     channel.channel_id == temporary_channel_id
-                        && channel.pubkey == expected_tenant.invoice_pubkey
+                        && channel.pubkey == expected_tenant.tenant_pubkey
                 })
             })
         }
@@ -1012,8 +1012,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .expect("create invoice through the standard tenant RPC");
     let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
         .expect("decode tenant invoice");
-    let expected_invoice_pubkey: secp256k1::PublicKey = expected_tenant.invoice_pubkey.into();
-    assert_eq!(decoded.payee_pub_key(), Some(&expected_invoice_pubkey));
+    let expected_tenant_pubkey: secp256k1::PublicKey = expected_tenant.tenant_pubkey.into();
+    assert_eq!(decoded.payee_pub_key(), Some(&expected_tenant_pubkey));
     assert_eq!(
         decoded.trampoline_route_hint(),
         Some(&secp256k1::PublicKey::from(public_t.pubkey))
@@ -1101,7 +1101,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let starts = Arc::new(AtomicUsize::new(0));
     let tenant_record = HostedTenantRecord {
         tenant_id: TenantId::new(TENANT_ID).unwrap(),
-        invoice_pubkey: tenant.pubkey,
+        tenant_pubkey: tenant.pubkey,
         private_channel_id: None,
         created_at: crate::now_timestamp_as_millis_u64(),
     };

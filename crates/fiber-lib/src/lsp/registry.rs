@@ -56,17 +56,17 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
 
     pub fn register(&self, record: HostedTenantRecord) -> Result<HostedTenantRecord, String> {
         if let Some(existing) = self.get(&record.tenant_id)? {
-            if existing.invoice_pubkey != record.invoice_pubkey {
+            if existing.tenant_pubkey != record.tenant_pubkey {
                 return Err(format!(
-                    "tenant {} is already registered with another invoice key",
+                    "tenant {} is already registered with another protocol key",
                     record.tenant_id
                 ));
             }
             return Ok(existing);
         }
-        if let Some(existing) = self.find_by_invoice_pubkey(&record.invoice_pubkey)? {
+        if let Some(existing) = self.find_by_tenant_pubkey(&record.tenant_pubkey)? {
             return Err(format!(
-                "invoice key is already registered to tenant {}",
+                "protocol key is already registered to tenant {}",
                 existing.tenant_id
             ));
         }
@@ -100,13 +100,13 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         Ok(record)
     }
 
-    pub fn find_by_invoice_pubkey(
+    pub fn find_by_tenant_pubkey(
         &self,
-        invoice_pubkey: &crate::fiber_types::Pubkey,
+        tenant_pubkey: &crate::fiber_types::Pubkey,
     ) -> Result<Option<HostedTenantRecord>, String> {
         Ok(self
             .list()?
             .into_iter()
-            .find(|record| &record.invoice_pubkey == invoice_pubkey))
+            .find(|record| &record.tenant_pubkey == tenant_pubkey))
     }
 }

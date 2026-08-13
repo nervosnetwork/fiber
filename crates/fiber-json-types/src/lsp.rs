@@ -81,7 +81,8 @@ pub enum LspTenantRuntimeStatus {
 pub struct LspTenantStatus {
     /// Stable operator-facing tenant identifier.
     pub tenant_id: String,
-    /// Key authenticating tenant invoices; it is not a public routing node identity.
+    /// Tenant protocol key used for its private channel and invoice signatures;
+    /// it is not a public, gossip-routable node identity.
     pub invoice_pubkey: Pubkey,
     /// Private channel currently bound to this tenant.
     pub private_channel_id: Option<Hash256>,
