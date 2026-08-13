@@ -2055,6 +2055,9 @@ where
         state.clean_up_failed_tlcs();
 
         if state.uses_deferred_external_signing() {
+            // Persist the exact transition input and pause before mutating the
+            // channel. Signature submission resumes it through the matching
+            // `finish_*` continuation below.
             let (content, settlement_data) = state.prepare_commitment_signature_request()?;
             state
                 .signer_state
@@ -2226,6 +2229,7 @@ where
         Ok(())
     }
 
+    /// Verify one pending external signature and resume its paused channel transition.
     async fn submit_channel_signature(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2334,6 +2338,10 @@ where
         Ok(SubmitSignatureOutcome::Applied)
     }
 
+    /// Drain runtime work queued while an external signature was outstanding.
+    ///
+    /// A drained item may create another signing request, in which case the
+    /// queue pauses again. This runtime queue is not a crash-recovery journal.
     async fn drain_deferred_external_signer_work(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -5717,6 +5725,7 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Copy signer-owned public material into the durable channel state.
     fn persist_external_signer_material(&mut self) {
         if let ChannelSignerRuntime::External(runtime) = &self.channel_signer {
             self.core.local_commitment_points = runtime.commitment_points.clone();
@@ -5724,6 +5733,8 @@ impl ChannelActorState {
         }
     }
 
+    /// Rebuild the external signer runtime from persisted public material.
+    /// Runtime-only deferred work intentionally starts empty.
     fn hydrate_external_signer_runtime(&mut self) {
         if !matches!(
             self.core.signer_state,
@@ -5749,6 +5760,7 @@ impl ChannelActorState {
         });
     }
 
+    /// Validate and install public material needed by the next signing round.
     fn apply_next_signer_material(
         &mut self,
         request: &ChannelSignatureRequest,
@@ -5866,10 +5878,12 @@ impl ChannelActorState {
         }
     }
 
+    /// Whether signing pauses for signatures supplied outside this process.
     fn uses_deferred_external_signing(&self) -> bool {
         matches!(&self.channel_signer, ChannelSignerRuntime::External(_))
     }
 
+    /// Verify a submitted partial signature against the persisted plaintext and nonce.
     fn verify_external_musig2_signature(
         &self,
         content: &Musig2SigningContent,
@@ -5897,6 +5911,7 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Build the typed plaintext persisted before external commitment signing.
     fn prepare_commitment_signature_request(
         &self,
     ) -> Result<(Musig2SigningContent, SettlementData), ProcessingChannelError> {
@@ -5919,6 +5934,7 @@ impl ChannelActorState {
         ))
     }
 
+    /// Take a peer message buffered behind the current external signature.
     fn take_pending_peer_commitment_signed(&mut self) -> Option<CommitmentSigned> {
         match &mut self.channel_signer {
             ChannelSignerRuntime::External(runtime) => {
@@ -5942,6 +5958,7 @@ impl ChannelActorState {
         }
     }
 
+    /// Buffer a peer message until the outstanding external signature completes.
     fn queue_pending_peer_commitment_signed(&mut self, commitment_signed: CommitmentSigned) {
         if let ChannelSignerRuntime::External(runtime) = &mut self.channel_signer {
             runtime.pending_peer_commitment_signed = Some(commitment_signed);
@@ -5988,6 +6005,7 @@ impl ChannelActorState {
             .build())
     }
 
+    /// Continue `SendRevokeAndAck` after its external partial signature arrives.
     fn finish_send_revoke_and_ack(
         &mut self,
         revocation_partial_signature: PartialSignature,
@@ -6028,6 +6046,7 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Continue cooperative close after its external partial signature arrives.
     fn finish_send_closing_signed(
         &mut self,
         closing_partial_signature: PartialSignature,
@@ -6059,6 +6078,7 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Continue public announcement after its external partial signature arrives.
     fn finish_sign_channel_announcement(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -6092,6 +6112,7 @@ impl ChannelActorState {
         Ok(())
     }
 
+    /// Continue peer revoke processing after the local external signature arrives.
     fn finish_received_revoke_and_ack(
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
