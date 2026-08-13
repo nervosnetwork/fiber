@@ -275,7 +275,6 @@ impl ChannelCommand {
 #[derive(Debug)]
 pub struct SubmitChannelSignatureCommand {
     pub request_id: SignatureRequestId,
-    pub revision: u64,
     pub partial_signature: PartialSignature,
     pub next_material: Option<NextChannelSignerMaterial>,
 }
@@ -2235,7 +2234,6 @@ where
     ) -> Result<SubmitSignatureOutcome, ProcessingChannelError> {
         let receipt = LastAppliedChannelSignature {
             request_id: command.request_id,
-            revision: command.revision,
             partial_signature: command.partial_signature,
             next_material: command.next_material.clone(),
         };

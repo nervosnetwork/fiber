@@ -1083,7 +1083,6 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             rpc_params![fiber_json_types::SubmitChannelSignatureParams {
                 channel_id: channel_id.into(),
                 request_id: crate::fiber_types::Hash256::from([9; 32]).into(),
-                channel_revision: 1,
                 partial_signature: [1; 32],
                 next_material: None,
             }],

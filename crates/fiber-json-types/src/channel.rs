@@ -630,10 +630,6 @@ pub enum ChannelSigningStatus {
     SignatureRequired {
         /// Identifier of the outstanding signature request.
         request_id: Hash256,
-        /// Channel signer revision that must be submitted with the signature.
-        #[serde_as(as = "U64Hex")]
-        #[schemars(schema_with = "schema_as_uint_hex")]
-        revision: u64,
         /// Semantic channel transition that produced this request.
         transition: ChannelSigningTransition,
         /// Structured MuSig2 plaintext independently hashed by the external signer.
@@ -811,10 +807,6 @@ pub struct SubmitChannelSignatureParams {
     pub channel_id: Hash256,
     /// Identifier of the outstanding signature request.
     pub request_id: Hash256,
-    /// Channel signer revision that must match the current request.
-    #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
-    pub channel_revision: u64,
     /// MuSig2 partial signature over the persisted plaintext (32 bytes, `0x`-prefixed hex).
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]

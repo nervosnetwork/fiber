@@ -519,8 +519,8 @@ Reads the current external signing status for a channel.
 
 Submits a partial signature for the channel's current outstanding signing request.
 
- The node verifies `request_id` and `channel_revision` against the persisted request,
- checks the partial signature against the saved plaintext, then resumes the channel
+ The node verifies `request_id` against the persisted request, checks the partial
+ signature against the saved plaintext, then resumes the channel
  state machine. The caller cannot replace the transaction or signing content.
  Optional `next_material` supplies the next commitment point and public nonces.
 
@@ -528,7 +528,6 @@ Submits a partial signature for the channel's current outstanding signing reques
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel that produced the outstanding signature request.
 * `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
-* `channel_revision` - <em>`u64`</em>, Channel signer revision that must match the current request.
 * `partial_signature` - <em>``</em>, MuSig2 partial signature over the persisted plaintext (32 bytes, `0x`-prefixed hex).
 * `next_material` - <em>Option<[NextChannelSignerMaterial](#type-nextchannelsignermaterial)></em>, Optional next-round public commitment point and nonces.
 

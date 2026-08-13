@@ -88,7 +88,7 @@ For a channel using deferred external signing, the Node persists:
 
 ```text
 External / Ready
-    -> AwaitingSignature(request_id, revision, typed_content)
+    -> AwaitingSignature(request_id, typed_content)
     -> Ready
 ```
 
@@ -423,13 +423,13 @@ the public material, verifying subsequent partial signatures, and applying the
 normal channel state machine.
 
 The channel state itself records whether it is `Internal` or `External`, the
-public signer material, revision, pending request, and idempotency receipt. A
+public signer material, pending request, and idempotency receipt. A
 signer submission is accepted only when all of the following hold:
 
 1. the authenticated token resolves to `tenant_id`;
 2. the channel exists in that tenant's namespace;
 3. the channel is external-signer controlled;
-4. request ID, channel revision, signature, and next public material match the
+4. request ID, signature, and next public material match the
    persisted request.
 
 The Biscuit token is a bearer credential: it proves possession of the
@@ -458,7 +458,7 @@ The combined system has independent durable and live state:
 | --- | --- | --- |
 | tenant identity and private-channel binding | `TenantRegistry` | yes |
 | tenant channel/payment/invoice state | tenant `NodeNamespace` | yes |
-| channel signing request and revision | `ChannelActorData` | yes |
+| channel signing request | `ChannelActorData` | yes |
 | mailbox requests, responses, and cursor | signer gateway | yes in production |
 | tenant runtime liveness | `TenantSupervisor` | no |
 | signer session connectivity | signer gateway | no |
@@ -561,7 +561,7 @@ checks, or crash recovery.
 | --- | --- | --- |
 | 1. Shared types and SDK signer core | Add `fiber-lsp-sdk`; move and adapt the prototype signer core; add canonical `TenantRegistryPayload` encoding and TenantId derivation to shared types | Fixed payload/digest and TenantId vectors; RootSigner create/open/restore; channel-key isolation; signer-store persistence; native tests and relevant WASM compile checks |
 | 2. Tenant registration | Add nonce storage and registration RPCs; verify the RootSigner proof; derive TenantId server-side; issue the tenant Biscuit; persist `root_signer_pubkey` | Nonce replacement, consumption, and replay rejection; wrong signature, public key, nonce, and LSP node rejection; derived TenantId cannot be client-controlled; persistence/restart test; nonce-to-registration RPC integration test |
-| 3. Channel signer state | Port the deferred external `ChannelActor` signer state machine into `FiberActorCore`; combine migrations; retain the internal signer path | Request/revision transition tests; wrong request, revision, signature, and next material rejection; `AlreadyApplied` idempotency; migration defaults existing channels to `Internal`; existing internal-signer regression tests |
+| 3. Channel signer state | Port the deferred external `ChannelActor` signer state machine into `FiberActorCore`; combine migrations; retain the internal signer path | Request transition tests; wrong request, signature, and next material rejection; `AlreadyApplied` idempotency; migration defaults existing channels to `Internal`; existing internal-signer regression tests |
 | 4. Tenant-scoped signer RPC | Add cold store-only status reads and hydrated signature submission; enforce namespace and private-channel ownership | Tenant A cannot query or submit for Tenant B; cold status query; submission hydrates and resumes the tenant; pending request survives restart |
 | 5. Hosted U-T external signer E2E | Connect SDK registration, Biscuit RPC client, external channel open, polling/signing loop, and payment flow | Registration through channel readiness; outbound and inbound payment; runtime eviction/rehydration; Node and SDK restart; repeated submission remains idempotent |
 | 6. Gateway and readiness | Add durable mailbox/cursors, signer sessions and fencing; gate delivery on `TenantSignReady` | Disconnect/reconnect and old-session fencing; mailbox recovery and cursor tests; delivery remains `Deferred` while signer is not ready; no duplicate downstream dispatch |

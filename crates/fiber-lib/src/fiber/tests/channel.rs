@@ -1685,14 +1685,6 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
         .expect_err("wrong request id must be rejected")
         .contains("request id does not match"));
 
-    let mut wrong_revision = valid_submission.clone();
-    wrong_revision.channel_revision += 1;
-    assert!(sdk
-        .submit(wrong_revision)
-        .await
-        .expect_err("wrong channel revision must be rejected")
-        .contains("revision does not match"));
-
     let mut invalid_signature = valid_submission.clone();
     invalid_signature.partial_signature = [1; 32];
     assert!(sdk
@@ -1774,7 +1766,6 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
     let pending_before_restart = sdk.get_signing_status(channel_id).await.status;
     let fiber_json_types::ChannelSigningStatus::SignatureRequired {
         request_id: expected_request_id,
-        revision: expected_revision,
         ..
     } = pending_before_restart
     else {
@@ -1791,9 +1782,8 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
         pending_after_restart,
         fiber_json_types::ChannelSigningStatus::SignatureRequired {
             request_id,
-            revision,
             ..
-        } if request_id == expected_request_id && revision == expected_revision
+        } if request_id == expected_request_id
     ));
 
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1998,7 +1988,6 @@ impl ExternalSignerHttpClient<'_> {
     ) -> SubmitChannelSignatureParams {
         let fiber_json_types::ChannelSigningStatus::SignatureRequired {
             request_id,
-            revision,
             content,
             ..
         } = status
@@ -2029,7 +2018,6 @@ impl ExternalSignerHttpClient<'_> {
         SubmitChannelSignatureParams {
             channel_id: channel_id.into(),
             request_id,
-            channel_revision: revision,
             partial_signature: signature.partial_signature.serialize(),
             next_material: Some(to_rpc_next_channel_signer_material(&next_material)),
         }

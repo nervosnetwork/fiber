@@ -127,8 +127,8 @@ trait ChannelRpc {
 
     /// Submits a partial signature for the channel's current outstanding signing request.
     ///
-    /// The node verifies `request_id` and `channel_revision` against the persisted request,
-    /// checks the partial signature against the saved plaintext, then resumes the channel
+    /// The node verifies `request_id` against the persisted request, checks the partial
+    /// signature against the saved plaintext, then resumes the channel
     /// state machine. The caller cannot replace the transaction or signing content.
     /// Optional `next_material` supplies the next commitment point and public nonces.
     #[method(name = "submit_channel_signature", with_extensions)]
@@ -821,7 +821,6 @@ where
     ) -> Result<SubmitChannelSignatureResult, ErrorObjectOwned> {
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         let request_id = SignatureRequestId(params.request_id.into());
-        let revision = params.channel_revision;
         let partial_signature =
             PartialSignature::from_slice(&params.partial_signature).rpc_err()?;
         let next_material = params
@@ -837,7 +836,6 @@ where
                     command: ChannelCommand::SubmitChannelSignature(
                         SubmitChannelSignatureCommand {
                             request_id,
-                            revision,
                             partial_signature,
                             next_material: next_material.clone(),
                         },
@@ -865,12 +863,10 @@ fn to_rpc_channel_signing_status(
         }
         InternalChannelSigningStatus::SignatureRequired {
             request_id,
-            revision,
             transition,
             content,
         } => ChannelSigningStatus::SignatureRequired {
             request_id: request_id.0.into(),
-            revision,
             transition: to_rpc_signing_transition(transition),
             content: to_rpc_musig2_signing_content(content)?,
         },

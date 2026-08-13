@@ -387,7 +387,6 @@ pub enum ChannelSignerState {
 /// Persisted state for one external channel signer.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalChannelSignerState {
-    revision: u64,
     state: ExternalSignerState,
     /// Last signature that successfully resumed this channel.
     ///
@@ -402,8 +401,6 @@ pub struct ExternalChannelSignerState {
 pub struct LastAppliedChannelSignature {
     /// Identifier of the applied signature request.
     pub request_id: SignatureRequestId,
-    /// Channel signer revision that was applied.
-    pub revision: u64,
     /// MuSig2 partial signature that resumed the channel.
     #[serde_as(as = "PartialSignatureAsBytes")]
     pub partial_signature: musig2::PartialSignature,
@@ -429,7 +426,6 @@ pub enum ExternalSignerState {
     /// Channel processing is paused until this exact signature is submitted.
     AwaitingSignature {
         request_id: SignatureRequestId,
-        revision: u64,
         request: ChannelSignatureRequest,
     },
 }
@@ -479,7 +475,6 @@ pub enum ChannelSigningStatus {
     NoSignatureRequired,
     SignatureRequired {
         request_id: SignatureRequestId,
-        revision: u64,
         transition: ChannelSigningTransition,
         content: Musig2SigningContent,
     },
@@ -496,61 +491,48 @@ pub enum ChannelSignerStateError {
     NoSignatureRequired,
     #[error("signature request id does not match the current request")]
     RequestMismatch,
-    #[error("signature request revision does not match the current request")]
-    RevisionMismatch,
     #[error("submitted signature does not match the previously applied result")]
     ResultMismatch,
-    #[error("channel signer revision overflow")]
-    RevisionOverflow,
 }
 
 impl ChannelSignerState {
     /// Construct an external signer in its idle state.
     pub fn external() -> Self {
         Self::External(ExternalChannelSignerState {
-            revision: 0,
             state: ExternalSignerState::Ready,
             last_applied: None,
         })
     }
 
-    /// Begin waiting for an external signature and return its new revision.
+    /// Begin waiting for an external signature.
     pub fn request_signature(
         &mut self,
         request_id: SignatureRequestId,
         request: ChannelSignatureRequest,
-    ) -> Result<u64, ChannelSignerStateError> {
+    ) -> Result<(), ChannelSignerStateError> {
         let Self::External(external) = self else {
             return Err(ChannelSignerStateError::InternalSigner);
         };
         if !matches!(external.state, ExternalSignerState::Ready) {
             return Err(ChannelSignerStateError::AlreadyAwaitingSignature);
         }
-        external.revision = external
-            .revision
-            .checked_add(1)
-            .ok_or(ChannelSignerStateError::RevisionOverflow)?;
-        let revision = external.revision;
         external.state = ExternalSignerState::AwaitingSignature {
             request_id,
-            revision,
             request,
         };
-        Ok(revision)
+        Ok(())
     }
 
     /// Validate and clone the current request without changing state.
     pub fn pending_request(
         &self,
         request_id: SignatureRequestId,
-        revision: u64,
     ) -> Result<ChannelSignatureRequest, ChannelSignerStateError> {
         let Self::External(external) = self else {
             return Err(ChannelSignerStateError::InternalSigner);
         };
         let ExternalSignerState::AwaitingSignature {
             request_id: expected_id,
-            revision: expected_revision,
             request,
         } = &external.state
         else {
@@ -558,9 +540,6 @@ impl ChannelSignerState {
         };
         if *expected_id != request_id {
             return Err(ChannelSignerStateError::RequestMismatch);
-        }
-        if *expected_revision != revision {
-            return Err(ChannelSignerStateError::RevisionMismatch);
         }
         Ok(request.clone())
     }
@@ -577,24 +556,17 @@ impl ChannelSignerState {
             if applied == receipt {
                 return Ok(None);
             }
-            if applied.request_id == receipt.request_id && applied.revision == receipt.revision {
+            if applied.request_id == receipt.request_id {
                 return Err(ChannelSignerStateError::ResultMismatch);
-            }
-            if receipt.revision < applied.revision {
-                return Err(ChannelSignerStateError::RevisionMismatch);
             }
         }
         match &external.state {
             ExternalSignerState::AwaitingSignature {
                 request_id,
-                revision,
                 request,
             } => {
                 if *request_id != receipt.request_id {
                     return Err(ChannelSignerStateError::RequestMismatch);
-                }
-                if *revision != receipt.revision {
-                    return Err(ChannelSignerStateError::RevisionMismatch);
                 }
                 Ok(Some(request.clone()))
             }
@@ -607,7 +579,7 @@ impl ChannelSignerState {
         &mut self,
         receipt: LastAppliedChannelSignature,
     ) -> Result<(), ChannelSignerStateError> {
-        self.pending_request(receipt.request_id, receipt.revision)?;
+        self.pending_request(receipt.request_id)?;
         let Self::External(external) = self else {
             unreachable!("pending_request already checked external state")
         };
@@ -647,13 +619,11 @@ impl ChannelSignerState {
                 state:
                     ExternalSignerState::AwaitingSignature {
                         request_id,
-                        revision,
                         request,
                     },
                 ..
             }) => ChannelSigningStatus::SignatureRequired {
                 request_id: *request_id,
-                revision: *revision,
                 transition: request.transition(),
                 content: request.content().clone(),
             },
@@ -714,21 +684,16 @@ mod tests {
         }
     }
 
-    fn receipt(
-        request_id: SignatureRequestId,
-        revision: u64,
-        tag: u8,
-    ) -> LastAppliedChannelSignature {
+    fn receipt(request_id: SignatureRequestId, tag: u8) -> LastAppliedChannelSignature {
         LastAppliedChannelSignature {
             request_id,
-            revision,
             partial_signature: musig2::PartialSignature::from_slice(&[tag; 32]).unwrap(),
             next_material: None,
         }
     }
 
     #[test]
-    fn external_signer_state_requires_matching_request_and_revision() {
+    fn external_signer_state_requires_matching_request() {
         let mut state = ChannelSignerState::external();
         let request_id = SignatureRequestId(Hash256::from([1; 32]));
         let request = ChannelSignatureRequest::SendCommitmentSigned {
@@ -736,10 +701,9 @@ mod tests {
             settlement_data: settlement_data(),
         };
 
-        let revision = state
+        state
             .request_signature(request_id, request.clone())
             .unwrap();
-        assert_eq!(revision, 1);
         assert_eq!(
             state.request_signature(SignatureRequestId(Hash256::from([4; 32])), request.clone()),
             Err(ChannelSignerStateError::AlreadyAwaitingSignature)
@@ -748,34 +712,22 @@ mod tests {
             state.signing_status(),
             ChannelSigningStatus::SignatureRequired {
                 request_id: id,
-                revision: 1,
                 transition: ChannelSigningTransition::SendCommitmentSigned,
                 ..
             } if id == request_id
         ));
         assert_eq!(
-            state.complete_request(receipt(
-                SignatureRequestId(Hash256::from([2; 32])),
-                revision,
-                1
-            )),
+            state.complete_request(receipt(SignatureRequestId(Hash256::from([2; 32])), 1)),
             Err(ChannelSignerStateError::RequestMismatch)
         );
-        assert_eq!(
-            state.complete_request(receipt(request_id, revision + 1, 1)),
-            Err(ChannelSignerStateError::RevisionMismatch)
-        );
-        state
-            .complete_request(receipt(request_id, revision, 1))
-            .unwrap();
+        state.complete_request(receipt(request_id, 1)).unwrap();
         assert!(matches!(
             state.signing_status(),
             ChannelSigningStatus::NoSignatureRequired
         ));
 
         let next_request_id = SignatureRequestId(Hash256::from([5; 32]));
-        let next_revision = state.request_signature(next_request_id, request).unwrap();
-        assert_eq!(next_revision, 2);
+        state.request_signature(next_request_id, request).unwrap();
     }
 
     #[test]
@@ -786,8 +738,8 @@ mod tests {
             content: content(),
             settlement_data: settlement_data(),
         };
-        let revision = state.request_signature(request_id, request).unwrap();
-        let applied = receipt(request_id, revision, 1);
+        state.request_signature(request_id, request).unwrap();
+        let applied = receipt(request_id, 1);
         assert!(state.replay_or_pending(&applied).unwrap().is_some());
         state.complete_request(applied.clone()).unwrap();
         assert!(state.replay_or_pending(&applied).unwrap().is_none());
@@ -798,7 +750,7 @@ mod tests {
         let mut state = ChannelSignerState::external();
         let first = SignatureRequestId(Hash256::from([1; 32]));
         let second = SignatureRequestId(Hash256::from([2; 32]));
-        let first_revision = state
+        state
             .request_signature(
                 first,
                 ChannelSignatureRequest::SendCommitmentSigned {
@@ -807,7 +759,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let applied = receipt(first, first_revision, 1);
+        let applied = receipt(first, 1);
         state.complete_request(applied.clone()).unwrap();
         state
             .request_signature(
@@ -820,7 +772,7 @@ mod tests {
             .unwrap();
         assert!(state.replay_or_pending(&applied).unwrap().is_none());
         assert!(matches!(
-            state.replay_or_pending(&receipt(first, first_revision, 2)),
+            state.replay_or_pending(&receipt(first, 2)),
             Err(ChannelSignerStateError::ResultMismatch)
         ));
     }
@@ -829,7 +781,7 @@ mod tests {
     fn replay_of_the_same_request_with_a_different_result_is_rejected() {
         let mut state = ChannelSignerState::external();
         let request_id = SignatureRequestId(Hash256::from([1; 32]));
-        let revision = state
+        state
             .request_signature(
                 request_id,
                 ChannelSignatureRequest::SendCommitmentSigned {
@@ -838,21 +790,19 @@ mod tests {
                 },
             )
             .unwrap();
-        state
-            .complete_request(receipt(request_id, revision, 1))
-            .unwrap();
+        state.complete_request(receipt(request_id, 1)).unwrap();
         assert!(matches!(
-            state.replay_or_pending(&receipt(request_id, revision, 2)),
+            state.replay_or_pending(&receipt(request_id, 2)),
             Err(ChannelSignerStateError::ResultMismatch)
         ));
     }
 
     #[test]
-    fn older_revision_after_apply_is_rejected() {
+    fn older_request_after_a_later_apply_is_no_longer_pending() {
         let mut state = ChannelSignerState::external();
         let first = SignatureRequestId(Hash256::from([1; 32]));
         let second = SignatureRequestId(Hash256::from([2; 32]));
-        let first_revision = state
+        state
             .request_signature(
                 first,
                 ChannelSignatureRequest::SendCommitmentSigned {
@@ -861,10 +811,8 @@ mod tests {
                 },
             )
             .unwrap();
+        state.complete_request(receipt(first, 1)).unwrap();
         state
-            .complete_request(receipt(first, first_revision, 1))
-            .unwrap();
-        let second_revision = state
             .request_signature(
                 second,
                 ChannelSignatureRequest::SendCommitmentSigned {
@@ -873,12 +821,10 @@ mod tests {
                 },
             )
             .unwrap();
-        state
-            .complete_request(receipt(second, second_revision, 2))
-            .unwrap();
+        state.complete_request(receipt(second, 2)).unwrap();
         assert!(matches!(
-            state.replay_or_pending(&receipt(first, first_revision, 1)),
-            Err(ChannelSignerStateError::RevisionMismatch)
+            state.replay_or_pending(&receipt(first, 1)),
+            Err(ChannelSignerStateError::NoSignatureRequired)
         ));
     }
 
@@ -898,7 +844,7 @@ mod tests {
             Err(ChannelSignerStateError::InternalSigner)
         );
         assert_eq!(
-            state.complete_request(receipt(request_id, 1, 1)),
+            state.complete_request(receipt(request_id, 1)),
             Err(ChannelSignerStateError::InternalSigner)
         );
         assert!(matches!(
@@ -927,7 +873,6 @@ mod tests {
             restored.signing_status(),
             ChannelSigningStatus::SignatureRequired {
                 request_id: id,
-                revision: 1,
                 ..
             } if id == request_id
         ));
