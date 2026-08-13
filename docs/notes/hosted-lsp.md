@@ -4,6 +4,10 @@ This note describes the first implementation of a hosted Lightning Service
 Provider (LSP) in Fiber. It focuses on trampoline routing and receiving payments
 for mobile tenants that may be offline.
 
+The proposed remote channel signer architecture and its integration with tenant
+identity, storage, runtime readiness, and payment delivery are described in
+[Hosted LSP remote signer integration](hosted-lsp-remote-signer.md).
+
 ## Scope
 
 One Fiber process hosts:
