@@ -10,6 +10,11 @@ pub use crate::fiber_types::TenantId;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostedTenantRecord {
     pub tenant_id: TenantId,
+    /// RootSigner identity that owns this tenant. Legacy operator-provisioned
+    /// records may omit it until they are migrated through authenticated
+    /// registration.
+    #[serde(default)]
+    pub root_signer_pubkey: Option<Pubkey>,
     /// Fiber protocol key used by the tenant side of its private channel and
     /// to authenticate its invoices. Public T uses it only for local peer
     /// addressing; it is never announced as a gossip-routable node identity.

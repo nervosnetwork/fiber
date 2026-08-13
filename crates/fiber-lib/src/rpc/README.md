@@ -49,6 +49,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Lsp](#module-lsp)
         * [Method `lsp_get_status`](#lsp-lsp_get_status)
+        * [Method `lsp_get_tenant_registry_nonce`](#lsp-lsp_get_tenant_registry_nonce)
         * [Method `lsp_register_tenant`](#lsp-lsp_register_tenant)
         * [Method `lsp_ensure_tenant`](#lsp-lsp_ensure_tenant)
         * [Method `lsp_evict_tenant`](#lsp-lsp_evict_tenant)
@@ -818,6 +819,25 @@ Returns a summary of the hosted LSP service.
 
 
 
+<a id="lsp-lsp_get_tenant_registry_nonce"></a>
+#### Method `lsp_get_tenant_registry_nonce`
+
+Issues and persists a fresh one-time tenant registration nonce.
+
+##### Params
+
+* `root_signer_pubkey` - <em>[Pubkey](#type-pubkey)</em>, RootSigner identity that will sign the registration payload.
+
+##### Returns
+
+* `lsp_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public Fiber identity of the hosted LSP.
+* `root_signer_pubkey` - <em>[Pubkey](#type-pubkey)</em>, RootSigner identity associated with this nonce.
+* `nonce` - <em>[Hash256](#type-hash256)</em>, Cryptographically random, single-use 32-byte nonce.
+
+---
+
+
+
 <a id="lsp-lsp_register_tenant"></a>
 #### Method `lsp_register_tenant`
 
@@ -825,7 +845,9 @@ Persistently registers a hosted tenant without starting its Fiber runtime.
 
 ##### Params
 
-* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>[Pubkey](#type-pubkey)</em>, RootSigner identity that deterministically derives the tenant ID.
+* `nonce` - <em>[Hash256](#type-hash256)</em>, Most recent nonce issued for this RootSigner by this LSP.
+* `signature` - <em>`String`</em>, Compact ECDSA signature over the canonical `TenantRegistryPayload`, as hex.
 
 ##### Returns
 
@@ -848,6 +870,8 @@ Starts a registered tenant execution context if it is currently cold.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, RootSigner identity that owns this tenant, when registered through the
+ authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
@@ -871,6 +895,8 @@ Stops a tenant execution context while retaining its persistent state and keys.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, RootSigner identity that owns this tenant, when registered through the
+ authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
@@ -1869,6 +1895,8 @@ Hosted tenant state boundary and liveness information.
 #### Fields
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, RootSigner identity that owns this tenant, when registered through the
+ authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.

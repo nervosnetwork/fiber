@@ -191,6 +191,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 
     // hosted LSP
     b.rule("lsp_get_status", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_tenant_registry_nonce", r#"allow if write("lsp");"#);
     b.rule("lsp_register_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
@@ -575,6 +576,7 @@ mod tests {
             "lsp_get_payment_delivery",
         ];
         let write_methods = [
+            "lsp_get_tenant_registry_nonce",
             "lsp_register_tenant",
             "lsp_ensure_tenant",
             "lsp_evict_tenant",

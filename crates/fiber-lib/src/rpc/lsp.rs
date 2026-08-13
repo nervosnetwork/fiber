@@ -20,11 +20,11 @@ use crate::rpc::payment::PaymentRpcServerImpl;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 
 pub use fiber_json_types::{
-    GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetPaymentCommandResult,
-    ListLspTenantsResult, LspInvoiceHint, LspInvoiceRegistration, LspPaymentDelivery,
-    LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantParams,
-    LspTenantRuntimeStatus, LspTenantStatus, NewLspInvoiceParams, RegisterLspTenantResult,
-    SendLspPaymentParams,
+    GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetLspTenantRegistryNonceParams,
+    GetLspTenantRegistryNonceResult, GetPaymentCommandResult, ListLspTenantsResult, LspInvoiceHint,
+    LspInvoiceRegistration, LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams,
+    LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus,
+    NewLspInvoiceParams, RegisterLspTenantParams, RegisterLspTenantResult, SendLspPaymentParams,
 };
 
 /// RPC module for hosted LSP tenant and payment-delivery administration.
@@ -34,11 +34,18 @@ trait LspRpc {
     #[method(name = "lsp_get_status")]
     async fn lsp_get_status(&self) -> Result<LspServiceStatus, ErrorObjectOwned>;
 
+    /// Issues and persists a fresh one-time tenant registration nonce.
+    #[method(name = "lsp_get_tenant_registry_nonce")]
+    async fn lsp_get_tenant_registry_nonce(
+        &self,
+        params: GetLspTenantRegistryNonceParams,
+    ) -> Result<GetLspTenantRegistryNonceResult, ErrorObjectOwned>;
+
     /// Persistently registers a hosted tenant without starting its Fiber runtime.
     #[method(name = "lsp_register_tenant")]
     async fn lsp_register_tenant(
         &self,
-        params: LspTenantParams,
+        params: RegisterLspTenantParams,
     ) -> Result<RegisterLspTenantResult, ErrorObjectOwned>;
 
     /// Starts a registered tenant execution context if it is currently cold.
@@ -134,18 +141,36 @@ impl LspRpcServerImpl {
 
     async fn register_tenant(
         &self,
-        params: LspTenantParams,
+        params: RegisterLspTenantParams,
     ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
-        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
+        let root_signer_pubkey =
+            crate::fiber_types::Pubkey::from_slice(&params.root_signer_pubkey.0).rpc_err()?;
+        let nonce: crate::fiber_types::Hash256 = params.nonce.into();
+        let signature_bytes = hex::decode(params.signature.trim_start_matches("0x")).rpc_err()?;
+        let signature =
+            crate::fiber_types::TenantRegistrySignature::from_slice(&signature_bytes).rpc_err()?;
+        let status = call!(self.actor, LspServiceMessage::GetStatus).rpc_err()?;
+        let payload = crate::fiber_types::TenantRegistryPayload::new(
+            status.public_node_id,
+            root_signer_pubkey,
+            nonce.into(),
+        );
+        let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
         let access_token = self
             .token_issuer
             .as_ref()
             .map(|issuer| issuer.issue_tenant_token(&tenant_id))
             .transpose()
             .rpc_err()?;
-        let registration = call!(self.actor, LspServiceMessage::RegisterTenant, tenant_id)
-            .rpc_err()?
-            .rpc_err()?;
+        let registration = call!(self.actor, |reply| {
+            LspServiceMessage::RegisterAuthenticatedTenant {
+                payload,
+                signature,
+                reply,
+            }
+        })
+        .rpc_err()?
+        .rpc_err()?;
         Ok(RegisterLspTenantResult {
             tenant: registration.status.into(),
             access_token: registration.created.then_some(access_token).flatten(),
@@ -265,9 +290,30 @@ impl LspRpcServer for LspRpcServerImpl {
             .map(Into::into)
     }
 
+    async fn lsp_get_tenant_registry_nonce(
+        &self,
+        params: GetLspTenantRegistryNonceParams,
+    ) -> Result<GetLspTenantRegistryNonceResult, ErrorObjectOwned> {
+        let root_signer_pubkey =
+            crate::fiber_types::Pubkey::from_slice(&params.root_signer_pubkey.0).rpc_err()?;
+        let nonce = call!(
+            self.actor,
+            LspServiceMessage::IssueTenantRegistryNonce,
+            root_signer_pubkey
+        )
+        .rpc_err()?
+        .rpc_err()?;
+        let status = call!(self.actor, LspServiceMessage::GetStatus).rpc_err()?;
+        Ok(GetLspTenantRegistryNonceResult {
+            lsp_node_id: status.public_node_id.into(),
+            root_signer_pubkey: root_signer_pubkey.into(),
+            nonce: crate::fiber_types::Hash256::from(nonce).into(),
+        })
+    }
+
     async fn lsp_register_tenant(
         &self,
-        params: LspTenantParams,
+        params: RegisterLspTenantParams,
     ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
         self.register_tenant(params).await
     }
@@ -350,6 +396,7 @@ impl From<InternalTenantStatus> for LspTenantStatus {
         };
         Self {
             tenant_id: status.record.tenant_id.to_string(),
+            root_signer_pubkey: status.record.root_signer_pubkey.map(Into::into),
             invoice_pubkey: status.record.tenant_pubkey.into(),
             private_channel_id: status.record.private_channel_id.map(Into::into),
             created_at: status.record.created_at,
