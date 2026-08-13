@@ -60,6 +60,83 @@ pub enum LiquiditySwapKind {
     LoopIn,
 }
 
+/// Complete liquidity quote terms transferred between independent nodes.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LiquidityQuoteEnvelope {
+    /// Provider-generated quote identifier.
+    pub quote_id: Hash256,
+    /// Swap direction.
+    pub swap_kind: LiquiditySwapKind,
+    /// Public key of the provider that issued the quote.
+    pub provider_pubkey: crate::Pubkey,
+    /// Complete information for the quoted asset.
+    pub asset: LiquidityAssetInfo,
+    /// Raw swap amount in the asset's smallest unit.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub amount: u128,
+    /// Fee charged by the provider in the swapped asset.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub provider_fee: u128,
+    /// Maximum Fiber routing fee in the swapped asset.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub routing_fee_limit: u128,
+    /// Estimated CKB transaction fee in shannons.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub onchain_fee_estimate_ckb: u64,
+    /// CKB capacity required by the on-chain cells in shannons.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub capacity_requirement_ckb: u64,
+    /// CKB hash of the 32-byte payment preimage.
+    pub payment_hash: Hash256,
+    /// Quote expiry as a Unix timestamp in milliseconds.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub expires_at: u64,
+    /// Deadline for confirming the provider payout as a Unix timestamp in milliseconds.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub payout_deadline: u64,
+    /// Exact encoded CKB `since` value after which the funder can refund.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub refund_after_lock_time: u64,
+    /// Claimant lock script encoded as Molecule script bytes in `0x` hex.
+    pub claimant_lock: String,
+    /// Refund lock script encoded as Molecule script bytes in `0x` hex.
+    pub refund_lock: String,
+    /// Client invoice required for Loop In and absent for Loop Out.
+    pub client_invoice: Option<String>,
+}
+
+/// Parameters for importing a provider's complete liquidity quote.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImportLiquidityQuoteParams {
+    /// Complete quote terms received from the provider.
+    pub quote: LiquidityQuoteEnvelope,
+    /// Maximum provider fee accepted by the client.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub max_provider_fee: u128,
+    /// Maximum Fiber routing fee accepted by the client.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub max_routing_fee: u128,
+}
+
+/// Parameters for enabling or disabling liquidity provider mode.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetLiquidityProviderModeParams {
+    /// Whether liquidity provider mode should be enabled.
+    pub enabled: bool,
+}
+
 /// Parameters for requesting a Loop Out quote.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -363,6 +440,147 @@ pub struct LiquidityProviderStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn liquidity_quote_envelope_serializes_complete_ckb_terms() {
+        let provider_pubkey = crate::Pubkey([2u8; 33]);
+        let envelope = LiquidityQuoteEnvelope {
+            quote_id: Hash256([1u8; 32]),
+            swap_kind: LiquiditySwapKind::LoopOut,
+            provider_pubkey,
+            asset: LiquidityAssetInfo {
+                asset_id: "ckb".to_string(),
+                kind: LiquidityAssetKind::Ckb,
+                udt_type_script: None,
+                min_amount: 1,
+                max_amount: 1_000,
+                available_capacity: 10_000,
+                base_fee: 2,
+                proportional_fee_ppm: 30,
+                enabled: true,
+            },
+            amount: 100,
+            provider_fee: 2,
+            routing_fee_limit: 3,
+            onchain_fee_estimate_ckb: 4,
+            capacity_requirement_ckb: 5,
+            payment_hash: Hash256([3u8; 32]),
+            expires_at: 6,
+            payout_deadline: 7,
+            refund_after_lock_time: 8,
+            claimant_lock: "0x0102".to_string(),
+            refund_lock: "0x0304".to_string(),
+            client_invoice: None,
+        };
+
+        let value = serde_json::to_value(&envelope).expect("json");
+        let decoded: LiquidityQuoteEnvelope = serde_json::from_value(value.clone()).expect("json");
+
+        assert_eq!(value["amount"], "0x64");
+        assert_eq!(decoded.provider_pubkey, provider_pubkey);
+        assert_eq!(value["client_invoice"], serde_json::Value::Null);
+        assert!(decoded.client_invoice.is_none());
+        assert_eq!(value["claimant_lock"], "0x0102");
+        assert_eq!(value["refund_lock"], "0x0304");
+    }
+
+    #[test]
+    fn liquidity_quote_envelope_round_trips_udt_terms_and_invoice() {
+        let script_json = serde_json::json!({
+            "code_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "hash_type": "type",
+            "args": "0x1234"
+        });
+        let envelope = LiquidityQuoteEnvelope {
+            quote_id: Hash256([4u8; 32]),
+            swap_kind: LiquiditySwapKind::LoopIn,
+            provider_pubkey: crate::Pubkey([3u8; 33]),
+            asset: LiquidityAssetInfo {
+                asset_id: "udt".to_string(),
+                kind: LiquidityAssetKind::Udt,
+                udt_type_script: Some(
+                    serde_json::from_value(script_json.clone()).expect("script json"),
+                ),
+                min_amount: 1,
+                max_amount: u128::MAX,
+                available_capacity: u128::MAX,
+                base_fee: 2,
+                proportional_fee_ppm: 30,
+                enabled: true,
+            },
+            amount: u128::MAX,
+            provider_fee: 2,
+            routing_fee_limit: 3,
+            onchain_fee_estimate_ckb: 4,
+            capacity_requirement_ckb: 5,
+            payment_hash: Hash256([5u8; 32]),
+            expires_at: 6,
+            payout_deadline: 7,
+            refund_after_lock_time: 8,
+            claimant_lock: "0x0506".to_string(),
+            refund_lock: "0x0708".to_string(),
+            client_invoice: Some("fiber-invoice".to_string()),
+        };
+
+        let value = serde_json::to_value(&envelope).expect("json");
+        let decoded: LiquidityQuoteEnvelope = serde_json::from_value(value.clone()).expect("json");
+
+        assert_eq!(value["asset"]["udt_type_script"], script_json);
+        assert_eq!(value["amount"], "0xffffffffffffffffffffffffffffffff");
+        assert_eq!(
+            value["asset"]["available_capacity"],
+            "0xffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(decoded.client_invoice.as_deref(), Some("fiber-invoice"));
+    }
+
+    #[test]
+    fn import_liquidity_quote_params_round_trip_fee_caps() {
+        let params = ImportLiquidityQuoteParams {
+            quote: LiquidityQuoteEnvelope {
+                quote_id: Hash256([6u8; 32]),
+                swap_kind: LiquiditySwapKind::LoopOut,
+                provider_pubkey: crate::Pubkey([2u8; 33]),
+                asset: LiquidityAssetInfo {
+                    asset_id: "ckb".to_string(),
+                    kind: LiquidityAssetKind::Ckb,
+                    udt_type_script: None,
+                    min_amount: 1,
+                    max_amount: 100,
+                    available_capacity: 1_000,
+                    base_fee: 2,
+                    proportional_fee_ppm: 30,
+                    enabled: true,
+                },
+                amount: 100,
+                provider_fee: 2,
+                routing_fee_limit: 3,
+                onchain_fee_estimate_ckb: 4,
+                capacity_requirement_ckb: 5,
+                payment_hash: Hash256([7u8; 32]),
+                expires_at: 6,
+                payout_deadline: 7,
+                refund_after_lock_time: 8,
+                claimant_lock: "0x0102".to_string(),
+                refund_lock: "0x0304".to_string(),
+                client_invoice: None,
+            },
+            max_provider_fee: u128::MAX,
+            max_routing_fee: 0x1_0000_0000_0000_0000,
+        };
+
+        let value = serde_json::to_value(&params).expect("json");
+        let decoded: ImportLiquidityQuoteParams =
+            serde_json::from_value(value.clone()).expect("json");
+
+        assert_eq!(
+            value["max_provider_fee"],
+            "0xffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(value["max_routing_fee"], "0x10000000000000000");
+        assert_eq!(decoded.max_provider_fee, u128::MAX);
+        assert_eq!(decoded.max_routing_fee, 0x1_0000_0000_0000_0000);
+    }
 
     #[test]
     fn quote_loop_out_params_serialize_amount_as_hex() {
