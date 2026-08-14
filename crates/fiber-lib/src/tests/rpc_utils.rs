@@ -50,4 +50,34 @@ mod tests {
         assert!(!rendered.contains(private_key));
         assert!(!rendered.contains(payment_preimage));
     }
+
+    #[test]
+    fn rpc_param_debug_redacts_nested_client_invoice() {
+        let params = json!({
+            "quote": {
+                "client_invoice": "nested-secret",
+                "asset": {
+                    "asset_id": "ckb",
+                },
+            },
+        });
+
+        let redacted = redacted_rpc_params(&params);
+
+        assert_eq!(redacted["quote"]["client_invoice"], "<redacted>");
+        assert_eq!(redacted["quote"]["asset"]["asset_id"], "ckb");
+    }
+
+    #[test]
+    fn rpc_param_debug_redacts_direct_invoice() {
+        let params = json!({
+            "invoice": "direct-secret",
+            "amount": "0x64",
+        });
+
+        let redacted = redacted_rpc_params(&params);
+
+        assert_eq!(redacted["invoice"], "<redacted>");
+        assert_eq!(redacted["amount"], "0x64");
+    }
 }

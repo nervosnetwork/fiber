@@ -823,7 +823,7 @@ Request a Loop Out quote from a provider.
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `provider_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Public key of the provider that issued the quote.
 * `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
 * `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
 * `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
@@ -861,7 +861,7 @@ Validate and persist complete quote terms received from an independent provider 
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `provider_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Public key of the provider that issued the quote.
 * `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
 * `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
 * `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
@@ -923,7 +923,7 @@ Request a Loop In quote from a provider.
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `provider_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Public key of the provider that issued the quote.
 * `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
 * `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
 * `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
@@ -1020,7 +1020,7 @@ Provider-side quote endpoint for a Loop Out request.
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `provider_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Public key of the provider that issued the quote.
 * `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
 * `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
 * `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
