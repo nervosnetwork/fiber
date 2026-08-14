@@ -1,7 +1,7 @@
 //! Liquidity management JSON-RPC types.
 
 use crate::schema_helpers::{schema_as_uint_hex, schema_as_uint_hex_optional};
-use crate::serde_utils::{Hash256, U128Hex, U64Hex};
+use crate::serde_utils::{Hash256, Pubkey, U128Hex, U64Hex};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -69,7 +69,7 @@ pub struct LiquidityQuoteEnvelope {
     /// Swap direction.
     pub swap_kind: LiquiditySwapKind,
     /// Public key of the provider that issued the quote.
-    pub provider_pubkey: crate::Pubkey,
+    pub provider_pubkey: Pubkey,
     /// Complete information for the quoted asset.
     pub asset: LiquidityAssetInfo,
     /// Raw swap amount in the asset's smallest unit.
