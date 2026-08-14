@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use ckb_types::packed::OutPoint;
 use fiber_json_types::{
     AddLiquidityAssetParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
-    LiquidityProviderStatus, LiquidityQuoteEnvelope, LiquidityQuoteResponse, LiquiditySwapResponse,
+    LiquidityProviderStatus, LiquidityQuoteEnvelope, LiquiditySwapResponse,
     ListLiquidityAssetsResponse, LoopInParams, LoopOutParams, ProviderAcceptLoopInParams,
     ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
     UpdateLiquidityAssetParams,
@@ -25,7 +25,7 @@ pub use crate::liquidity::chain::{
 };
 use crate::liquidity::quote::{
     build_loop_in_quote_terms, json_asset_to_liquidity_asset, liquidity_asset_to_json_info,
-    liquidity_quote_envelope_from_terms, parse_script_hex, script_hex, validate_imported_quote,
+    liquidity_quote_envelope_from_terms, parse_script_hex, validate_imported_quote,
     validate_loop_out_quote_request,
 };
 use crate::liquidity::store::{
@@ -49,12 +49,12 @@ pub enum LiquidityActorMessage {
     /// Client-side request for a provider Loop Out quote.
     QuoteLoopOut(
         QuoteLoopOutParams,
-        RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+        RpcReplyPort<Result<LiquidityQuoteEnvelope, LiquidityLoopOutError>>,
     ),
     /// Client-side request for a provider Loop In quote.
     QuoteLoopIn(
         QuoteLoopInParams,
-        RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+        RpcReplyPort<Result<LiquidityQuoteEnvelope, LiquidityLoopOutError>>,
     ),
     /// Import complete quote terms received from another node.
     ImportLiquidityQuote(
@@ -74,7 +74,7 @@ pub enum LiquidityActorMessage {
     /// Provider-side quote request.
     ProviderQuoteLoopOut(
         ProviderQuoteLoopOutParams,
-        RpcReplyPort<Result<LiquidityQuoteResponse, LiquidityLoopOutError>>,
+        RpcReplyPort<Result<LiquidityQuoteEnvelope, LiquidityLoopOutError>>,
     ),
     /// Provider-side quote acceptance.
     ProviderAcceptLoopOut(
@@ -408,7 +408,7 @@ where
     fn handle_provider_quote_loop_out(
         &mut self,
         params: ProviderQuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+    ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
         ensure_provider_mode(&self.store)?;
         let asset = self
             .store
@@ -449,13 +449,13 @@ where
         self.store
             .insert_loop_out_quote(terms.clone(), now_ms)
             .map_err(map_store_error)?;
-        Ok(quote_response_from_terms(terms))
+        Ok(liquidity_quote_envelope_from_terms(&terms))
     }
 
     fn handle_quote_loop_in(
         &mut self,
         params: QuoteLoopInParams,
-    ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+    ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
         let asset = self
             .store
             .get_liquidity_asset(&params.asset_id)
@@ -482,13 +482,13 @@ where
         self.store
             .insert_loop_out_quote(terms.clone(), now_ms)
             .map_err(map_store_error)?;
-        Ok(loop_in_quote_response_from_terms(terms))
+        Ok(liquidity_quote_envelope_from_terms(&terms))
     }
 
     fn handle_quote_loop_out(
         &mut self,
         params: QuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+    ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
         // No remote provider client is wired here; quote against the local provider registry.
         let QuoteLoopOutParams {
             provider: _,
@@ -1583,44 +1583,6 @@ fn loop_in_quote_hash(params: &QuoteLoopInParams, now_ms: u64, domain: &[u8]) ->
 fn deterministic_provider_pubkey() -> fiber_types::Pubkey {
     let sk = SecretKey::from_slice(&[42; 32]).expect("valid deterministic provider secret key");
     fiber_types::Pubkey::from(sk.public_key(SECP256K1))
-}
-
-fn quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuoteResponse {
-    LiquidityQuoteResponse {
-        quote_id: terms.quote_id.into(),
-        swap_kind: fiber_json_types::LiquiditySwapKind::LoopOut,
-        asset_id: terms.asset.asset_id,
-        amount: terms.amount,
-        provider_fee: terms.provider_fee,
-        routing_fee_limit: terms.routing_fee_limit,
-        onchain_fee_estimate_ckb: terms.onchain_fee_estimate_ckb,
-        capacity_requirement_ckb: terms.capacity_requirement_ckb,
-        payment_hash: terms.payment_hash.into(),
-        expires_at: terms.expires_at,
-        payout_deadline: Some(terms.payout_deadline),
-        refund_after_lock_time: terms.refund_after_lock_time,
-        claimant_lock: None,
-        refund_lock: None,
-    }
-}
-
-fn loop_in_quote_response_from_terms(terms: LoopOutQuoteTerms) -> LiquidityQuoteResponse {
-    LiquidityQuoteResponse {
-        quote_id: terms.quote_id.into(),
-        swap_kind: fiber_json_types::LiquiditySwapKind::LoopIn,
-        asset_id: terms.asset.asset_id,
-        amount: terms.amount,
-        provider_fee: terms.provider_fee,
-        routing_fee_limit: terms.routing_fee_limit,
-        onchain_fee_estimate_ckb: terms.onchain_fee_estimate_ckb,
-        capacity_requirement_ckb: terms.capacity_requirement_ckb,
-        payment_hash: terms.payment_hash.into(),
-        expires_at: terms.expires_at,
-        payout_deadline: None,
-        refund_after_lock_time: terms.refund_after_lock_time,
-        claimant_lock: Some(script_hex(&terms.claimant_lock)),
-        refund_lock: Some(script_hex(&terms.refund_lock)),
-    }
 }
 
 fn ensure_loop_in_quote_terms(quote: &LoopOutQuoteTerms) -> Result<(), LiquidityLoopOutError> {
@@ -3441,7 +3403,7 @@ mod tests {
             self.store.insert_loop_out_quote(quote, now_ms()).unwrap();
         }
 
-        fn use_fake_payment_preimage_for_quote(&self, quote: &mut LiquidityQuoteResponse) {
+        fn use_fake_payment_preimage_for_quote(&self, quote: &mut LiquidityQuoteEnvelope) {
             let quote_id = quote.quote_id.into();
             let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash([4u8; 32]).into();
             quote.payment_hash = payment_hash.into();
@@ -3501,34 +3463,40 @@ mod tests {
         async fn call_provider_quote(
             &self,
             params: ProviderQuoteLoopOutParams,
-        ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
-            ractor::call!(actor, |reply| {
+            let result = ractor::call!(actor, |reply| {
                 LiquidityActorMessage::ProviderQuoteLoopOut(params, reply)
             })
-            .unwrap()
+            .unwrap();
+            actor.stop(None);
+            result
         }
 
         async fn call_quote(
             &self,
             params: QuoteLoopOutParams,
-        ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
-            ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopOut(
+            let result = ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopOut(
                 params, reply
             ))
-            .unwrap()
+            .unwrap();
+            actor.stop(None);
+            result
         }
 
         async fn call_quote_loop_in(
             &self,
             params: QuoteLoopInParams,
-        ) -> Result<LiquidityQuoteResponse, LiquidityLoopOutError> {
+        ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
-            ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopIn(
+            let result = ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopIn(
                 params, reply
             ))
-            .unwrap()
+            .unwrap();
+            actor.stop(None);
+            result
         }
 
         async fn call_provider_accept_loop_in(
@@ -5766,7 +5734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_quote_loop_out_validates_asset_and_returns_terms() {
+    async fn provider_quote_loop_out_returns_complete_envelope() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
 
         let quote = harness
@@ -5782,7 +5750,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(quote.asset_id, "ckb");
+        assert_eq!(quote.asset.asset_id, "ckb");
         assert_eq!(quote.amount, 1000);
         assert!(quote.provider_fee <= 100);
         assert!(quote.routing_fee_limit <= 50);
@@ -5793,7 +5761,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(persisted_quote.quote_id, quote.quote_id.into());
-        assert_eq!(persisted_quote.asset.asset_id, quote.asset_id);
+        assert_eq!(
+            serde_json::to_value(&quote).unwrap(),
+            serde_json::to_value(liquidity_quote_envelope_from_terms(&persisted_quote)).unwrap()
+        );
+        assert_eq!(persisted_quote.asset.asset_id, quote.asset.asset_id);
         assert_eq!(persisted_quote.amount, quote.amount);
         assert_eq!(persisted_quote.provider_fee, quote.provider_fee);
         assert_eq!(persisted_quote.routing_fee_limit, quote.routing_fee_limit);
@@ -5958,19 +5930,23 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(quote.asset_id, "ckb");
+        assert_eq!(quote.asset.asset_id, "ckb");
         assert_eq!(quote.amount, 1000);
         assert!(quote.provider_fee <= 100);
         assert!(quote.routing_fee_limit <= 50);
-        assert!(harness
+        let persisted = harness
             .store
             .get_loop_out_quote(&quote.quote_id.into())
             .unwrap()
-            .is_some());
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&quote).unwrap(),
+            serde_json::to_value(liquidity_quote_envelope_from_terms(&persisted)).unwrap()
+        );
     }
 
     #[tokio::test]
-    async fn quote_loop_in_persists_and_returns_requested_routing_fee_limit() {
+    async fn quote_loop_in_returns_complete_envelope_with_invoice_identity_asset_and_scripts() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
         let client_invoice = valid_client_invoice(100, [44u8; 32].into());
         let claimant_lock = script("loop-in-claimant");
@@ -5981,7 +5957,7 @@ mod tests {
                 provider: "local".to_string(),
                 asset_id: "ckb".to_string(),
                 amount: 100,
-                client_invoice,
+                client_invoice: client_invoice.clone(),
                 claimant_lock: script_hex(&claimant_lock),
                 refund_lock: script_hex(&refund_lock),
                 max_provider_fee: 100,
@@ -5992,8 +5968,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(quote.routing_fee_limit, 17);
-        assert_eq!(quote.claimant_lock, Some(script_hex(&claimant_lock)));
-        assert_eq!(quote.refund_lock, Some(script_hex(&refund_lock)));
+        assert_eq!(quote.claimant_lock, script_hex(&claimant_lock));
+        assert_eq!(quote.refund_lock, script_hex(&refund_lock));
+        assert_eq!(quote.client_invoice, Some(client_invoice));
+        assert_eq!(quote.asset.asset_id, "ckb");
+        assert_eq!(
+            fiber_types::Pubkey::try_from(quote.provider_pubkey).unwrap(),
+            deterministic_provider_pubkey()
+        );
         let persisted = harness
             .store
             .get_loop_out_quote(&quote.quote_id.into())

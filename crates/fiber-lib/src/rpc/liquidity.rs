@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use fiber_json_types::{
-    AddLiquidityAssetParams, GetSwapParams, LiquidityAssetInfo, LiquidityProviderStatus,
-    LiquidityQuoteResponse, LiquiditySwapRecord as JsonLiquiditySwapRecord, LiquiditySwapResponse,
+    AddLiquidityAssetParams, GetSwapParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
+    LiquidityProviderStatus, LiquidityQuoteEnvelope,
+    LiquiditySwapRecord as JsonLiquiditySwapRecord, LiquiditySwapResponse,
     ListLiquidityAssetsResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
     ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
     QuoteLoopInParams, QuoteLoopOutParams, UpdateLiquidityAssetParams,
@@ -38,7 +39,18 @@ trait LiquidityRpc {
     async fn quote_loop_out(
         &self,
         params: QuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned>;
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned>;
+
+    /// Validate and persist complete quote terms received from an independent provider node.
+    ///
+    /// The quote must be unexpired and its provider and routing fees must not exceed the supplied
+    /// caps. The complete canonical envelope, including the final asset and lock scripts, is
+    /// returned after persistence.
+    #[method(name = "import_liquidity_quote")]
+    async fn import_liquidity_quote(
+        &self,
+        params: ImportLiquidityQuoteParams,
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned>;
 
     /// Execute a Loop Out swap after quote acceptance.
     #[method(name = "loop_out")]
@@ -52,7 +64,7 @@ trait LiquidityRpc {
     async fn quote_loop_in(
         &self,
         params: QuoteLoopInParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned>;
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned>;
 
     /// Execute a Loop In swap after quote acceptance.
     #[method(name = "loop_in")]
@@ -80,7 +92,7 @@ trait LiquidityRpc {
     async fn provider_quote_loop_out(
         &self,
         params: ProviderQuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned>;
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned>;
 
     /// Provider-side accept endpoint for a Loop Out quote.
     #[method(name = "provider_accept_loop_out")]
@@ -138,6 +150,7 @@ pub struct LiquidityRpcServerImpl<S> {
 pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
     vec![
         "quote_loop_out",
+        "import_liquidity_quote",
         "loop_out",
         "quote_loop_in",
         "loop_in",
@@ -170,8 +183,15 @@ where
     async fn quote_loop_out(
         &self,
         params: QuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
         self.quote_loop_out(params).await
+    }
+
+    async fn import_liquidity_quote(
+        &self,
+        params: ImportLiquidityQuoteParams,
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
+        self.import_liquidity_quote(params).await
     }
 
     async fn loop_out(
@@ -184,7 +204,7 @@ where
     async fn quote_loop_in(
         &self,
         params: QuoteLoopInParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
         self.quote_loop_in(params).await
     }
 
@@ -212,7 +232,7 @@ where
     async fn provider_quote_loop_out(
         &self,
         params: ProviderQuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
         self.provider_quote_loop_out(params).await
     }
 
@@ -270,13 +290,28 @@ where
     pub async fn quote_loop_out(
         &self,
         params: QuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
         let actor = self
             .actor
             .as_ref()
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
         let log_params = params.clone();
         let message = move |reply| LiquidityActorMessage::QuoteLoopOut(params, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Validate and persist complete quote terms received from an independent provider node.
+    pub async fn import_liquidity_quote(
+        &self,
+        params: ImportLiquidityQuoteParams,
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::ImportLiquidityQuote(params, reply);
 
         call_liquidity_actor(actor.clone(), message, &log_params).await
     }
@@ -300,7 +335,7 @@ where
     pub async fn quote_loop_in(
         &self,
         params: QuoteLoopInParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
         let actor = self
             .actor
             .as_ref()
@@ -369,7 +404,7 @@ where
     pub async fn provider_quote_loop_out(
         &self,
         params: ProviderQuoteLoopOutParams,
-    ) -> Result<LiquidityQuoteResponse, ErrorObjectOwned> {
+    ) -> Result<LiquidityQuoteEnvelope, ErrorObjectOwned> {
         let actor = self
             .actor
             .as_ref()
@@ -578,7 +613,8 @@ mod tests {
     use std::time::Duration;
 
     use fiber_json_types::{
-        GetSwapParams, Hash256 as JsonHash256, ListSwapsParams, LoopInParams, QuoteLoopInParams,
+        GetSwapParams, Hash256 as JsonHash256, ImportLiquidityQuoteParams, LiquidityQuoteEnvelope,
+        ListSwapsParams, LoopInParams, QuoteLoopInParams,
     };
     use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapState};
     use ractor::{Actor, ActorProcessingErr, ActorRef};
@@ -808,7 +844,7 @@ mod tests {
             match message {
                 LiquidityActorMessage::QuoteLoopOut(_params, reply) => {
                     events.lock().expect("events lock").push("quote_loop_out");
-                    let _ = reply.send(Ok(liquidity_quote_response()));
+                    let _ = reply.send(Ok(liquidity_quote_envelope()));
                 }
                 LiquidityActorMessage::LoopOut(_params, reply) => {
                     events.lock().expect("events lock").push("loop_out");
@@ -816,7 +852,19 @@ mod tests {
                 }
                 LiquidityActorMessage::QuoteLoopIn(_params, reply) => {
                     events.lock().expect("events lock").push("quote_loop_in");
-                    let _ = reply.send(Ok(liquidity_quote_response()));
+                    let _ = reply.send(Ok(liquidity_quote_envelope()));
+                }
+                LiquidityActorMessage::ImportLiquidityQuote(params, reply) => {
+                    assert_eq!(
+                        serde_json::to_value(&params).expect("serialize received import params"),
+                        serde_json::to_value(import_liquidity_quote_params())
+                            .expect("serialize expected import params")
+                    );
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("import_liquidity_quote");
+                    let _ = reply.send(Ok(params.quote));
                 }
                 LiquidityActorMessage::LoopIn(_params, reply) => {
                     events.lock().expect("events lock").push("loop_in");
@@ -827,7 +875,7 @@ mod tests {
                         .lock()
                         .expect("events lock")
                         .push("provider_quote_loop_out");
-                    let _ = reply.send(Ok(liquidity_quote_response()));
+                    let _ = reply.send(Ok(liquidity_quote_envelope()));
                 }
                 LiquidityActorMessage::ProviderAcceptLoopOut(_params, reply) => {
                     events
@@ -907,7 +955,9 @@ mod tests {
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
             match message {
-                LiquidityActorMessage::QuoteLoopIn(_, _) | LiquidityActorMessage::LoopIn(_, _) => {
+                LiquidityActorMessage::QuoteLoopIn(_, _)
+                | LiquidityActorMessage::ImportLiquidityQuote(_, _)
+                | LiquidityActorMessage::LoopIn(_, _) => {
                     pending::<()>().await;
                 }
                 _ => {}
@@ -927,6 +977,12 @@ mod tests {
         }
     }
 
+    impl Drop for SpawnedLiquidityRpcMock {
+        fn drop(&mut self) {
+            self.ref_.stop(None);
+        }
+    }
+
     async fn spawn_liquidity_rpc_mock() -> SpawnedLiquidityRpcMock {
         let events = Arc::new(Mutex::new(Vec::new()));
         let (ref_, _handle) = ractor::Actor::spawn(None, LiquidityRpcMock, events.clone())
@@ -941,6 +997,43 @@ mod tests {
             .await
             .expect("spawn stalled liquidity rpc mock");
 
+        ref_
+    }
+
+    struct ClosedReplyLiquidityRpcMock;
+
+    #[async_trait::async_trait]
+    impl Actor for ClosedReplyLiquidityRpcMock {
+        type Msg = LiquidityActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let LiquidityActorMessage::ImportLiquidityQuote(_, reply) = message {
+                drop(reply);
+                myself.stop(None);
+            }
+            Ok(())
+        }
+    }
+
+    async fn spawn_closed_reply_liquidity_rpc_mock() -> ActorRef<LiquidityActorMessage> {
+        let (ref_, _handle) = ractor::Actor::spawn(None, ClosedReplyLiquidityRpcMock, ())
+            .await
+            .expect("spawn closed reply liquidity rpc mock");
         ref_
     }
 
@@ -1004,19 +1097,12 @@ mod tests {
         }
     }
 
-    fn provider_accept_loop_in_params() -> ProviderAcceptLoopInParams {
-        ProviderAcceptLoopInParams {
-            quote_id: JsonHash256([1u8; 32]),
-            lock_tx_hash: JsonHash256([9u8; 32]),
-            lock_output_index: 0,
-        }
-    }
-
-    fn liquidity_quote_response() -> LiquidityQuoteResponse {
-        LiquidityQuoteResponse {
+    fn liquidity_quote_envelope() -> LiquidityQuoteEnvelope {
+        LiquidityQuoteEnvelope {
             quote_id: JsonHash256([1u8; 32]),
             swap_kind: fiber_json_types::LiquiditySwapKind::LoopOut,
-            asset_id: "ckb".to_string(),
+            provider_pubkey: fiber_json_types::Pubkey([2u8; 33]),
+            asset: liquidity_asset_info(),
             amount: 100,
             provider_fee: 10,
             routing_fee_limit: 5,
@@ -1024,10 +1110,27 @@ mod tests {
             capacity_requirement_ckb: 61,
             payment_hash: JsonHash256([3u8; 32]),
             expires_at: 1000,
-            payout_deadline: Some(2000),
+            payout_deadline: 2000,
             refund_after_lock_time: 3000,
-            claimant_lock: None,
-            refund_lock: None,
+            claimant_lock: "0xclaimant".to_string(),
+            refund_lock: "0xrefund".to_string(),
+            client_invoice: None,
+        }
+    }
+
+    fn import_liquidity_quote_params() -> ImportLiquidityQuoteParams {
+        ImportLiquidityQuoteParams {
+            quote: liquidity_quote_envelope(),
+            max_provider_fee: 10,
+            max_routing_fee: 5,
+        }
+    }
+
+    fn provider_accept_loop_in_params() -> ProviderAcceptLoopInParams {
+        ProviderAcceptLoopInParams {
+            quote_id: JsonHash256([1u8; 32]),
+            lock_tx_hash: JsonHash256([9u8; 32]),
+            lock_output_index: 0,
         }
     }
 
@@ -1099,6 +1202,69 @@ mod tests {
         let expected: HashSet<_> = liquidity_rpc_method_names().into_iter().collect();
 
         assert_eq!(methods, expected);
+        assert!(methods.contains("import_liquidity_quote"));
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_rpc_delegates_exact_params_and_returns_exact_envelope() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+        let params = import_liquidity_quote_params();
+        let expected = serde_json::to_value(&params.quote).expect("serialize expected envelope");
+
+        let response = rpc
+            .import_liquidity_quote(params)
+            .await
+            .expect("import liquidity quote");
+
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize response envelope"),
+            expected
+        );
+        assert_eq!(actor.take_events(), vec!["import_liquidity_quote"]);
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_rpc_reports_actor_unavailable() {
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None);
+
+        let error = rpc
+            .import_liquidity_quote(import_liquidity_quote_params())
+            .await
+            .expect_err("missing actor");
+
+        assert!(error.message().contains("liquidity actor is not available"));
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_rpc_times_out_when_actor_stalls() {
+        let actor = spawn_stalled_liquidity_rpc_mock().await;
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.clone()));
+
+        let error = rpc
+            .import_liquidity_quote(import_liquidity_quote_params())
+            .await
+            .expect_err("stalled actor");
+
+        assert!(error.message().contains("liquidity actor call timed out"));
+        actor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn import_liquidity_quote_rpc_reports_closed_actor_reply() {
+        let actor = spawn_closed_reply_liquidity_rpc_mock().await;
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor));
+
+        let error = rpc
+            .import_liquidity_quote(import_liquidity_quote_params())
+            .await
+            .expect_err("closed actor reply");
+
+        assert_eq!(
+            error.message(),
+            "Messaging failed because channel is closed"
+        );
     }
 
     #[tokio::test]
@@ -1249,6 +1415,42 @@ mod tests {
             .expect("quote loop in");
 
         assert_eq!(response.quote_id, JsonHash256([1u8; 32]));
+        assert_eq!(actor.take_events(), vec!["quote_loop_in"]);
+    }
+
+    #[tokio::test]
+    async fn provider_quote_loop_out_rpc_returns_complete_envelope() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .provider_quote_loop_out(provider_quote_loop_out_params())
+            .await
+            .expect("provider quote loop out");
+
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize response envelope"),
+            serde_json::to_value(liquidity_quote_envelope()).expect("serialize expected envelope")
+        );
+        assert_eq!(actor.take_events(), vec!["provider_quote_loop_out"]);
+    }
+
+    #[tokio::test]
+    async fn quote_loop_in_rpc_returns_complete_envelope() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .quote_loop_in(quote_loop_in_params())
+            .await
+            .expect("quote loop in");
+
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize response envelope"),
+            serde_json::to_value(liquidity_quote_envelope()).expect("serialize expected envelope")
+        );
         assert_eq!(actor.take_events(), vec!["quote_loop_in"]);
     }
 
