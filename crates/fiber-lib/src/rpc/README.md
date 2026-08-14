@@ -49,6 +49,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Liquidity](#module-liquidity)
         * [Method `quote_loop_out`](#liquidity-quote_loop_out)
+        * [Method `import_liquidity_quote`](#liquidity-import_liquidity_quote)
         * [Method `loop_out`](#liquidity-loop_out)
         * [Method `quote_loop_in`](#liquidity-quote_loop_in)
         * [Method `loop_in`](#liquidity-loop_in)
@@ -822,18 +823,58 @@ Request a Loop Out quote from a provider.
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
-* `amount` - <em>`u128`</em>, Raw destination amount before routing fees.
-* `provider_fee` - <em>`u128`</em>, Fee charged in the swapped asset.
+* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
+* `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
+* `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
 * `routing_fee_limit` - <em>`u128`</em>, Maximum Fiber routing fee in the swapped asset.
-* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee.
-* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells.
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
-* `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
-* `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
-* `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
-* `claimant_lock` - <em>`Option<String>`</em>, Claimant lock script bytes encoded for the liquidity-lock output.
-* `refund_lock` - <em>`Option<String>`</em>, Refund lock script bytes encoded for the liquidity-lock output.
+* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee in shannons.
+* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells in shannons.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB hash of the 32-byte payment preimage.
+* `expires_at` - <em>`u64`</em>, Quote expiry as a Unix timestamp in milliseconds.
+* `payout_deadline` - <em>`u64`</em>, Deadline for confirming the provider payout as a Unix timestamp in milliseconds.
+* `refund_after_lock_time` - <em>`u64`</em>, Exact encoded CKB `since` value after which the funder can refund.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script encoded as Molecule script bytes in `0x` hex.
+* `refund_lock` - <em>`String`</em>, Refund lock script encoded as Molecule script bytes in `0x` hex.
+* `client_invoice` - <em>`Option<String>`</em>, Client invoice required for Loop In and absent for Loop Out.
+
+---
+
+
+
+<a id="liquidity-import_liquidity_quote"></a>
+#### Method `import_liquidity_quote`
+
+Validate and persist complete quote terms received from an independent provider node.
+
+ The quote must be unexpired and its provider and routing fees must not exceed the supplied
+ caps. The complete canonical envelope, including the final asset and lock scripts, is
+ returned after persistence.
+
+##### Params
+
+* `quote` - <em>[LiquidityQuoteEnvelope](#type-liquidityquoteenvelope)</em>, Complete quote terms received from the provider.
+* `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
+* `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
+
+##### Returns
+
+* `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
+* `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
+* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
+* `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
+* `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
+* `routing_fee_limit` - <em>`u128`</em>, Maximum Fiber routing fee in the swapped asset.
+* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee in shannons.
+* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells in shannons.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB hash of the 32-byte payment preimage.
+* `expires_at` - <em>`u64`</em>, Quote expiry as a Unix timestamp in milliseconds.
+* `payout_deadline` - <em>`u64`</em>, Deadline for confirming the provider payout as a Unix timestamp in milliseconds.
+* `refund_after_lock_time` - <em>`u64`</em>, Exact encoded CKB `since` value after which the funder can refund.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script encoded as Molecule script bytes in `0x` hex.
+* `refund_lock` - <em>`String`</em>, Refund lock script encoded as Molecule script bytes in `0x` hex.
+* `client_invoice` - <em>`Option<String>`</em>, Client invoice required for Loop In and absent for Loop Out.
 
 ---
 
@@ -882,18 +923,20 @@ Request a Loop In quote from a provider.
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
-* `amount` - <em>`u128`</em>, Raw destination amount before routing fees.
-* `provider_fee` - <em>`u128`</em>, Fee charged in the swapped asset.
+* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
+* `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
+* `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
 * `routing_fee_limit` - <em>`u128`</em>, Maximum Fiber routing fee in the swapped asset.
-* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee.
-* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells.
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
-* `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
-* `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
-* `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
-* `claimant_lock` - <em>`Option<String>`</em>, Claimant lock script bytes encoded for the liquidity-lock output.
-* `refund_lock` - <em>`Option<String>`</em>, Refund lock script bytes encoded for the liquidity-lock output.
+* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee in shannons.
+* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells in shannons.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB hash of the 32-byte payment preimage.
+* `expires_at` - <em>`u64`</em>, Quote expiry as a Unix timestamp in milliseconds.
+* `payout_deadline` - <em>`u64`</em>, Deadline for confirming the provider payout as a Unix timestamp in milliseconds.
+* `refund_after_lock_time` - <em>`u64`</em>, Exact encoded CKB `since` value after which the funder can refund.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script encoded as Molecule script bytes in `0x` hex.
+* `refund_lock` - <em>`String`</em>, Refund lock script encoded as Molecule script bytes in `0x` hex.
+* `client_invoice` - <em>`Option<String>`</em>, Client invoice required for Loop In and absent for Loop Out.
 
 ---
 
@@ -977,18 +1020,20 @@ Provider-side quote endpoint for a Loop Out request.
 
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `swap_kind` - <em>[LiquiditySwapKind](#type-liquidityswapkind)</em>, Swap direction.
-* `asset_id` - <em>`String`</em>, Provider asset registry identifier.
-* `amount` - <em>`u128`</em>, Raw destination amount before routing fees.
-* `provider_fee` - <em>`u128`</em>, Fee charged in the swapped asset.
+* `provider_pubkey` - <em>`crate::Pubkey`</em>, Public key of the provider that issued the quote.
+* `asset` - <em>[LiquidityAssetInfo](#type-liquidityassetinfo)</em>, Complete information for the quoted asset.
+* `amount` - <em>`u128`</em>, Raw swap amount in the asset's smallest unit.
+* `provider_fee` - <em>`u128`</em>, Fee charged by the provider in the swapped asset.
 * `routing_fee_limit` - <em>`u128`</em>, Maximum Fiber routing fee in the swapped asset.
-* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee.
-* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells.
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
-* `expires_at` - <em>`u64`</em>, Quote expiry timestamp in milliseconds.
-* `payout_deadline` - <em>`Option<u64>`</em>, Loop Out deadline for confirming provider payout lock.
-* `refund_after_lock_time` - <em>`u64`</em>, Chain lock time after which the on-chain funder can refund.
-* `claimant_lock` - <em>`Option<String>`</em>, Claimant lock script bytes encoded for the liquidity-lock output.
-* `refund_lock` - <em>`Option<String>`</em>, Refund lock script bytes encoded for the liquidity-lock output.
+* `onchain_fee_estimate_ckb` - <em>`u64`</em>, Estimated CKB transaction fee in shannons.
+* `capacity_requirement_ckb` - <em>`u64`</em>, CKB capacity required by the on-chain cells in shannons.
+* `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB hash of the 32-byte payment preimage.
+* `expires_at` - <em>`u64`</em>, Quote expiry as a Unix timestamp in milliseconds.
+* `payout_deadline` - <em>`u64`</em>, Deadline for confirming the provider payout as a Unix timestamp in milliseconds.
+* `refund_after_lock_time` - <em>`u64`</em>, Exact encoded CKB `since` value after which the funder can refund.
+* `claimant_lock` - <em>`String`</em>, Claimant lock script encoded as Molecule script bytes in `0x` hex.
+* `refund_lock` - <em>`String`</em>, Refund lock script encoded as Molecule script bytes in `0x` hex.
+* `client_invoice` - <em>`Option<String>`</em>, Client invoice required for Loop In and absent for Loop Out.
 
 ---
 
