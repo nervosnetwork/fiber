@@ -281,6 +281,16 @@ pub mod server {
         }))
     }
 
+    fn liquidity_provider_pubkey(
+        fiber_config: Option<&FiberConfig>,
+    ) -> Result<fiber_types::Pubkey> {
+        let fiber_config = fiber_config
+            .ok_or_else(|| anyhow::anyhow!("liquidity RPC requires Fiber configuration"))?;
+        Ok(crate::fiber::types::pubkey_from_tentacle(
+            fiber_config.public_key(),
+        ))
+    }
+
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
@@ -335,6 +345,7 @@ pub mod server {
         }
         let liquidity_actor = if config.is_module_enabled("liquidity") {
             {
+                let provider_pubkey = liquidity_provider_pubkey(fiber_config.as_ref())?;
                 match (network_actor.clone(), ckb_chain_actor.clone()) {
                     (Some(network_actor), Some(ckb_chain_actor)) => {
                         if let Some(liquidity_lock_script) =
@@ -364,6 +375,7 @@ pub mod server {
                                                     liquidity_lock_script,
                                                     liquidity_lock_cell_deps,
                                                 ),
+                                                provider_pubkey,
                                             },
                                             supervisor.clone(),
                                         )
@@ -520,5 +532,25 @@ pub mod server {
         assert!(!is_public_addr("[::1]:0").unwrap());
         assert!(is_public_addr("0.0.0.0:0").unwrap());
         assert!(!is_public_addr("127.0.0.1:0").unwrap());
+    }
+
+    #[test]
+    fn liquidity_startup_provider_identity_matches_fiber_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fiber_config = crate::tests::get_fiber_config(temp_dir.path(), None);
+        let expected = crate::fiber::types::pubkey_from_tentacle(fiber_config.public_key());
+
+        let actual = liquidity_provider_pubkey(Some(&fiber_config)).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn liquidity_startup_requires_fiber_config() {
+        let error = liquidity_provider_pubkey(None).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("liquidity RPC requires Fiber configuration"));
     }
 }

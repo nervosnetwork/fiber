@@ -17,6 +17,7 @@ use fiber_json_types::{
 };
 use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+#[cfg(test)]
 use secp256k1::{SecretKey, SECP256K1};
 
 pub use crate::liquidity::chain::{
@@ -164,6 +165,8 @@ pub struct LiquidityActorArguments<S, P, C> {
     pub payment: P,
     /// Chain adapter used by payout and claim workflows.
     pub chain: C,
+    /// Fiber public key advertised by the serving provider node.
+    pub provider_pubkey: fiber_types::Pubkey,
 }
 
 /// Durable mutation actor for liquidity workflows.
@@ -174,6 +177,7 @@ pub struct LiquidityActorState<S, P, C> {
     store: S,
     payment: P,
     chain: C,
+    provider_pubkey: fiber_types::Pubkey,
     watched_payout_swaps: HashSet<Hash256>,
     active_payment_swaps: HashSet<Hash256>,
     watched_claim_swaps: HashSet<Hash256>,
@@ -202,6 +206,7 @@ where
             store: args.store,
             payment: args.payment,
             chain: args.chain,
+            provider_pubkey: args.provider_pubkey,
             watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
@@ -426,7 +431,7 @@ where
         let terms = LoopOutQuoteTerms {
             quote_id: loop_out_quote_hash(&params, now_ms, b"quote"),
             swap_kind: LiquiditySwapKind::LoopOut,
-            provider: deterministic_provider_pubkey(),
+            provider: self.provider_pubkey,
             asset,
             amount: params.amount,
             provider_fee: validated.provider_fee,
@@ -460,7 +465,7 @@ where
         let expires_at = quote_expires_at(now_ms, params.expires_after_seconds)?;
         let mut terms = build_loop_in_quote_terms(
             loop_in_quote_hash(&params, now_ms, b"quote"),
-            deterministic_provider_pubkey(),
+            self.provider_pubkey,
             &asset,
             params.amount,
             asset.udt_type_script.as_ref(),
@@ -1574,6 +1579,7 @@ fn loop_in_quote_hash(params: &QuoteLoopInParams, now_ms: u64, domain: &[u8]) ->
     ckb_hash::blake2b_256(seed).into()
 }
 
+#[cfg(test)]
 fn deterministic_provider_pubkey() -> fiber_types::Pubkey {
     let sk = SecretKey::from_slice(&[42; 32]).expect("valid deterministic provider secret key");
     fiber_types::Pubkey::from(sk.public_key(SECP256K1))
@@ -3622,6 +3628,27 @@ mod tests {
             self.spawn_actor_with_handle().await.0
         }
 
+        async fn spawn_actor_with_provider_pubkey(
+            &self,
+            provider_pubkey: Pubkey,
+        ) -> (
+            ractor::ActorRef<LiquidityActorMessage>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            ractor::Actor::spawn(
+                None,
+                LiquidityActor::<_, _, _>(std::marker::PhantomData),
+                LiquidityActorArguments {
+                    store: self.store.clone(),
+                    payment: self.payment.clone(),
+                    chain: self.chain.clone(),
+                    provider_pubkey,
+                },
+            )
+            .await
+            .unwrap()
+        }
+
         async fn spawn_actor_with_handle(
             &self,
         ) -> (
@@ -3635,6 +3662,7 @@ mod tests {
                     store: self.store.clone(),
                     payment: self.payment.clone(),
                     chain: self.chain.clone(),
+                    provider_pubkey: deterministic_provider_pubkey(),
                 },
             )
             .await
@@ -3654,6 +3682,7 @@ mod tests {
                 store,
                 payment,
                 chain,
+                provider_pubkey: deterministic_provider_pubkey(),
             },
         )
         .await
@@ -4334,6 +4363,7 @@ mod tests {
             )
             .0,
             chain: TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+            provider_pubkey: deterministic_provider_pubkey(),
             watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
@@ -4440,6 +4470,7 @@ mod tests {
             store,
             payment: TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
             chain: TestLiquidityChain::new_with_label(events, "runtime_client"),
+            provider_pubkey: deterministic_provider_pubkey(),
             watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
@@ -4682,6 +4713,7 @@ mod tests {
                 store: harness.store.clone(),
                 payment: harness.payment.clone(),
                 chain: harness.chain.clone(),
+                provider_pubkey: deterministic_provider_pubkey(),
             },
         )
         .await
@@ -5768,6 +5800,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_identity_loop_out_quote_uses_actor_pubkey() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let provider_pubkey = Pubkey::from(
+            SecretKey::from_slice(&[43; 32])
+                .unwrap()
+                .public_key(SECP256K1),
+        );
+        assert_ne!(provider_pubkey, deterministic_provider_pubkey());
+        let (actor, handle) = harness
+            .spawn_actor_with_provider_pubkey(provider_pubkey)
+            .await;
+
+        let quote = ractor::call!(actor, |reply| {
+            LiquidityActorMessage::ProviderQuoteLoopOut(
+                ProviderQuoteLoopOutParams {
+                    asset_id: "ckb".to_string(),
+                    amount: 1_000,
+                    claimant_lock: script_hex(&script("provider-identity-loop-out-claimant")),
+                    refund_lock: script_hex(&script("provider-identity-loop-out-refund")),
+                    max_provider_fee: 100,
+                    max_routing_fee: 50,
+                    expires_after_seconds: 60,
+                },
+                reply,
+            )
+        })
+        .unwrap()
+        .unwrap();
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        let envelope = liquidity_quote_envelope_from_terms(&persisted);
+
+        assert_eq!(persisted.provider, provider_pubkey);
+        assert_eq!(
+            fiber_types::Pubkey::try_from(envelope.provider_pubkey).unwrap(),
+            provider_pubkey
+        );
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn provider_quote_loop_out_rejects_malformed_claimant_before_side_effects() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
 
@@ -5925,6 +6002,51 @@ mod tests {
         assert_eq!(persisted.routing_fee_limit, 17);
         assert_eq!(persisted.claimant_lock, claimant_lock);
         assert_eq!(persisted.refund_lock, refund_lock);
+    }
+
+    #[tokio::test]
+    async fn provider_identity_loop_in_quote_uses_actor_pubkey() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let provider_pubkey = Pubkey::from(
+            SecretKey::from_slice(&[43; 32])
+                .unwrap()
+                .public_key(SECP256K1),
+        );
+        assert_ne!(provider_pubkey, deterministic_provider_pubkey());
+        let (actor, handle) = harness
+            .spawn_actor_with_provider_pubkey(provider_pubkey)
+            .await;
+
+        let quote = ractor::call!(actor, |reply| LiquidityActorMessage::QuoteLoopIn(
+            QuoteLoopInParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                client_invoice: valid_client_invoice(100, [43u8; 32].into()),
+                claimant_lock: script_hex(&script("provider-identity-loop-in-claimant")),
+                refund_lock: script_hex(&script("provider-identity-loop-in-refund")),
+                max_provider_fee: 100,
+                max_routing_fee: 17,
+                expires_after_seconds: 60,
+            },
+            reply,
+        ))
+        .unwrap()
+        .unwrap();
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        let envelope = liquidity_quote_envelope_from_terms(&persisted);
+
+        assert_eq!(persisted.provider, provider_pubkey);
+        assert_eq!(
+            fiber_types::Pubkey::try_from(envelope.provider_pubkey).unwrap(),
+            provider_pubkey
+        );
+        actor.stop(None);
+        handle.await.unwrap();
     }
 
     #[tokio::test]
