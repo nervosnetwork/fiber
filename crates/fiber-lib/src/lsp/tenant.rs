@@ -1,6 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-use crate::fiber_types::{Hash256, Pubkey};
+use crate::fiber_types::{Hash256, NodeId, Pubkey};
+
+/// Watchtower `node_id` for a hosted tenant Fiber identity.
+///
+/// Matches the biscuit `node(...)` fact issued on the tenant access token so
+/// get/submit watchtower RPCs read the same key the runtime writes.
+pub fn tenant_watchtower_node_id(tenant_pubkey: &Pubkey) -> NodeId {
+    NodeId::from_bytes(tenant_pubkey.serialize().to_vec())
+}
 
 pub use crate::fiber_types::TenantId;
 

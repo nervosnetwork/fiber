@@ -3,7 +3,9 @@
 This workflow starts `fiber-lsp-sdk-agent` as a separate process and exercises the real
 `fiber-lsp-sdk` over JSON-RPC. The agent owns its RootKey and channel keys, registers a
 RootSigner-derived tenant, opens a private hosted channel with external funding, polls
-and answers node signing requests with `prepare_bound`, and persists its SDK snapshot.
+and answers node signing requests with `prepare` + the test-only `Always`
+policy, and persists its SDK snapshot. Production clients use the same
+`prepare` with `Auto`/`Manual`.
 
 The workflow deliberately restarts the agent after the channel reaches `ChannelReady`,
 checks that the RootSigner identity, tenant token, and channel binding are restored, and

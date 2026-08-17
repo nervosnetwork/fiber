@@ -35,8 +35,25 @@ dependencies here.
 After `open_channel_with_external_funding` returns a frozen unsigned funding
 transaction, call `ChannelSigner::bind_from_approved_funding` with that
 transaction, the cells the wallet agreed to spend, and the shutdown script from
-the open request. Later `prepare_bound` checks signing requests against that
-approved funding identity. The node does not supply a bindable channel identity.
+the open request. Later `ChannelSigner::prepare` checks every signing request
+against that approved funding identity. The node does not supply a bindable
+channel identity.
+
+RPC clients should convert `get_channel_signing_status` and
+`get_watchtower_signing_status` through `fiber_lsp_sdk::json` (`json` feature,
+on by default). Production clients then drive [`HostedSession`]: feed each
+RPC result in, inspect [`ProcessOutcome`], and POST the returned submit
+params. The session performs no HTTP. Auto-approving poll loops stay in
+`tests/fiber-lsp-sdk-agent` and must not be copied into production.
+
+[`HostedSession::new`] defaults to [`SigningPolicy::Auto`]. Call
+[`SigningPolicy::decide`] yourself only if you are not using `HostedSession`.
+`Always` exists only under `test-apis`. Production clients use `Auto`
+(inbound invoices this client issued, the snapshot hashes into the
+commitment lock args, and local balance does not fall) or `Manual`. Auto
+will not trust a node-supplied `local_amount` unless that snapshot is
+committed by the unsigned transaction. Settlement, TLC, cooperative close,
+and announcement requests always require confirmation under `Auto`.
 
 Signing is deliberately split into review and approval. The node supplies typed
 plaintext, never a caller-computed digest. `ChannelSigner::prepare` computes the

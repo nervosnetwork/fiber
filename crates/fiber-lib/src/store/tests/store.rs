@@ -544,7 +544,7 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
     };
 
     store.insert_watch_channel(
-        node_id,
+        node_id.clone(),
         channel_id,
         None,
         None,
@@ -566,6 +566,13 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
         .tlcs
         .iter()
         .all(|tlc| tlc.local_key.is_none()));
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        fiber_types::WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState {
+            state: fiber_types::WatchtowerExternalState::Ready,
+            last_applied: None,
+        })
+    );
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]

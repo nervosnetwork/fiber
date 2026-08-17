@@ -5,14 +5,23 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "json")]
+pub mod json;
+mod policy;
 mod protocol;
 mod root_key;
+#[cfg(feature = "json")]
+mod session;
 mod signer;
 mod store;
 
 pub use fiber_types::{
     ChannelOpenSignerMaterial, NextChannelSignerMaterial, TenantId, TenantRegistryPayload,
     TenantRegistrySignature, TENANT_REGISTRY_PROTOCOL,
+};
+pub use policy::{
+    OwnedSettlementBinding, PaymentRegistry, SettlementBinding, SigningDecision, SigningPolicy,
+    SigningPolicyInput,
 };
 pub use protocol::{
     compute_tx_message, ChannelBinding, ChannelKeyId, ChannelPublicMaterial, ChannelSignature,
@@ -22,5 +31,9 @@ pub use protocol::{
     SigningWarning,
 };
 pub use root_key::{RootKey, RootKeyBackup};
+#[cfg(feature = "json")]
+pub use session::{
+    HostedSession, HostedSessionState, PendingRequest, ProcessOutcome, SessionError, SubmitParams,
+};
 pub use signer::{ChannelSigner, CreatedRootSigner, RootSigner};
 pub use store::{MemoryStore, MemoryStoreError, SignerStore};

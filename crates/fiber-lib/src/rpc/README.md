@@ -81,6 +81,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_local_settlement`](#watchtower-update_local_settlement)
         * [Method `create_preimage`](#watchtower-create_preimage)
         * [Method `remove_preimage`](#watchtower-remove_preimage)
+        * [Method `get_watchtower_signing_status`](#watchtower-get_watchtower_signing_status)
+        * [Method `submit_watchtower_signature`](#watchtower-submit_watchtower_signature)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
@@ -132,6 +134,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
     * [Type `UdtDep`](#type-udtdep)
     * [Type `UdtScript`](#type-udtscript)
+    * [Type `WatchtowerSigningStatus`](#type-watchtowersigningstatus)
 
 ## RPC Modules
 
@@ -758,9 +761,11 @@ Generates a new invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
- If both preimage and hash are absent, a random preimage is generated.
+ If both preimage and hash are absent, a standalone node generates a random preimage.
+ Hosted tenant invoices must supply this or `payment_hash`; the LSP will not invent a settle secret.
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
  for which the tlc must be accepted and held until the preimage becomes known.
+ Hosted tenant invoices may supply only this field so the client keeps the preimage.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -1438,7 +1443,13 @@ RPC module for watchtower related operations
 <a id="watchtower-create_watch_channel"></a>
 #### Method `create_watch_channel`
 
-Create a new watched channel
+Create a new watched channel.
+
+ Supplying `local_settlement_key` leaves the settlement secret on the
+ watchtower. Omit the private key and pass `local_settlement_key_pubkey`
+ for an externally signed channel. Settlement then pauses until the
+ owner submits a signature through `get_watchtower_signing_status` and
+ `submit_watchtower_signature`.
 
 ##### Params
 
@@ -1563,6 +1574,44 @@ Remove preimage
 ##### Returns
 
 * None
+
+---
+
+
+
+<a id="watchtower-get_watchtower_signing_status"></a>
+#### Method `get_watchtower_signing_status`
+
+Read the current external watchtower signing status for a watched channel.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel whose signer state should be read.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel whose signer state was read.
+* `status` - <em>[WatchtowerSigningStatus](#type-watchtowersigningstatus)</em>, Current signer status for this watched channel.
+
+---
+
+
+
+<a id="watchtower-submit_watchtower_signature"></a>
+#### Method `submit_watchtower_signature`
+
+Submit an external watchtower settlement or TLC signature.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel that produced the outstanding signature request.
+* `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
+* `signature` - <em>``</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
+
+##### Returns
+
+* `Applied` - <em>``</em>, The signature was verified and the watchtower resumed.
+* `AlreadyApplied` - <em>``</em>, The same signature was already applied for this request.
 
 ---
 
@@ -2020,9 +2069,11 @@ The parameter struct for generating a new invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
- If both preimage and hash are absent, a random preimage is generated.
+ If both preimage and hash are absent, a standalone node generates a random preimage.
+ Hosted tenant invoices must supply this or `payment_hash`; the LSP will not invent a settle secret.
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
  for which the tlc must be accepted and held until the preimage becomes known.
+ Hosted tenant invoices may supply only this field so the client keeps the preimage.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -2353,5 +2404,18 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node.
 * `code_hash` - <em>`H256`</em>, The code hash of the script.
 * `hash_type` - <em>`ScriptHashType`</em>, The hash type of the script.
 * `args` - <em>`String`</em>, The arguments of the script.
+---
+
+<a id="#type-watchtowersigningstatus"></a>
+### Type `WatchtowerSigningStatus`
+
+Read-only projection of a watchtower's external signer sub-state.
+
+
+#### Enum with values of
+
+* `Internal` - This watched channel holds a local settlement secret.
+* `NoSignatureRequired` - External signer, but no signature is currently required.
+* `SignatureRequired` - Settlement or TLC spend is paused until this signature is submitted.
 ---
 

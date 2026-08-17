@@ -446,13 +446,12 @@ impl<S: SignerStore> ChannelSigner<S> {
         }
     }
 
-    /// Validate plaintext against the bound channel identity, then [`prepare`].
+    /// Independently hash typed plaintext after checking the bound funding identity.
     ///
-    /// This is an identity check, not a full policy verifier: it does not
-    /// reconstruct balances, TLC sets, output amounts, or watchtower settlement
-    /// locks. Tests and manual review may call [`prepare`] directly without a
-    /// binding.
-    pub async fn prepare_bound(
+    /// Requires [`Self::bind_from_approved_funding`]. This is an identity check,
+    /// not a balance policy: it does not reconstruct TLC state or output amounts.
+    /// Call [`crate::SigningPolicy::decide`] on the returned review before [`sign`].
+    pub async fn prepare(
         &self,
         content: ChannelSigningContent,
     ) -> Result<PreparedSigning, SignerError> {
@@ -461,14 +460,6 @@ impl<S: SignerStore> ChannelSigner<S> {
             .await?
             .ok_or(SignerError::ChannelNotBound)?;
         validate_content_against_binding(&content, &binding)?;
-        self.prepare(content).await
-    }
-
-    /// Validate plaintext, compute its digest, and produce a user-reviewable request.
-    pub async fn prepare(
-        &self,
-        content: ChannelSigningContent,
-    ) -> Result<PreparedSigning, SignerError> {
         validate_signing_content(&content)?;
         let signing_message = content.signing_message();
         let canonical_content = content.canonical_bytes();
@@ -938,6 +929,57 @@ mod tests {
         TransactionBuilder::default().version(version).build()
     }
 
+    fn funding_outpoint() -> ckb_types::packed::OutPoint {
+        ckb_types::packed::OutPoint::new_builder()
+            .tx_hash([7u8; 32].pack())
+            .index(0u32)
+            .build()
+    }
+
+    fn shutdown_script() -> ckb_types::packed::Script {
+        ckb_types::packed::Script::new_builder()
+            .args([1u8, 2, 3].pack())
+            .build()
+    }
+
+    fn lock_script_for(local: Pubkey, remote: Pubkey) -> ckb_types::packed::Script {
+        let ctx = KeyAggContext::new([local, remote]).expect("aggregate keys");
+        ckb_types::packed::Script::new_builder()
+            .args(aggregated_funding_lock_args(&ctx).to_vec().pack())
+            .build()
+    }
+
+    fn binding(channel: &ChannelSigner<MemoryStore>, remote: &InMemorySigner) -> ChannelBinding {
+        ChannelBinding {
+            funding_outpoint: funding_outpoint(),
+            funding_lock_script: lock_script_for(
+                channel.public_material().base_public_keys.funding_pubkey,
+                remote.funding_key.pubkey(),
+            ),
+            local_shutdown_script: shutdown_script(),
+        }
+    }
+
+    async fn bind_remote(channel: &ChannelSigner<MemoryStore>, remote: &InMemorySigner) {
+        channel
+            .bind_channel(binding(channel, remote))
+            .await
+            .expect("bind test channel");
+    }
+
+    fn commitment_tx(version: u32) -> ckb_types::packed::Transaction {
+        use ckb_types::packed::CellInput;
+        TransactionBuilder::default()
+            .version(version)
+            .input(
+                CellInput::new_builder()
+                    .previous_output(funding_outpoint())
+                    .build(),
+            )
+            .build()
+            .data()
+    }
+
     async fn musig_content(
         channel: &ChannelSigner<MemoryStore>,
         remote_signer: &InMemorySigner,
@@ -973,7 +1015,7 @@ mod tests {
                 commitment_counter: Some(CommitmentCounter::Local),
                 key_agg_ctx: key_agg_ctx.clone(),
                 agg_nonce: agg_nonce.clone(),
-                content: Musig2SignableContent::CommitmentTransaction(transaction(version).data()),
+                content: Musig2SignableContent::CommitmentTransaction(commitment_tx(version)),
             }),
             local_nonce,
             key_agg_ctx,
@@ -1043,6 +1085,7 @@ mod tests {
         let channel_key_id = channel.channel_key_id();
         let material = channel.public_material();
         let remote_signer = InMemorySigner::generate_from_seed(b"restore test remote signer");
+        bind_remote(&channel, &remote_signer).await;
         let (content, nonce_before, _, _) = musig_content(&channel, &remote_signer, 42, 1).await;
         let prepared = channel.prepare(content.clone()).await.expect("prepare");
         let review_before = prepared.review().clone();
@@ -1206,9 +1249,10 @@ mod tests {
             .expect("create root signer");
         let channel = root.create_channel().await.expect("create channel");
         let remote_signer = InMemorySigner::generate_from_seed(b"remote signer");
+        bind_remote(&channel, &remote_signer).await;
         let (content, local_nonce, key_agg_ctx, agg_nonce) =
             musig_content(&channel, &remote_signer, 7, 11).await;
-        let expected_message = crate::compute_tx_message(&transaction(11));
+        let expected_message = content.signing_message();
         let prepared = channel.prepare(content).await.expect("prepare");
         assert_eq!(prepared.review().signing_message, expected_message);
         assert_eq!(prepared.content().signing_message(), expected_message);
@@ -1257,6 +1301,7 @@ mod tests {
             .expect("create root signer");
         let channel = root.create_channel().await.expect("create channel");
         let remote = InMemorySigner::generate_from_seed(b"tamper remote signer");
+        bind_remote(&channel, &remote).await;
         let (content, _, _, _) = musig_content(&channel, &remote, 9, 1).await;
         let mut prepared = channel.prepare(content).await.expect("prepare");
         let ChannelSigningContent::Musig2(content) = &mut prepared.content else {
@@ -1276,6 +1321,7 @@ mod tests {
             .expect("create root signer");
         let channel = root.create_channel().await.expect("create channel");
         let remote = InMemorySigner::generate_from_seed(b"warning remote signer");
+        bind_remote(&channel, &remote).await;
         let (first, _, _, _) = musig_content(&channel, &remote, 5, 1).await;
         let prepared = channel.prepare(first).await.expect("prepare first");
         channel.sign(prepared).await.expect("sign first");
@@ -1327,6 +1373,7 @@ mod tests {
             .await
             .expect("open second");
         let remote = InMemorySigner::generate_from_seed(b"concurrent remote signer");
+        bind_remote(&first, &remote).await;
         let (first_content, _, _, _) = musig_content(&first, &remote, 3, 1).await;
         let (second_content, _, _, _) = musig_content(&second, &remote, 3, 2).await;
         let first_prepared = first.prepare(first_content).await.expect("prepare first");
@@ -1382,40 +1429,6 @@ mod tests {
         ));
     }
 
-    fn funding_outpoint() -> ckb_types::packed::OutPoint {
-        use ckb_types::prelude::*;
-        ckb_types::packed::OutPoint::new_builder()
-            .tx_hash([7u8; 32].pack())
-            .index(0u32)
-            .build()
-    }
-
-    fn shutdown_script() -> ckb_types::packed::Script {
-        use ckb_types::prelude::*;
-        ckb_types::packed::Script::new_builder()
-            .args([1u8, 2, 3].pack())
-            .build()
-    }
-
-    fn lock_script_for(local: Pubkey, remote: Pubkey) -> ckb_types::packed::Script {
-        use ckb_types::prelude::*;
-        let ctx = KeyAggContext::new([local, remote]).expect("aggregate keys");
-        ckb_types::packed::Script::new_builder()
-            .args(aggregated_funding_lock_args(&ctx).to_vec().pack())
-            .build()
-    }
-
-    fn binding(channel: &ChannelSigner<MemoryStore>, remote: &InMemorySigner) -> ChannelBinding {
-        ChannelBinding {
-            funding_outpoint: funding_outpoint(),
-            funding_lock_script: lock_script_for(
-                channel.public_material().base_public_keys.funding_pubkey,
-                remote.funding_key.pubkey(),
-            ),
-            local_shutdown_script: shutdown_script(),
-        }
-    }
-
     fn tx_spending_funding_and_paying_shutdown() -> ckb_types::packed::Transaction {
         use ckb_types::{packed::CellInput, prelude::*};
         TransactionBuilder::default()
@@ -1444,11 +1457,11 @@ mod tests {
             panic!("expected MuSig2 content");
         };
         inner.content = Musig2SignableContent::CommitmentTransaction(transaction);
-        channel.prepare_bound(content).await
+        channel.prepare(content).await
     }
 
     #[tokio::test]
-    async fn prepare_bound_requires_a_channel_binding() {
+    async fn prepare_requires_a_channel_binding() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -1456,7 +1469,7 @@ mod tests {
         let remote = InMemorySigner::generate_from_seed(b"unbound remote");
         let (content, _, _, _) = musig_content(&channel, &remote, 1, 1).await;
         assert_eq!(
-            channel.prepare_bound(content).await.expect_err("unbound"),
+            channel.prepare(content).await.expect_err("unbound"),
             SignerError::ChannelNotBound
         );
     }
@@ -1489,7 +1502,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_bound_rejects_musig2_keys_that_do_not_match_the_binding() {
+    async fn prepare_rejects_musig2_keys_that_do_not_match_the_binding() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -1502,13 +1515,13 @@ mod tests {
             .expect("bind channel");
         let (content, _, _, _) = musig_content(&channel, &attacker, 1, 1).await;
         assert!(matches!(
-            channel.prepare_bound(content).await,
+            channel.prepare(content).await,
             Err(SignerError::InvalidContent(_))
         ));
     }
 
     #[tokio::test]
-    async fn prepare_bound_rejects_a_commitment_that_does_not_spend_funding() {
+    async fn prepare_rejects_a_commitment_that_does_not_spend_funding() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -1525,7 +1538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_bound_accepts_onchain_settlement_without_a_shutdown_output() {
+    async fn prepare_accepts_onchain_settlement_without_a_shutdown_output() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -1540,13 +1553,13 @@ mod tests {
             transaction: transaction(1).data(),
         });
         channel
-            .prepare_bound(onchain)
+            .prepare(onchain)
             .await
             .expect("settlement txs are not checked against the shutdown script");
     }
 
     #[tokio::test]
-    async fn prepare_bound_accepts_a_commitment_that_matches_the_binding() {
+    async fn prepare_accepts_a_commitment_that_matches_the_binding() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -1642,16 +1655,5 @@ mod tests {
                 .await,
             Err(SignerError::InvalidContent(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn raw_prepare_still_works_without_a_binding() {
-        let root = RootSigner::create(root_key(), MemoryStore::default())
-            .await
-            .expect("create root signer");
-        let channel = root.create_channel().await.expect("create channel");
-        let remote = InMemorySigner::generate_from_seed(b"raw remote");
-        let (content, _, _, _) = musig_content(&channel, &remote, 1, 1).await;
-        channel.prepare(content).await.expect("raw prepare");
     }
 }

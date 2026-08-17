@@ -2,8 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fiber_json_types::{
     GetChannelSigningStatusParams, GetChannelSigningStatusResult, GetLspTenantRegistryNonceParams,
-    GetLspTenantRegistryNonceResult, Hash256, RegisterLspTenantParams, RegisterLspTenantResult,
-    SubmitChannelSignatureParams, SubmitChannelSignatureResult,
+    GetLspTenantRegistryNonceResult, GetWatchtowerSigningStatusParams,
+    GetWatchtowerSigningStatusResult, Hash256, RegisterLspTenantParams, RegisterLspTenantResult,
+    SubmitChannelSignatureParams, SubmitChannelSignatureResult, SubmitWatchtowerSignatureParams,
+    SubmitWatchtowerSignatureResult,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -29,6 +31,16 @@ pub trait FiberRpc: Clone + Send + Sync + 'static {
         tenant_token: &str,
         params: SubmitChannelSignatureParams,
     ) -> Result<SubmitChannelSignatureResult>;
+    async fn get_watchtower_signing_status(
+        &self,
+        tenant_token: &str,
+        channel_id: Hash256,
+    ) -> Result<GetWatchtowerSigningStatusResult>;
+    async fn submit_watchtower_signature(
+        &self,
+        tenant_token: &str,
+        params: SubmitWatchtowerSignatureParams,
+    ) -> Result<SubmitWatchtowerSignatureResult>;
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +144,28 @@ impl FiberRpc for HttpFiberRpc {
         params: SubmitChannelSignatureParams,
     ) -> Result<SubmitChannelSignatureResult> {
         self.call("submit_channel_signature", &params, tenant_token)
+            .await
+    }
+
+    async fn get_watchtower_signing_status(
+        &self,
+        tenant_token: &str,
+        channel_id: Hash256,
+    ) -> Result<GetWatchtowerSigningStatusResult> {
+        self.call(
+            "get_watchtower_signing_status",
+            &GetWatchtowerSigningStatusParams { channel_id },
+            tenant_token,
+        )
+        .await
+    }
+
+    async fn submit_watchtower_signature(
+        &self,
+        tenant_token: &str,
+        params: SubmitWatchtowerSignatureParams,
+    ) -> Result<SubmitWatchtowerSignatureResult> {
+        self.call("submit_watchtower_signature", &params, tenant_token)
             .await
     }
 }

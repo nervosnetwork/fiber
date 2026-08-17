@@ -54,11 +54,16 @@ impl BiscuitTokenIssuer {
         })
     }
 
-    pub fn issue_tenant_token(&self, tenant_id: &TenantId) -> Result<String> {
-        let mut builder = Biscuit::builder().fact(Fact::new(
-            "tenant".to_string(),
-            &[Term::Str(tenant_id.as_str().to_string())],
-        ))?;
+    pub fn issue_tenant_token(&self, tenant_id: &TenantId, node_id: &NodeId) -> Result<String> {
+        let mut builder = Biscuit::builder()
+            .fact(Fact::new(
+                "tenant".to_string(),
+                &[Term::Str(tenant_id.as_str().to_string())],
+            ))?
+            .fact(Fact::new(
+                "node".to_string(),
+                &[Term::Str(node_id.to_string())],
+            ))?;
         for (operation, resource) in TENANT_CAPABILITIES {
             builder = builder.fact(Fact::new(
                 operation.to_string(),
@@ -248,6 +253,18 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "remove_preimage",
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
     );
+    b.with_rule(
+        "get_watchtower_signing_status",
+        AuthRule::new(
+            r#"allow if read("watchtower"); allow if write("watchtower"); allow if read("channels");"#,
+        )
+        .with_require_rpc_context(true),
+    );
+    b.with_rule(
+        "submit_watchtower_signature",
+        AuthRule::new(r#"allow if write("watchtower"); allow if write("channels");"#)
+            .with_require_rpc_context(true),
+    );
 
     b.0
 }
@@ -383,6 +400,7 @@ mod tests {
         lsp::TenantId,
         rpc::biscuit::{extract_node_id, extract_tenant_id},
     };
+    use fiber_types::NodeId;
 
     use super::{build_authorizer, AuthRule, BiscuitAuth, BiscuitTokenIssuer};
 
@@ -394,8 +412,9 @@ mod tests {
             &root.public().to_string(),
         )
         .unwrap();
+        let node_id = NodeId::from_bytes(vec![1, 2, 3]);
         let token = issuer
-            .issue_tenant_token(&TenantId::new("u1".to_string()).unwrap())
+            .issue_tenant_token(&TenantId::new("u1".to_string()).unwrap(), &node_id)
             .unwrap();
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 
@@ -404,12 +423,20 @@ mod tests {
             extract_tenant_id(&biscuit).unwrap(),
             Some(TenantId::new("u1".to_string()).unwrap())
         );
+        assert_eq!(extract_node_id(&biscuit).unwrap(), node_id);
         auth.check_permission("new_invoice", &token).unwrap();
         auth.check_permission("send_payment", &token).unwrap();
         auth.check_permission("get_channel_signing_status", &token)
             .unwrap();
         auth.check_permission("submit_channel_signature", &token)
             .unwrap();
+        auth.check_permission("get_watchtower_signing_status", &token)
+            .unwrap();
+        auth.check_permission("submit_watchtower_signature", &token)
+            .unwrap();
+        assert!(auth
+            .check_permission("create_watch_channel", &token)
+            .is_err());
         assert!(auth
             .check_permission("lsp_register_tenant", &token)
             .is_err());
@@ -629,6 +656,57 @@ mod tests {
             .is_ok());
         assert!(auth
             .check_permission("submit_channel_signature", &read_token)
+            .is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_watchtower_signing_separates_read_and_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let channel_read_token = biscuit!(r#"read("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let channel_write_token = biscuit!(r#"write("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &channel_read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &channel_write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &read_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &channel_write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &channel_read_token)
             .is_err());
     }
 

@@ -27,10 +27,6 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::Extensions;
-#[cfg(test)]
-use molecule::prelude::Entity;
-#[cfg(test)]
-use musig2::{AggNonce, KeyAggContext};
 use musig2::{PartialSignature, PubNonce};
 use ractor::{call, ActorRef};
 use std::cmp::Reverse;
@@ -810,7 +806,7 @@ where
         };
         Ok(GetChannelSigningStatusResult {
             channel_id: channel_id.into(),
-            status: to_rpc_channel_signing_status(state.signer_state.signing_status()).rpc_err()?,
+            status: to_rpc_channel_signing_status(&state).rpc_err()?,
         })
     }
 
@@ -854,9 +850,9 @@ where
 }
 
 fn to_rpc_channel_signing_status(
-    status: InternalChannelSigningStatus,
+    state: &crate::fiber::channel::ChannelActorState,
 ) -> Result<ChannelSigningStatus, String> {
-    Ok(match status {
+    Ok(match state.signer_state.signing_status() {
         InternalChannelSigningStatus::Internal => ChannelSigningStatus::Internal,
         InternalChannelSigningStatus::NoSignatureRequired => {
             ChannelSigningStatus::NoSignatureRequired
@@ -865,12 +861,56 @@ fn to_rpc_channel_signing_status(
             request_id,
             transition,
             content,
-        } => ChannelSigningStatus::SignatureRequired {
-            request_id: request_id.0.into(),
-            transition: to_rpc_signing_transition(transition),
-            content: to_rpc_musig2_signing_content(content)?,
-        },
+            settlement_data,
+        } => {
+            let for_remote = matches!(
+                transition,
+                fiber_types::ChannelSigningTransition::SendCommitmentSigned
+            );
+            ChannelSigningStatus::SignatureRequired {
+                request_id: request_id.0.into(),
+                transition: to_rpc_signing_transition(transition),
+                content: to_rpc_musig2_signing_content(content)?,
+                settlement: settlement_data.and_then(|settlement| {
+                    let remote = state.remote_channel_public_keys.as_ref()?;
+                    Some(to_rpc_signing_settlement(
+                        settlement,
+                        state.local_channel_public_keys.tlc_base_key,
+                        remote.tlc_base_key,
+                        for_remote,
+                    ))
+                }),
+            }
+        }
     })
+}
+
+fn to_rpc_signing_settlement(
+    settlement: fiber_types::SettlementData,
+    local_settlement_key: Pubkey,
+    remote_settlement_key: Pubkey,
+    for_remote: bool,
+) -> fiber_json_types::SigningSettlement {
+    fiber_json_types::SigningSettlement {
+        local_amount: settlement.local_amount,
+        remote_amount: settlement.remote_amount,
+        local_settlement_pubkey: local_settlement_key.into(),
+        remote_settlement_pubkey: remote_settlement_key.into(),
+        for_remote,
+        tlcs: settlement
+            .tlcs
+            .into_iter()
+            .map(|tlc| fiber_json_types::SigningSettlementTlc {
+                inbound: matches!(tlc.tlc_id, TLCId::Received(_)),
+                payment_hash: tlc.payment_hash.into(),
+                payment_amount: tlc.payment_amount,
+                hash_algorithm: tlc.hash_algorithm.into(),
+                expiry: tlc.expiry,
+                local_key_pubkey: tlc.local_pubkey().into(),
+                remote_key: tlc.remote_key.into(),
+            })
+            .collect(),
+    }
 }
 
 fn to_rpc_signing_transition(
@@ -913,23 +953,6 @@ fn to_rpc_musig2_signing_content(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn try_into_musig2_signing_content(
-    content: fiber_json_types::Musig2SigningContent,
-) -> Result<fiber_types::Musig2SigningContent, String> {
-    Ok(fiber_types::Musig2SigningContent {
-        slot: fiber_types::NonceSlot {
-            purpose: from_rpc_nonce_purpose(content.slot.purpose),
-            commitment_number: content.slot.commitment_number,
-        },
-        commitment_counter: content.commitment_counter.map(from_rpc_commitment_counter),
-        key_agg_ctx: KeyAggContext::from_bytes(&content.key_agg_ctx)
-            .map_err(|error| error.to_string())?,
-        agg_nonce: AggNonce::from_bytes(&content.agg_nonce).map_err(|error| error.to_string())?,
-        content: try_into_musig2_signable_content(content.content)?,
-    })
-}
-
 fn to_rpc_nonce_purpose(purpose: fiber_types::NoncePurpose) -> fiber_json_types::NoncePurpose {
     match purpose {
         fiber_types::NoncePurpose::Commitment => fiber_json_types::NoncePurpose::Commitment,
@@ -940,33 +963,12 @@ fn to_rpc_nonce_purpose(purpose: fiber_types::NoncePurpose) -> fiber_json_types:
     }
 }
 
-#[cfg(test)]
-fn from_rpc_nonce_purpose(purpose: fiber_json_types::NoncePurpose) -> fiber_types::NoncePurpose {
-    match purpose {
-        fiber_json_types::NoncePurpose::Commitment => fiber_types::NoncePurpose::Commitment,
-        fiber_json_types::NoncePurpose::Revocation => fiber_types::NoncePurpose::Revocation,
-        fiber_json_types::NoncePurpose::ChannelAnnouncement => {
-            fiber_types::NoncePurpose::ChannelAnnouncement
-        }
-    }
-}
-
 fn to_rpc_commitment_counter(
     counter: fiber_types::CommitmentCounter,
 ) -> fiber_json_types::CommitmentCounter {
     match counter {
         fiber_types::CommitmentCounter::Local => fiber_json_types::CommitmentCounter::Local,
         fiber_types::CommitmentCounter::Remote => fiber_json_types::CommitmentCounter::Remote,
-    }
-}
-
-#[cfg(test)]
-fn from_rpc_commitment_counter(
-    counter: fiber_json_types::CommitmentCounter,
-) -> fiber_types::CommitmentCounter {
-    match counter {
-        fiber_json_types::CommitmentCounter::Local => fiber_types::CommitmentCounter::Local,
-        fiber_json_types::CommitmentCounter::Remote => fiber_types::CommitmentCounter::Remote,
     }
 }
 
@@ -1005,61 +1007,6 @@ fn to_rpc_musig2_signable_content(
             unreachable!("ChannelAnnouncement is converted from canonical bytes before this match")
         }
     }
-}
-
-#[cfg(test)]
-fn try_into_musig2_signable_content(
-    content: fiber_json_types::Musig2SignableContent,
-) -> Result<fiber_types::Musig2SignableContent, String> {
-    Ok(match content {
-        fiber_json_types::Musig2SignableContent::CommitmentTransaction { transaction } => {
-            fiber_types::Musig2SignableContent::CommitmentTransaction(transaction.into())
-        }
-        fiber_json_types::Musig2SignableContent::CooperativeCloseTransaction { transaction } => {
-            fiber_types::Musig2SignableContent::CooperativeCloseTransaction(transaction.into())
-        }
-        fiber_json_types::Musig2SignableContent::Revocation {
-            output,
-            output_data,
-            commitment_lock_script_args,
-        } => fiber_types::Musig2SignableContent::Revocation {
-            output,
-            output_data,
-            commitment_lock_script_args,
-        },
-        fiber_json_types::Musig2SignableContent::ChannelAnnouncement {
-            unsigned_announcement,
-        } => {
-            let molecule =
-                fiber_types::gen::gossip::ChannelAnnouncement::from_slice(&unsigned_announcement)
-                    .map_err(|error| error.to_string())?;
-            use ckb_types::prelude::Unpack;
-            fiber_types::Musig2SignableContent::ChannelAnnouncement(
-                fiber_types::ChannelAnnouncement {
-                    node1_signature: None,
-                    node2_signature: None,
-                    ckb_signature: None,
-                    features: molecule.features().unpack(),
-                    capacity: molecule.capacity().unpack(),
-                    chain_hash: molecule.chain_hash().into(),
-                    channel_outpoint: molecule.channel_outpoint(),
-                    udt_type_script: molecule.udt_type_script().to_opt(),
-                    node1_id: molecule
-                        .node1_id()
-                        .try_into()
-                        .map_err(|error: secp256k1::Error| error.to_string())?,
-                    node2_id: molecule
-                        .node2_id()
-                        .try_into()
-                        .map_err(|error: secp256k1::Error| error.to_string())?,
-                    ckb_key: molecule
-                        .ckb_key()
-                        .try_into()
-                        .map_err(|error: secp256k1::Error| error.to_string())?,
-                },
-            )
-        }
-    })
 }
 
 fn try_into_pub_nonce(bytes: Vec<u8>) -> Result<PubNonce, String> {
@@ -1121,23 +1068,6 @@ pub(crate) fn to_rpc_channel_open_signer_material(
         revocation_nonce: material.revocation_nonce.serialize().to_vec(),
         channel_announcement_nonce: material
             .channel_announcement_nonce
-            .as_ref()
-            .map(|nonce| nonce.serialize().to_vec()),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn to_rpc_next_channel_signer_material(
-    material: &NextChannelSignerMaterial,
-) -> fiber_json_types::NextChannelSignerMaterial {
-    fiber_json_types::NextChannelSignerMaterial {
-        next_commitment_point: material.next_commitment_point.map(Into::into),
-        next_commitment_nonce: material
-            .next_commitment_nonce
-            .as_ref()
-            .map(|nonce| nonce.serialize().to_vec()),
-        next_revocation_nonce: material
-            .next_revocation_nonce
             .as_ref()
             .map(|nonce| nonce.serialize().to_vec()),
     }

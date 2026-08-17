@@ -133,7 +133,7 @@ tempfile = "3.10.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-fiber-lsp-sdk = { path = "../fiber-lsp-sdk" }
+fiber-lsp-sdk = { path = "../fiber-lsp-sdk", features = ["test-apis"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 jsonrpsee = { version = "0.25.1", features = [
   "server",

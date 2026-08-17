@@ -156,12 +156,6 @@ impl LspRpcServerImpl {
             nonce.into(),
         );
         let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
-        let access_token = self
-            .token_issuer
-            .as_ref()
-            .map(|issuer| issuer.issue_tenant_token(&tenant_id))
-            .transpose()
-            .rpc_err()?;
         let registration = call!(self.actor, |reply| {
             LspServiceMessage::RegisterAuthenticatedTenant {
                 payload,
@@ -171,9 +165,25 @@ impl LspRpcServerImpl {
         })
         .rpc_err()?
         .rpc_err()?;
+        let access_token = if registration.created {
+            self.token_issuer
+                .as_ref()
+                .map(|issuer| {
+                    issuer.issue_tenant_token(
+                        &tenant_id,
+                        &crate::lsp::tenant_watchtower_node_id(
+                            &registration.status.record.tenant_pubkey,
+                        ),
+                    )
+                })
+                .transpose()
+                .rpc_err()?
+        } else {
+            None
+        };
         Ok(RegisterLspTenantResult {
             tenant: registration.status.into(),
-            access_token: registration.created.then_some(access_token).flatten(),
+            access_token,
         })
     }
 
@@ -211,6 +221,7 @@ impl LspRpcServerImpl {
             Some(context.config),
         )
         .with_trampoline_route_hint(context.public_node_id.into())
+        .with_require_client_payment_lock(true)
         .new_invoice(params.invoice)
         .await?;
         let invoice = CkbInvoice::from_str(&result.invoice_address)

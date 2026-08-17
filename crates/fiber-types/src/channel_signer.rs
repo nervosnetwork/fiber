@@ -344,6 +344,19 @@ impl ChannelSignatureRequest {
         }
     }
 
+    /// Settlement snapshot captured with this request, when it assigns balances.
+    pub fn settlement_data(&self) -> Option<&SettlementData> {
+        match self {
+            Self::SendCommitmentSigned {
+                settlement_data, ..
+            }
+            | Self::CompleteReceivedCommitment {
+                settlement_data, ..
+            } => Some(settlement_data),
+            _ => None,
+        }
+    }
+
     /// User-facing transition associated with this internal state-machine point.
     pub fn transition(&self) -> ChannelSigningTransition {
         match self {
@@ -477,6 +490,9 @@ pub enum ChannelSigningStatus {
         request_id: SignatureRequestId,
         transition: ChannelSigningTransition,
         content: Musig2SigningContent,
+        /// Balance and TLC snapshot captured with this commitment, when present.
+        #[serde(default)]
+        settlement_data: Option<SettlementData>,
     },
 }
 
@@ -626,6 +642,7 @@ impl ChannelSignerState {
                 request_id: *request_id,
                 transition: request.transition(),
                 content: request.content().clone(),
+                settlement_data: request.settlement_data().cloned(),
             },
         }
     }

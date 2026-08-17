@@ -6,21 +6,18 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use fiber_json_types::{
-    ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial, ChannelSigningStatus,
-    RegisterLspTenantParams, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
+    ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial, SubmitChannelSignatureResult,
+    SubmitWatchtowerSignatureResult, WatchtowerSigningStatus,
 };
 use fiber_lsp_sdk::{
-    ChannelKeyId, ChannelSignature, ChannelSigningContent, RootKey, RootSigner, SignerStore,
-    TenantId, TenantRegistryPayload,
+    json::open_material_to_rpc, ChannelKeyId, HostedSession, HostedSessionState, ProcessOutcome,
+    RootKey, RootSigner, SignerStore, SigningPolicy, SubmitParams, TenantId,
 };
 use fiber_types::Hash256;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::{
-    convert::{musig2_from_rpc, next_material_to_rpc, open_material_to_rpc},
-    rpc::FiberRpc,
-};
+use crate::rpc::FiberRpc;
 
 const ROOT_KEY_FILE: &str = "root.key";
 const AGENT_STATE_FILE: &str = "agent.json";
@@ -47,15 +44,15 @@ pub struct AgentConfig {
     pub status_file: Option<PathBuf>,
 }
 
-/// Auto-approving test client backed by the real portable SDK.
+/// Auto-approving test client backed by [`fiber_lsp_sdk::HostedSession`].
+///
+/// Uses [`SigningPolicy::Always`] so E2E can drive the node. Production
+/// clients construct `HostedSession::new` (default `Auto`) and feed RPC
+/// results in themselves.
 pub struct Agent<R, S> {
     rpc: R,
-    root: RootSigner<S>,
+    session: HostedSession<S>,
     config: AgentConfig,
-    tenant_id: TenantId,
-    tenant_token: Option<String>,
-    bindings: HashMap<Hash256, ChannelKeyId>,
-    pending: Option<ChannelKeyId>,
     state_file: PathBuf,
 }
 
@@ -66,7 +63,6 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         config: AgentConfig,
         persisted: PersistedAgent,
     ) -> Result<Self> {
-        let tenant_id = TenantId::from_root_signer_pubkey(&root.identity_public_key().into());
         let bindings = persisted
             .bindings
             .into_iter()
@@ -79,94 +75,79 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .map(|key_id| parse_hash(&key_id).map(ChannelKeyId))
             .transpose()?;
         let state_file = config.store_dir.join(AGENT_STATE_FILE);
+        let session = HostedSession::new(root)
+            .with_policy(SigningPolicy::Always)
+            .with_state(HostedSessionState {
+                tenant_token: persisted.tenant_token,
+                bindings,
+                pending,
+            });
         Ok(Self {
             rpc,
-            root,
+            session,
             config,
-            tenant_id,
-            tenant_token: persisted.tenant_token,
-            bindings,
-            pending,
             state_file,
         })
     }
 
-    pub fn tenant_id(&self) -> &TenantId {
-        &self.tenant_id
+    pub fn tenant_id(&self) -> TenantId {
+        self.session.tenant_id()
     }
 
     pub fn pending_channel_key_id(&self) -> Option<ChannelKeyId> {
-        self.pending
+        self.session.pending_channel_key_id()
     }
 
     pub fn binding(&self, channel_id: Hash256) -> Option<ChannelKeyId> {
-        self.bindings.get(&channel_id).copied()
+        self.session.binding(channel_id)
+    }
+
+    /// Reopen a channel signer. Test helper for constructing approved funding txs.
+    pub async fn open_channel(
+        &self,
+        key_id: ChannelKeyId,
+    ) -> Result<fiber_lsp_sdk::ChannelSigner<S>> {
+        self.session
+            .open_channel(key_id)
+            .await
+            .map_err(|error| anyhow!("open channel signer: {error}"))
     }
 
     /// Register the RootSigner tenant once and allocate channel open material.
     pub async fn initialize(&mut self) -> Result<()> {
         self.ensure_registered().await?;
-        self.ensure_pending().await?;
+        self.session
+            .allocate_pending_channel()
+            .await
+            .map_err(|error| anyhow!("allocate pending channel: {error}"))?;
+        self.persist_state()?;
         self.write_status().await
     }
 
     async fn ensure_registered(&mut self) -> Result<()> {
-        if self.tenant_token.is_some() {
+        if self.session.tenant_token().is_some() {
             return Ok(());
         }
-        let root_signer_pubkey: fiber_types::Pubkey = self.root.identity_public_key().into();
+        let identity: fiber_types::Pubkey = self.session.identity_public_key().into();
         let nonce = self
             .rpc
-            .get_tenant_registry_nonce(root_signer_pubkey.into())
+            .get_tenant_registry_nonce(identity.into())
             .await
             .context("request tenant registration nonce")?;
-        let returned_root = fiber_types::Pubkey::try_from(nonce.root_signer_pubkey)
-            .map_err(|error| anyhow!(error))?;
-        if returned_root != root_signer_pubkey {
-            return Err(anyhow!("LSP returned a nonce for another RootSigner"));
-        }
-        let nonce_hash: Hash256 = nonce.nonce.into();
-        let payload = TenantRegistryPayload::new(
-            fiber_types::Pubkey::try_from(nonce.lsp_node_id).map_err(|error| anyhow!(error))?,
-            root_signer_pubkey,
-            nonce_hash.into(),
-        );
-        let signature = self
-            .root
-            .sign_tenant_registry_payload(&payload)
-            .map_err(|error| anyhow!("sign tenant registration: {error}"))?;
+        let params = self
+            .session
+            .begin_registration(nonce)
+            .map_err(|error| anyhow!("begin registration: {error}"))?;
         let registered = self
             .rpc
-            .register_tenant(RegisterLspTenantParams {
-                root_signer_pubkey: root_signer_pubkey.into(),
-                nonce: nonce_hash.into(),
-                signature: hex::encode(signature.serialize()),
-            })
+            .register_tenant(params)
             .await
             .context("register RootSigner tenant")?;
-        if registered.tenant.tenant_id != self.tenant_id.as_str() {
-            return Err(anyhow!("LSP returned an unexpected tenant id"));
-        }
-        self.tenant_token = Some(
-            registered
-                .access_token
-                .ok_or_else(|| anyhow!("first registration returned no tenant token"))?,
-        );
+        self.session
+            .finish_registration(registered)
+            .map_err(|error| anyhow!("finish registration: {error}"))?;
         self.persist_state()?;
         Ok(())
-    }
-
-    async fn ensure_pending(&mut self) -> Result<()> {
-        if self.pending.is_some() {
-            return Ok(());
-        }
-        let channel = self
-            .root
-            .create_channel()
-            .await
-            .map_err(|error| anyhow!("create channel signer: {error}"))?;
-        self.pending = Some(channel.channel_key_id());
-        self.persist_state()
     }
 
     /// Bind the pending signer to the funding transaction the user already approved.
@@ -177,34 +158,15 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         local_shutdown_script: ckb_types::packed::Script,
         funding_output_index: u32,
     ) -> Result<()> {
-        if self.bindings.contains_key(&channel_id) {
-            return Ok(());
-        }
-        let pending = self
-            .pending
-            .ok_or_else(|| anyhow!("no pending signer for channel {channel_id:#x}"))?;
-        let expected_inputs: Vec<_> = unsigned_funding_tx
-            .raw()
-            .inputs()
-            .into_iter()
-            .map(|input| input.previous_output())
-            .collect();
-        let signer = self
-            .root
-            .open_channel(pending)
-            .await
-            .map_err(|error| anyhow!("open pending channel signer: {error}"))?;
-        signer
-            .bind_from_approved_funding(
+        self.session
+            .bind_approved_funding(
+                channel_id,
                 &unsigned_funding_tx,
-                funding_output_index,
                 local_shutdown_script,
-                &expected_inputs,
+                funding_output_index,
             )
             .await
             .map_err(|error| anyhow!("bind approved funding: {error}"))?;
-        self.pending = None;
-        self.bindings.insert(channel_id, pending);
         self.persist_state()?;
         self.write_status().await?;
         info!(channel_id = %format!("{channel_id:#x}"), "bound SDK signer to approved funding");
@@ -213,130 +175,137 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
 
     /// Service outstanding signing requests for already-bound channels.
     pub async fn poll_once(&mut self) -> Result<()> {
-        let token = self.tenant_token()?.to_string();
-        let bound = self
-            .bindings
-            .iter()
-            .map(|(id, key)| (*id, *key))
-            .collect::<Vec<_>>();
-        for (channel_id, key_id) in bound {
-            self.poll_channel(&token, channel_id, key_id).await?;
+        let token = self
+            .session
+            .tenant_token()
+            .ok_or_else(|| anyhow!("agent is not registered"))?
+            .to_string();
+        let bound: Vec<_> = self.session.state().bindings.keys().copied().collect();
+        for channel_id in bound {
+            self.poll_channel(&token, channel_id).await?;
+            self.poll_watchtower(&token, channel_id).await?;
         }
         Ok(())
     }
 
-    async fn poll_channel(
-        &self,
-        token: &str,
-        channel_id: Hash256,
-        key_id: ChannelKeyId,
-    ) -> Result<()> {
+    async fn poll_channel(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
         let status = self
             .rpc
             .get_channel_signing_status(token, channel_id.into())
             .await?
             .status;
-        let ChannelSigningStatus::SignatureRequired {
-            request_id,
-            content,
-            ..
-        } = status
-        else {
-            return Ok(());
-        };
-        let signer = self
-            .root
-            .open_channel(key_id)
+        match self
+            .session
+            .handle_channel_status(channel_id, status)
             .await
-            .map_err(|error| anyhow!("open channel signer: {error}"))?;
-        let content = musig2_from_rpc(content).map_err(|error| anyhow!(error))?;
-        let slot = content.slot;
-        let prepared = signer
-            .prepare_bound(ChannelSigningContent::Musig2(content))
-            .await
-            .map_err(|error| anyhow!("prepare bound signature: {error}"))?;
-        let signature = signer
-            .sign(prepared)
-            .await
-            .map_err(|error| anyhow!("sign channel request: {error}"))?;
-        let ChannelSignature::Musig2(signature) = signature else {
-            return Err(anyhow!("channel request produced an on-chain signature"));
-        };
-        let next_material = signer
-            .next_material(slot)
-            .await
-            .map_err(|error| anyhow!("derive next signer material: {error}"))?;
-        let outcome = self
-            .rpc
-            .submit_channel_signature(
-                token,
-                SubmitChannelSignatureParams {
-                    channel_id: channel_id.into(),
-                    request_id,
-                    partial_signature: signature.partial_signature.serialize(),
-                    next_material: Some(next_material_to_rpc(&next_material)),
-                },
-            )
-            .await?;
-        match outcome {
-            SubmitChannelSignatureResult::Applied
-            | SubmitChannelSignatureResult::AlreadyApplied => Ok(()),
+            .map_err(|error| anyhow!("handle channel status: {error}"))?
+        {
+            ProcessOutcome::Idle => Ok(()),
+            ProcessOutcome::ReadyToSubmit(SubmitParams::Channel(params)) => {
+                match self.rpc.submit_channel_signature(token, params).await? {
+                    SubmitChannelSignatureResult::Applied
+                    | SubmitChannelSignatureResult::AlreadyApplied => Ok(()),
+                }
+            }
+            ProcessOutcome::ReadyToSubmit(SubmitParams::Watchtower(_)) => Err(anyhow!(
+                "channel status produced a watchtower submit payload"
+            )),
+            ProcessOutcome::NeedConfirmation(_) => {
+                Err(anyhow!("Always policy required confirmation"))
+            }
+            ProcessOutcome::Denied => Err(anyhow!("Always policy denied a signing request")),
         }
     }
 
-    async fn write_status(&self) -> Result<()> {
-        let Some(path) = &self.config.status_file else {
+    async fn poll_watchtower(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
+        let status = match self
+            .rpc
+            .get_watchtower_signing_status(token, channel_id.into())
+            .await
+        {
+            Ok(result) => result.status,
+            Err(error) if error.to_string().contains("watched channel not found") => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if matches!(
+            status,
+            WatchtowerSigningStatus::Internal | WatchtowerSigningStatus::NoSignatureRequired
+        ) {
+            return Ok(());
+        }
+        match self
+            .session
+            .handle_watchtower_status(channel_id, status)
+            .await
+            .map_err(|error| anyhow!("handle watchtower status: {error}"))?
+        {
+            ProcessOutcome::Idle => Ok(()),
+            ProcessOutcome::ReadyToSubmit(SubmitParams::Watchtower(params)) => {
+                match self.rpc.submit_watchtower_signature(token, params).await? {
+                    SubmitWatchtowerSignatureResult::Applied
+                    | SubmitWatchtowerSignatureResult::AlreadyApplied => Ok(()),
+                }
+            }
+            ProcessOutcome::ReadyToSubmit(SubmitParams::Channel(_)) => Err(anyhow!(
+                "watchtower status produced a channel submit payload"
+            )),
+            ProcessOutcome::NeedConfirmation(_) => {
+                Err(anyhow!("Always policy required confirmation"))
+            }
+            ProcessOutcome::Denied => Err(anyhow!("Always policy denied a signing request")),
+        }
+    }
+
+    async fn write_status(&mut self) -> Result<()> {
+        let Some(path) = &self.config.status_file.clone() else {
             return Ok(());
         };
-        let material = match self.pending {
-            Some(key_id) => {
-                let signer = self
-                    .root
-                    .open_channel(key_id)
+        let material = if self.session.pending_channel_key_id().is_some() {
+            Some(open_material_to_rpc(
+                &self
+                    .session
+                    .allocate_pending_channel()
                     .await
-                    .map_err(|error| anyhow!("open pending channel signer: {error}"))?;
-                Some(open_material_to_rpc(
-                    &signer
-                        .channel_open_material(false)
-                        .await
-                        .map_err(|error| anyhow!("create channel open material: {error}"))?,
-                ))
-            }
-            None => None,
+                    .map_err(|error| anyhow!("create channel open material: {error}"))?,
+            ))
+        } else {
+            None
         };
         let mut bound_channel_ids = self
+            .session
+            .state()
             .bindings
             .keys()
             .map(|channel_id| format!("{channel_id:#x}"))
             .collect::<Vec<_>>();
         bound_channel_ids.sort();
         let status = AgentStatus {
-            tenant_id: self.tenant_id.as_str().to_string(),
-            root_signer_pubkey: fiber_types::Pubkey::from(self.root.identity_public_key()).into(),
-            tenant_token: self.tenant_token()?.to_string(),
+            tenant_id: self.session.tenant_id().as_str().to_string(),
+            root_signer_pubkey: fiber_types::Pubkey::from(self.session.identity_public_key())
+                .into(),
+            tenant_token: self
+                .session
+                .tenant_token()
+                .ok_or_else(|| anyhow!("agent is not registered"))?
+                .to_string(),
             channel_open_signer_material: material,
             bound_channel_ids,
         };
         atomic_write(path, &serde_json::to_vec_pretty(&status)?)
     }
 
-    fn tenant_token(&self) -> Result<&str> {
-        self.tenant_token
-            .as_deref()
-            .ok_or_else(|| anyhow!("agent is not registered"))
-    }
-
     fn persist_state(&self) -> Result<()> {
+        let state = self.session.state();
         let persisted = PersistedAgent {
-            tenant_token: self.tenant_token.clone(),
-            bindings: self
+            tenant_token: state.tenant_token.clone(),
+            bindings: state
                 .bindings
                 .iter()
                 .map(|(channel_id, key_id)| {
                     (format!("{channel_id:#x}"), format!("{:#x}", key_id.0))
                 })
                 .collect(),
-            pending_channel_key_id: self.pending.map(|key_id| format!("{:#x}", key_id.0)),
+            pending_channel_key_id: state.pending.map(|key_id| format!("{:#x}", key_id.0)),
         };
         atomic_write(&self.state_file, &serde_json::to_vec_pretty(&persisted)?)
     }
@@ -417,11 +386,13 @@ mod tests {
 
     use async_trait::async_trait;
     use fiber_json_types::{
-        ChannelSigningTransition, GetChannelSigningStatusResult, GetLspTenantRegistryNonceResult,
-        Hash256 as JsonHash256, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantResult,
+        ChannelSigningStatus, ChannelSigningTransition, GetChannelSigningStatusResult,
+        GetLspTenantRegistryNonceResult, Hash256 as JsonHash256, LspTenantRuntimeStatus,
+        LspTenantStatus, RegisterLspTenantParams, RegisterLspTenantResult,
+        SubmitChannelSignatureParams,
     };
     use fiber_lsp_sdk::{MemoryStore, RootKey, RootSigner};
-    use fiber_types::{Privkey, TenantRegistrySignature};
+    use fiber_types::{Privkey, TenantId, TenantRegistryPayload, TenantRegistrySignature};
 
     use super::*;
     use crate::convert::{musig2_to_rpc, tests as convert_tests};
@@ -530,6 +501,26 @@ mod tests {
             state.submissions.push(params);
             Ok(SubmitChannelSignatureResult::Applied)
         }
+
+        async fn get_watchtower_signing_status(
+            &self,
+            tenant_token: &str,
+            channel_id: JsonHash256,
+        ) -> Result<fiber_json_types::GetWatchtowerSigningStatusResult> {
+            self.state().tenant_tokens.push(tenant_token.to_string());
+            Ok(fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id,
+                status: WatchtowerSigningStatus::NoSignatureRequired,
+            })
+        }
+
+        async fn submit_watchtower_signature(
+            &self,
+            _tenant_token: &str,
+            _params: fiber_json_types::SubmitWatchtowerSignatureParams,
+        ) -> Result<SubmitWatchtowerSignatureResult> {
+            Ok(SubmitWatchtowerSignatureResult::Applied)
+        }
     }
 
     fn channel_id() -> Hash256 {
@@ -573,7 +564,7 @@ mod tests {
 
     async fn bind_pending(agent: &mut Agent<FakeNode, MemoryStore>, channel_id: Hash256) {
         let key_id = agent.pending_channel_key_id().expect("pending key");
-        let signer = agent.root.open_channel(key_id).await.expect("open signer");
+        let signer = agent.open_channel(key_id).await.expect("open signer");
         let tx = approved_funding_tx(funding_lock_for(
             signer.public_material().base_public_keys.funding_pubkey,
             convert_tests::remote_binding_pubkey(),
@@ -653,7 +644,7 @@ mod tests {
         let mut reopened = Agent::open(node.clone(), config()).await.expect("reopen");
         reopened.initialize().await.expect("reinitialize");
 
-        assert_eq!(reopened.tenant_id(), &tenant_id);
+        assert_eq!(reopened.tenant_id(), tenant_id);
         assert_eq!(reopened.pending_channel_key_id(), pending);
         assert_eq!(node.state().nonce_calls, 1);
         assert_eq!(node.state().register_calls, 1);
@@ -714,7 +705,7 @@ mod tests {
         let mut agent = memory_agent(node.clone(), dir.path()).await;
         agent.initialize().await.expect("initialize");
         let key_id = agent.pending_channel_key_id().expect("pending key");
-        let signer = agent.root.open_channel(key_id).await.expect("open signer");
+        let signer = agent.open_channel(key_id).await.expect("open signer");
         let funding_tx = approved_funding_tx(funding_lock_for(
             signer.public_material().base_public_keys.funding_pubkey,
             convert_tests::remote_binding_pubkey(),
@@ -739,6 +730,7 @@ mod tests {
                 request_id: JsonHash256([0x22; 32]),
                 transition: ChannelSigningTransition::SendCommitmentSigned,
                 content: musig2_to_rpc(&content),
+                settlement: None,
             },
         );
 

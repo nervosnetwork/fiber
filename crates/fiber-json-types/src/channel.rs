@@ -634,7 +634,60 @@ pub enum ChannelSigningStatus {
         transition: ChannelSigningTransition,
         /// Structured MuSig2 plaintext independently hashed by the external signer.
         content: Musig2SigningContent,
+        /// Balance and TLC snapshot captured with this commitment, when present.
+        #[serde(default)]
+        settlement: Option<SigningSettlement>,
     },
+}
+
+/// Public settlement snapshot attached to a commitment signing request.
+///
+/// Clients must hash this snapshot the same way Fiber builds CommitmentLock
+/// args and compare that hash to the unsigned commitment transaction. The
+/// amounts and TLC set are not trustworthy until that check succeeds.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SigningSettlement {
+    /// Local channel balance assigned by this commitment.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub local_amount: u128,
+    /// Remote channel balance assigned by this commitment.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub remote_amount: u128,
+    /// Local TLC base key hashed into the settlement witness.
+    pub local_settlement_pubkey: Pubkey,
+    /// Remote TLC base key hashed into the settlement witness.
+    pub remote_settlement_pubkey: Pubkey,
+    /// `true` for `SendCommitmentSigned`, `false` for `CompleteReceivedCommitment`.
+    pub for_remote: bool,
+    /// Live TLCs committed by this snapshot.
+    pub tlcs: Vec<SigningSettlementTlc>,
+}
+
+/// One TLC in a [`SigningSettlement`].
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SigningSettlementTlc {
+    /// Whether this TLC is inbound to the local party.
+    pub inbound: bool,
+    /// Payment hash locked by this TLC.
+    pub payment_hash: Hash256,
+    /// Amount locked by this TLC.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub payment_amount: u128,
+    /// Hash algorithm locked by this TLC.
+    pub hash_algorithm: crate::invoice::HashAlgorithm,
+    /// Expiry time for the TLC in milliseconds.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub expiry: u64,
+    /// Local TLC public key hashed into the settlement witness.
+    pub local_key_pubkey: Pubkey,
+    /// Remote TLC public key hashed into the settlement witness.
+    pub remote_key: Pubkey,
 }
 
 /// Public semantic label for a channel signing transition.
@@ -820,6 +873,90 @@ pub struct SubmitChannelSignatureParams {
 #[serde(tag = "type")]
 pub enum SubmitChannelSignatureResult {
     /// The signature was verified and the channel state machine resumed.
+    Applied,
+    /// The same signature was already applied for this request.
+    AlreadyApplied,
+}
+
+/// Signer-owned key used to authorize a commitment-output spend.
+#[serde_as]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(tag = "type")]
+pub enum OnchainKeyPurpose {
+    /// The channel TLC base key used for the final balance settlement path.
+    Settlement,
+    /// A TLC key derived from the channel TLC base key and commitment point.
+    Tlc {
+        /// Commitment point index used by Fiber's native TLC key derivation.
+        #[serde_as(as = "U64Hex")]
+        #[schemars(schema_with = "schema_as_uint_hex")]
+        commitment_number: u64,
+    },
+}
+
+/// Plaintext on-chain transaction signed by a channel signer.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OnchainSigningContent {
+    /// Selects either the TLC base key or one derived TLC key.
+    pub key_purpose: OnchainKeyPurpose,
+    /// Unsigned transaction from which the signer computes the CKB digest.
+    pub transaction: Transaction,
+}
+
+/// Parameters for querying a watched channel's external signing status.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetWatchtowerSigningStatusParams {
+    /// The watched channel whose signer state should be read.
+    pub channel_id: Hash256,
+}
+
+/// Result of querying a watched channel's external signing status.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetWatchtowerSigningStatusResult {
+    /// The watched channel whose signer state was read.
+    pub channel_id: Hash256,
+    /// Current signer status for this watched channel.
+    pub status: WatchtowerSigningStatus,
+}
+
+/// Read-only projection of a watchtower's external signer sub-state.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum WatchtowerSigningStatus {
+    /// This watched channel holds a local settlement secret.
+    Internal,
+    /// External signer, but no signature is currently required.
+    NoSignatureRequired,
+    /// Settlement or TLC spend is paused until this signature is submitted.
+    SignatureRequired {
+        /// Identifier of the outstanding signature request.
+        request_id: Hash256,
+        /// Structured on-chain plaintext independently hashed by the signer.
+        content: OnchainSigningContent,
+    },
+}
+
+/// Parameters for submitting an external watchtower signature.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct SubmitWatchtowerSignatureParams {
+    /// The watched channel that produced the outstanding signature request.
+    pub channel_id: Hash256,
+    /// Identifier of the outstanding signature request.
+    pub request_id: Hash256,
+    /// Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub signature: [u8; 65],
+}
+
+/// Result of submitting an external watchtower signature.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(tag = "type")]
+pub enum SubmitWatchtowerSignatureResult {
+    /// The signature was verified and the watchtower resumed.
     Applied,
     /// The same signature was already applied for this request.
     AlreadyApplied,

@@ -13,15 +13,23 @@ pub use fiber_json_types::RpcContext;
 use fiber_types::{NodeId, Pubkey};
 
 pub use fiber_json_types::{
-    CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
-    UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
+    CreatePreimageParams, CreateWatchChannelParams, GetWatchtowerSigningStatusParams,
+    GetWatchtowerSigningStatusResult, RemovePreimageParams, RemoveWatchChannelParams,
+    SubmitWatchtowerSignatureParams, SubmitWatchtowerSignatureResult, UpdateLocalSettlementParams,
+    UpdatePendingRemoteSettlementParams, UpdateRevocationParams, WatchtowerSigningStatus,
 };
 
 /// RPC module for watchtower related operations
 #[cfg(feature = "watchtower")]
 #[rpc(server)]
 trait WatchtowerRpc {
-    /// Create a new watched channel
+    /// Create a new watched channel.
+    ///
+    /// Supplying `local_settlement_key` leaves the settlement secret on the
+    /// watchtower. Omit the private key and pass `local_settlement_key_pubkey`
+    /// for an externally signed channel. Settlement then pauses until the
+    /// owner submits a signature through `get_watchtower_signing_status` and
+    /// `submit_watchtower_signature`.
     #[method(name = "create_watch_channel")]
     async fn create_watch_channel(
         &self,
@@ -76,6 +84,22 @@ trait WatchtowerRpc {
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned>;
+
+    /// Read the current external watchtower signing status for a watched channel.
+    #[method(name = "get_watchtower_signing_status")]
+    async fn get_watchtower_signing_status(
+        &self,
+        ctx: RpcContext,
+        params: GetWatchtowerSigningStatusParams,
+    ) -> Result<GetWatchtowerSigningStatusResult, ErrorObjectOwned>;
+
+    /// Submit an external watchtower settlement or TLC signature.
+    #[method(name = "submit_watchtower_signature")]
+    async fn submit_watchtower_signature(
+        &self,
+        ctx: RpcContext,
+        params: SubmitWatchtowerSignatureParams,
+    ) -> Result<SubmitWatchtowerSignatureResult, ErrorObjectOwned>;
 }
 
 /// ignore rpc-doc-gen
@@ -124,6 +148,20 @@ trait WatchtowerRpc {
     /// Remove preimage
     #[method(name = "remove_preimage")]
     async fn remove_preimage(&self, params: RemovePreimageParams) -> Result<(), ErrorObjectOwned>;
+
+    /// Read the current external watchtower signing status for a watched channel.
+    #[method(name = "get_watchtower_signing_status")]
+    async fn get_watchtower_signing_status(
+        &self,
+        params: GetWatchtowerSigningStatusParams,
+    ) -> Result<GetWatchtowerSigningStatusResult, ErrorObjectOwned>;
+
+    /// Submit an external watchtower settlement or TLC signature.
+    #[method(name = "submit_watchtower_signature")]
+    async fn submit_watchtower_signature(
+        &self,
+        params: SubmitWatchtowerSignatureParams,
+    ) -> Result<SubmitWatchtowerSignatureResult, ErrorObjectOwned>;
 }
 
 #[cfg(feature = "watchtower")]
@@ -296,5 +334,131 @@ where
         let payment_hash = params.payment_hash.into();
         self.store.remove_watch_preimage(node_id, payment_hash);
         Ok(())
+    }
+
+    async fn get_watchtower_signing_status(
+        &self,
+        ctx: RpcContext,
+        params: GetWatchtowerSigningStatusParams,
+    ) -> Result<GetWatchtowerSigningStatusResult, ErrorObjectOwned> {
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let channel_id: fiber_types::Hash256 = params.channel_id.into();
+        if self
+            .store
+            .get_watch_channel(&node_id, &channel_id)
+            .is_none()
+        {
+            return Err(rpc_error("watched channel not found"));
+        }
+        let status = to_rpc_watchtower_signing_status(
+            self.store.get_watchtower_signer(&node_id, &channel_id),
+        );
+        Ok(GetWatchtowerSigningStatusResult {
+            channel_id: channel_id.into(),
+            status,
+        })
+    }
+
+    async fn submit_watchtower_signature(
+        &self,
+        ctx: RpcContext,
+        params: SubmitWatchtowerSignatureParams,
+    ) -> Result<SubmitWatchtowerSignatureResult, ErrorObjectOwned> {
+        use fiber_types::{
+            LastAppliedWatchtowerSignature, WatchtowerExternalState, WatchtowerSignerState,
+        };
+
+        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let channel_id: fiber_types::Hash256 = params.channel_id.into();
+        let request_id: fiber_types::Hash256 = params.request_id.into();
+        if self
+            .store
+            .get_watch_channel(&node_id, &channel_id)
+            .is_none()
+        {
+            return Err(rpc_error("watched channel not found"));
+        }
+        let current = self.store.get_watchtower_signer(&node_id, &channel_id);
+        let WatchtowerSignerState::External(mut external) = current else {
+            return Err(rpc_error("watched channel does not use an external signer"));
+        };
+        if external
+            .last_applied
+            .as_ref()
+            .is_some_and(|applied| applied.request_id == request_id)
+        {
+            if external
+                .last_applied
+                .as_ref()
+                .is_some_and(|applied| applied.signature == params.signature)
+            {
+                return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
+            }
+            return Err(rpc_error(
+                "submitted signature does not match the previously applied result",
+            ));
+        }
+        let WatchtowerExternalState::AwaitingSignature {
+            request_id: expected,
+            content,
+        } = external.state
+        else {
+            return Err(rpc_error(
+                "watched channel is not waiting for an external signature",
+            ));
+        };
+        if expected != request_id {
+            return Err(rpc_error(
+                "signature request id does not match the current request",
+            ));
+        }
+        external.last_applied = Some(LastAppliedWatchtowerSignature {
+            request_id,
+            signature: params.signature,
+        });
+        external.state = WatchtowerExternalState::Signed {
+            request_id,
+            content,
+            signature: params.signature,
+        };
+        self.store.put_watchtower_signer(
+            &node_id,
+            &channel_id,
+            WatchtowerSignerState::External(external),
+        );
+        Ok(SubmitWatchtowerSignatureResult::Applied)
+    }
+}
+
+#[cfg(feature = "watchtower")]
+fn to_rpc_watchtower_signing_status(
+    state: fiber_types::WatchtowerSignerState,
+) -> WatchtowerSigningStatus {
+    use fiber_types::{OnchainKeyPurpose, WatchtowerExternalState, WatchtowerSignerState};
+
+    match state {
+        WatchtowerSignerState::Internal => WatchtowerSigningStatus::Internal,
+        WatchtowerSignerState::External(external) => match external.state {
+            WatchtowerExternalState::Ready | WatchtowerExternalState::Signed { .. } => {
+                WatchtowerSigningStatus::NoSignatureRequired
+            }
+            WatchtowerExternalState::AwaitingSignature {
+                request_id,
+                content,
+            } => WatchtowerSigningStatus::SignatureRequired {
+                request_id: request_id.into(),
+                content: fiber_json_types::OnchainSigningContent {
+                    key_purpose: match content.key_purpose {
+                        OnchainKeyPurpose::Settlement => {
+                            fiber_json_types::OnchainKeyPurpose::Settlement
+                        }
+                        OnchainKeyPurpose::Tlc { commitment_number } => {
+                            fiber_json_types::OnchainKeyPurpose::Tlc { commitment_number }
+                        }
+                    },
+                    transaction: content.transaction.into(),
+                },
+            },
+        },
     }
 }

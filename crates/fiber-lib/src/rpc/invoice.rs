@@ -79,6 +79,9 @@ pub struct InvoiceRpcServerImpl<S> {
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
     trampoline_route_hint: Option<PublicKey>,
+    /// Hosted tenants must supply `payment_hash` or `payment_preimage` so the
+    /// LSP does not generate and store a settle secret.
+    require_client_payment_lock: bool,
     #[cfg(not(target_arch = "wasm32"))]
     lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
@@ -132,6 +135,7 @@ impl<S> InvoiceRpcServerImpl<S> {
             currency,
             node_features,
             trampoline_route_hint: None,
+            require_client_payment_lock: false,
             #[cfg(not(target_arch = "wasm32"))]
             lsp_actor: None,
         }
@@ -139,6 +143,12 @@ impl<S> InvoiceRpcServerImpl<S> {
 
     pub fn with_trampoline_route_hint(mut self, node_id: PublicKey) -> Self {
         self.trampoline_route_hint = Some(node_id);
+        self
+    }
+
+    /// Require the caller to lock the invoice to a preimage they already know.
+    pub fn with_require_client_payment_lock(mut self, required: bool) -> Self {
+        self.require_client_payment_lock = required;
         self
     }
 
@@ -179,6 +189,7 @@ where
                 Some(context.config),
             )
             .with_trampoline_route_hint(context.public_node_id.into())
+            .with_require_client_payment_lock(true)
             .new_invoice(params)
             .await?;
             let invoice = result
@@ -295,9 +306,16 @@ where
         let preimage_hash = params.payment_preimage.map(fiber_types::Hash256::from);
         let payment_hash = params.payment_hash.map(fiber_types::Hash256::from);
 
-        // If both preimage and hash are absent, a random preimage is generated.
+        // If both preimage and hash are absent, a random preimage is generated
+        // unless this is a hosted tenant invoice. Hosted invoices must be
+        // locked to a client-owned secret so the LSP cannot settle them.
         let preimage_opt = match (preimage_hash, payment_hash) {
             (Some(preimage), _) => Some(preimage),
+            (None, None) if self.require_client_payment_lock => {
+                return error(
+                    "hosted invoices require payment_hash or payment_preimage from the client",
+                );
+            }
             (None, None) => Some(gen_rand_sha256_hash()),
             _ => None,
         };

@@ -201,6 +201,24 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             self.default_shutdown_script.clone(),
         )
         .await?;
+        // Treat the host watchtower as this tenant Fiber's external tower:
+        // write create/update/remove against the tenant node_id, same methods
+        // as the watchtower RPC. Public T's own events use NodeId::local().
+        #[cfg(feature = "watchtower")]
+        {
+            let watchtower_store = self.tenant_store.clone();
+            let tenant_node_id = super::tenant_watchtower_node_id(&tenant_pubkey);
+            tokio::spawn(async move {
+                while let Some(event) = event_receiver.recv().await {
+                    crate::event_handler::forward_event_to_watchtower_store(
+                        event,
+                        &watchtower_store,
+                        tenant_node_id.clone(),
+                    );
+                }
+            });
+        }
+        #[cfg(not(feature = "watchtower"))]
         tokio::spawn(async move { while event_receiver.recv().await.is_some() {} });
 
         let mut runtime = HostedTenantRuntime {

@@ -1276,6 +1276,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 let Some(local_settlement_key) =
                                     channel_data.local_settlement_key.clone()
                                 else {
+                                    warn!(
+                                        channel_id = ?channel_data.channel_id,
+                                        "watchtower cannot settle without local_settlement_key; remote settlement signing is not wired"
+                                    );
                                     return Ok(None);
                                 };
                                 unlock_option = Some((
@@ -1382,6 +1386,10 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             let Some(local_settlement_key) =
                                 channel_data.local_settlement_key.clone()
                             else {
+                                warn!(
+                                    channel_id = ?channel_data.channel_id,
+                                    "watchtower cannot settle without local_settlement_key; remote settlement signing is not wired"
+                                );
                                 return Ok(None);
                             };
                             unlock_option = Some((
@@ -1699,7 +1707,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
                 let Some(unlock_key) = unlock_key else {
-                    return Ok(None);
+                    return persist_or_apply_external_settlement(
+                        store,
+                        self_node_id,
+                        channel_data.channel_id,
+                        tx,
+                        onchain_key_purpose(unlock.unlock_type, commitment_number),
+                        unlock.with_preimage,
+                        signer,
+                    );
                 };
                 let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
@@ -1933,7 +1949,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs_data(outputs_data)
                     .build();
                 let Some(unlock_key) = unlock_key else {
-                    return Ok(None);
+                    return persist_or_apply_external_settlement(
+                        store,
+                        self_node_id,
+                        channel_data.channel_id,
+                        tx,
+                        onchain_key_purpose(unlock.unlock_type, commitment_number),
+                        unlock.with_preimage,
+                        signer,
+                    );
                 };
                 let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
                 return Ok(Some(tx));
@@ -1942,6 +1966,109 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
         Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
     }
+}
+
+fn onchain_key_purpose(unlock_type: u8, commitment_number: u64) -> fiber_types::OnchainKeyPurpose {
+    if unlock_type < 0xFE {
+        fiber_types::OnchainKeyPurpose::Tlc { commitment_number }
+    } else {
+        fiber_types::OnchainKeyPurpose::Settlement
+    }
+}
+
+fn persist_or_apply_external_settlement<S: WatchtowerStore>(
+    store: &S,
+    node_id: &NodeId,
+    channel_id: Hash256,
+    tx: TransactionView,
+    key_purpose: fiber_types::OnchainKeyPurpose,
+    with_preimage: bool,
+    change_signer: &LocalSigner,
+) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+    use fiber_types::{
+        OnchainSigningContent, WatchtowerExternalSignerState, WatchtowerExternalState,
+        WatchtowerSignerState,
+    };
+
+    let content = OnchainSigningContent {
+        key_purpose,
+        transaction: tx.data(),
+    };
+    match store.get_watchtower_signer(node_id, &channel_id) {
+        WatchtowerSignerState::External(external) => match external.state {
+            WatchtowerExternalState::Signed {
+                content: signed,
+                signature,
+                ..
+            } if signed.transaction.as_slice() == content.transaction.as_slice() => Ok(Some(
+                apply_external_settlement_signature(tx, change_signer, signature, with_preimage)?,
+            )),
+            WatchtowerExternalState::AwaitingSignature {
+                content: pending, ..
+            } if pending.transaction.as_slice() == content.transaction.as_slice() => Ok(None),
+            _ => {
+                let request_id =
+                    Hash256::from(ckb_hash::blake2b_256(content.transaction.as_slice()));
+                store.put_watchtower_signer(
+                    node_id,
+                    &channel_id,
+                    WatchtowerSignerState::External(WatchtowerExternalSignerState {
+                        state: WatchtowerExternalState::AwaitingSignature {
+                            request_id,
+                            content,
+                        },
+                        last_applied: external.last_applied,
+                    }),
+                );
+                Ok(None)
+            }
+        },
+        WatchtowerSignerState::Internal => {
+            warn!(
+                channel_id = %channel_id,
+                "watchtower settlement has no local key and no external signer state"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn apply_external_settlement_signature(
+    tx: TransactionView,
+    change_signer: &LocalSigner,
+    signature_bytes: [u8; 65],
+    with_preimage: bool,
+) -> Result<TransactionView, Box<dyn std::error::Error>> {
+    let tx = tx.data().into_view();
+    let mut settlement_witness = tx
+        .witnesses()
+        .get(0)
+        .expect("get witness at index 0")
+        .raw_data()
+        .to_vec();
+    if with_preimage {
+        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
+        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
+        settlement_witness.splice(start..end, signature_bytes);
+    } else {
+        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
+        settlement_witness.splice(start.., signature_bytes);
+    }
+
+    let witness = tx.witnesses().get(1).expect("get witness at index 1");
+    let mut blake2b = new_blake2b();
+    blake2b.update(tx.hash().as_slice());
+    blake2b.update(&(witness.item_count() as u64).to_le_bytes());
+    blake2b.update(&witness.raw_data());
+    let mut message = [0u8; 32];
+    blake2b.finalize(&mut message);
+    let change_signature = change_signer.sign_recoverable(&message);
+    let change_witness = WitnessArgs::new_builder()
+        .lock(Some(ckb_types::bytes::Bytes::from(change_signature.to_vec())).pack())
+        .build()
+        .as_bytes();
+    let witnesses = vec![settlement_witness.pack(), change_witness.pack()];
+    Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
 }
 
 fn sign_tx(
@@ -2414,6 +2541,22 @@ mod tests {
                     (stored_node_id == node_id && stored_payment_hash == payment_hash)
                         .then_some(*preimage)
                 })
+        }
+
+        fn get_watchtower_signer(
+            &self,
+            _node_id: &NodeId,
+            _channel_id: &Hash256,
+        ) -> fiber_types::WatchtowerSignerState {
+            fiber_types::WatchtowerSignerState::Internal
+        }
+
+        fn put_watchtower_signer(
+            &self,
+            _node_id: &NodeId,
+            _channel_id: &Hash256,
+            _state: fiber_types::WatchtowerSignerState,
+        ) {
         }
 
         fn insert_onchain_tlc_settlement(

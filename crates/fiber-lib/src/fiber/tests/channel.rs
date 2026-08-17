@@ -32,11 +32,10 @@ use crate::fiber::{FiberActorMessage, FiberActorRef};
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::channel::{
-    to_rpc_channel_open_signer_material, to_rpc_next_channel_signer_material,
-    try_into_musig2_signing_content, GetChannelSigningStatusParams, GetChannelSigningStatusResult,
-    OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    SubmitChannelSignatureParams, SubmitChannelSignatureResult, SubmitSignedFundingTxParams,
-    SubmitSignedFundingTxResult,
+    to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
+    GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
+    OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
+    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
 };
 use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
@@ -1650,6 +1649,7 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
         .expect("open_channel_with_external_funding over HTTP");
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
     let _: SubmitSignedFundingTxResult = node_a
         .send_rpc_request(
@@ -1892,6 +1892,7 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
         .expect("open public channel with external funding over HTTP");
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
     let _: SubmitSignedFundingTxResult = node_a
         .send_rpc_request(
@@ -1939,6 +1940,24 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
         state.signer_state.signing_status(),
         fiber_types::ChannelSigningStatus::NoSignatureRequired
     ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn bind_external_signer(
+    signer: &ChannelSigner<MemoryStore>,
+    unsigned_tx: &Transaction,
+    shutdown_script: Script,
+) {
+    let expected_inputs: Vec<_> = unsigned_tx
+        .raw()
+        .inputs()
+        .into_iter()
+        .map(|input| input.previous_output())
+        .collect();
+    signer
+        .bind_from_approved_funding(unsigned_tx, 0, shutdown_script, &expected_inputs)
+        .await
+        .expect("bind approved funding");
 }
 
 /// Phone-SDK stand-in: HTTP RPC to Fiber plus an independent local `fiber-signer`.
@@ -1994,7 +2013,7 @@ impl ExternalSignerHttpClient<'_> {
         else {
             panic!("channel must have a pending signing request");
         };
-        let content = try_into_musig2_signing_content(content)
+        let content = fiber_lsp_sdk::json::musig2_from_rpc(content)
             .expect("RPC signing content must round-trip into fiber-signer plaintext");
         let slot = content.slot;
         let prepared = self
@@ -2019,7 +2038,7 @@ impl ExternalSignerHttpClient<'_> {
             channel_id: channel_id.into(),
             request_id,
             partial_signature: signature.partial_signature.serialize(),
-            next_material: Some(to_rpc_next_channel_signer_material(&next_material)),
+            next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
         }
     }
 

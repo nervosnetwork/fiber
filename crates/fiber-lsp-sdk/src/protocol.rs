@@ -14,11 +14,12 @@ pub use fiber_types::{
 /// Funding identity taken from a user-approved unsigned funding transaction.
 ///
 /// This is derived locally by [`crate::ChannelSigner::bind_from_approved_funding`].
-/// Later [`crate::ChannelSigner::prepare_bound`] calls check that MuSig2
+/// Later [`crate::ChannelSigner::prepare`] calls check that MuSig2
 /// aggregation matches this funding lock, that commitment/close txs spend this
 /// outpoint, that close txs pay the local shutdown script, and that
-/// announcements name the same outpoint. They do not reconstruct balances, TLC
-/// state, output amounts, or watchtower settlement locks.
+/// announcements name the same outpoint. They do not reconstruct balances.
+/// [`crate::SigningPolicy::Auto`] binds a settlement snapshot to the
+/// commitment lock args before trusting `local_amount` or the TLC set.
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelBinding {

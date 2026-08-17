@@ -5058,34 +5058,18 @@ impl From<TlcInfo> for TlcNotifyInfo {
 }
 
 /// Build the witness bytes for a settlement transaction.
-///
-/// Free function replacement for `SettlementData::to_witness()` because the method
-/// depends on `blake160` from `ckb_sdk` which is not available in fiber-types.
 pub fn settlement_data_to_witness(
     data: &SettlementData,
     for_remote: bool,
     local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
-    let mut vec = Vec::new();
-    let len =
-        u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
-    vec.push(len);
-    for tlc in &data.tlcs {
-        vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
-    }
-    if for_remote {
-        vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
-        vec.extend_from_slice(data.remote_amount.to_le_bytes().as_ref());
-        vec.extend_from_slice(blake160(&local_settlement_key.serialize()).as_ref());
-        vec.extend_from_slice(data.local_amount.to_le_bytes().as_ref());
-    } else {
-        vec.extend_from_slice(blake160(&local_settlement_key.serialize()).as_ref());
-        vec.extend_from_slice(data.local_amount.to_le_bytes().as_ref());
-        vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
-        vec.extend_from_slice(data.remote_amount.to_le_bytes().as_ref());
-    }
-    vec
+    fiber_types::settlement_data_to_witness(
+        data,
+        for_remote,
+        local_settlement_key,
+        remote_settlement_key,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -5095,32 +5079,35 @@ pub enum DeferredPeerTlcUpdate {
 }
 
 /// Build the witness bytes for a single TLC in a settlement transaction.
-///
-/// Free function replacement for `SettlementTlc::to_witness()`.
 pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
-    let mut vec = Vec::new();
-    let offered_flag = if tlc.tlc_id.is_offered() { 0u8 } else { 1u8 };
-    vec.push(((tlc.hash_algorithm as u8) << 1) + offered_flag);
-    vec.extend_from_slice(&tlc.payment_amount.to_le_bytes());
-    vec.extend_from_slice(&tlc.payment_hash.as_ref()[0..20]);
-    if for_remote {
-        vec.extend_from_slice(blake160(&tlc.remote_key.serialize()).as_ref());
-        vec.extend_from_slice(blake160(&tlc.local_pubkey().serialize()).as_ref());
-    } else {
-        vec.extend_from_slice(blake160(&tlc.local_pubkey().serialize()).as_ref());
-        vec.extend_from_slice(blake160(&tlc.remote_key.serialize()).as_ref());
-    }
-
-    let since = Since::new(SinceType::Timestamp, tlc.expiry / 1000, false);
-    vec.extend_from_slice(&since.value().to_le_bytes());
-    vec
+    fiber_types::settlement_tlc_to_witness(tlc, for_remote)
 }
 
 /// Get the local pubkey hash for a settlement TLC.
-///
-/// Free function replacement for `SettlementTlc::local_pubkey_hash()`.
 pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
-    blake160(&tlc.local_pubkey().serialize()).0
+    fiber_types::settlement_tlc_local_pubkey_hash(tlc)
+}
+
+#[cfg(test)]
+mod settlement_witness_compat_tests {
+    use super::*;
+
+    #[test]
+    fn timestamp_since_matches_ckb_sdk() {
+        assert_eq!(
+            fiber_types::watchtower::settlement_timestamp_since(1_234_000),
+            Since::new(SinceType::Timestamp, 1_234, false).value()
+        );
+    }
+
+    #[test]
+    fn blake160_matches_ckb_sdk() {
+        let message = b"fiber-settlement-witness";
+        assert_eq!(
+            fiber_types::watchtower::blake160(message).as_slice(),
+            blake160(message).as_ref()
+        );
+    }
 }
 
 pub(crate) fn validate_commit_diff_for_replay_inputs(
