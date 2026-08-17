@@ -70,6 +70,16 @@ impl BiscuitTokenIssuer {
                 &[Term::Str(resource.to_string())],
             ))?;
         }
+        // E2E nodes build with `debug-add-tlc`, which is forbidden in release.
+        // Grant `write("dev")` so Bruno can kick `check_channel_shutdown`
+        // instead of waiting for the 300s background scan.
+        #[cfg(all(debug_assertions, feature = "debug-add-tlc"))]
+        {
+            builder = builder.fact(Fact::new(
+                "write".to_string(),
+                &[Term::Str("dev".to_string())],
+            ))?;
+        }
         builder
             .build(&self.root)?
             .to_base64()
@@ -439,6 +449,13 @@ mod tests {
             .is_err());
         assert!(auth
             .check_permission("lsp_register_tenant", &token)
+            .is_err());
+        #[cfg(all(debug_assertions, feature = "debug-add-tlc"))]
+        auth.check_permission("check_channel_shutdown", &token)
+            .unwrap();
+        #[cfg(not(all(debug_assertions, feature = "debug-add-tlc")))]
+        assert!(auth
+            .check_permission("check_channel_shutdown", &token)
             .is_err());
 
         let other_root = KeyPair::new();

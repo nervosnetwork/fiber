@@ -627,7 +627,10 @@ Submit a commitment transaction to the chain
 <a id="dev-check_channel_shutdown"></a>
 #### Method `check_channel_shutdown`
 
-Manually trigger CheckShutdownTx on all channels
+Manually trigger CheckShutdownTx on a channel.
+
+ A tenant Biscuit routes this to the hosted tenant Fiber; other
+ callers hit the public host node.
 
 ##### Params
 

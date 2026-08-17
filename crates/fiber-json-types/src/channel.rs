@@ -949,7 +949,7 @@ pub struct SubmitWatchtowerSignatureParams {
     /// Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
     #[serde_as(as = "SliceHex")]
     #[schemars(schema_with = "schema_as_hex_bytes")]
-    pub signature: [u8; 65],
+    pub signature: Vec<u8>,
 }
 
 /// Result of submitting an external watchtower signature.

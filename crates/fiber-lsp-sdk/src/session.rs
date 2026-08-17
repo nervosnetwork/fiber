@@ -456,7 +456,7 @@ impl<S: SignerStore> HostedSession<S> {
                 Ok(SubmitParams::Watchtower(SubmitWatchtowerSignatureParams {
                     channel_id: pending.channel_id.into(),
                     request_id: pending.request_id.into(),
-                    signature: signature.signature,
+                    signature: signature.signature.to_vec(),
                 }))
             }
             _ => Err(SessionError::Invalid(

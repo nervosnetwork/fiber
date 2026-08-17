@@ -407,6 +407,7 @@ pub mod server {
                             rpc_dev_module_commitment_txs
                                 .expect("rpc_dev_module_commitment_txs should be set"),
                         )
+                        .with_lsp_actor(lsp_actor.clone())
                         .into_rpc(),
                     )
                     .unwrap();

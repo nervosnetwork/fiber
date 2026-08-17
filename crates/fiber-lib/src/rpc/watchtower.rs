@@ -371,6 +371,11 @@ where
         let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         let request_id: fiber_types::Hash256 = params.request_id.into();
+        let signature: [u8; 65] = params
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| rpc_error("watchtower signature must be 65 bytes"))?;
         if self
             .store
             .get_watch_channel(&node_id, &channel_id)
@@ -390,7 +395,7 @@ where
             if external
                 .last_applied
                 .as_ref()
-                .is_some_and(|applied| applied.signature == params.signature)
+                .is_some_and(|applied| applied.signature == signature)
             {
                 return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
             }
@@ -414,12 +419,12 @@ where
         }
         external.last_applied = Some(LastAppliedWatchtowerSignature {
             request_id,
-            signature: params.signature,
+            signature,
         });
         external.state = WatchtowerExternalState::Signed {
             request_id,
             content,
-            signature: params.signature,
+            signature,
         };
         self.store.put_watchtower_signer(
             &node_id,
