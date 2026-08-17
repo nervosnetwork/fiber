@@ -1,11 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fiber_json_types::{
-    ChannelBinding, GetChannelBindingParams, GetChannelSigningStatusParams,
-    GetChannelSigningStatusResult, GetLspTenantRegistryNonceParams,
-    GetLspTenantRegistryNonceResult, Hash256, ListChannelsParams, ListChannelsResult,
-    RegisterLspTenantParams, RegisterLspTenantResult, SubmitChannelSignatureParams,
-    SubmitChannelSignatureResult,
+    GetChannelSigningStatusParams, GetChannelSigningStatusResult, GetLspTenantRegistryNonceParams,
+    GetLspTenantRegistryNonceResult, Hash256, RegisterLspTenantParams, RegisterLspTenantResult,
+    SubmitChannelSignatureParams, SubmitChannelSignatureResult,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -21,12 +19,6 @@ pub trait FiberRpc: Clone + Send + Sync + 'static {
         &self,
         params: RegisterLspTenantParams,
     ) -> Result<RegisterLspTenantResult>;
-    async fn list_channel_ids(&self, tenant_token: &str) -> Result<Vec<Hash256>>;
-    async fn get_channel_binding(
-        &self,
-        tenant_token: &str,
-        channel_id: Hash256,
-    ) -> Result<ChannelBinding>;
     async fn get_channel_signing_status(
         &self,
         tenant_token: &str,
@@ -119,38 +111,6 @@ impl FiberRpc for HttpFiberRpc {
     ) -> Result<RegisterLspTenantResult> {
         self.call("lsp_register_tenant", &params, &self.operator_token)
             .await
-    }
-
-    async fn list_channel_ids(&self, tenant_token: &str) -> Result<Vec<Hash256>> {
-        let result: ListChannelsResult = self
-            .call(
-                "list_channels",
-                &ListChannelsParams {
-                    pubkey: None,
-                    include_closed: None,
-                    only_pending: None,
-                },
-                tenant_token,
-            )
-            .await?;
-        Ok(result
-            .channels
-            .into_iter()
-            .map(|channel| channel.channel_id)
-            .collect())
-    }
-
-    async fn get_channel_binding(
-        &self,
-        tenant_token: &str,
-        channel_id: Hash256,
-    ) -> Result<ChannelBinding> {
-        self.call(
-            "get_channel_binding",
-            &GetChannelBindingParams { channel_id },
-            tenant_token,
-        )
-        .await
     }
 
     async fn get_channel_signing_status(

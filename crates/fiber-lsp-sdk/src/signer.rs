@@ -384,10 +384,37 @@ impl<S: SignerStore> ChannelSigner<S> {
         }
     }
 
-    /// Record the immutable Fiber channel identity for bound signing.
+    /// Bind this signer to the funding identity the user already approved.
     ///
-    /// Binding the same identity again is a no-op. A different identity is rejected.
+    /// `unsigned_funding_tx` must be the frozen transaction returned by
+    /// `open_channel_with_external_funding`. The caller supplies the cells it
+    /// agreed to spend and the shutdown script it sent in that open request.
+    /// Fiber puts the funding cell at output index 0; pass another index only
+    /// when reviewing a transaction that does not follow that layout.
+    pub async fn bind_from_approved_funding(
+        &self,
+        unsigned_funding_tx: &ckb_types::packed::Transaction,
+        funding_output_index: u32,
+        local_shutdown_script: ckb_types::packed::Script,
+        expected_input_outpoints: &[ckb_types::packed::OutPoint],
+    ) -> Result<ChannelBinding, SignerError> {
+        let binding = approved_funding_identity(
+            unsigned_funding_tx,
+            funding_output_index,
+            local_shutdown_script,
+            expected_input_outpoints,
+        )?;
+        self.persist_binding(binding.clone()).await?;
+        Ok(binding)
+    }
+
+    /// Record a previously derived funding identity. Test-only shortcut.
+    #[cfg(test)]
     pub async fn bind_channel(&self, binding: ChannelBinding) -> Result<(), SignerError> {
+        self.persist_binding(binding).await
+    }
+
+    async fn persist_binding(&self, binding: ChannelBinding) -> Result<(), SignerError> {
         loop {
             let encoded = self
                 .store
@@ -433,11 +460,7 @@ impl<S: SignerStore> ChannelSigner<S> {
             .load_binding()
             .await?
             .ok_or(SignerError::ChannelNotBound)?;
-        validate_content_against_binding(
-            &content,
-            &binding,
-            self.public_material().base_public_keys.funding_pubkey,
-        )?;
+        validate_content_against_binding(&content, &binding)?;
         self.prepare(content).await
     }
 
@@ -641,22 +664,56 @@ fn validate_signing_content(content: &ChannelSigningContent) -> Result<(), Signe
     }
 }
 
+fn approved_funding_identity(
+    unsigned_funding_tx: &ckb_types::packed::Transaction,
+    funding_output_index: u32,
+    local_shutdown_script: ckb_types::packed::Script,
+    expected_input_outpoints: &[ckb_types::packed::OutPoint],
+) -> Result<ChannelBinding, SignerError> {
+    let raw = unsigned_funding_tx.raw();
+    let inputs: Vec<ckb_types::packed::OutPoint> = raw
+        .inputs()
+        .into_iter()
+        .map(|input| input.previous_output())
+        .collect();
+    if inputs.is_empty() {
+        return Err(SignerError::InvalidContent(
+            "approved funding transaction has no inputs".to_string(),
+        ));
+    }
+    if inputs != expected_input_outpoints {
+        return Err(SignerError::InvalidContent(
+            "approved funding transaction does not spend the expected cells".to_string(),
+        ));
+    }
+    let output = raw
+        .outputs()
+        .get(funding_output_index as usize)
+        .ok_or_else(|| {
+            SignerError::InvalidContent(format!(
+                "approved funding transaction has no output {funding_output_index}"
+            ))
+        })?;
+    Ok(ChannelBinding {
+        funding_outpoint: ckb_types::packed::OutPoint::new(
+            unsigned_funding_tx.calc_tx_hash(),
+            funding_output_index,
+        ),
+        funding_lock_script: output.lock(),
+        local_shutdown_script,
+    })
+}
+
 fn validate_content_against_binding(
     content: &ChannelSigningContent,
     binding: &ChannelBinding,
-    local_funding_pubkey: Pubkey,
 ) -> Result<(), SignerError> {
     use ckb_types::prelude::Entity;
     match content {
         ChannelSigningContent::Musig2(content) => {
-            if !musig2_keys_match_binding(
-                &content.key_agg_ctx,
-                local_funding_pubkey,
-                binding.remote_public_keys.funding_pubkey,
-            ) {
+            if !musig2_matches_approved_lock(&content.key_agg_ctx, &binding.funding_lock_script) {
                 return Err(SignerError::InvalidContent(
-                    "MuSig2 key aggregation does not match the bound channel funding keys"
-                        .to_string(),
+                    "MuSig2 key aggregation does not match the approved funding lock".to_string(),
                 ));
             }
             match &content.content {
@@ -703,12 +760,19 @@ fn validate_content_against_binding(
     }
 }
 
-fn musig2_keys_match_binding(ctx: &musig2::KeyAggContext, local: Pubkey, remote: Pubkey) -> bool {
-    let actual: musig2::secp::Point = ctx.aggregated_pubkey();
-    [[local, remote], [remote, local]].into_iter().any(|keys| {
-        musig2::KeyAggContext::new(keys)
-            .is_ok_and(|expected| expected.aggregated_pubkey::<musig2::secp::Point>() == actual)
-    })
+fn aggregated_funding_lock_args(ctx: &musig2::KeyAggContext) -> [u8; 20] {
+    let point: musig2::secp::Point = ctx.aggregated_pubkey();
+    let digest = blake2b_hash_with_salt(&point.serialize_xonly(), &[]);
+    let mut args = [0u8; 20];
+    args.copy_from_slice(&digest[..20]);
+    args
+}
+
+fn musig2_matches_approved_lock(
+    ctx: &musig2::KeyAggContext,
+    lock: &ckb_types::packed::Script,
+) -> bool {
+    lock.args().raw_data().as_ref() == aggregated_funding_lock_args(ctx)
 }
 
 fn transaction_spends(
@@ -856,6 +920,7 @@ fn derive_nonce(signer: &InMemorySigner, slot: NonceSlot) -> SecNonce {
 #[cfg(test)]
 mod tests {
     use ckb_types::core::TransactionBuilder;
+    use ckb_types::prelude::*;
     use fiber_types::{Hash256, InMemorySigner, Musig2Context};
     use musig2::{verify_partial, AggNonce, KeyAggContext};
     use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
@@ -1332,14 +1397,22 @@ mod tests {
             .build()
     }
 
-    fn binding(remote: &InMemorySigner) -> ChannelBinding {
+    fn lock_script_for(local: Pubkey, remote: Pubkey) -> ckb_types::packed::Script {
+        use ckb_types::prelude::*;
+        let ctx = KeyAggContext::new([local, remote]).expect("aggregate keys");
+        ckb_types::packed::Script::new_builder()
+            .args(aggregated_funding_lock_args(&ctx).to_vec().pack())
+            .build()
+    }
+
+    fn binding(channel: &ChannelSigner<MemoryStore>, remote: &InMemorySigner) -> ChannelBinding {
         ChannelBinding {
-            channel_id: Hash256::from([3; 32]),
             funding_outpoint: funding_outpoint(),
-            remote_public_keys: remote.get_base_public_keys(),
-            funding_lock_script: ckb_types::packed::Script::default(),
+            funding_lock_script: lock_script_for(
+                channel.public_material().base_public_keys.funding_pubkey,
+                remote.funding_key.pubkey(),
+            ),
             local_shutdown_script: shutdown_script(),
-            commitment_delay_epoch: 10,
         }
     }
 
@@ -1395,7 +1468,7 @@ mod tests {
             .expect("create root signer");
         let channel = root.create_channel().await.expect("create channel");
         let remote = InMemorySigner::generate_from_seed(b"bind remote");
-        let identity = binding(&remote);
+        let identity = binding(&channel, &remote);
         channel
             .bind_channel(identity.clone())
             .await
@@ -1405,7 +1478,7 @@ mod tests {
             .await
             .expect("bind the same identity again");
         let mut other = identity;
-        other.channel_id = Hash256::from([9; 32]);
+        other.funding_outpoint = ckb_types::packed::OutPoint::new([9u8; 32].pack(), 0);
         assert_eq!(
             channel
                 .bind_channel(other)
@@ -1424,7 +1497,7 @@ mod tests {
         let remote = InMemorySigner::generate_from_seed(b"bound remote");
         let attacker = InMemorySigner::generate_from_seed(b"attacker remote");
         channel
-            .bind_channel(binding(&remote))
+            .bind_channel(binding(&channel, &remote))
             .await
             .expect("bind channel");
         let (content, _, _, _) = musig_content(&channel, &attacker, 1, 1).await;
@@ -1442,7 +1515,7 @@ mod tests {
         let channel = root.create_channel().await.expect("create channel");
         let remote = InMemorySigner::generate_from_seed(b"spend remote");
         channel
-            .bind_channel(binding(&remote))
+            .bind_channel(binding(&channel, &remote))
             .await
             .expect("bind channel");
         assert!(matches!(
@@ -1459,7 +1532,7 @@ mod tests {
         let channel = root.create_channel().await.expect("create channel");
         let remote = InMemorySigner::generate_from_seed(b"onchain remote");
         channel
-            .bind_channel(binding(&remote))
+            .bind_channel(binding(&channel, &remote))
             .await
             .expect("bind channel");
         let onchain = ChannelSigningContent::Onchain(OnchainSigningContent {
@@ -1480,7 +1553,7 @@ mod tests {
         let channel = root.create_channel().await.expect("create channel");
         let remote = InMemorySigner::generate_from_seed(b"valid remote");
         channel
-            .bind_channel(binding(&remote))
+            .bind_channel(binding(&channel, &remote))
             .await
             .expect("bind channel");
         let prepared = bind_and_prepare_commitment(
@@ -1491,6 +1564,84 @@ mod tests {
         .await
         .expect("verified prepare");
         channel.sign(prepared).await.expect("sign verified request");
+    }
+
+    fn approved_funding_tx(
+        inputs: &[ckb_types::packed::OutPoint],
+        funding_lock: ckb_types::packed::Script,
+    ) -> ckb_types::packed::Transaction {
+        use ckb_types::packed::CellInput;
+        let mut builder = TransactionBuilder::default();
+        for outpoint in inputs {
+            builder = builder.input(
+                CellInput::new_builder()
+                    .previous_output(outpoint.clone())
+                    .build(),
+            );
+        }
+        builder
+            .output(
+                ckb_types::packed::CellOutput::new_builder()
+                    .lock(funding_lock)
+                    .capacity(1000u64)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data()
+    }
+
+    #[tokio::test]
+    async fn bind_from_approved_funding_records_the_funding_outpoint() {
+        let root = RootSigner::create(root_key(), MemoryStore::default())
+            .await
+            .expect("create root signer");
+        let channel = root.create_channel().await.expect("create channel");
+        let remote = InMemorySigner::generate_from_seed(b"approved remote");
+        let input = funding_outpoint();
+        let lock = lock_script_for(
+            channel.public_material().base_public_keys.funding_pubkey,
+            remote.funding_key.pubkey(),
+        );
+        let tx = approved_funding_tx(std::slice::from_ref(&input), lock.clone());
+        let binding = channel
+            .bind_from_approved_funding(&tx, 0, shutdown_script(), std::slice::from_ref(&input))
+            .await
+            .expect("bind from approved funding");
+        assert_eq!(binding.funding_lock_script, lock);
+        assert_eq!(binding.local_shutdown_script, shutdown_script());
+        assert_eq!(binding.funding_outpoint.tx_hash(), tx.calc_tx_hash());
+        channel
+            .bind_from_approved_funding(&tx, 0, shutdown_script(), &[input])
+            .await
+            .expect("binding the same approved funding is idempotent");
+    }
+
+    #[tokio::test]
+    async fn bind_from_approved_funding_rejects_unexpected_inputs() {
+        let root = RootSigner::create(root_key(), MemoryStore::default())
+            .await
+            .expect("create root signer");
+        let channel = root.create_channel().await.expect("create channel");
+        let remote = InMemorySigner::generate_from_seed(b"wrong inputs");
+        let tx = approved_funding_tx(
+            &[funding_outpoint()],
+            lock_script_for(
+                channel.public_material().base_public_keys.funding_pubkey,
+                remote.funding_key.pubkey(),
+            ),
+        );
+        assert!(matches!(
+            channel
+                .bind_from_approved_funding(
+                    &tx,
+                    0,
+                    shutdown_script(),
+                    &[ckb_types::packed::OutPoint::new([8u8; 32].pack(), 0)]
+                )
+                .await,
+            Err(SignerError::InvalidContent(_))
+        ));
     }
 
     #[tokio::test]

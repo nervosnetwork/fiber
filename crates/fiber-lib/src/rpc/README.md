@@ -30,7 +30,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `open_channel_with_external_funding`](#channel-open_channel_with_external_funding)
         * [Method `submit_signed_funding_tx`](#channel-submit_signed_funding_tx)
         * [Method `get_channel_signing_status`](#channel-get_channel_signing_status)
-        * [Method `get_channel_binding`](#channel-get_channel_binding)
         * [Method `submit_channel_signature`](#channel-submit_channel_signature)
     * [Module Dev](#module-dev)
         * [Method `commitment_signed`](#dev-commitment_signed)
@@ -510,28 +509,6 @@ Reads the current external signing status for a channel.
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel whose signer state was read.
 * `status` - <em>[ChannelSigningStatus](#type-channelsigningstatus)</em>, Current signer status for this channel.
-
----
-
-
-
-<a id="channel-get_channel_binding"></a>
-#### Method `get_channel_binding`
-
-Reads the immutable channel identity an external signer binds before signing.
-
-##### Params
-
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel whose funding identity should be read.
-
-##### Returns
-
-* `channel_id` - <em>[Hash256](#type-hash256)</em>, Fiber channel id assigned by the node.
-* `funding_outpoint` - <em>`OutPoint`</em>, Funding transaction outpoint locked by this channel.
-* `remote_public_keys` - <em>[ChannelBasePublicKeys](#type-channelbasepublickeys)</em>, Counterparty funding and TLC base public keys.
-* `funding_lock_script` - <em>`Script`</em>, On-chain funding lock script.
-* `local_shutdown_script` - <em>`Script`</em>, Local cooperative-close shutdown script.
-* `commitment_delay_epoch` - <em>`u64`</em>, Commitment delay encoded as a full epoch value.
 
 ---
 

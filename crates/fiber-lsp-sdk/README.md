@@ -32,6 +32,12 @@ atomically compare-and-swap opaque byte values. An IndexedDB implementation can
 therefore live in a browser integration crate without adding browser
 dependencies here.
 
+After `open_channel_with_external_funding` returns a frozen unsigned funding
+transaction, call `ChannelSigner::bind_from_approved_funding` with that
+transaction, the cells the wallet agreed to spend, and the shutdown script from
+the open request. Later `prepare_bound` checks signing requests against that
+approved funding identity. The node does not supply a bindable channel identity.
+
 Signing is deliberately split into review and approval. The node supplies typed
 plaintext, never a caller-computed digest. `ChannelSigner::prepare` computes the
 Fiber digest and returns a `SigningReview` plus the exact typed content. Calling

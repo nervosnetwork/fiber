@@ -15,12 +15,10 @@ use fiber_lsp_sdk::{
 };
 use fiber_types::Hash256;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::{
-    convert::{
-        channel_binding_from_rpc, musig2_from_rpc, next_material_to_rpc, open_material_to_rpc,
-    },
+    convert::{musig2_from_rpc, next_material_to_rpc, open_material_to_rpc},
     rpc::FiberRpc,
 };
 
@@ -171,60 +169,51 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         self.persist_state()
     }
 
-    /// Bind the pending SDK key bundle to one immutable Fiber channel identity.
-    pub async fn bind(&mut self, channel_id: Hash256) -> Result<()> {
+    /// Bind the pending signer to the funding transaction the user already approved.
+    pub async fn bind_approved_funding(
+        &mut self,
+        channel_id: Hash256,
+        unsigned_funding_tx: ckb_types::packed::Transaction,
+        local_shutdown_script: ckb_types::packed::Script,
+        funding_output_index: u32,
+    ) -> Result<()> {
         if self.bindings.contains_key(&channel_id) {
             return Ok(());
         }
-        let token = self.tenant_token()?;
-        let binding = self
-            .rpc
-            .get_channel_binding(token, channel_id.into())
-            .await
-            .with_context(|| format!("get channel binding for {channel_id:#x}"))?;
-        let signer_binding = channel_binding_from_rpc(binding).map_err(|error| anyhow!(error))?;
         let pending = self
             .pending
             .ok_or_else(|| anyhow!("no pending signer for channel {channel_id:#x}"))?;
+        let expected_inputs: Vec<_> = unsigned_funding_tx
+            .raw()
+            .inputs()
+            .into_iter()
+            .map(|input| input.previous_output())
+            .collect();
         let signer = self
             .root
             .open_channel(pending)
             .await
             .map_err(|error| anyhow!("open pending channel signer: {error}"))?;
         signer
-            .bind_channel(signer_binding)
+            .bind_from_approved_funding(
+                &unsigned_funding_tx,
+                funding_output_index,
+                local_shutdown_script,
+                &expected_inputs,
+            )
             .await
-            .map_err(|error| anyhow!("bind channel signer: {error}"))?;
+            .map_err(|error| anyhow!("bind approved funding: {error}"))?;
         self.pending = None;
         self.bindings.insert(channel_id, pending);
         self.persist_state()?;
         self.write_status().await?;
-        info!(channel_id = %format!("{channel_id:#x}"), "bound SDK signer channel");
+        info!(channel_id = %format!("{channel_id:#x}"), "bound SDK signer to approved funding");
         Ok(())
     }
 
-    /// Discover the external hosted channel and service one outstanding request.
+    /// Service outstanding signing requests for already-bound channels.
     pub async fn poll_once(&mut self) -> Result<()> {
         let token = self.tenant_token()?.to_string();
-        if self.pending.is_some() {
-            for json_id in self.rpc.list_channel_ids(&token).await? {
-                let channel_id: Hash256 = json_id.into();
-                if self.bindings.contains_key(&channel_id) {
-                    continue;
-                }
-                let status = self
-                    .rpc
-                    .get_channel_signing_status(&token, channel_id.into())
-                    .await?;
-                if matches!(status.status, ChannelSigningStatus::Internal) {
-                    continue;
-                }
-                if let Err(error) = self.bind(channel_id).await {
-                    debug!(channel_id = %format!("{channel_id:#x}"), "channel is not bindable yet: {error}");
-                }
-            }
-        }
-
         let bound = self
             .bindings
             .iter()
@@ -447,8 +436,6 @@ mod tests {
     struct FakeNodeState {
         nonce_calls: usize,
         register_calls: usize,
-        channels: Vec<JsonHash256>,
-        bindings: HashMap<JsonHash256, fiber_json_types::ChannelBinding>,
         statuses: HashMap<JsonHash256, ChannelSigningStatus>,
         submissions: Vec<SubmitChannelSignatureParams>,
         tenant_tokens: Vec<String>,
@@ -469,12 +456,7 @@ mod tests {
         }
 
         fn insert_external_channel(&self, channel_id: Hash256) {
-            let mut state = self.state();
-            state.channels.push(channel_id.into());
-            state
-                .bindings
-                .insert(channel_id.into(), sample_binding(channel_id));
-            state
+            self.state()
                 .statuses
                 .insert(channel_id.into(), ChannelSigningStatus::NoSignatureRequired);
         }
@@ -523,26 +505,6 @@ mod tests {
             })
         }
 
-        async fn list_channel_ids(&self, tenant_token: &str) -> Result<Vec<JsonHash256>> {
-            let mut state = self.state();
-            state.tenant_tokens.push(tenant_token.to_string());
-            Ok(state.channels.clone())
-        }
-
-        async fn get_channel_binding(
-            &self,
-            tenant_token: &str,
-            channel_id: JsonHash256,
-        ) -> Result<fiber_json_types::ChannelBinding> {
-            let mut state = self.state();
-            state.tenant_tokens.push(tenant_token.to_string());
-            state
-                .bindings
-                .get(&channel_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("channel binding not available"))
-        }
-
         async fn get_channel_signing_status(
             &self,
             tenant_token: &str,
@@ -574,19 +536,52 @@ mod tests {
         Hash256::from([0x11; 32])
     }
 
-    fn sample_binding(channel_id: Hash256) -> fiber_json_types::ChannelBinding {
-        let remote = convert_tests::remote_binding_pubkey();
-        fiber_json_types::ChannelBinding {
-            channel_id: channel_id.into(),
-            funding_outpoint: convert_tests::bound_funding_outpoint(),
-            remote_public_keys: fiber_json_types::ChannelBasePublicKeys {
-                funding_pubkey: remote.into(),
-                tlc_base_key: remote.into(),
-            },
-            funding_lock_script: ckb_types::packed::Script::default().into(),
-            local_shutdown_script: convert_tests::bound_shutdown_script().into(),
-            commitment_delay_epoch: 10,
-        }
+    fn funding_lock_for(
+        local: fiber_types::Pubkey,
+        remote: fiber_types::Pubkey,
+    ) -> ckb_types::packed::Script {
+        use ckb_types::prelude::*;
+        use musig2::KeyAggContext;
+        let ctx = KeyAggContext::new([local, remote]).expect("aggregate keys");
+        let point: musig2::secp::Point = ctx.aggregated_pubkey();
+        let digest = fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[]);
+        ckb_types::packed::Script::new_builder()
+            .args(digest[..20].to_vec().pack())
+            .build()
+    }
+
+    fn approved_funding_tx(
+        funding_lock: ckb_types::packed::Script,
+    ) -> ckb_types::packed::Transaction {
+        use ckb_types::{packed::CellInput, prelude::*};
+        ckb_types::core::TransactionBuilder::default()
+            .input(
+                CellInput::new_builder()
+                    .previous_output(convert_tests::bound_funding_outpoint())
+                    .build(),
+            )
+            .output(
+                ckb_types::packed::CellOutput::new_builder()
+                    .lock(funding_lock)
+                    .capacity(1000u64)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data()
+    }
+
+    async fn bind_pending(agent: &mut Agent<FakeNode, MemoryStore>, channel_id: Hash256) {
+        let key_id = agent.pending_channel_key_id().expect("pending key");
+        let signer = agent.root.open_channel(key_id).await.expect("open signer");
+        let tx = approved_funding_tx(funding_lock_for(
+            signer.public_material().base_public_keys.funding_pubkey,
+            convert_tests::remote_binding_pubkey(),
+        ));
+        agent
+            .bind_approved_funding(channel_id, tx, convert_tests::bound_shutdown_script(), 0)
+            .await
+            .expect("bind approved funding");
     }
 
     async fn memory_agent(node: FakeNode, dir: &Path) -> Agent<FakeNode, MemoryStore> {
@@ -673,7 +668,7 @@ mod tests {
         agent.initialize().await.expect("initialize");
         let pending = agent.pending_channel_key_id().expect("pending key");
 
-        agent.poll_once().await.expect("poll");
+        bind_pending(&mut agent, channel_id()).await;
 
         assert_eq!(agent.binding(channel_id()), Some(pending));
         assert!(agent.pending_channel_key_id().is_none());
@@ -697,27 +692,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = FakeNode::default();
         {
-            let mut state = node.state();
-            state.channels.push(channel_id().into());
-            state
+            node.state()
                 .statuses
                 .insert(channel_id().into(), ChannelSigningStatus::Internal);
         }
-        let mut agent = memory_agent(node, dir.path()).await;
-        agent.initialize().await.expect("initialize");
-        let pending = agent.pending_channel_key_id();
-
-        agent.poll_once().await.expect("poll");
-
-        assert_eq!(agent.pending_channel_key_id(), pending);
-        assert_eq!(agent.binding(channel_id()), None);
-    }
-
-    #[tokio::test]
-    async fn unavailable_binding_is_retried_without_consuming_pending_signer() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let node = FakeNode::default();
-        node.state().channels.push(channel_id().into());
         let mut agent = memory_agent(node, dir.path()).await;
         agent.initialize().await.expect("initialize");
         let pending = agent.pending_channel_key_id();
@@ -737,7 +715,24 @@ mod tests {
         agent.initialize().await.expect("initialize");
         let key_id = agent.pending_channel_key_id().expect("pending key");
         let signer = agent.root.open_channel(key_id).await.expect("open signer");
-        let content = convert_tests::musig_content_for(&signer).await;
+        let funding_tx = approved_funding_tx(funding_lock_for(
+            signer.public_material().base_public_keys.funding_pubkey,
+            convert_tests::remote_binding_pubkey(),
+        ));
+        let funding_outpoint = ckb_types::packed::OutPoint::new(funding_tx.calc_tx_hash(), 0);
+        agent
+            .bind_approved_funding(
+                channel_id(),
+                funding_tx,
+                convert_tests::bound_shutdown_script(),
+                0,
+            )
+            .await
+            .expect("bind approved funding");
+        let mut content = convert_tests::musig_content_for(&signer).await;
+        content.content = fiber_lsp_sdk::Musig2SignableContent::CommitmentTransaction(
+            convert_tests::commitment_spending(funding_outpoint),
+        );
         node.state().statuses.insert(
             channel_id().into(),
             ChannelSigningStatus::SignatureRequired {

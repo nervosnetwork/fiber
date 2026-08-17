@@ -41,4 +41,17 @@ assert {
 script:post-response {
   bru.setVar("REMOTE_CHANNEL_ID", res.body.result.channel_id);
   bru.setVar("REMOTE_UNSIGNED_TX", res.body.result.unsigned_funding_tx);
+  const bindRes = await fetch("http://127.0.0.1:21917/bind", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      channel_id: res.body.result.channel_id,
+      unsigned_funding_tx: res.body.result.unsigned_funding_tx,
+      shutdown_script: bru.getVar("REMOTE_FUNDING_SCRIPT"),
+      funding_output_index: 0
+    })
+  });
+  if (!bindRes.ok) {
+    throw new Error(`agent bind failed: ${bindRes.status} ${await bindRes.text()}`);
+  }
 }

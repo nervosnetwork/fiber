@@ -11,31 +11,26 @@ pub use fiber_types::{
     NoncePurpose, NonceSlot, OnchainKeyPurpose, OnchainSigningContent, SigningIntent,
 };
 
-/// Immutable Fiber channel identity recorded by a [`crate::ChannelSigner`].
+/// Funding identity taken from a user-approved unsigned funding transaction.
 ///
-/// Bind once after funding is known. Later [`crate::ChannelSigner::prepare_bound`]
-/// calls check MuSig2 funding keys, that commitment/close txs spend the funding
-/// outpoint, that close txs pay the local shutdown script, and that announcements
-/// name the same outpoint. They do not reconstruct balances, TLC state, output
-/// amounts, or watchtower settlement locks.
+/// This is derived locally by [`crate::ChannelSigner::bind_from_approved_funding`].
+/// Later [`crate::ChannelSigner::prepare_bound`] calls check that MuSig2
+/// aggregation matches this funding lock, that commitment/close txs spend this
+/// outpoint, that close txs pay the local shutdown script, and that
+/// announcements name the same outpoint. They do not reconstruct balances, TLC
+/// state, output amounts, or watchtower settlement locks.
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelBinding {
-    /// Fiber channel id assigned by the node.
-    pub channel_id: Hash256,
     /// Funding transaction outpoint locked by this channel.
     #[serde_as(as = "EntityHex")]
     pub funding_outpoint: OutPoint,
-    /// Counterparty funding and TLC base public keys.
-    pub remote_public_keys: ChannelBasePublicKeys,
-    /// On-chain funding lock script.
+    /// On-chain funding lock script from the approved funding output.
     #[serde_as(as = "EntityHex")]
     pub funding_lock_script: Script,
     /// Local cooperative-close / user-owned shutdown script.
     #[serde_as(as = "EntityHex")]
     pub local_shutdown_script: Script,
-    /// Commitment delay in epochs.
-    pub commitment_delay_epoch: u64,
 }
 
 /// Opaque identifier for one channel key bundle owned by a [`RootSigner`](crate::RootSigner).
@@ -183,10 +178,10 @@ pub enum SignerError {
     /// MuSig2 or secp256k1 rejected the supplied signing context.
     #[error("signing failed: {0}")]
     Signing(String),
-    /// Bound signing was requested before [`crate::ChannelSigner::bind_channel`].
+    /// Bound signing was requested before [`crate::ChannelSigner::bind_from_approved_funding`].
     #[error("channel signer is not bound to a Fiber channel")]
     ChannelNotBound,
-    /// [`crate::ChannelSigner::bind_channel`] was called again with different identity.
+    /// The signer was bound again with a different approved funding identity.
     #[error("channel signer is already bound to a different Fiber channel")]
     ChannelAlreadyBound,
 }

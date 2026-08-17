@@ -8,28 +8,12 @@ use fiber_json_types::{
     NextChannelSignerMaterial as JsonNextChannelSignerMaterial,
 };
 use fiber_lsp_sdk::{
-    ChannelBinding, ChannelOpenSignerMaterial, CommitmentCounter, Musig2SignableContent,
-    Musig2SigningContent, NextChannelSignerMaterial, NoncePurpose, NonceSlot,
+    ChannelOpenSignerMaterial, CommitmentCounter, Musig2SignableContent, Musig2SigningContent,
+    NextChannelSignerMaterial, NoncePurpose, NonceSlot,
 };
-use fiber_types::{ChannelAnnouncement, ChannelBasePublicKeys, Pubkey};
+use fiber_types::ChannelAnnouncement;
 use molecule::prelude::Entity;
 use musig2::{AggNonce, KeyAggContext};
-
-pub(crate) fn channel_binding_from_rpc(
-    binding: fiber_json_types::ChannelBinding,
-) -> Result<ChannelBinding, String> {
-    Ok(ChannelBinding {
-        channel_id: binding.channel_id.into(),
-        funding_outpoint: binding.funding_outpoint,
-        remote_public_keys: ChannelBasePublicKeys {
-            funding_pubkey: Pubkey::try_from(binding.remote_public_keys.funding_pubkey)?,
-            tlc_base_key: Pubkey::try_from(binding.remote_public_keys.tlc_base_key)?,
-        },
-        funding_lock_script: binding.funding_lock_script.into(),
-        local_shutdown_script: binding.local_shutdown_script.into(),
-        commitment_delay_epoch: binding.commitment_delay_epoch,
-    })
-}
 
 pub(crate) fn musig2_from_rpc(
     content: JsonMusig2SigningContent,
@@ -279,13 +263,15 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn bound_commitment_tx() -> ckb_types::packed::Transaction {
+        commitment_spending(bound_funding_outpoint())
+    }
+
+    pub(crate) fn commitment_spending(
+        outpoint: ckb_types::packed::OutPoint,
+    ) -> ckb_types::packed::Transaction {
         use ckb_types::{packed::CellInput, prelude::*};
         ckb_types::core::TransactionBuilder::default()
-            .input(
-                CellInput::new_builder()
-                    .previous_output(bound_funding_outpoint())
-                    .build(),
-            )
+            .input(CellInput::new_builder().previous_output(outpoint).build())
             .build()
             .data()
     }

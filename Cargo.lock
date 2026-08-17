@@ -2355,6 +2355,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ckb-jsonrpc-types",
  "ckb-types",
  "clap",
  "fiber-json-types",

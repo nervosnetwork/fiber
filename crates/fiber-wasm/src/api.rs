@@ -143,15 +143,6 @@ pub mod channel {
             .map_err(error)
     }
     #[wasm_bindgen]
-    pub async fn get_channel_binding(params: JsValue) -> Result<JsValue, JsValue> {
-        fiber_wasm()?
-            .channel
-            .get_channel_binding(param(params)?)
-            .await
-            .map(result)
-            .map_err(error)
-    }
-    #[wasm_bindgen]
     pub async fn submit_channel_signature(params: JsValue) -> Result<JsValue, JsValue> {
         fiber_wasm()?
             .channel
