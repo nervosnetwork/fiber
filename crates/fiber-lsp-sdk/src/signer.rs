@@ -667,11 +667,6 @@ fn approved_funding_identity(
         .into_iter()
         .map(|input| input.previous_output())
         .collect();
-    if inputs.is_empty() {
-        return Err(SignerError::InvalidContent(
-            "approved funding transaction has no inputs".to_string(),
-        ));
-    }
     if inputs != expected_input_outpoints {
         return Err(SignerError::InvalidContent(
             "approved funding transaction does not spend the expected cells".to_string(),
@@ -702,13 +697,17 @@ fn validate_content_against_binding(
     use ckb_types::prelude::Entity;
     match content {
         ChannelSigningContent::Musig2(content) => {
-            if !musig2_matches_approved_lock(&content.key_agg_ctx, &binding.funding_lock_script) {
-                return Err(SignerError::InvalidContent(
-                    "MuSig2 key aggregation does not match the approved funding lock".to_string(),
-                ));
-            }
             match &content.content {
                 Musig2SignableContent::CommitmentTransaction(transaction) => {
+                    if !musig2_matches_approved_lock(
+                        &content.key_agg_ctx,
+                        &binding.funding_lock_script,
+                    ) {
+                        return Err(SignerError::InvalidContent(
+                            "MuSig2 key aggregation does not match the approved funding lock"
+                                .to_string(),
+                        ));
+                    }
                     if !transaction_spends(transaction, &binding.funding_outpoint) {
                         return Err(SignerError::InvalidContent(
                             "transaction does not spend the bound funding outpoint".to_string(),
@@ -716,6 +715,15 @@ fn validate_content_against_binding(
                     }
                 }
                 Musig2SignableContent::CooperativeCloseTransaction(transaction) => {
+                    if !musig2_matches_approved_lock(
+                        &content.key_agg_ctx,
+                        &binding.funding_lock_script,
+                    ) {
+                        return Err(SignerError::InvalidContent(
+                            "MuSig2 key aggregation does not match the approved funding lock"
+                                .to_string(),
+                        ));
+                    }
                     if !transaction_spends(transaction, &binding.funding_outpoint) {
                         return Err(SignerError::InvalidContent(
                             "transaction does not spend the bound funding outpoint".to_string(),
@@ -728,8 +736,19 @@ fn validate_content_against_binding(
                         ));
                     }
                 }
+                // Revocation aggregates the same funding pubkeys in a
+                // commitment-specific order and does not spend the funding cell.
                 Musig2SignableContent::Revocation { .. } => {}
                 Musig2SignableContent::ChannelAnnouncement(announcement) => {
+                    if !musig2_matches_approved_lock(
+                        &content.key_agg_ctx,
+                        &binding.funding_lock_script,
+                    ) {
+                        return Err(SignerError::InvalidContent(
+                            "MuSig2 key aggregation does not match the approved funding lock"
+                                .to_string(),
+                        ));
+                    }
                     if announcement.channel_outpoint.as_slice()
                         != binding.funding_outpoint.as_slice()
                     {
