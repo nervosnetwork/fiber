@@ -1,0 +1,40 @@
+meta {
+  name: bind SDK agent to approved funding
+  type: http
+  seq: 4
+}
+
+post {
+  url: http://127.0.0.1:21917/bind
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "channel_id": "placeholder",
+    "unsigned_funding_tx": {},
+    "shutdown_script": {},
+    "funding_output_index": 0
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  body.unsigned_funding_tx = bru.getVar("REMOTE_UNSIGNED_TX");
+  body.shutdown_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 500));
+}
