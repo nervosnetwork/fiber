@@ -8,7 +8,8 @@ use fiber_json_types::{
     LiquiditySwapRecord as JsonLiquiditySwapRecord, LiquiditySwapResponse,
     ListLiquidityAssetsResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
     ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
-    QuoteLoopInParams, QuoteLoopOutParams, UpdateLiquidityAssetParams,
+    QuoteLoopInParams, QuoteLoopOutParams, SetLiquidityProviderModeParams,
+    UpdateLiquidityAssetParams,
 };
 use fiber_types::LiquiditySwapState;
 #[cfg(not(target_arch = "wasm32"))]
@@ -138,6 +139,16 @@ trait LiquidityRpc {
     async fn get_liquidity_provider_status(
         &self,
     ) -> Result<LiquidityProviderStatus, ErrorObjectOwned>;
+
+    /// Enable or disable liquidity provider mode.
+    ///
+    /// When disabled, all provider quote and accept endpoints are rejected until provider mode is
+    /// enabled again. Recovery of already accepted swaps is unaffected.
+    #[method(name = "set_liquidity_provider_mode")]
+    async fn set_liquidity_provider_mode(
+        &self,
+        params: SetLiquidityProviderModeParams,
+    ) -> Result<LiquidityProviderStatus, ErrorObjectOwned>;
 }
 
 /// Server implementation for the liquidity RPC module.
@@ -164,6 +175,7 @@ pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
         "disable_liquidity_asset",
         "list_liquidity_assets",
         "get_liquidity_provider_status",
+        "set_liquidity_provider_mode",
     ]
 }
 
@@ -279,6 +291,13 @@ where
         &self,
     ) -> Result<LiquidityProviderStatus, ErrorObjectOwned> {
         self.get_liquidity_provider_status().await
+    }
+
+    async fn set_liquidity_provider_mode(
+        &self,
+        params: SetLiquidityProviderModeParams,
+    ) -> Result<LiquidityProviderStatus, ErrorObjectOwned> {
+        self.set_liquidity_provider_mode(params).await
     }
 }
 
@@ -514,6 +533,21 @@ where
             .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
         let log_params = "get_liquidity_provider_status";
         let message = move |reply| LiquidityActorMessage::GetLiquidityProviderStatus(reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
+    /// Enable or disable liquidity provider mode.
+    pub async fn set_liquidity_provider_mode(
+        &self,
+        params: SetLiquidityProviderModeParams,
+    ) -> Result<LiquidityProviderStatus, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = params.clone();
+        let message = move |reply| LiquidityActorMessage::SetLiquidityProviderMode(params, reply);
 
         call_liquidity_actor(actor.clone(), message, &log_params).await
     }
@@ -926,6 +960,20 @@ mod tests {
                         .push("get_liquidity_provider_status");
                     let _ = reply.send(Ok(liquidity_provider_status()));
                 }
+                LiquidityActorMessage::SetLiquidityProviderMode(params, reply) => {
+                    assert_eq!(
+                        serde_json::to_value(&params).expect("serialize received mode params"),
+                        serde_json::to_value(set_liquidity_provider_mode_params())
+                            .expect("serialize expected mode params")
+                    );
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("set_liquidity_provider_mode");
+                    let mut status = liquidity_provider_status();
+                    status.enabled = params.enabled;
+                    let _ = reply.send(Ok(status));
+                }
                 _ => {}
             }
             Ok(())
@@ -957,7 +1005,8 @@ mod tests {
             match message {
                 LiquidityActorMessage::QuoteLoopIn(_, _)
                 | LiquidityActorMessage::ImportLiquidityQuote(_, _)
-                | LiquidityActorMessage::LoopIn(_, _) => {
+                | LiquidityActorMessage::LoopIn(_, _)
+                | LiquidityActorMessage::SetLiquidityProviderMode(_, _) => {
                     pending::<()>().await;
                 }
                 _ => {}
@@ -1169,6 +1218,10 @@ mod tests {
             enabled_asset_count: 0,
             active_swaps: 0,
         }
+    }
+
+    fn set_liquidity_provider_mode_params() -> SetLiquidityProviderModeParams {
+        SetLiquidityProviderModeParams { enabled: true }
     }
 
     fn add_liquidity_asset_params() -> AddLiquidityAssetParams {
@@ -1633,6 +1686,49 @@ mod tests {
 
         assert_eq!(response.active_swaps, 0);
         assert_eq!(actor.take_events(), vec!["get_liquidity_provider_status"]);
+    }
+
+    #[tokio::test]
+    async fn set_liquidity_provider_mode_rpc_delegates_exact_params_and_returns_status() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .set_liquidity_provider_mode(set_liquidity_provider_mode_params())
+            .await
+            .expect("set liquidity provider mode");
+
+        assert!(response.enabled);
+        assert_eq!(actor.take_events(), vec!["set_liquidity_provider_mode"]);
+    }
+
+    #[tokio::test]
+    async fn set_liquidity_provider_mode_rpc_reports_actor_unavailable() {
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None);
+
+        let error = rpc
+            .set_liquidity_provider_mode(set_liquidity_provider_mode_params())
+            .await
+            .expect_err("missing actor");
+
+        assert!(error.message().contains("liquidity actor is not available"));
+    }
+
+    #[tokio::test]
+    async fn set_liquidity_provider_mode_rpc_times_out_when_actor_stalls() {
+        let actor = spawn_stalled_liquidity_rpc_mock().await;
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            rpc.set_liquidity_provider_mode(set_liquidity_provider_mode_params()),
+        )
+        .await
+        .expect("rpc call should time out internally");
+        let error = result.expect_err("stalled actor");
+
+        assert!(error.message().contains("liquidity actor call timed out"));
     }
 
     #[tokio::test]

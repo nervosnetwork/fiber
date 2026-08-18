@@ -63,6 +63,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `disable_liquidity_asset`](#liquidity-disable_liquidity_asset)
         * [Method `list_liquidity_assets`](#liquidity-list_liquidity_assets)
         * [Method `get_liquidity_provider_status`](#liquidity-get_liquidity_provider_status)
+        * [Method `set_liquidity_provider_mode`](#liquidity-set_liquidity_provider_mode)
     * [Module Payment](#module-payment)
         * [Method `send_payment`](#payment-send_payment)
         * [Method `get_payment`](#payment-get_payment)
@@ -1179,6 +1180,28 @@ Return provider status.
 
 ##### Params
 * None
+
+##### Returns
+
+* `enabled` - <em>`bool`</em>, Whether provider mode is enabled.
+* `enabled_asset_count` - <em>`u64`</em>, Number of currently enabled assets.
+* `active_swaps` - <em>`u64`</em>, Number of non-terminal provider swaps.
+
+---
+
+
+
+<a id="liquidity-set_liquidity_provider_mode"></a>
+#### Method `set_liquidity_provider_mode`
+
+Enable or disable liquidity provider mode.
+
+ When disabled, all provider quote and accept endpoints are rejected until provider mode is
+ enabled again. Recovery of already accepted swaps is unaffected.
+
+##### Params
+
+* `enabled` - <em>`bool`</em>, Whether liquidity provider mode should be enabled.
 
 ##### Returns
 
