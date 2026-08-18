@@ -1261,6 +1261,8 @@ where
             lock_script.hash_type().into(),
         )?;
 
+        let gross_amount = loop_in_gross_onchain_amount(quote)?;
+
         if quote.asset.kind == LiquidityAssetKind::Udt {
             let cell_type_script = cell.output.type_().to_opt();
             let expected_type = quote.asset.udt_type_script.as_ref();
@@ -1280,6 +1282,44 @@ where
                     ));
                 }
             }
+
+            let cell_data = cell.data.raw_data();
+            if cell_data.len() != 16 {
+                return Err(LiquidityLoopOutError::Chain(format!(
+                    "observed loop in lock UDT data length {} does not match expected 16",
+                    cell_data.len()
+                )));
+            }
+            let udt_amount: u128 = u128::from_le_bytes(cell_data[..16].try_into().unwrap());
+            if udt_amount != gross_amount {
+                return Err(LiquidityLoopOutError::Chain(format!(
+                    "observed loop in lock UDT amount mismatch: expected {gross_amount}, got {udt_amount}"
+                )));
+            }
+        } else if cell.output.type_().to_opt().is_some() {
+            return Err(LiquidityLoopOutError::Chain(
+                "observed loop in lock CKB cell has unexpected type script".to_string(),
+            ));
+        } else {
+            let gross_ckb = u64::try_from(gross_amount).map_err(|_| {
+                LiquidityLoopOutError::Chain(
+                    "observed loop in lock CKB gross amount does not fit u64".to_string(),
+                )
+            })?;
+            if u64::from(cell.output.capacity()) < gross_ckb {
+                return Err(LiquidityLoopOutError::Chain(format!(
+                    "observed loop in lock CKB capacity {} below gross amount {gross_ckb}",
+                    u64::from(cell.output.capacity())
+                )));
+            }
+        }
+
+        if u64::from(cell.output.capacity()) < quote.capacity_requirement_ckb {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "observed loop in lock capacity {} below requirement {}",
+                u64::from(cell.output.capacity()),
+                quote.capacity_requirement_ckb
+            )));
         }
 
         Ok(())
@@ -1927,7 +1967,7 @@ mod tests {
     use secp256k1::{SecretKey, SECP256K1};
     use tokio::sync::mpsc;
 
-    use crate::ckb::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingTx};
+    use crate::ckb::{CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingTx, LiveCell};
     use crate::liquidity::store::{
         LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
         LiquiditySwapKind, LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapRole,
@@ -4606,5 +4646,205 @@ mod tests {
         );
         let result = validate_liquidity_lock_args(&args, &quote, &code_hash, 0, &code_hash, 0);
         assert!(result.unwrap_err().to_string().contains("amount"));
+    }
+
+    struct LiveCellMockCkbActor;
+
+    #[async_trait::async_trait]
+    impl Actor for LiveCellMockCkbActor {
+        type Msg = CkbChainMessage;
+        type State = Option<LiveCell>;
+        type Arguments = Option<LiveCell>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            cell: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(cell)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let CkbChainMessage::GetLiveCell(_outpoint, reply) = message {
+                let _ = reply.send(Ok(state.take()));
+            }
+            Ok(())
+        }
+    }
+
+    fn observed_loop_in_lock_output(quote: &LoopOutQuoteTerms) -> packed::CellOutput {
+        let lock = loop_in_lock_script_for_quote(quote);
+        let udt_type_script: Option<packed::Script> =
+            quote.asset.udt_type_script.clone().map(Into::into);
+        packed::CellOutput::new_builder()
+            .capacity(quote.capacity_requirement_ckb)
+            .lock(lock)
+            .type_(udt_type_script.pack())
+            .build()
+    }
+
+    fn observed_loop_in_lock_data(quote: &LoopOutQuoteTerms) -> packed::Bytes {
+        if quote.asset.kind == LiquidityAssetKind::Udt {
+            Bytes::from(
+                loop_in_gross_onchain_amount(quote)
+                    .unwrap()
+                    .to_le_bytes()
+                    .to_vec(),
+            )
+            .pack()
+        } else {
+            Bytes::new().pack()
+        }
+    }
+
+    async fn validate_observed_cell(
+        quote: &LoopOutQuoteTerms,
+        cell: LiveCell,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let (ckb_actor, handle) = ractor::Actor::spawn(None, LiveCellMockCkbActor, Some(cell))
+            .await
+            .unwrap();
+        let stop_ref = ckb_actor.clone();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            NoopLiquidityStore::default(),
+            liquidity_lock_artifact(),
+        );
+        let result = watcher
+            .validate_observed_loop_in_lock(quote, &test_outpoint(0))
+            .await;
+        stop_ref.stop(Some("test done".to_string()));
+        let _ = handle.await;
+        result
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_accepts_valid_ckb_cell() {
+        let quote = test_loop_in_quote_terms();
+        let cell = LiveCell {
+            output: observed_loop_in_lock_output(&quote),
+            data: observed_loop_in_lock_data(&quote),
+        };
+        validate_observed_cell(&quote, cell).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_insufficient_ckb_capacity() {
+        let quote = test_loop_in_quote_terms();
+        let output = observed_loop_in_lock_output(&quote)
+            .as_builder()
+            .capacity(quote.capacity_requirement_ckb - 1)
+            .build();
+        let cell = LiveCell {
+            output,
+            data: observed_loop_in_lock_data(&quote),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("capacity"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_accepts_valid_udt_cell() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let cell = LiveCell {
+            output: observed_loop_in_lock_output(&quote),
+            data: observed_loop_in_lock_data(&quote),
+        };
+        validate_observed_cell(&quote, cell).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_missing_udt_data() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let cell = LiveCell {
+            output: observed_loop_in_lock_output(&quote),
+            data: Bytes::new().pack(),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("UDT data length"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_15_byte_udt_data() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let cell = LiveCell {
+            output: observed_loop_in_lock_output(&quote),
+            data: Bytes::from(vec![0u8; 15]).pack(),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("UDT data length"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_17_byte_udt_data() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let cell = LiveCell {
+            output: observed_loop_in_lock_output(&quote),
+            data: Bytes::from(vec![0u8; 17]).pack(),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("UDT data length"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_wrong_udt_amount() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let wrong = loop_in_gross_onchain_amount(&quote).unwrap() + 1;
+        let cell = LiveCell {
+            output: observed_loop_in_lock_output(&quote),
+            data: Bytes::from(wrong.to_le_bytes().to_vec()).pack(),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("UDT amount mismatch"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_wrong_udt_type_script() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let output = observed_loop_in_lock_output(&quote)
+            .as_builder()
+            .type_(Some(script("wrong-udt")).pack())
+            .build();
+        let cell = LiveCell {
+            output,
+            data: observed_loop_in_lock_data(&quote),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("UDT type script mismatch"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_unexpected_ckb_type_script() {
+        let quote = test_loop_in_quote_terms();
+        let output = observed_loop_in_lock_output(&quote)
+            .as_builder()
+            .type_(Some(script("unexpected-udt")).pack())
+            .build();
+        let cell = LiveCell {
+            output,
+            data: observed_loop_in_lock_data(&quote),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("type script"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_in_lock_rejects_insufficient_udt_capacity() {
+        let (quote, _udt_type_script) = test_loop_in_udt_quote_terms();
+        let output = observed_loop_in_lock_output(&quote)
+            .as_builder()
+            .capacity(quote.capacity_requirement_ckb - 1)
+            .build();
+        let cell = LiveCell {
+            output,
+            data: observed_loop_in_lock_data(&quote),
+        };
+        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        assert!(error.to_string().contains("capacity"));
     }
 }
