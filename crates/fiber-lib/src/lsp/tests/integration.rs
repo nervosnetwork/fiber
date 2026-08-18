@@ -35,7 +35,7 @@ use crate::{
         },
         payment::SendPaymentCommand,
     },
-    fiber_types::Privkey,
+    fiber_types::{HashAlgorithm, Privkey},
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
@@ -1561,6 +1561,11 @@ async fn hosted_tenant_pays_ordinary_node_through_lsp_with_mpp() {
 async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
     init_tracing();
 
+    let payment_preimage = gen_rand_sha256_hash();
+    let expected_payment_hash: crate::fiber_types::Hash256 = HashAlgorithm::CkbHash
+        .hash(payment_preimage.as_ref())
+        .into();
+
     // U1 -> LSP1 -> N2 -> N3 -> LSP2 -> U2
     let network = create_lsp_test_network(
         &[
@@ -1591,7 +1596,7 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
                     description: Some("cross LSP hosted payment".to_string()),
                     currency: fiber_json_types::Currency::Fibd,
                     payment_preimage: None,
-                    payment_hash: Some(crate::fiber_types::Hash256::from([0x43; 32]).into()),
+                    payment_hash: Some(expected_payment_hash.into()),
                     expiry: Some(60 * 60),
                     fallback_address: None,
                     final_expiry_delta: None,
@@ -1608,6 +1613,7 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
     assert_eq!(invoice.tenant_id, "u2");
     assert_eq!(invoice.hint.lsp_node_id, network.nodes[3].pubkey.into());
     let payment_hash: crate::fiber_types::Hash256 = invoice.hint.payment_hash.into();
+    assert_eq!(payment_hash, expected_payment_hash);
 
     let response = network
         .send_payment(
@@ -1625,6 +1631,20 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
         .expect("send U1 payment through LSP1 and LSP2");
     assert_eq!(response.payment_hash, payment_hash.into());
 
+    wait_until_async_timeout(|| async {
+        network
+            .tenant(3, "u2")
+            .node
+            .get_invoice_status(&payment_hash)
+            == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    network
+        .tenant(3, "u2")
+        .node
+        .settle_invoice(&payment_hash, payment_preimage)
+        .await
+        .expect("settle U2 hosted hold invoice");
     network
         .tenant(0, "u1")
         .node
