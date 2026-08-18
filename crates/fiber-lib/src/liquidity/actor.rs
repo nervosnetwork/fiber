@@ -13,7 +13,7 @@ use fiber_json_types::{
     LiquidityProviderStatus, LiquidityQuoteEnvelope, LiquiditySwapResponse,
     ListLiquidityAssetsResponse, LoopInParams, LoopOutParams, ProviderAcceptLoopInParams,
     ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
-    UpdateLiquidityAssetParams,
+    SetLiquidityProviderModeParams, UpdateLiquidityAssetParams,
 };
 use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
@@ -107,6 +107,11 @@ pub enum LiquidityActorMessage {
     GetLiquidityProviderStatus(
         RpcReplyPort<Result<LiquidityProviderStatus, LiquidityLoopOutError>>,
     ),
+    /// Enable or disable provider mode.
+    SetLiquidityProviderMode(
+        SetLiquidityProviderModeParams,
+        RpcReplyPort<Result<LiquidityProviderStatus, LiquidityLoopOutError>>,
+    ),
     /// Resume every persisted non-terminal Loop Out swap.
     ResumeNonTerminal(RpcReplyPort<Result<usize, LiquidityLoopOutError>>),
     /// Internal continuation after payout lock confirmation.
@@ -144,6 +149,7 @@ impl LiquidityActorMessage {
             "disable_liquidity_asset",
             "list_liquidity_assets",
             "get_liquidity_provider_status",
+            "set_liquidity_provider_mode",
             "resume_non_terminal",
             "payout_confirmed",
             "payment_settled",
@@ -354,6 +360,10 @@ where
                 let result = state.handle_get_liquidity_provider_status();
                 let _ = reply.send(result);
             }
+            LiquidityActorMessage::SetLiquidityProviderMode(params, reply) => {
+                let result = state.handle_set_liquidity_provider_mode(params);
+                let _ = reply.send(result);
+            }
         }
         Ok(())
     }
@@ -456,6 +466,7 @@ where
         &mut self,
         params: QuoteLoopInParams,
     ) -> Result<LiquidityQuoteEnvelope, LiquidityLoopOutError> {
+        ensure_provider_mode(&self.store)?;
         let asset = self
             .store
             .get_liquidity_asset(&params.asset_id)
@@ -635,6 +646,18 @@ where
             enabled_asset_count,
             active_swaps,
         })
+    }
+
+    fn handle_set_liquidity_provider_mode(
+        &self,
+        params: SetLiquidityProviderModeParams,
+    ) -> Result<LiquidityProviderStatus, LiquidityLoopOutError> {
+        if self.store.get_provider_mode().map_err(map_store_error)? != params.enabled {
+            self.store
+                .set_provider_mode(params.enabled)
+                .map_err(map_store_error)?;
+        }
+        self.handle_get_liquidity_provider_status()
     }
 
     fn count_non_terminal_provider_swaps(&self) -> Result<u64, LiquidityLoopOutError> {
@@ -2559,6 +2582,7 @@ mod tests {
                 "disable_liquidity_asset",
                 "list_liquidity_assets",
                 "get_liquidity_provider_status",
+                "set_liquidity_provider_mode",
                 "resume_non_terminal",
                 "payout_confirmed",
                 "payment_settled",
@@ -2620,6 +2644,7 @@ mod tests {
         listed_swap_kinds: Shared<Vec<LiquiditySwapKind>>,
         label: Option<&'static str>,
         provider_mode: Shared<bool>,
+        provider_mode_writes: Shared<usize>,
     }
 
     impl TestLiquidityStore {
@@ -2634,6 +2659,7 @@ mod tests {
                 listed_swap_kinds: Shared::new(Vec::new()),
                 label: Some(label),
                 provider_mode: Shared::new(false),
+                provider_mode_writes: Shared::new(0),
             }
         }
 
@@ -2933,6 +2959,7 @@ mod tests {
 
         fn set_provider_mode(&self, enabled: bool) -> Result<(), LiquidityStoreError> {
             *self.provider_mode.borrow_mut() = enabled;
+            *self.provider_mode_writes.borrow_mut() += 1;
             Ok(())
         }
 
@@ -3692,6 +3719,19 @@ mod tests {
         actor: ractor::ActorRef<LiquidityActorMessage>,
     ) -> Result<usize, LiquidityLoopOutError> {
         ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal).unwrap()
+    }
+
+    async fn call_set_provider_mode(
+        actor: &ractor::ActorRef<LiquidityActorMessage>,
+        enabled: bool,
+    ) -> Result<LiquidityProviderStatus, LiquidityLoopOutError> {
+        ractor::call!(actor, |reply| {
+            LiquidityActorMessage::SetLiquidityProviderMode(
+                SetLiquidityProviderModeParams { enabled },
+                reply,
+            )
+        })
+        .unwrap()
     }
 
     async fn call_loop_in(
@@ -6054,6 +6094,124 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("provider mode is disabled"));
+    }
+
+    #[tokio::test]
+    async fn provider_mode_set_enabled_returns_status_enabled_true() {
+        let harness = RuntimeActorHarness::new("client");
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
+
+        let status = call_set_provider_mode(&actor, true).await.unwrap();
+
+        assert!(status.enabled);
+        assert!(harness.store.get_provider_mode().unwrap());
+        stop_liquidity_actor(actor, handle).await;
+    }
+
+    #[tokio::test]
+    async fn provider_mode_repeated_enable_performs_single_store_write() {
+        let harness = RuntimeActorHarness::new("client");
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
+
+        let first = call_set_provider_mode(&actor, true).await.unwrap();
+        let second = call_set_provider_mode(&actor, true).await.unwrap();
+
+        assert!(first.enabled);
+        assert!(second.enabled);
+        assert_eq!(*harness.store.provider_mode_writes.borrow(), 1);
+        stop_liquidity_actor(actor, handle).await;
+    }
+
+    #[tokio::test]
+    async fn provider_mode_disable_returns_status_disabled() {
+        let harness = RuntimeActorHarness::new_provider();
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
+
+        let status = call_set_provider_mode(&actor, false).await.unwrap();
+
+        assert!(!status.enabled);
+        assert!(!harness.store.get_provider_mode().unwrap());
+        stop_liquidity_actor(actor, handle).await;
+    }
+
+    #[tokio::test]
+    async fn provider_mode_disabled_gates_loop_out_accept() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        harness.store.set_provider_mode(false).unwrap();
+
+        let error = harness
+            .call_provider_accept([1u8; 32].into())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("provider mode is disabled"));
+    }
+
+    #[tokio::test]
+    async fn provider_mode_disabled_gates_loop_in_quote() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        harness.store.set_provider_mode(false).unwrap();
+
+        let error = harness
+            .call_quote_loop_in(QuoteLoopInParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                client_invoice: valid_client_invoice(100, [43u8; 32].into()),
+                claimant_lock: script_hex(&script("disabled-loop-in-claimant")),
+                refund_lock: script_hex(&script("disabled-loop-in-refund")),
+                max_provider_fee: 100,
+                max_routing_fee: 17,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("provider mode is disabled"));
+    }
+
+    #[tokio::test]
+    async fn provider_mode_disabled_gates_loop_in_accept() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        harness.store.set_provider_mode(false).unwrap();
+
+        let error = harness
+            .call_provider_accept_loop_in([1u8; 32].into(), [46u8; 32].into(), 2)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("provider mode is disabled"));
+    }
+
+    #[tokio::test]
+    async fn provider_mode_disabled_does_not_gate_resume_non_terminal() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let mut swap = recovery_swap(31, LiquiditySwapState::PayoutPending);
+        swap.onchain_outpoint = None;
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        store
+            .insert_loop_out_quote(
+                LoopOutQuoteTerms {
+                    quote_id: [31u8; 32].into(),
+                    payment_hash: HashAlgorithm::CkbHash.hash([4u8; 32]).into(),
+                    ..test_loop_out_quote(now_ms() + 60_000)
+                },
+                now_ms(),
+            )
+            .unwrap();
+        store.set_provider_mode(false).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
+        )
+        .await;
+
+        let resumed = call_resume_non_terminal(actor).await;
+
+        assert_eq!(resumed, 1);
+        assert_eq!(event_count(&events, "watch_payout"), 1);
     }
 
     #[tokio::test]
