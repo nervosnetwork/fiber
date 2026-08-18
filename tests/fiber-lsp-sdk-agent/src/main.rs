@@ -77,14 +77,16 @@ async fn main() -> Result<()> {
         },
     )
     .await?;
-    agent.initialize().await?;
 
-    info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
     if args.once {
+        initialize_with_retry(&mut agent, &mut None).await?;
+        info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
         agent.poll_once().await?;
         return Ok(());
     }
 
+    // Bind the test control server before initialize so wait.sh / Bruno can
+    // connect while the agent retries tenant registration against node RPC.
     let (bind_tx, mut bind_rx) = mpsc::channel::<BindApprovedFundingRequest>(4);
     let (control, mut shutdown_rx) = match (args.control_addr, status_file) {
         (Some(address), Some(status_file)) => {
@@ -102,6 +104,14 @@ async fn main() -> Result<()> {
         (Some(_), None) => anyhow::bail!("--control-addr requires --status-file"),
         (None, _) => (None, None),
     };
+    if !initialize_with_retry(&mut agent, &mut shutdown_rx).await? {
+        if let Some(control) = control {
+            control.abort();
+        }
+        return Ok(());
+    }
+
+    info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
     let interval = Duration::from_millis(args.interval_ms);
     loop {
         tokio::select! {
@@ -123,6 +133,28 @@ async fn main() -> Result<()> {
         control.abort();
     }
     Ok(())
+}
+
+async fn initialize_with_retry<R, S>(
+    agent: &mut Agent<R, S>,
+    shutdown_rx: &mut Option<oneshot::Receiver<()>>,
+) -> Result<bool>
+where
+    R: fiber_lsp_sdk_agent::FiberRpc,
+    S: fiber_lsp_sdk::SignerStore,
+{
+    loop {
+        match agent.initialize().await {
+            Ok(()) => return Ok(true),
+            Err(error) => {
+                tracing::warn!("SDK agent initialize failed; retrying: {error:#}");
+                tokio::select! {
+                    _ = wait_for_shutdown(shutdown_rx) => return Ok(false),
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+            }
+        }
+    }
 }
 
 async fn bind_request<R, S>(

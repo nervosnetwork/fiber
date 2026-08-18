@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: http://127.0.0.1:21917/shutdown
+  url: {{LSP_SDK_AGENT_URL}}/shutdown
   body: none
   auth: none
 }
@@ -15,5 +15,5 @@ assert {
 }
 
 script:post-response {
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise(r => setTimeout(r, 5000));
 }

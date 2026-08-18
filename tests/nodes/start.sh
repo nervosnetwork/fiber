@@ -12,7 +12,39 @@ testcase_dir="$(dirname "$script_dir")/bruno/${testcase_name}"
 start_node_ids=()
 enable_fiber_metrics="${ENABLE_FIBER_METRICS:-}"
 fiber_build_features="${FIBER_BUILD_FEATURES:-}"
+lsp_sdk_agent_control_addr="${LSP_SDK_AGENT_CONTROL_ADDR:-127.0.0.1:21917}"
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::trackers::lnd_trackers=off,fnn::fiber::gossip=off,fnn::fiber::graph=off,fnn::utils::actor=off
+
+is_lsp_e2e() {
+    case "$testcase_name" in
+        e2e/lsp|e2e/lsp-remote-signer|e2e/lsp-remote-signer-watchtower)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Read a one-line `section.key` value from a generated node YAML file.
+yaml_map_value() {
+    local file="$1"
+    local section="$2"
+    local key="$3"
+    awk -v section="$section" -v key="$key" '
+        $0 ~ "^" section ":" { in_section = 1; next }
+        in_section && $0 ~ /^[^[:space:]#]/ { in_section = 0 }
+        in_section && $1 == key ":" { print $2; exit }
+    ' "$file"
+}
+
+# CI remaps fiber/rpc ports after init. Do not reuse leftover extra wait ports
+# from a previous LSP run when starting a non-LSP workflow. LSP cases write the
+# SDK agent control port immediately so wait.sh does not race node RPC readiness.
+rm -f "$nodes_dir/.extra-ports"
+if is_lsp_e2e; then
+    printf '%s\n' "${lsp_sdk_agent_control_addr##*:}" >"$nodes_dir/.extra-ports"
+fi
 
 append_fiber_build_feature() {
     local feature="$1"
@@ -73,7 +105,7 @@ elif [ -n "$should_remove_old_state" ]; then
     echo "starting to reset ...."
     rm -rf "$nodes_dir"/*/fiber/store
     "$deploy_dir/init-dev-chain.sh" -f
-    if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+    if is_lsp_e2e; then
         rm -rf "$nodes_dir/lsp-sdk-agent"
         rm -f "$nodes_dir/lsp-sdk-agent-status.json"
     fi
@@ -109,7 +141,7 @@ if [[ -n "$fiber_build_features" ]]; then
     build_args+=(--features "$fiber_build_features")
 fi
 cargo build "${build_args[@]}"
-if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+if is_lsp_e2e; then
     agent_build_args=(--locked)
     case "$test_env" in
         debug)
@@ -159,7 +191,7 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
         export FIBER_BOOTNODE_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
     node2_args=(-d 2)
-    if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+    if is_lsp_e2e; then
         node2_args+=(
             -s fiber,rpc,ckb,lsp
             --fiber-auto-accept-channel-ckb-funding-amount 50000000000
@@ -176,17 +208,24 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
         FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start_fnn "${node2_args[@]}" &
         FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start_fnn -d 3 &
     fi
-    if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+    if is_lsp_e2e; then
         agent_store="$nodes_dir/lsp-sdk-agent"
         agent_status="$nodes_dir/lsp-sdk-agent-status.json"
         operator_token="$(sed -n 's/^  LSP_OPERATOR_TOKEN: //p' "$bruno_dir/test.bru")"
+        node2_rpc_addr="$(yaml_map_value "$nodes_dir/2/config.yml" rpc listening_addr)"
+        if [[ -z "$node2_rpc_addr" ]]; then
+            echo "failed to read rpc.listening_addr from $nodes_dir/2/config.yml" >&2
+            exit 1
+        fi
+        node2_rpc_url="http://${node2_rpc_addr}"
+        echo "starting fiber-lsp-sdk-agent --rpc ${node2_rpc_url} --control-addr ${lsp_sdk_agent_control_addr}"
         run_lsp_sdk_agent() {
             while true; do
                 if ! ../../target/"${test_env}"/fiber-lsp-sdk-agent \
-                        --rpc http://127.0.0.1:21715 \
+                        --rpc "$node2_rpc_url" \
                         --store "$agent_store" \
                         --status-file "$agent_status" \
-                        --control-addr 127.0.0.1:21917 \
+                        --control-addr "$lsp_sdk_agent_control_addr" \
                         --operator-token "$operator_token" \
                         2>&1 | tee -a lsp-sdk-agent.log; then
                     echo "fiber-lsp-sdk-agent failed; retrying persisted signer"
