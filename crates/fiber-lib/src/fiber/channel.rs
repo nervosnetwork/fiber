@@ -125,6 +125,7 @@ use tracing::{debug, error, info, trace, warn};
 // - `signature`: 64 bytes, aggregated signature
 pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
 pub(crate) struct HostedWatchChannelParams {
     pub funding_udt_type_script: Option<Script>,
     pub local_settlement_key: Option<Privkey>,
@@ -11129,6 +11130,7 @@ impl ChannelActorState {
     }
 
     /// Snapshot used to register a hosted tenant watchtower row.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
     pub(crate) fn hosted_watch_channel_params(&self) -> Result<HostedWatchChannelParams, String> {
         let (local_settlement_key, local_settlement_key_pubkey, remote_settlement_key) =
             self.get_settlement_keys();
