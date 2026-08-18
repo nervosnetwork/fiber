@@ -36,6 +36,18 @@ pub struct LiveCell {
     pub data: packed::Bytes,
 }
 
+/// Convert a JSON-RPC cell view into a [`LiveCell`], defaulting an omitted
+/// cell data to empty bytes so empty-data CKB loop-in cells do not error.
+fn live_cell_from_cell_info(cell: ckb_jsonrpc_types::CellInfo) -> LiveCell {
+    LiveCell {
+        output: cell.output.into(),
+        data: cell
+            .data
+            .map(|data| packed::Bytes::from(data.content.as_bytes()))
+            .unwrap_or_default(),
+    }
+}
+
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 #[derive(Clone, Debug)]
@@ -380,20 +392,7 @@ impl Actor for CkbChainActor {
                 let outpoint_json: ckb_jsonrpc_types::OutPoint = outpoint.clone().into();
                 let result: Result<Option<LiveCell>, RpcError> =
                     match ckb_client.get_live_cell(outpoint_json, true).await {
-                        Ok(live_cell) => live_cell
-                            .cell
-                            .map(|cell| {
-                                let data = cell.data.ok_or_else(|| {
-                                    RpcError::Other(anyhow::anyhow!(
-                                        "get_live_cell response omitted requested cell data"
-                                    ))
-                                })?;
-                                Ok(LiveCell {
-                                    output: cell.output.into(),
-                                    data: packed::Bytes::from(data.content.as_bytes()),
-                                })
-                            })
-                            .transpose(),
+                        Ok(live_cell) => Ok(live_cell.cell.map(live_cell_from_cell_info)),
                         Err(e) => Err(RpcError::Other(anyhow::anyhow!(
                             "get_live_cell failed: {e}"
                         ))),
@@ -497,4 +496,24 @@ async fn fund_via_shell(
 ) -> Result<FundingTx, FundingError> {
     // Never called in WASM
     unreachable!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ckb_types::prelude::Builder;
+    use molecule::prelude::Entity;
+
+    #[test]
+    fn missing_cell_data_defaults_to_empty_bytes() {
+        let output: ckb_jsonrpc_types::CellOutput = packed::CellOutput::new_builder()
+            .capacity(100u64)
+            .build()
+            .into();
+        let cell_info = ckb_jsonrpc_types::CellInfo { output, data: None };
+
+        let live_cell = live_cell_from_cell_info(cell_info);
+
+        assert_eq!(live_cell.data, packed::Bytes::default());
+    }
 }

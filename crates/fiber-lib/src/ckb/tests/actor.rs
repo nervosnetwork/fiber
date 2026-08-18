@@ -88,7 +88,8 @@ async fn test_submit_mocked_secp256k1_tx() {
     ));
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_repeatedly_consume_the_same_cell() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
@@ -159,7 +160,8 @@ async fn test_repeatedly_consume_the_same_cell() {
     assert!(matches!(submit_tx(actor, tx).await, TxStatus::Rejected(_)));
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_submit_malformed_commitment_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
@@ -219,7 +221,8 @@ async fn get_live_cell(
     .expect("chain actor alive")
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_get_live_cell_returns_output_and_exact_data() {
     let actor = create_mock_chain_actor().await;
     let data: Vec<u8> = (0..16u8).collect();
@@ -237,7 +240,8 @@ async fn test_get_live_cell_returns_output_and_exact_data() {
     assert_eq!(live.data.raw_data().to_vec(), data);
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_get_live_cell_missing_returns_none() {
     let actor = create_mock_chain_actor().await;
     let live = get_live_cell(&actor, OutPoint::default()).await.unwrap();
@@ -262,17 +266,20 @@ async fn assert_non_live_outpoint_returns_none(status: CellStatus) {
     assert!(live.is_none());
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_get_live_cell_consumed_returns_none() {
     assert_non_live_outpoint_returns_none(CellStatus::Consumed).await;
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_get_live_cell_pending_returns_none() {
     assert_non_live_outpoint_returns_none(CellStatus::Pending).await;
 }
 
-#[tokio::test]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_get_live_cell_rejected_returns_none() {
     assert_non_live_outpoint_returns_none(CellStatus::Rejected).await;
 }
