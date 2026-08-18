@@ -125,6 +125,16 @@ use tracing::{debug, error, info, trace, warn};
 // - `signature`: 64 bytes, aggregated signature
 pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 
+pub(crate) struct HostedWatchChannelParams {
+    pub funding_udt_type_script: Option<Script>,
+    pub local_settlement_key: Option<Privkey>,
+    pub local_settlement_key_pubkey: Pubkey,
+    pub remote_settlement_key: Pubkey,
+    pub local_funding_pubkey: Pubkey,
+    pub remote_funding_pubkey: Pubkey,
+    pub settlement_data: SettlementData,
+}
+
 // - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `unlock_count`: 1 byte
 // - `pubkey`: 32 bytes, x only aggregated public key
@@ -11115,6 +11125,24 @@ impl ChannelActorState {
             local_amount: to_local_value,
             remote_amount: to_remote_value,
             tlcs: self.get_active_tlcs_for_settlement(for_remote)?,
+        })
+    }
+
+    /// Snapshot used to register a hosted tenant watchtower row.
+    pub(crate) fn hosted_watch_channel_params(&self) -> Result<HostedWatchChannelParams, String> {
+        let (local_settlement_key, local_settlement_key_pubkey, remote_settlement_key) =
+            self.get_settlement_keys();
+        let settlement_data = self
+            .build_settlement_data(false)
+            .map_err(|error| error.to_string())?;
+        Ok(HostedWatchChannelParams {
+            funding_udt_type_script: self.funding_udt_type_script.clone(),
+            local_settlement_key,
+            local_settlement_key_pubkey,
+            remote_settlement_key,
+            local_funding_pubkey: *self.get_local_funding_pubkey(),
+            remote_funding_pubkey: *self.get_remote_funding_pubkey(),
+            settlement_data,
         })
     }
 

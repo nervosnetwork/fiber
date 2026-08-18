@@ -111,7 +111,7 @@ rule(
     allow if right({channel_id}, "watchtower"); 
     "#, 
 ); 
-rule("create_preimage", r#"allow if write("watchtower");"#); 
+rule("create_preimage", r#"allow if write("watchtower");"#);
 rule("remove_preimage", r#"allow if write("watchtower");"#); 
 rule(
     "get_watchtower_signing_status",

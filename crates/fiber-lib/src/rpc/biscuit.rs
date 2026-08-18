@@ -300,12 +300,37 @@ impl BiscuitAuth {
 
 /// Extract node id from token
 pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
+    extract_optional_node_id(token)?.ok_or_else(|| anyhow!("token is missing a node fact"))
+}
+
+fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
     const QUERY: &str = "data($id) <- node($id)";
     let mut authorizer = build_authorizer(token)?;
-    let (id,): (String,) = authorizer.query_exactly_one(QUERY)?;
-    let node_id = NodeId::from_str(id.as_str())?;
-    tracing::warn!("fetch {id:?} {node_id:?}");
-    Ok(node_id)
+    let nodes: Vec<(String,)> = authorizer.query(QUERY)?;
+    match nodes.as_slice() {
+        [] => Ok(None),
+        [(id,)] => Ok(Some(NodeId::from_str(id.as_str())?)),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one node fact"
+        )),
+    }
+}
+
+/// Resolve the watchtower namespace for an authenticated token.
+///
+/// Tenant tokens may only touch the `node(...)` bound at issue time, which is
+/// the hosted tenant watchtower id. They cannot address `NodeId::local()`.
+/// Operator tokens without a node fact use the host namespace.
+pub fn scoped_rpc_node_id(token: &Biscuit) -> Result<NodeId> {
+    match (extract_tenant_id(token)?, extract_optional_node_id(token)?) {
+        (Some(_), Some(node_id)) if node_id != NodeId::local() => Ok(node_id),
+        (Some(_), Some(_)) => Err(anyhow!(
+            "tenant token cannot access the host watchtower namespace"
+        )),
+        (Some(_), None) => Err(anyhow!("tenant token is missing a node fact")),
+        (None, Some(node_id)) => Ok(node_id),
+        (None, None) => Ok(NodeId::local()),
+    }
 }
 
 /// Extract the hosted tenant identity from the token authority block.
@@ -339,7 +364,7 @@ mod tests {
 
     use crate::{
         lsp::TenantId,
-        rpc::biscuit::{extract_node_id, extract_tenant_id},
+        rpc::biscuit::{extract_node_id, extract_tenant_id, scoped_rpc_node_id},
     };
     use fiber_types::NodeId;
 
@@ -375,9 +400,12 @@ mod tests {
             .unwrap();
         auth.check_permission("submit_watchtower_signature", &token)
             .unwrap();
-        assert!(auth
-            .check_permission("create_watch_channel", &token)
-            .is_err());
+        auth.check_permission("create_preimage", &token).unwrap();
+        auth.check_permission("remove_preimage", &token).unwrap();
+        auth.check_permission("create_watch_channel", &token)
+            .unwrap();
+        auth.check_permission("remove_watch_channel", &token)
+            .unwrap();
         assert!(auth
             .check_permission("lsp_register_tenant", &token)
             .is_err());
@@ -395,6 +423,58 @@ mod tests {
             &root.public().to_string(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn scoped_rpc_node_id_keeps_tenant_tokens_off_the_host_namespace() {
+        let root = KeyPair::new();
+        let tenant_id = TenantId::new("u1").unwrap();
+        let tenant_node = NodeId::from_bytes(vec![1, 2, 3]);
+        let tenant_token = biscuit!(
+            r#"
+                tenant({tenant});
+                node({node});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+            node = tenant_node.to_string(),
+        )
+        .build(&root)
+        .unwrap();
+        assert_eq!(scoped_rpc_node_id(&tenant_token).unwrap(), tenant_node);
+
+        let host_tenant_token = biscuit!(
+            r#"
+                tenant({tenant});
+                node({node});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+            node = NodeId::local().to_string(),
+        )
+        .build(&root)
+        .unwrap();
+        assert!(scoped_rpc_node_id(&host_tenant_token)
+            .unwrap_err()
+            .to_string()
+            .contains("host watchtower namespace"));
+
+        let tenant_without_node = biscuit!(
+            r#"
+                tenant({tenant});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+        )
+        .build(&root)
+        .unwrap();
+        assert!(scoped_rpc_node_id(&tenant_without_node)
+            .unwrap_err()
+            .to_string()
+            .contains("missing a node fact"));
+
+        let operator = biscuit!(r#"write("watchtower");"#).build(&root).unwrap();
+        assert_eq!(scoped_rpc_node_id(&operator).unwrap(), NodeId::local());
     }
 
     #[test]
@@ -631,7 +711,6 @@ mod tests {
             .unwrap()
             .to_base64()
             .unwrap();
-
         assert!(auth
             .check_permission("get_watchtower_signing_status", &read_token)
             .is_ok());
@@ -655,6 +734,14 @@ mod tests {
             .is_ok());
         assert!(auth
             .check_permission("submit_watchtower_signature", &channel_read_token)
+            .is_err());
+        let invoice_write_token = biscuit!(r#"write("invoices");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        assert!(auth
+            .check_permission("create_preimage", &invoice_write_token)
             .is_err());
     }
 

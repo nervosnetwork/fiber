@@ -201,9 +201,9 @@ impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
             self.default_shutdown_script.clone(),
         )
         .await?;
-        // Treat the host watchtower as this tenant Fiber's external tower:
-        // write create/update/remove against the tenant node_id, same methods
-        // as the watchtower RPC. Public T's own events use NodeId::local().
+        // Live updates while the tenant is running. Evict stops this loop but
+        // must not remove the host watch row; PeriodicCheck keeps scanning it.
+        // LspService also ensures the row exists on TenantChannelOnline.
         #[cfg(feature = "watchtower")]
         {
             let watchtower_store = self.tenant_store.clone();

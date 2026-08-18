@@ -26,6 +26,8 @@ use secp256k1::SECP256K1;
 use tempfile::{tempdir, TempDir};
 
 use super::{lsp_config, NoopNetworkActor};
+#[cfg(feature = "watchtower")]
+use crate::watchtower::WatchtowerStore;
 use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
@@ -39,9 +41,9 @@ use crate::{
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
-        FiberTenantRuntimeFactory, HostedTenantRecord, HostedTenantRpcContext, HostedTenantRuntime,
-        LspInvoiceStore, LspService, LspServiceArgs, LspServiceMessage, TenantId,
-        TenantRuntimeFactory,
+        tenant_watchtower_node_id, FiberTenantRuntimeFactory, HostedTenantRecord,
+        HostedTenantRpcContext, HostedTenantRuntime, LspInvoiceStore, LspService, LspServiceArgs,
+        LspServiceMessage, TenantId, TenantRuntimeFactory,
     },
     rpc::{
         lsp::{
@@ -527,6 +529,7 @@ async fn create_lsp_test_network(
                 runtime_factory,
                 signing_key: nodes[lsp_node_index].private_key.clone(),
                 token_issuer: super::test_token_issuer(),
+                watchtower_store: nodes[lsp_node_index].store.clone(),
             },
             root_actor.get_cell(),
         )
@@ -626,6 +629,49 @@ async fn create_lsp_test_network(
     }
 }
 
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn hosted_private_channel_registers_host_watch_and_survives_evict() {
+    init_tracing();
+
+    let network = create_lsp_test_network(
+        &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
+        2,
+        &[((0, TENANT_ID), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))],
+    )
+    .await;
+    let tenant = network.tenant(0, TENANT_ID);
+    let node_id = tenant_watchtower_node_id(&tenant.node.pubkey);
+    let watched = network.nodes[0]
+        .store
+        .get_watch_channel(&node_id, &tenant.private_channel_id)
+        .expect("host must watch the hosted private channel");
+    assert_eq!(watched.channel_id, tenant.private_channel_id);
+
+    let evicted: crate::rpc::lsp::LspTenantStatus = network
+        .lsp(0)
+        .client
+        .request(
+            "lsp_evict_tenant",
+            rpc_params![LspTenantParams {
+                tenant_id: tenant.tenant_id.as_str().to_string(),
+            }],
+        )
+        .await
+        .expect("evict hosted tenant");
+    assert!(matches!(
+        evicted.runtime_status,
+        LspTenantRuntimeStatus::Cold
+    ));
+    let watched = network.nodes[0]
+        .store
+        .get_watch_channel(&node_id, &tenant.private_channel_id)
+        .expect("evict must not remove the host watch");
+    assert_eq!(watched.channel_id, tenant.private_channel_id);
+
+    network.stop().await;
+}
+
 #[tokio::test]
 async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     init_tracing();
@@ -670,6 +716,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
             runtime_factory,
             signing_key: public_t.private_key.clone(),
             token_issuer: super::test_token_issuer(),
+            watchtower_store: public_t.store.clone(),
         },
         root_actor.get_cell(),
     )
@@ -897,6 +944,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             runtime_factory,
             signing_key: public_t.private_key.clone(),
             token_issuer,
+            watchtower_store: public_t.store.clone(),
         },
         root_actor.get_cell(),
     )
@@ -1317,6 +1365,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
             runtime_factory,
             signing_key: public_t.private_key.clone(),
             token_issuer: super::test_token_issuer(),
+            watchtower_store: public_t.store.clone(),
         },
         root_actor.get_cell(),
     )

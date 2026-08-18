@@ -514,6 +514,7 @@ async fn run_node(
                     runtime_factory,
                     signing_key,
                     token_issuer,
+                    watchtower_store: store.clone(),
                 },
                 root_actor.get_cell(),
             )

@@ -61,11 +61,14 @@ flowchart TB
     T <-->|"P2P / gossip"| N["Fiber network"]
 ```
 
-The remote channel signer shown above is the target deployment architecture,
-not part of this implementation stage. For now, the hosted process owns each
-tenant's invoice/channel signing key. A production deployment that requires
-non-custodial keys must add the remote signer wire protocol before treating
-this boundary as non-custodial.
+A ready private U-T channel is always registered as a host watchtower row
+under the tenant node id. Evicting the tenant runtime leaves that row in
+place so PeriodicCheck keeps watching the last snapshot. Invoice preimages
+stay with the client; they are not copied into the LSP when the watch is
+created. A tenant may later push a preimage with `create_preimage` if it
+needs an on-chain TLC claim. Tenant tokens carry `write("watchtower")`
+but middleware and the watchtower RPC bind every call to the token's
+`node(...)` fact, so they cannot touch Public T or another tenant.
 
 ## Invoice registration and payer hint
 

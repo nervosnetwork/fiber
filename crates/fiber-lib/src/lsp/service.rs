@@ -31,6 +31,8 @@ pub struct LspServiceArgs {
     pub signing_key: Privkey,
     /// Issues tenant access tokens on authenticated registration.
     pub token_issuer: BiscuitTokenIssuer,
+    /// Un-namespaced Public T store used for hosted watchtower rows.
+    pub watchtower_store: Store,
 }
 
 /// Read-only status for callers that need to discover the hosted service.
@@ -123,6 +125,7 @@ pub struct LspServiceState {
     pub supervisor: TenantSupervisor,
     pub signing_key: Privkey,
     pub token_issuer: BiscuitTokenIssuer,
+    pub watchtower_store: Store,
     pub ready_tenants: HashMap<TenantId, Hash256>,
 }
 
@@ -302,6 +305,7 @@ impl Actor for LspService {
             supervisor,
             signing_key: args.signing_key,
             token_issuer: args.token_issuer,
+            watchtower_store: args.watchtower_store,
             ready_tenants: HashMap::new(),
         })
     }
@@ -487,6 +491,19 @@ impl Actor for LspService {
                     state
                         .ready_tenants
                         .insert(tenant.tenant_id.clone(), channel_id);
+                    #[cfg(feature = "watchtower")]
+                    if let Err(error) = super::watch::ensure_hosted_watch_channel(
+                        &state.watchtower_store,
+                        &tenant,
+                        channel_id,
+                    ) {
+                        tracing::warn!(
+                            tenant_id = %tenant.tenant_id,
+                            %channel_id,
+                            %error,
+                            "Failed to ensure hosted watchtower row"
+                        );
+                    }
                     for delivery in state.delivery_manager.list_pending()? {
                         if delivery.tenant_id == tenant.tenant_id
                             && delivery.private_channel_id == channel_id

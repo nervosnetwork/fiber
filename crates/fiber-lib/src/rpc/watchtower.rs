@@ -177,6 +177,17 @@ impl<S> WatchtowerRpcServerImpl<S> {
 }
 
 #[cfg(feature = "watchtower")]
+fn authorized_watchtower_node_id(ctx: &RpcContext) -> Result<NodeId, ErrorObjectOwned> {
+    let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+    if ctx.tenant_scoped && node_id == NodeId::local() {
+        return Err(rpc_error(
+            "tenant token cannot access the host watchtower namespace",
+        ));
+    }
+    Ok(node_id)
+}
+
+#[cfg(feature = "watchtower")]
 #[async_trait::async_trait]
 impl<S> WatchtowerRpcServer for WatchtowerRpcServerImpl<S>
 where
@@ -187,7 +198,7 @@ where
         ctx: RpcContext,
         params: CreateWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let local_settlement_key = params
             .local_settlement_key
@@ -246,7 +257,7 @@ where
         ctx: RpcContext,
         params: RemoveWatchChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         self.store.remove_watch_channel(node_id, channel_id);
         Ok(())
@@ -257,7 +268,7 @@ where
         ctx: RpcContext,
         params: UpdateRevocationParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let revocation_data: fiber_types::RevocationData = params
             .revocation_data
@@ -277,7 +288,7 @@ where
         ctx: RpcContext,
         params: UpdatePendingRemoteSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
@@ -293,7 +304,7 @@ where
         ctx: RpcContext,
         params: UpdateLocalSettlementParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
@@ -311,7 +322,7 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         use fiber_types::HashAlgorithm;
 
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let payment_hash = params.payment_hash.into();
         let preimage = params.preimage.into();
 
@@ -330,7 +341,7 @@ where
         ctx: RpcContext,
         params: RemovePreimageParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let payment_hash = params.payment_hash.into();
         self.store.remove_watch_preimage(node_id, payment_hash);
         Ok(())
@@ -341,7 +352,7 @@ where
         ctx: RpcContext,
         params: GetWatchtowerSigningStatusParams,
     ) -> Result<GetWatchtowerSigningStatusResult, ErrorObjectOwned> {
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         if self
             .store
@@ -368,7 +379,7 @@ where
             LastAppliedWatchtowerSignature, WatchtowerExternalState, WatchtowerSignerState,
         };
 
-        let node_id = ctx.node_id.parse::<NodeId>().rpc_err()?;
+        let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
         let request_id: fiber_types::Hash256 = params.request_id.into();
         let signature: [u8; 65] = params
@@ -465,5 +476,33 @@ fn to_rpc_watchtower_signing_status(
                 },
             },
         },
+    }
+}
+
+#[cfg(all(test, feature = "watchtower"))]
+mod tests {
+    use super::{authorized_watchtower_node_id, RpcContext};
+    use fiber_types::NodeId;
+
+    #[test]
+    fn tenant_context_cannot_use_the_host_namespace() {
+        let ctx = RpcContext {
+            node_id: NodeId::local().to_string(),
+            tenant_scoped: true,
+        };
+        assert!(authorized_watchtower_node_id(&ctx)
+            .unwrap_err()
+            .message()
+            .contains("host watchtower namespace"));
+    }
+
+    #[test]
+    fn tenant_context_keeps_its_own_node() {
+        let node_id = NodeId::from_bytes(vec![1, 2, 3]);
+        let ctx = RpcContext {
+            node_id: node_id.to_string(),
+            tenant_scoped: true,
+        };
+        assert_eq!(authorized_watchtower_node_id(&ctx).unwrap(), node_id);
     }
 }

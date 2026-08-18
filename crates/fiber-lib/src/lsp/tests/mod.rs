@@ -123,6 +123,49 @@ fn tenant_registry_is_persistent_and_idempotent() {
     assert_eq!(reopened.list().unwrap().len(), 1);
 }
 
+#[cfg(feature = "watchtower")]
+#[test]
+fn ensure_hosted_watch_skips_an_existing_row() {
+    use crate::fiber_types::SettlementData;
+    use crate::watchtower::WatchtowerStore;
+
+    let root = tempdir().expect("temporary directory");
+    std::fs::create_dir_all(root.path().join("fiber")).expect("create store dir");
+    let store = open_store(root.path().join("fiber/store")).expect("open store");
+    let record = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
+        private_channel_id: None,
+        created_at: 42,
+    };
+    let channel_id = Hash256::from([9u8; 32]);
+    let node_id = crate::lsp::tenant_watchtower_node_id(&record.tenant_pubkey);
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        None,
+        record.tenant_pubkey,
+        Privkey::from(&[2; 32]).pubkey(),
+        record.tenant_pubkey,
+        Privkey::from(&[3; 32]).pubkey(),
+        SettlementData {
+            local_amount: 11,
+            remote_amount: 22,
+            tlcs: Vec::new(),
+        },
+    );
+
+    super::watch::ensure_hosted_watch_channel(&store, &record, channel_id).unwrap();
+
+    let watched = store
+        .get_watch_channel(&node_id, &channel_id)
+        .expect("watch row remains");
+    assert_eq!(watched.local_settlement_data.local_amount, 11);
+    assert_eq!(watched.local_settlement_data.remote_amount, 22);
+}
+
 #[test]
 fn authenticated_tenant_registry_replaces_consumes_and_persists_nonces() {
     let root = tempdir().expect("temporary directory");
@@ -1262,6 +1305,7 @@ async fn start_test_lsp_service_with_all_dispatch_failures(
             config,
             public_node_id: lsp_key.pubkey(),
             public_network_actor,
+            watchtower_store: store.clone(),
             store,
             runtime_factory: factory,
             signing_key: lsp_key,
@@ -1453,6 +1497,7 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
             config,
             public_node_id: lsp_key.pubkey(),
             public_network_actor,
+            watchtower_store: store.clone(),
             store,
             runtime_factory: factory,
             signing_key: lsp_key.clone(),
@@ -1499,6 +1544,13 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
         crate::rpc::biscuit::extract_node_id(&biscuit).unwrap(),
         expected_node
     );
+    assert_eq!(
+        crate::rpc::biscuit::scoped_rpc_node_id(&biscuit).unwrap(),
+        expected_node
+    );
+    auth.check_permission("create_watch_channel", &token)
+        .unwrap();
+    auth.check_permission("create_preimage", &token).unwrap();
 }
 
 async fn register_test_invoice(

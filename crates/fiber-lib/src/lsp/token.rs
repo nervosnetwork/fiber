@@ -9,13 +9,15 @@ use biscuit_auth::{
 use super::TenantId;
 use fiber_types::NodeId;
 
-const TENANT_CAPABILITIES: [(&str, &str); 6] = [
+const TENANT_CAPABILITIES: [(&str, &str); 8] = [
     ("read", "channels"),
     ("write", "channels"),
     ("read", "invoices"),
     ("write", "invoices"),
     ("read", "payments"),
     ("write", "payments"),
+    ("read", "watchtower"),
+    ("write", "watchtower"),
 ];
 
 /// Signs tenant-scoped Biscuit access tokens with the RPC authentication root key.
