@@ -1,3 +1,4 @@
+use ckb_sdk::{Since, SinceType};
 use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 use fiber_json_types::{LiquidityAssetInfo, LiquidityQuoteEnvelope};
@@ -98,6 +99,19 @@ pub fn loop_in_gross_onchain_amount(
         .amount
         .checked_add(quote.provider_fee)
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
+}
+
+/// Encode an absolute millisecond timestamp as a CKB `since` timestamp value.
+///
+/// The refund lock time is stored as an absolute [`SinceType::Timestamp`] since whose
+/// payload is Unix seconds. Millisecond timestamps are rounded up to the next whole
+/// second so the refund never becomes valid before the intended deadline.
+pub(crate) fn absolute_timestamp_since(target_ms: u64) -> Result<u64, LiquidityLoopOutError> {
+    let seconds = target_ms.div_ceil(1_000);
+    if seconds > 0x00FF_FFFF_FFFF_FFFF {
+        return Err(LiquidityLoopOutError::RefundLockTimeOverflow);
+    }
+    Ok(Since::new(SinceType::Timestamp, seconds, false).value())
 }
 
 fn parse_client_invoice(client_invoice: &str) -> Result<CkbInvoice, LiquidityLoopOutError> {
@@ -375,7 +389,7 @@ pub fn build_loop_in_quote_terms(
         payment_hash: *invoice.payment_hash(),
         expires_at,
         payout_deadline: expires_at,
-        refund_after_lock_time: expires_at,
+        refund_after_lock_time: absolute_timestamp_since(expires_at)?,
         claimant_lock: Default::default(),
         refund_lock: Default::default(),
         client_invoice: Some(client_invoice),
@@ -1036,5 +1050,113 @@ mod tests {
         )
         .unwrap_err();
         assert!(shortfall.to_string().contains("capacity"));
+    }
+
+    #[test]
+    fn refund_lock_time_is_absolute_timestamp_since() {
+        let expires_at = 1_800_000_500;
+        let quote = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            0,
+            expires_at,
+            1,
+        )
+        .expect("loop in quote");
+
+        let since = ckb_sdk::Since::from_raw_value(quote.refund_after_lock_time);
+        assert!(
+            since.is_absolute(),
+            "refund lock time must be an absolute since"
+        );
+        let (since_type, seconds) = since.extract_metric().expect("valid since metric");
+        assert_eq!(since_type, ckb_sdk::SinceType::Timestamp);
+        assert_eq!(seconds, expires_at.div_ceil(1_000));
+    }
+
+    #[test]
+    fn refund_lock_time_rounds_milliseconds_up_to_seconds() {
+        let base_sec = 1_800_000u64;
+        let base_ms = base_sec * 1_000;
+
+        let round_up = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            0,
+            base_ms + 1_500,
+            1,
+        )
+        .expect("loop in quote");
+        let (since_type, seconds) = ckb_sdk::Since::from_raw_value(round_up.refund_after_lock_time)
+            .extract_metric()
+            .expect("valid since metric");
+        assert_eq!(since_type, ckb_sdk::SinceType::Timestamp);
+        assert_eq!(seconds, base_sec + 2);
+
+        let exact = build_loop_in_quote_terms(
+            Hash256::from([1; 32]),
+            Pubkey([2; 33]),
+            &ckb_asset(true),
+            1_000,
+            None,
+            ckb_client_invoice(Hash256::from([3; 32])).to_string(),
+            0,
+            base_ms,
+            1,
+        )
+        .expect("loop in quote");
+        let (since_type, seconds) = ckb_sdk::Since::from_raw_value(exact.refund_after_lock_time)
+            .extract_metric()
+            .expect("valid since metric");
+        assert_eq!(since_type, ckb_sdk::SinceType::Timestamp);
+        assert_eq!(seconds, base_sec);
+
+        assert_ne!(round_up.refund_after_lock_time, base_ms + 1_500);
+        assert_ne!(exact.refund_after_lock_time, base_ms);
+    }
+
+    #[test]
+    fn absolute_timestamp_since_rounds_up_and_encodes_absolute_timestamp() {
+        let base_sec = 1_800_000u64;
+        let base_ms = base_sec * 1_000;
+
+        assert_eq!(
+            absolute_timestamp_since(base_ms).unwrap(),
+            Since::new(SinceType::Timestamp, base_sec, false).value()
+        );
+        assert_eq!(
+            absolute_timestamp_since(base_ms + 1).unwrap(),
+            Since::new(SinceType::Timestamp, base_sec + 1, false).value()
+        );
+        assert_eq!(
+            absolute_timestamp_since(base_ms + 1_000).unwrap(),
+            Since::new(SinceType::Timestamp, base_sec + 1, false).value()
+        );
+
+        let since = Since::from_raw_value(absolute_timestamp_since(base_ms + 1_500).unwrap());
+        assert!(since.is_absolute());
+        assert_eq!(
+            since.extract_metric(),
+            Some((SinceType::Timestamp, base_sec + 2))
+        );
+    }
+
+    #[test]
+    fn absolute_timestamp_since_encodes_max_millis_within_metric_payload() {
+        let encoded = absolute_timestamp_since(u64::MAX).unwrap();
+        let since = Since::from_raw_value(encoded);
+        assert!(since.is_absolute());
+        assert_eq!(
+            since.extract_metric(),
+            Some((SinceType::Timestamp, u64::MAX.div_ceil(1_000)))
+        );
     }
 }

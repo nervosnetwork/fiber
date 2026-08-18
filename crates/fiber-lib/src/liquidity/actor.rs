@@ -24,9 +24,9 @@ pub use crate::liquidity::chain::{
     LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimPlan, LoopOutClaimRequest,
 };
 use crate::liquidity::quote::{
-    build_loop_in_quote_terms, json_asset_to_liquidity_asset, liquidity_asset_to_json_info,
-    liquidity_quote_envelope_from_terms, parse_script_hex, validate_imported_quote,
-    validate_loop_out_quote_request,
+    absolute_timestamp_since, build_loop_in_quote_terms, json_asset_to_liquidity_asset,
+    liquidity_asset_to_json_info, liquidity_quote_envelope_from_terms, parse_script_hex,
+    validate_imported_quote, validate_loop_out_quote_request,
 };
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
@@ -451,7 +451,9 @@ where
             payment_hash: loop_out_quote_hash(&params, now_ms, b"payment"),
             expires_at: validated.expires_at,
             payout_deadline: validated.expires_at.saturating_add(10_000),
-            refund_after_lock_time: validated.expires_at.saturating_add(20_000),
+            refund_after_lock_time: absolute_timestamp_since(
+                validated.expires_at.saturating_add(20_000),
+            )?,
             claimant_lock,
             refund_lock,
             client_invoice: None,
