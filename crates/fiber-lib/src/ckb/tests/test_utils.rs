@@ -40,11 +40,12 @@ pub const TRACE_TX_TIMEOUT_MS: u64 = 3 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellStatus {
-    // This cell has been consumed. If any transaction
-    // tries to consume the same cell, it should be rejected.
+    /// This cell has been consumed. If any transaction
+    /// tries to consume the same cell, it should be rejected.
     Consumed,
-    // The cell is pending or rejected, so it must not be reported as live.
+    /// The cell is pending, so it must not be reported as live.
     Pending,
+    /// The cell has been rejected, so it must not be reported as live.
     Rejected,
 }
 
