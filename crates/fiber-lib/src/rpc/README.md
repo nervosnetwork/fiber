@@ -917,7 +917,7 @@ Persistently registers a hosted tenant without starting its Fiber runtime.
 ##### Returns
 
 * `tenant` - <em>[LspTenantStatus](#type-lsptenantstatus)</em>, Persistent and runtime status of the registered tenant.
-* `access_token` - <em>`Option<String>`</em>, Newly issued tenant access token. It is returned only when the tenant is first created.
+* `access_token` - <em>`String`</em>, Newly issued tenant access token.
 
 ---
 

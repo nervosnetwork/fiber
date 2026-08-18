@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -22,22 +23,30 @@ use crate::fiber_types::{
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::TrampolineForwardingRequest;
 use crate::lsp::{
-    is_permanent_hosted_payment_failure, HostedTenantRecord, HostedTenantRuntime, LspConfig,
-    LspDeliveryDecision, LspInvoiceRegistry, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
-    LspPaymentDeliveryStatus, LspPaymentDispatchError, LspPaymentOutcomeDecision, LspService,
-    LspServiceArgs, LspServiceMessage, TenantId, TenantRegistry, TenantRuntimeFactory,
-    TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
-    MAX_LSP_BUFFER_DURATION_MS,
+    is_permanent_hosted_payment_failure, BiscuitTokenIssuer, HostedTenantRecord,
+    HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
+    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus,
+    LspPaymentDispatchError, LspPaymentOutcomeDecision, LspService, LspServiceArgs,
+    LspServiceMessage, TenantId, TenantRegistry, TenantRuntimeFactory, TenantSupervisor,
+    DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS, MAX_LSP_BUFFER_DURATION_MS,
 };
 use crate::store::{open_store, NodeNamespace, Store};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod integration;
 
+fn test_token_issuer() -> BiscuitTokenIssuer {
+    let root = biscuit_auth::KeyPair::new();
+    BiscuitTokenIssuer::from_private_key(
+        &root.private().to_prefixed_string(),
+        &root.public().to_string(),
+    )
+    .expect("test biscuit issuer")
+}
+
 fn lsp_config(base_dir: PathBuf) -> LspConfig {
     LspConfig {
         base_dir: Some(base_dir),
-        tenants: Vec::new(),
         max_active_tenants: 64,
         max_buffer_duration_ms: MAX_LSP_BUFFER_DURATION_MS,
         max_pending_deliveries: 1_024,
@@ -197,6 +206,30 @@ impl Actor for NoopNetworkActor {
 
 struct FakeRuntimeFactory {
     starts: Arc<AtomicUsize>,
+    protocol_secrets: HashMap<TenantId, u8>,
+    default_protocol_secret: u8,
+}
+
+impl FakeRuntimeFactory {
+    fn new(starts: Arc<AtomicUsize>) -> Self {
+        Self {
+            starts,
+            protocol_secrets: HashMap::new(),
+            default_protocol_secret: 1,
+        }
+    }
+
+    fn with_protocol_secret(mut self, tenant_id: TenantId, secret: u8) -> Self {
+        self.protocol_secrets.insert(tenant_id, secret);
+        self
+    }
+
+    fn protocol_secret(&self, tenant_id: &TenantId) -> u8 {
+        self.protocol_secrets
+            .get(tenant_id)
+            .copied()
+            .unwrap_or(self.default_protocol_secret)
+    }
 }
 
 struct BusyNetworkActor;
@@ -295,7 +328,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
 #[async_trait]
 impl TenantRuntimeFactory for FakeRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
-        let secret = if tenant_id.as_str() == "u1" { 1 } else { 2 };
+        let secret = self.protocol_secret(tenant_id);
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: None,
@@ -321,9 +354,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
 #[tokio::test]
 async fn tenant_supervisor_hydrates_evicts_and_enforces_capacity() {
     let starts = Arc::new(AtomicUsize::new(0));
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: starts.clone(),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(starts.clone()));
     let mut supervisor = TenantSupervisor::new(factory.clone(), 1);
     let u1 = factory.provision(&TenantId::new("u1").unwrap()).unwrap();
     let u2 = factory.provision(&TenantId::new("u2").unwrap()).unwrap();
@@ -1234,11 +1265,50 @@ async fn start_test_lsp_service_with_all_dispatch_failures(
             store,
             runtime_factory: factory,
             signing_key: lsp_key,
+            token_issuer: test_token_issuer(),
         },
     )
     .await
     .unwrap()
     .0
+}
+
+fn test_root_signer() -> Privkey {
+    Privkey::from(&[7; 32])
+}
+
+fn test_root_signer_n(n: u8) -> Privkey {
+    Privkey::from(&[20 + n; 32])
+}
+
+fn test_protocol_key(secret: u8) -> Privkey {
+    Privkey::from(&[secret; 32])
+}
+
+async fn register_authenticated_test_tenant(
+    service: &ActorRef<LspServiceMessage>,
+    lsp_key: &Privkey,
+    root_signer_key: &Privkey,
+) -> TenantId {
+    let root_signer_pubkey = root_signer_key.pubkey();
+    let nonce = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_signer_pubkey
+    )
+    .unwrap()
+    .unwrap();
+    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, nonce);
+    let registration = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(root_signer_key, &payload),
+            payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap();
+    registration.status.record.tenant_id
 }
 
 fn sign_tenant_registry_payload(
@@ -1258,9 +1328,7 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let registry = TenantRegistry::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let lsp_key = Privkey::from(&[9; 32]);
     let service = start_test_lsp_service(
         store,
@@ -1346,6 +1414,7 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
         registry.registration_nonce(&root_signer_pubkey).unwrap(),
         None
     );
+    assert!(!registration.access_token.is_empty());
 
     let replay_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
@@ -1359,23 +1428,98 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     assert!(replay_result.contains("already registered"));
 }
 
+#[tokio::test]
+async fn authenticated_registration_issues_tenant_token_through_issuer() {
+    use crate::lsp::tenant_watchtower_node_id;
+    use crate::rpc::biscuit::BiscuitAuth;
+    use biscuit_auth::KeyPair;
+
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let biscuit_root = KeyPair::new();
+    let issuer = BiscuitTokenIssuer::from_private_key(
+        &biscuit_root.private().to_prefixed_string(),
+        &biscuit_root.public().to_string(),
+    )
+    .unwrap();
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
+    let lsp_key = Privkey::from(&[9; 32]);
+    let public_network_actor = Actor::spawn(None, NoopNetworkActor, ()).await.unwrap().0;
+    let service = Actor::spawn(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: lsp_key.pubkey(),
+            public_network_actor,
+            store,
+            runtime_factory: factory,
+            signing_key: lsp_key.clone(),
+            token_issuer: issuer,
+        },
+    )
+    .await
+    .unwrap()
+    .0;
+
+    let root_signer_key = test_root_signer();
+    let nonce = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_signer_key.pubkey()
+    )
+    .unwrap()
+    .unwrap();
+    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_key.pubkey(), nonce);
+    let issued = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap();
+    let token = issued.access_token;
+    let auth = BiscuitAuth::from_pubkey(biscuit_root.public().to_string()).unwrap();
+    auth.check_permission("open_channel", &token).unwrap();
+    auth.check_permission("get_channel_signing_status", &token)
+        .unwrap();
+    assert!(auth
+        .check_permission("lsp_register_tenant", &token)
+        .is_err());
+    let expected_node = tenant_watchtower_node_id(&issued.status.record.tenant_pubkey);
+    let (biscuit, _) = auth.check_permission("new_invoice", &token).unwrap();
+    assert_eq!(
+        crate::rpc::biscuit::extract_tenant_id(&biscuit).unwrap(),
+        Some(issued.status.record.tenant_id)
+    );
+    assert_eq!(
+        crate::rpc::biscuit::extract_node_id(&biscuit).unwrap(),
+        expected_node
+    );
+}
+
 async fn register_test_invoice(
     service: &ActorRef<LspServiceMessage>,
+    tenant_id: TenantId,
     tenant_key: &Privkey,
     payment_hash: Hash256,
 ) {
-    register_test_invoice_with_buffer(service, tenant_key, payment_hash, None).await;
+    register_test_invoice_with_buffer(service, tenant_id, tenant_key, payment_hash, None).await;
 }
 
 async fn register_test_invoice_with_buffer(
     service: &ActorRef<LspServiceMessage>,
+    tenant_id: TenantId,
     tenant_key: &Privkey,
     payment_hash: Hash256,
     buffer_duration_ms: Option<u64>,
 ) {
     register_test_invoice_for_tenant(
         service,
-        TenantId::new("u1").unwrap(),
+        tenant_id,
         tenant_key,
         payment_hash,
         buffer_duration_ms,
@@ -1424,12 +1568,11 @@ async fn wait_for_delivery_status(
 #[tokio::test]
 async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let starts = Arc::new(AtomicUsize::new(0));
-    let factory = Arc::new(FakeRuntimeFactory { starts });
+    let factory = Arc::new(FakeRuntimeFactory::new(starts));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let lsp_key = Privkey::from(&[9; 32]);
@@ -1443,8 +1586,11 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([13; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([23; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -1459,7 +1605,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
@@ -1505,44 +1651,44 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
 #[tokio::test]
 async fn offline_tenant_does_not_block_an_online_tenant() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string(), "u2".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let starts = Arc::new(AtomicUsize::new(0));
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: starts.clone(),
-    });
+    let u1_root = test_root_signer_n(1);
+    let u2_root = test_root_signer_n(2);
+    let u1_id = TenantId::from_root_signer_pubkey(&u1_root.pubkey());
+    let u2_id = TenantId::from_root_signer_pubkey(&u2_root.pubkey());
+    let factory = Arc::new(
+        FakeRuntimeFactory::new(starts.clone())
+            .with_protocol_secret(u1_id.clone(), 1)
+            .with_protocol_secret(u2_id.clone(), 2),
+    );
     let dispatches = Arc::new(AtomicUsize::new(0));
+    let lsp_key = Privkey::from(&[9; 32]);
     let service = start_test_lsp_service(
         store,
         config,
         factory,
-        Privkey::from(&[9; 32]),
+        lsp_key.clone(),
         dispatches.clone(),
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
-    let u1_key = Privkey::from(&[1; 32]);
-    let u2_key = Privkey::from(&[2; 32]);
+    assert_eq!(
+        register_authenticated_test_tenant(&service, &lsp_key, &u1_root).await,
+        u1_id
+    );
+    assert_eq!(
+        register_authenticated_test_tenant(&service, &lsp_key, &u2_root).await,
+        u2_id
+    );
+    let u1_key = test_protocol_key(1);
+    let u2_key = test_protocol_key(2);
     let u1_payment_hash = Hash256::from([31; 32]);
     let u2_payment_hash = Hash256::from([32; 32]);
-    register_test_invoice_for_tenant(
-        &service,
-        TenantId::new("u1").unwrap(),
-        &u1_key,
-        u1_payment_hash,
-        None,
-    )
-    .await;
-    register_test_invoice_for_tenant(
-        &service,
-        TenantId::new("u2").unwrap(),
-        &u2_key,
-        u2_payment_hash,
-        None,
-    )
-    .await;
+    register_test_invoice_for_tenant(&service, u1_id.clone(), &u1_key, u1_payment_hash, None).await;
+    register_test_invoice_for_tenant(&service, u2_id.clone(), &u2_key, u2_payment_hash, None).await;
     let u1_channel = Hash256::from([33; 32]);
     let u2_channel = Hash256::from([34; 32]);
     service
@@ -1564,14 +1710,14 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
         ))
         .unwrap();
     let u1 = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: u1_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: u1_key.pubkey(),
         private_channel_id: Some(u1_channel),
         created_at: 42,
     };
     let u2 = HostedTenantRecord {
-        tenant_id: TenantId::new("u2").unwrap(),
+        tenant_id: u2_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: u2_key.pubkey(),
         private_channel_id: Some(u2_channel),
@@ -1631,13 +1777,10 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
 #[tokio::test]
 async fn cold_tenant_delivery_fails_at_buffer_deadline() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -1650,8 +1793,11 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
         failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([14; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([24; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -1666,7 +1812,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -1697,13 +1843,10 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
 #[tokio::test]
 async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -1716,8 +1859,11 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
         failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([43; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([44; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -1732,7 +1878,7 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -1787,13 +1933,11 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
 #[tokio::test]
 async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory: Arc<dyn TenantRuntimeFactory> = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory: Arc<dyn TenantRuntimeFactory> =
+        Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let upstream_pending = Arc::new(AtomicBool::new(true));
@@ -1810,8 +1954,11 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
         upstream_pending.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([41; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([42; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -1826,7 +1973,7 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -1875,14 +2022,11 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
 #[tokio::test]
 async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
     let starts = Arc::new(AtomicUsize::new(0));
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: starts.clone(),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(starts.clone()));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -1895,8 +2039,18 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([20; 32]);
-    register_test_invoice_with_buffer(&service, &tenant_key, payment_hash, Some(0)).await;
+    register_test_invoice_with_buffer(
+        &service,
+        tenant_id.clone(),
+        &tenant_key,
+        payment_hash,
+        Some(0),
+    )
+    .await;
     let private_channel_id = Hash256::from([27; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -1911,7 +2065,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -1942,12 +2096,9 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
 #[tokio::test]
 async fn tenant_with_pending_delivery_cannot_be_evicted() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let tenant_key = Privkey::from(&[1; 32]);
     let service = start_test_lsp_service(
         store,
@@ -1958,8 +2109,11 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([21; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([28; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -1974,7 +2128,7 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -1991,25 +2145,22 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
 
     assert_eq!(
         ractor::call!(service, |reply| LspServiceMessage::EvictTenant(
-            TenantId::new("u1").unwrap(),
+            tenant_id.clone(),
             reply,
         ))
         .unwrap()
         .unwrap_err(),
-        "tenant u1 has unfinished hosted payment deliveries"
+        format!("tenant {tenant_id} has unfinished hosted payment deliveries")
     );
 }
 
 #[tokio::test]
 async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let upstream_failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -2023,8 +2174,11 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         upstream_failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([22; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([29; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -2033,7 +2187,7 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -2067,13 +2221,10 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
 #[tokio::test]
 async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let upstream_failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -2089,8 +2240,11 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
         Arc::new(AtomicBool::new(true)),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([24; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([31; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -2099,7 +2253,7 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -2138,13 +2292,10 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
 #[tokio::test]
 async fn transient_payment_outcome_retries_delivery_before_deadline() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let upstream_failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -2157,8 +2308,11 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         upstream_failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([25; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([32; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -2167,7 +2321,7 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -2211,13 +2365,10 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
 #[tokio::test]
 async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let dispatches = Arc::new(AtomicUsize::new(0));
     let upstream_failures = Arc::new(AtomicUsize::new(0));
     let tenant_key = Privkey::from(&[1; 32]);
@@ -2230,6 +2381,9 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         upstream_failures.clone(),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let private_channel_id = Hash256::from([33; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -2238,7 +2392,7 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
@@ -2264,7 +2418,7 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
 
     for (index, (error_code, reason)) in cases.into_iter().enumerate() {
         let payment_hash = Hash256::from([40 + index as u8; 32]);
-        register_test_invoice(&service, &tenant_key, payment_hash).await;
+        register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
         ractor::call!(service, |reply| {
             LspServiceMessage::AcceptTrampolineDelivery(
                 hosted_forwarding_request(
@@ -2329,13 +2483,10 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
 #[tokio::test]
 async fn downstream_outcome_is_persisted_before_upstream_settlement() {
     let root = tempdir().expect("temporary directory");
-    let mut config = lsp_config(root.path().join("lsp"));
-    config.tenants = vec!["u1".to_string()];
+    let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let manager = LspPaymentDeliveryManager::new(store.clone());
-    let factory = Arc::new(FakeRuntimeFactory {
-        starts: Arc::new(AtomicUsize::new(0)),
-    });
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
     let tenant_key = Privkey::from(&[1; 32]);
     let service = start_test_lsp_service(
         store.clone(),
@@ -2346,8 +2497,11 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         Arc::new(AtomicUsize::new(0)),
     )
     .await;
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant_id =
+        register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
     let payment_hash = Hash256::from([23; 32]);
-    register_test_invoice(&service, &tenant_key, payment_hash).await;
+    register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
     let private_channel_id = Hash256::from([30; 32]);
     service
         .send_message(LspServiceMessage::TenantChannelOnline(
@@ -2362,7 +2516,7 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         ))
         .unwrap();
     let tenant = HostedTenantRecord {
-        tenant_id: TenantId::new("u1").unwrap(),
+        tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),

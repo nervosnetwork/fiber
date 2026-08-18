@@ -1,67 +1,34 @@
 meta {
-  name: register hosted tenant
+  name: read RootSigner tenant from SDK agent
   type: http
   seq: 2
 }
 
-post {
-  url: {{NODE2_RPC_URL}}
-  body: json
+get {
+  url: http://127.0.0.1:21917/status
+  body: none
   auth: none
 }
 
-headers {
-  Content-Type: application/json
-  Accept: application/json
-  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
-}
-
-body:json {
-  {
-    "id": "42",
-    "jsonrpc": "2.0",
-    "method": "lsp_register_tenant",
-    "params": [
-      { "tenant_id": "u1" }
-    ]
-  }
-}
-
-assert {
-  res.body.error: isUndefined
-  res.body.result.tenant.tenant_id: eq "u1"
-  res.body.result.tenant.runtime_status: eq "cold"
-  res.body.result.tenant.channel_online: eq false
+vars:post-response {
+  AGENT_STATUS_MAX_ITERATIONS: 60
 }
 
 script:post-response {
-  const axios = require("axios");
-  const tenantPubkey = res.body.result.tenant.invoice_pubkey;
-  if (!tenantPubkey || tenantPubkey === bru.getEnvVar("NODE2_PUBKEY")) {
-    throw new Error("hosted tenant must have an identity distinct from Public T");
+  const iteration = Number(bru.getVar("AGENT_STATUS_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("AGENT_STATUS_MAX_ITERATIONS"));
+  if (res.status === 200 && res.body.tenant_token && res.body.tenant_id) {
+    bru.setVar("LSP_TENANT_ID", res.body.tenant_id);
+    bru.setVar("LSP_TENANT_TOKEN", res.body.tenant_token);
+    bru.setVar("REMOTE_ROOT_PUBKEY", res.body.root_signer_pubkey);
+    bru.setVar("AGENT_STATUS_ITERATION", 0);
+    return;
   }
-  const tenantToken = res.body.result.access_token;
-  if (!tenantToken) {
-    throw new Error("new hosted tenant registration must return an access token");
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("AGENT_STATUS_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("read RootSigner tenant from SDK agent");
+    return;
   }
-  const duplicate = await axios.post(
-    bru.getEnvVar("NODE2_RPC_URL"),
-    {
-      id: "duplicate-registration",
-      jsonrpc: "2.0",
-      method: "lsp_register_tenant",
-      params: [{ tenant_id: "u1" }]
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${bru.getEnvVar("LSP_OPERATOR_TOKEN")}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
-  if (duplicate.data.error || duplicate.data.result.access_token !== null) {
-    throw new Error("repeat hosted tenant registration must not issue another access token");
-  }
-  bru.setVar("HOSTED_TENANT_PUBKEY", tenantPubkey);
-  bru.setVar("LSP_TENANT_TOKEN", tenantToken);
+  throw new Error(`SDK agent did not become ready: ${JSON.stringify(res.body)}`);
 }

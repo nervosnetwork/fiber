@@ -33,7 +33,7 @@ assert {
 }
 
 script:post-response {
-  const tenant = (res.body.result.tenants || []).find(item => item.tenant_id === "u1");
+  const tenant = (res.body.result.tenants || []).find(item => item.tenant_id === bru.getVar("LSP_TENANT_ID"));
   const iteration = Number(bru.getVar("HOSTED_REESTABLISH_ITERATION") || 0);
   const maxIterations = Number(bru.getVar("HOSTED_REESTABLISH_MAX_ITERATIONS"));
 

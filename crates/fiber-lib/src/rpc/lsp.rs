@@ -14,7 +14,6 @@ use crate::lsp::{
     LspServiceStatus as InternalServiceStatus, TenantId,
     TenantRuntimeStatus as InternalTenantRuntimeStatus,
 };
-use crate::rpc::biscuit::BiscuitTokenIssuer;
 use crate::rpc::invoice::InvoiceRpcServerImpl;
 use crate::rpc::payment::PaymentRpcServerImpl;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
@@ -108,22 +107,12 @@ trait LspRpc {
 /// JSON-RPC adapter for an active hosted LSP service actor.
 pub struct LspRpcServerImpl {
     actor: ActorRef<LspServiceMessage>,
-    token_issuer: Option<BiscuitTokenIssuer>,
 }
 
 impl LspRpcServerImpl {
     /// Construct an LSP RPC server backed by `actor`.
     pub fn new(actor: ActorRef<LspServiceMessage>) -> Self {
-        Self {
-            actor,
-            token_issuer: None,
-        }
-    }
-
-    /// Configure the Biscuit authority used for first-time tenant onboarding.
-    pub fn with_token_issuer(mut self, token_issuer: Option<BiscuitTokenIssuer>) -> Self {
-        self.token_issuer = token_issuer;
-        self
+        Self { actor }
     }
 
     async fn tenant_rpc_context(
@@ -155,7 +144,6 @@ impl LspRpcServerImpl {
             root_signer_pubkey,
             nonce.into(),
         );
-        let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
         let registration = call!(self.actor, |reply| {
             LspServiceMessage::RegisterAuthenticatedTenant {
                 payload,
@@ -165,25 +153,9 @@ impl LspRpcServerImpl {
         })
         .rpc_err()?
         .rpc_err()?;
-        let access_token = if registration.created {
-            self.token_issuer
-                .as_ref()
-                .map(|issuer| {
-                    issuer.issue_tenant_token(
-                        &tenant_id,
-                        &crate::lsp::tenant_watchtower_node_id(
-                            &registration.status.record.tenant_pubkey,
-                        ),
-                    )
-                })
-                .transpose()
-                .rpc_err()?
-        } else {
-            None
-        };
         Ok(RegisterLspTenantResult {
             tenant: registration.status.into(),
-            access_token,
+            access_token: registration.access_token,
         })
     }
 

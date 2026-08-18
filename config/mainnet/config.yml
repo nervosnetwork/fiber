@@ -111,7 +111,6 @@ lsp:
   max_buffer_duration_ms: 604800000
   max_pending_deliveries: 1024
   max_pending_deliveries_per_tenant: 64
-  tenants: []
 
 ckb:
   # Replace this with a trusted mainnet CKB RPC endpoint before starting FNN.

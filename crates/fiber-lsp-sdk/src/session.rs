@@ -210,13 +210,7 @@ impl<S: SignerStore> HostedSession<S> {
                 "LSP returned an unexpected tenant id".to_string(),
             ));
         }
-        if let Some(token) = result.access_token {
-            self.state.tenant_token = Some(token);
-        } else if self.state.tenant_token.is_none() {
-            return Err(SessionError::Invalid(
-                "first registration returned no tenant token".to_string(),
-            ));
-        }
+        self.state.tenant_token = Some(result.access_token);
         Ok(())
     }
 
@@ -540,7 +534,7 @@ mod tests {
                     runtime_status: LspTenantRuntimeStatus::Cold,
                     channel_online: false,
                 },
-                access_token: Some("token".to_string()),
+                access_token: "token".to_string(),
             })
             .expect("finish");
         assert_eq!(session.tenant_token(), Some("token"));

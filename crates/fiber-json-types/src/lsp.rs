@@ -133,8 +133,8 @@ pub struct LspTenantStatus {
 pub struct RegisterLspTenantResult {
     /// Persistent and runtime status of the registered tenant.
     pub tenant: LspTenantStatus,
-    /// Newly issued tenant access token. It is returned only when the tenant is first created.
-    pub access_token: Option<String>,
+    /// Newly issued tenant access token.
+    pub access_token: String,
 }
 
 /// Result of listing hosted tenants.

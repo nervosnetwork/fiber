@@ -196,9 +196,10 @@ If `biscuit_public_key` is not set, the RPC server will not require authenticati
 
 ### c. Configure Hosted LSP Token Issuance
 
-An authenticated hosted LSP RPC server issues a tenant-scoped access token when
-`lsp_register_tenant` creates a tenant. Store the matching Biscuit private key in
-a file readable only by the Fiber service account, then configure its path:
+Enabling the LSP service requires a matching Biscuit key pair so Fiber can issue
+tenant tokens. Without LSP, do not set `biscuit_private_key_path` — the issuance
+RPC is not mounted and the private key is unused. Store the private key in a
+file readable only by the Fiber service account, then configure its path:
 
 ```yaml
 rpc:

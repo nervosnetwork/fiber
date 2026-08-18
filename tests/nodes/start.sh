@@ -73,7 +73,7 @@ elif [ -n "$should_remove_old_state" ]; then
     echo "starting to reset ...."
     rm -rf "$nodes_dir"/*/fiber/store
     "$deploy_dir/init-dev-chain.sh" -f
-    if [[ "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+    if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
         rm -rf "$nodes_dir/lsp-sdk-agent"
         rm -f "$nodes_dir/lsp-sdk-agent-status.json"
     fi
@@ -109,7 +109,7 @@ if [[ -n "$fiber_build_features" ]]; then
     build_args+=(--features "$fiber_build_features")
 fi
 cargo build "${build_args[@]}"
-if [[ "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
     agent_build_args=(--locked)
     case "$test_env" in
         debug)
@@ -176,7 +176,7 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
         FIBER_SECRET_KEY_PASSWORD='password2' LOG_PREFIX=$'[node 2]' start_fnn "${node2_args[@]}" &
         FIBER_SECRET_KEY_PASSWORD='password3' LOG_PREFIX=$'[node 3]' start_fnn -d 3 &
     fi
-    if [[ "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
+    if [[ "$testcase_name" == "e2e/lsp" || "$testcase_name" == "e2e/lsp-remote-signer" || "$testcase_name" == "e2e/lsp-remote-signer-watchtower" ]]; then
         agent_store="$nodes_dir/lsp-sdk-agent"
         agent_status="$nodes_dir/lsp-sdk-agent-status.json"
         operator_token="$(sed -n 's/^  LSP_OPERATOR_TOKEN: //p' "$bruno_dir/test.bru")"

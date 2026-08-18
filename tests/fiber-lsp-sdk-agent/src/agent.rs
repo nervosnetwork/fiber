@@ -472,7 +472,7 @@ mod tests {
                     runtime_status: LspTenantRuntimeStatus::Active,
                     channel_online: false,
                 },
-                access_token: Some("tenant-token".to_string()),
+                access_token: "tenant-token".to_string(),
             })
         }
 

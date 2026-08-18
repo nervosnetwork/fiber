@@ -19,6 +19,7 @@ pub struct RpcConfig {
     pub biscuit_public_key: Option<String>,
 
     /// File containing the Biscuit private key used to issue hosted tenant tokens.
+    /// Required when the LSP service is enabled; rejected when LSP is not running.
     #[default(None)]
     #[arg(
         name = "RPC_BISCUIT_PRIVATE_KEY_PATH",

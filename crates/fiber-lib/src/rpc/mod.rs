@@ -64,7 +64,7 @@ pub mod server {
         rpc::watchtower::{WatchtowerRpcServer, WatchtowerRpcServerImpl},
         watchtower::WatchtowerStore,
     };
-    use anyhow::{bail, Context, Result};
+    use anyhow::{bail, Result};
     #[cfg(debug_assertions)]
     use ckb_types::core::TransactionView;
     use jsonrpsee::server::{
@@ -83,7 +83,7 @@ pub mod server {
     use tower_http::cors::{Any, CorsLayer};
     use tracing::debug;
 
-    use super::biscuit::{BiscuitAuth, BiscuitTokenIssuer};
+    use super::biscuit::BiscuitAuth;
     use crate::store::actor::StoreActorMessage;
     use crate::store::store_impl::StoreChange;
     use ractor::{ActorCell, OutputPort};
@@ -296,25 +296,13 @@ pub mod server {
             bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
         }
 
-        let token_issuer = match (
-            config.biscuit_private_key_path.as_deref(),
-            config.biscuit_public_key.as_deref(),
-        ) {
-            (Some(path), Some(public_key)) => Some(
-                BiscuitTokenIssuer::from_private_key_file(path, public_key)
-                    .context("failed to configure Biscuit token issuer")?,
-            ),
-            (Some(_), None) => {
-                bail!("rpc.biscuit_private_key_path requires rpc.biscuit_public_key")
+        if config.biscuit_private_key_path.is_some() {
+            if lsp_actor.is_none() {
+                bail!("rpc.biscuit_private_key_path requires the LSP service");
             }
-            (None, _) => None,
-        };
-        if lsp_actor.is_some()
-            && config.is_module_enabled("lsp")
-            && config.biscuit_public_key.is_some()
-            && token_issuer.is_none()
-        {
-            bail!("authenticated LSP RPC requires rpc.biscuit_private_key_path to issue tenant access tokens");
+            if config.biscuit_public_key.is_none() {
+                bail!("rpc.biscuit_private_key_path requires rpc.biscuit_public_key");
+            }
         }
 
         let auth = match config.biscuit_public_key.as_ref() {
@@ -434,11 +422,7 @@ pub mod server {
         if let Some(lsp_actor) = lsp_actor {
             if config.is_module_enabled("lsp") {
                 modules
-                    .merge(
-                        LspRpcServerImpl::new(lsp_actor)
-                            .with_token_issuer(token_issuer)
-                            .into_rpc(),
-                    )
+                    .merge(LspRpcServerImpl::new(lsp_actor).into_rpc())
                     .unwrap();
             }
         }

@@ -22,9 +22,15 @@ body:json {
     "jsonrpc": "2.0",
     "method": "lsp_ensure_tenant",
     "params": [
-      { "tenant_id": "u1" }
+      { "tenant_id": "placeholder" }
     ]
   }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].tenant_id = bru.getVar("LSP_TENANT_ID");
+  req.setBody(body);
 }
 
 assert {

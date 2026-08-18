@@ -14,7 +14,7 @@ use fnn::fiber::{
     network::{init_chain_hash, NetworkActorMessage, PublicNetworkCommand},
 };
 use fnn::fiber_types::Privkey;
-use fnn::lsp::{FiberTenantRuntimeFactory, LspService, LspServiceArgs};
+use fnn::lsp::{BiscuitTokenIssuer, FiberTenantRuntimeFactory, LspService, LspServiceArgs};
 use fnn::rpc::server::start_rpc;
 use fnn::store::actor::{StoreActor, StoreActorInitializationParameter};
 use fnn::store::open_store_with_migration;
@@ -479,6 +479,29 @@ async fn run_node(
                 Privkey::try_from_slice(public_key_pair.as_ref()).map_err(|error| {
                     ExitMessage(format!("failed to decode Public T signing key: {error}"))
                 })?;
+            let token_issuer = match (
+                config
+                    .rpc
+                    .as_ref()
+                    .and_then(|rpc| rpc.biscuit_private_key_path.as_deref()),
+                config
+                    .rpc
+                    .as_ref()
+                    .and_then(|rpc| rpc.biscuit_public_key.as_deref()),
+            ) {
+                (Some(path), Some(public_key)) => BiscuitTokenIssuer::from_private_key_file(
+                    path, public_key,
+                )
+                .map_err(|error| {
+                    ExitMessage(format!("failed to configure Biscuit token issuer: {error}"))
+                })?,
+                _ => {
+                    return ExitMessage::err(
+                        "LSP service requires rpc.biscuit_public_key and rpc.biscuit_private_key_path to issue tenant access tokens"
+                            .to_string(),
+                    );
+                }
+            };
             info!("Starting multi-tenant LSP service");
             let lsp_actor = Actor::spawn_linked(
                 Some("lsp service".to_string()),
@@ -490,6 +513,7 @@ async fn run_node(
                     store: store.namespaced(NodeNamespace::lsp_metadata()),
                     runtime_factory,
                     signing_key,
+                    token_issuer,
                 },
                 root_actor.get_cell(),
             )
@@ -515,6 +539,16 @@ async fn run_node(
         }
         (None, _, _) => None,
     };
+    if lsp_actor.is_none()
+        && config
+            .rpc
+            .as_ref()
+            .is_some_and(|rpc| rpc.biscuit_private_key_path.is_some())
+    {
+        return ExitMessage::err(
+            "rpc.biscuit_private_key_path requires the LSP service".to_string(),
+        );
+    }
 
     let cch_currency = config
         .parsed_fiber()

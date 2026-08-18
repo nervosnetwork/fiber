@@ -22,20 +22,26 @@ body:json {
     "jsonrpc": "2.0",
     "method": "lsp_ensure_tenant",
     "params": [
-      { "tenant_id": "u1" }
+      { "tenant_id": "placeholder" }
     ]
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].tenant_id = bru.getVar("LSP_TENANT_ID");
+  req.setBody(body);
+}
+
 assert {
   res.body.error: isUndefined
-  res.body.result.tenant_id: eq "u1"
   res.body.result.runtime_status: eq "active"
   res.body.result.channel_online: eq false
 }
 
 script:post-response {
-  if (res.body.result.invoice_pubkey !== bru.getVar("HOSTED_TENANT_PUBKEY")) {
-    throw new Error("hosted tenant identity changed during activation");
+  if (res.body.result.tenant_id !== bru.getVar("LSP_TENANT_ID")) {
+    throw new Error("activated tenant id does not match the registered RootSigner tenant");
   }
+  bru.setVar("HOSTED_TENANT_PUBKEY", res.body.result.invoice_pubkey);
 }

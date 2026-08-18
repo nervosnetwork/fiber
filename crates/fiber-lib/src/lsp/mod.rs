@@ -108,6 +108,8 @@ mod runtime;
 mod service;
 #[cfg(not(target_arch = "wasm32"))]
 mod tenant;
+#[cfg(not(target_arch = "wasm32"))]
+mod token;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use config::{LspConfig, DEFAULT_MAX_ACTIVE_TENANTS};
@@ -138,6 +140,8 @@ pub use tenant::{
     tenant_watchtower_node_id, HostedTenantRecord, HostedTenantStatus, TenantId,
     TenantRuntimeStatus,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use token::BiscuitTokenIssuer;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

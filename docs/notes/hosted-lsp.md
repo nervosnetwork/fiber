@@ -186,8 +186,11 @@ settles all parts from one downstream outcome.
 ## Configuration
 
 Enable `fiber`, `ckb`, `rpc`, and `lsp` in `services`. The `lsp` section accepts
-an optional boot-time tenant list, a bound on resident tenant runtimes, a buffer
-policy cap, and global/per-tenant pending-delivery limits:
+a bound on resident tenant runtimes, a buffer policy cap, and global/per-tenant
+pending-delivery limits. LSP startup requires `rpc.biscuit_public_key` and
+`rpc.biscuit_private_key_path`; without LSP those issuance keys must not be set.
+Tenants are created only through `lsp_register_tenant` (RootSigner proof); the
+first successful registration issues a tenant access token.
 
 ```yaml
 services:
@@ -201,9 +204,6 @@ lsp:
   max_buffer_duration_ms: 604800000 # 7 days
   max_pending_deliveries: 1024
   max_pending_deliveries_per_tenant: 64
-  tenants:
-    - u1
-    - u2
 ```
 
 The default storage layout is:

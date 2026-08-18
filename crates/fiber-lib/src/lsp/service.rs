@@ -13,11 +13,12 @@ use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
 use super::{
-    is_permanent_hosted_payment_failure, HostedTenantRpcContext, HostedTenantStatus, LspConfig,
-    LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryKey,
-    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus,
-    LspPaymentDispatchError, LspPaymentOutcomeDecision, TenantId, TenantRegistry,
-    TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor, TrampolineForwardingRequest,
+    is_permanent_hosted_payment_failure, tenant_watchtower_node_id, BiscuitTokenIssuer,
+    HostedTenantRpcContext, HostedTenantStatus, LspConfig, LspInvoiceRegistration,
+    LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryKey, LspPaymentDeliveryLimits,
+    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspPaymentDispatchError,
+    LspPaymentOutcomeDecision, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
+    TenantSupervisor, TrampolineForwardingRequest,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -28,6 +29,8 @@ pub struct LspServiceArgs {
     pub store: Store,
     pub runtime_factory: Arc<dyn TenantRuntimeFactory>,
     pub signing_key: Privkey,
+    /// Issues tenant access tokens on authenticated registration.
+    pub token_issuer: BiscuitTokenIssuer,
 }
 
 /// Read-only status for callers that need to discover the hosted service.
@@ -44,6 +47,8 @@ pub struct LspServiceStatus {
 pub struct HostedTenantRegistration {
     pub status: HostedTenantStatus,
     pub created: bool,
+    /// Tenant Biscuit issued for this newly created tenant.
+    pub access_token: String,
 }
 
 /// Result of consulting the hosted invoice registry for an incoming trampoline TLC.
@@ -62,11 +67,6 @@ pub enum LspServiceMessage {
         signature: TenantRegistrySignature,
         reply: RpcReplyPort<Result<HostedTenantRegistration, String>>,
     },
-    /// Legacy operator provisioning used by static configuration and internal tests.
-    RegisterTenant(
-        TenantId,
-        RpcReplyPort<Result<HostedTenantRegistration, String>>,
-    ),
     EnsureTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     EvictTenant(TenantId, RpcReplyPort<Result<HostedTenantStatus, String>>),
     ListTenants(RpcReplyPort<Result<Vec<HostedTenantStatus>, String>>),
@@ -122,6 +122,7 @@ pub struct LspServiceState {
     pub delivery_manager: LspPaymentDeliveryManager<Store>,
     pub supervisor: TenantSupervisor,
     pub signing_key: Privkey,
+    pub token_issuer: BiscuitTokenIssuer,
     pub ready_tenants: HashMap<TenantId, Hash256>,
 }
 
@@ -144,6 +145,18 @@ impl LspServiceState {
             .get(tenant_id)?
             .map(|record| self.tenant_status(record))
             .ok_or_else(|| format!("tenant {tenant_id} is not registered"))
+    }
+
+    fn issue_created_tenant_token(
+        &self,
+        record: &crate::lsp::HostedTenantRecord,
+    ) -> Result<String, String> {
+        self.token_issuer
+            .issue_tenant_token(
+                &record.tenant_id,
+                &tenant_watchtower_node_id(&record.tenant_pubkey),
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn schedule_delivery_deadline(
@@ -270,13 +283,6 @@ impl Actor for LspService {
         );
         let supervisor =
             TenantSupervisor::new(args.runtime_factory.clone(), args.config.max_active_tenants);
-        for tenant in &args.config.tenants {
-            let tenant_id = TenantId::new(tenant.clone()).map_err(anyhow::Error::msg)?;
-            let record = supervisor
-                .provision(&tenant_id)
-                .map_err(anyhow::Error::msg)?;
-            registry.register(record).map_err(anyhow::Error::msg)?;
-        }
         for delivery in delivery_manager
             .list_pending()
             .map_err(anyhow::Error::msg)?
@@ -295,6 +301,7 @@ impl Actor for LspService {
             delivery_manager,
             supervisor,
             signing_key: args.signing_key,
+            token_issuer: args.token_issuer,
             ready_tenants: HashMap::new(),
         })
     }
@@ -339,25 +346,13 @@ impl Actor for LspService {
                     let record = state
                         .registry
                         .register_authenticated(record, payload.nonce)?;
+                    let access_token = state.issue_created_tenant_token(&record)?;
                     Ok(HostedTenantRegistration {
                         status: state.tenant_status(record),
                         created: true,
+                        access_token,
                     })
                 })();
-                let _ = reply.send(result);
-            }
-            LspServiceMessage::RegisterTenant(tenant_id, reply) => {
-                let result = state.registry.get(&tenant_id).and_then(|existing| {
-                    let created = existing.is_none();
-                    state
-                        .supervisor
-                        .provision(&tenant_id)
-                        .and_then(|record| state.registry.register(record))
-                        .map(|record| HostedTenantRegistration {
-                            status: state.tenant_status(record),
-                            created,
-                        })
-                });
                 let _ = reply.send(result);
             }
             LspServiceMessage::EnsureTenant(tenant_id, reply) => {

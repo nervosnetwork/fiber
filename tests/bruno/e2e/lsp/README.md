@@ -2,7 +2,7 @@
 
 This workflow starts Node2 as a Public Trampoline node with the hosted LSP service and Biscuit
 authentication enabled. Operator requests use an LSP administration token. Hosted wallet
-requests use a token whose authority block contains `tenant("u1")` and call the standard Fiber
+requests use the tenant token issued on first `lsp_register_tenant` and call the standard Fiber
 channel, invoice, and payment RPC methods without a `tenant_id` parameter.
 
 The workflow registers and activates a tenant, then the tenant calls `open_channel` against

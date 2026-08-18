@@ -24,12 +24,6 @@ pub struct LspConfig {
     )]
     pub(crate) base_dir: Option<PathBuf>,
 
-    /// Tenant identifiers provisioned when the service starts. Provisioning is
-    /// persistent but does not eagerly start their Fiber runtimes.
-    #[arg(skip)]
-    #[serde(default)]
-    pub tenants: Vec<String>,
-
     /// Maximum number of tenant Fiber runtimes kept active at once.
     #[default(DEFAULT_MAX_ACTIVE_TENANTS)]
     #[arg(
