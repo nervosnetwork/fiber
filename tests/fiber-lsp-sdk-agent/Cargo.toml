@@ -19,7 +19,6 @@ fiber-json-types = { path = "../../crates/fiber-json-types", features = ["conver
 fiber-lsp-sdk = { path = "../../crates/fiber-lsp-sdk", features = ["test-apis"] }
 fiber-types = { path = "../../crates/fiber-types" }
 hex = "0.4"
-molecule = { version = "0.9.2", default-features = false }
 musig2 = { version = "0.2.4", features = ["secp256k1"] }
 reqwest = { version = "0.12", features = ["json"] }
 secp256k1 = { version = "0.30.0", features = ["global-context"] }

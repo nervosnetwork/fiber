@@ -1959,6 +1959,7 @@ dependencies = [
  "ckb-rocksdb",
  "console_error_panic_hook",
  "fiber-types 0.8.1",
+ "fiber-types 0.9.0",
  "fiber-types 0.9.0-rc4",
  "fiber-wasm-db-common",
  "serde",
