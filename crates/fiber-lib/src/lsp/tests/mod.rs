@@ -16,7 +16,8 @@ use crate::fiber::network::{
     FiberActorCommand, FiberActorMessage, HostedTenantActivity, NetworkActorMessage,
 };
 use crate::fiber_types::{
-    Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, TlcErrorCode,
+    Hash256, HashAlgorithm, PaymentStatus, PrevTlcInfo, Privkey, TenantRegistryPayload,
+    TenantRegistrySignature, TlcErrorCode,
 };
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::TrampolineForwardingRequest;
@@ -88,6 +89,7 @@ fn tenant_registry_is_persistent_and_idempotent() {
     let registry = TenantRegistry::new(store.clone());
     let record = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -97,6 +99,7 @@ fn tenant_registry_is_persistent_and_idempotent() {
     assert_eq!(registry.register(record.clone()).unwrap(), record);
     let duplicate_key = HostedTenantRecord {
         tenant_id: TenantId::new("u2").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: record.tenant_pubkey,
         private_channel_id: None,
         created_at: 43,
@@ -109,6 +112,55 @@ fn tenant_registry_is_persistent_and_idempotent() {
     let reopened = TenantRegistry::new(store);
     assert_eq!(reopened.get(&record.tenant_id).unwrap(), Some(record));
     assert_eq!(reopened.list().unwrap().len(), 1);
+}
+
+#[test]
+fn authenticated_tenant_registry_replaces_consumes_and_persists_nonces() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let registry = TenantRegistry::new(store.clone());
+    let root_signer_pubkey = Privkey::from(&[7; 32]).pubkey();
+    let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
+    let first = registry
+        .issue_registration_nonce(&root_signer_pubkey)
+        .unwrap();
+    let second = registry
+        .issue_registration_nonce(&root_signer_pubkey)
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        registry.registration_nonce(&root_signer_pubkey).unwrap(),
+        Some(second)
+    );
+    let record = HostedTenantRecord {
+        tenant_id: tenant_id.clone(),
+        root_signer_pubkey: Some(root_signer_pubkey),
+        tenant_pubkey: Privkey::from(&[8; 32]).pubkey(),
+        private_channel_id: None,
+        created_at: 42,
+    };
+    assert!(registry
+        .register_authenticated(record.clone(), first)
+        .unwrap_err()
+        .contains("missing, replaced, or consumed"));
+    assert_eq!(
+        registry
+            .register_authenticated(record.clone(), second)
+            .unwrap(),
+        record
+    );
+    assert_eq!(
+        registry.registration_nonce(&root_signer_pubkey).unwrap(),
+        None
+    );
+
+    let reopened = TenantRegistry::new(store);
+    assert_eq!(reopened.get(&tenant_id).unwrap(), Some(record.clone()));
+    assert!(reopened
+        .register_authenticated(record, second)
+        .unwrap_err()
+        .contains("already registered"));
 }
 
 struct NoopNetworkActor;
@@ -190,6 +242,7 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
+            root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[4; 32]).pubkey(),
             private_channel_id: None,
             created_at: 42,
@@ -218,6 +271,7 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
+            root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[5; 32]).pubkey(),
             private_channel_id: None,
             created_at: 42,
@@ -244,6 +298,7 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
         let secret = if tenant_id.as_str() == "u1" { 1 } else { 2 };
         Ok(HostedTenantRecord {
             tenant_id: tenant_id.clone(),
+            root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[secret; 32]).pubkey(),
             private_channel_id: None,
             created_at: 42,
@@ -366,6 +421,7 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -401,6 +457,7 @@ fn hosted_invoice_route_hint_must_match_public_t() {
     let other_lsp_key = Privkey::from(&[10; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -433,6 +490,7 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -470,6 +528,7 @@ fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -503,6 +562,7 @@ fn hosted_invoice_buffer_duration_is_shortened_by_operator_policy() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -532,6 +592,7 @@ fn hosted_invoice_must_be_signed_by_registered_tenant() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -593,6 +654,7 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
@@ -634,6 +696,7 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
@@ -783,6 +846,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
@@ -874,6 +938,7 @@ fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition(
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([25; 32])),
         created_at: 42,
@@ -945,6 +1010,7 @@ fn payment_delivery_enforces_per_tenant_pending_limit() {
     let lsp_key = Privkey::from(&[9; 32]);
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(Hash256::from([26; 32])),
         created_at: 42,
@@ -1175,6 +1241,124 @@ async fn start_test_lsp_service_with_all_dispatch_failures(
     .0
 }
 
+fn sign_tenant_registry_payload(
+    root_signer_key: &Privkey,
+    payload: &TenantRegistryPayload,
+) -> TenantRegistrySignature {
+    let signature = secp256k1::SECP256K1.sign_ecdsa(
+        &secp256k1::Message::from_digest(payload.digest()),
+        &root_signer_key.0,
+    );
+    TenantRegistrySignature(signature.serialize_compact())
+}
+
+#[tokio::test]
+async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let registry = TenantRegistry::new(store.clone());
+    let factory = Arc::new(FakeRuntimeFactory {
+        starts: Arc::new(AtomicUsize::new(0)),
+    });
+    let lsp_key = Privkey::from(&[9; 32]);
+    let service = start_test_lsp_service(
+        store,
+        config,
+        factory,
+        lsp_key.clone(),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let root_signer_key = Privkey::from(&[7; 32]);
+    let root_signer_pubkey = root_signer_key.pubkey();
+    let replaced_nonce = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_signer_pubkey
+    )
+    .unwrap()
+    .unwrap();
+    let nonce = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_signer_pubkey
+    )
+    .unwrap()
+    .unwrap();
+
+    let old_payload =
+        TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, replaced_nonce);
+    let old_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &old_payload),
+            payload: old_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(old_result.contains("missing, replaced, or consumed"));
+
+    let wrong_lsp_payload =
+        TenantRegistryPayload::new(Privkey::from(&[6; 32]).pubkey(), root_signer_pubkey, nonce);
+    let wrong_lsp_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &wrong_lsp_payload),
+            payload: wrong_lsp_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(wrong_lsp_result.contains("another LSP node"));
+
+    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, nonce);
+    let wrong_signature = sign_tenant_registry_payload(&Privkey::from(&[5; 32]), &payload);
+    let wrong_signature_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            payload: payload.clone(),
+            signature: wrong_signature,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(wrong_signature_result.contains("invalid RootSigner registration proof"));
+
+    let registration = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            payload: payload.clone(),
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap();
+    let expected_tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
+    assert_eq!(registration.status.record.tenant_id, expected_tenant_id);
+    assert_eq!(
+        registration.status.record.root_signer_pubkey,
+        Some(root_signer_pubkey)
+    );
+    assert_eq!(
+        registry.registration_nonce(&root_signer_pubkey).unwrap(),
+        None
+    );
+
+    let replay_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(replay_result.contains("already registered"));
+}
+
 async fn register_test_invoice(
     service: &ActorRef<LspServiceMessage>,
     tenant_key: &Privkey,
@@ -1276,6 +1460,7 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: None,
         created_at: 42,
@@ -1380,12 +1565,14 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
         .unwrap();
     let u1 = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: u1_key.pubkey(),
         private_channel_id: Some(u1_channel),
         created_at: 42,
     };
     let u2 = HostedTenantRecord {
         tenant_id: TenantId::new("u2").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: u2_key.pubkey(),
         private_channel_id: Some(u2_channel),
         created_at: 42,
@@ -1480,6 +1667,7 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1545,6 +1733,7 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1638,6 +1827,7 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1722,6 +1912,7 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1784,6 +1975,7 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1842,6 +2034,7 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1907,6 +2100,7 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -1974,6 +2168,7 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -2044,6 +2239,7 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,
@@ -2167,6 +2363,7 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         .unwrap();
     let tenant = HostedTenantRecord {
         tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
         private_channel_id: Some(private_channel_id),
         created_at: 42,

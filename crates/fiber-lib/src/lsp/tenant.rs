@@ -1,49 +1,16 @@
-use std::{fmt, str::FromStr};
-
 use serde::{Deserialize, Serialize};
 
-use crate::fiber_types::{Hash256, Pubkey};
+use crate::fiber_types::{Hash256, NodeId, Pubkey};
 
-/// Stable identifier used for authorization, storage namespaces and runtime lookup.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct TenantId(String);
-
-impl TenantId {
-    /// Construct and validate a tenant identifier.
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        if value.is_empty() || value.len() > 64 {
-            return Err("tenant id must contain between 1 and 64 characters".to_string());
-        }
-        if !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(
-                "tenant id may only contain ASCII letters, digits, '-' and '_'".to_string(),
-            );
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+/// Watchtower `node_id` for a hosted tenant Fiber identity.
+///
+/// Matches the biscuit `node(...)` fact issued on the tenant access token so
+/// get/submit watchtower RPCs read the same key the runtime writes.
+pub fn tenant_watchtower_node_id(tenant_pubkey: &Pubkey) -> NodeId {
+    NodeId::from_bytes(tenant_pubkey.serialize().to_vec())
 }
 
-impl fmt::Display for TenantId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl FromStr for TenantId {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::new(value)
-    }
-}
+pub use crate::fiber_types::TenantId;
 
 /// Persisted state boundary of a hosted tenant. Runtime liveness is
 /// intentionally excluded because it is rebuilt by the supervisor after
@@ -51,6 +18,11 @@ impl FromStr for TenantId {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostedTenantRecord {
     pub tenant_id: TenantId,
+    /// RootSigner identity that owns this tenant. Legacy operator-provisioned
+    /// records may omit it until they are migrated through authenticated
+    /// registration.
+    #[serde(default)]
+    pub root_signer_pubkey: Option<Pubkey>,
     /// Fiber protocol key used by the tenant side of its private channel and
     /// to authenticate its invoices. Public T uses it only for local peer
     /// addressing; it is never announced as a gossip-routable node identity.

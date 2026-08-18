@@ -1,0 +1,37 @@
+[package]
+name = "fiber-lsp-sdk-agent"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Test-only hosted LSP client and auto-approving remote signer"
+
+[[bin]]
+name = "fiber-lsp-sdk-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+ckb-jsonrpc-types = "1"
+ckb-types = "1"
+fiber-json-types = { path = "../../crates/fiber-json-types", features = ["conversion"] }
+fiber-lsp-sdk = { path = "../../crates/fiber-lsp-sdk", features = ["test-apis"] }
+fiber-types = { path = "../../crates/fiber-types" }
+hex = "0.4"
+molecule = { version = "0.9.2", default-features = false }
+musig2 = { version = "0.2.4", features = ["secp256k1"] }
+reqwest = { version = "0.12", features = ["json"] }
+secp256k1 = { version = "0.30.0", features = ["global-context"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+needless-return = "allow"
+upper-case-acronyms = "allow"

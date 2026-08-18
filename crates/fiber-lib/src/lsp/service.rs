@@ -5,7 +5,10 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use crate::fiber::network::{
     BufferedTrampolineUpstreamStatus, FiberActorCommand, NetworkActorMessage,
 };
-use crate::fiber_types::{Hash256, PaymentStatus, Privkey, Pubkey, TlcErrorCode};
+use crate::fiber_types::{
+    Hash256, PaymentStatus, Privkey, Pubkey, TenantRegistryPayload, TenantRegistrySignature,
+    TlcErrorCode,
+};
 use crate::invoice::CkbInvoice;
 use crate::store::Store;
 
@@ -37,6 +40,7 @@ pub struct LspServiceStatus {
 }
 
 /// Result of the idempotent hosted tenant registration operation.
+#[derive(Debug)]
 pub struct HostedTenantRegistration {
     pub status: HostedTenantStatus,
     pub created: bool,
@@ -52,6 +56,13 @@ pub enum LspDeliveryDecision {
 /// Commands accepted by the LSP service container.
 pub enum LspServiceMessage {
     GetStatus(RpcReplyPort<LspServiceStatus>),
+    IssueTenantRegistryNonce(Pubkey, RpcReplyPort<Result<[u8; 32], String>>),
+    RegisterAuthenticatedTenant {
+        payload: TenantRegistryPayload,
+        signature: TenantRegistrySignature,
+        reply: RpcReplyPort<Result<HostedTenantRegistration, String>>,
+    },
+    /// Legacy operator provisioning used by static configuration and internal tests.
     RegisterTenant(
         TenantId,
         RpcReplyPort<Result<HostedTenantRegistration, String>>,
@@ -303,6 +314,37 @@ impl Actor for LspService {
                     registered_tenants,
                     active_tenants: state.supervisor.active_count(),
                 });
+            }
+            LspServiceMessage::IssueTenantRegistryNonce(root_signer_pubkey, reply) => {
+                let result = state.registry.issue_registration_nonce(&root_signer_pubkey);
+                let _ = reply.send(result);
+            }
+            LspServiceMessage::RegisterAuthenticatedTenant {
+                payload,
+                signature,
+                reply,
+            } => {
+                let result = (|| {
+                    if payload.lsp_node_id != state.public_node_id {
+                        return Err(
+                            "tenant registration proof targets another LSP node".to_string()
+                        );
+                    }
+                    payload.verify_signature(&signature).map_err(|error| {
+                        format!("invalid RootSigner registration proof: {error}")
+                    })?;
+                    let tenant_id = TenantId::from_root_signer_pubkey(&payload.root_signer_pubkey);
+                    let mut record = state.supervisor.provision(&tenant_id)?;
+                    record.root_signer_pubkey = Some(payload.root_signer_pubkey);
+                    let record = state
+                        .registry
+                        .register_authenticated(record, payload.nonce)?;
+                    Ok(HostedTenantRegistration {
+                        status: state.tenant_status(record),
+                        created: true,
+                    })
+                })();
+                let _ = reply.send(result);
             }
             LspServiceMessage::RegisterTenant(tenant_id, reply) => {
                 let result = state.registry.get(&tenant_id).and_then(|existing| {

@@ -17,8 +17,10 @@
 #[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
+pub mod channel_signer;
 pub mod config;
 pub mod gen;
+pub mod hosted_lsp;
 pub mod invoice;
 pub mod network;
 pub mod onion;
@@ -36,7 +38,9 @@ pub use cch::{
     CchInvoice, CchOrder, CchOrderStatus, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation,
 };
 pub use channel::*;
+pub use channel_signer::*;
 pub use config::*;
+pub use hosted_lsp::*;
 pub use invoice::*;
 pub use network::{HopRequire, PersistentNetworkActorState};
 pub use onion::*;
@@ -44,10 +48,14 @@ pub use payment::*;
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
 pub use protocol::*;
 
-#[cfg(feature = "watchtower")]
-pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};
+pub use watchtower::{
+    commitment_lock_settlement_hash, settlement_data_to_witness,
+    settlement_matches_commitment_lock_args, settlement_matches_commitment_tx,
+    settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness, settlement_witness_hash,
+    ChannelData, LastAppliedWatchtowerSignature, RevocationData, SettlementData, SettlementTlc,
+    WatchtowerExternalSignerState, WatchtowerExternalState, WatchtowerSignerState,
+};
 
-#[cfg(feature = "watchtower")]
 pub mod watchtower;
 
 pub use serde_utils::{

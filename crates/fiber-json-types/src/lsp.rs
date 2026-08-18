@@ -17,6 +17,35 @@ pub struct LspTenantParams {
     pub tenant_id: String,
 }
 
+/// Parameters for issuing a one-time hosted tenant registration nonce.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct GetLspTenantRegistryNonceParams {
+    /// RootSigner identity that will sign the registration payload.
+    pub root_signer_pubkey: Pubkey,
+}
+
+/// One-time challenge and LSP identity used to build `TenantRegistryPayload`.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct GetLspTenantRegistryNonceResult {
+    /// Public Fiber identity of the hosted LSP.
+    pub lsp_node_id: Pubkey,
+    /// RootSigner identity associated with this nonce.
+    pub root_signer_pubkey: Pubkey,
+    /// Cryptographically random, single-use 32-byte nonce.
+    pub nonce: Hash256,
+}
+
+/// RootSigner-authenticated hosted tenant registration request.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct RegisterLspTenantParams {
+    /// RootSigner identity that deterministically derives the tenant ID.
+    pub root_signer_pubkey: Pubkey,
+    /// Most recent nonce issued for this RootSigner by this LSP.
+    pub nonce: Hash256,
+    /// Compact ECDSA signature over the canonical `TenantRegistryPayload`, as hex.
+    pub signature: String,
+}
+
 /// Parameters for creating and registering an invoice owned by a hosted tenant.
 #[serde_as]
 #[derive(Clone, Deserialize, JsonSchema, Serialize)]
@@ -81,6 +110,9 @@ pub enum LspTenantRuntimeStatus {
 pub struct LspTenantStatus {
     /// Stable operator-facing tenant identifier.
     pub tenant_id: String,
+    /// RootSigner identity that owns this tenant, when registered through the
+    /// authenticated tenant registry protocol.
+    pub root_signer_pubkey: Option<Pubkey>,
     /// Tenant protocol key used for its private channel and invoice signatures;
     /// it is not a public, gossip-routable node identity.
     pub invoice_pubkey: Pubkey,

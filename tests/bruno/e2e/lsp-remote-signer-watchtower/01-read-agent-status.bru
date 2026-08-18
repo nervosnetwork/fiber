@@ -1,0 +1,35 @@
+meta {
+  name: read independent SDK agent status
+  type: http
+  seq: 1
+}
+
+get {
+  url: http://127.0.0.1:21917/status
+  body: none
+  auth: none
+}
+
+vars:post-response {
+  AGENT_STATUS_MAX_ITERATIONS: 60
+}
+
+script:post-response {
+  const iteration = Number(bru.getVar("AGENT_STATUS_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("AGENT_STATUS_MAX_ITERATIONS"));
+  if (res.status === 200 && res.body.tenant_token && res.body.channel_open_signer_material) {
+    bru.setVar("REMOTE_TENANT_ID", res.body.tenant_id);
+    bru.setVar("REMOTE_TENANT_TOKEN", res.body.tenant_token);
+    bru.setVar("REMOTE_ROOT_PUBKEY", res.body.root_signer_pubkey);
+    bru.setVar("REMOTE_OPEN_MATERIAL", res.body.channel_open_signer_material);
+    bru.setVar("AGENT_STATUS_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("AGENT_STATUS_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("read independent SDK agent status");
+    return;
+  }
+  throw new Error(`SDK agent did not become ready: ${JSON.stringify(res.body)}`);
+}

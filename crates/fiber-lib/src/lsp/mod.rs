@@ -134,7 +134,10 @@ pub use service::{
     LspServiceState, LspServiceStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use tenant::{HostedTenantRecord, HostedTenantStatus, TenantId, TenantRuntimeStatus};
+pub use tenant::{
+    tenant_watchtower_node_id, HostedTenantRecord, HostedTenantStatus, TenantId,
+    TenantRuntimeStatus,
+};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

@@ -35,6 +35,7 @@ use crate::{
         },
         payment::SendPaymentCommand,
     },
+    fiber_types::Privkey,
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
@@ -44,9 +45,10 @@ use crate::{
     },
     rpc::{
         lsp::{
-            ListLspTenantsResult, LspInvoiceRegistration, LspPaymentDelivery,
-            LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantParams,
-            LspTenantRuntimeStatus, NewLspInvoiceParams, RegisterLspTenantResult,
+            GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, ListLspTenantsResult,
+            LspInvoiceRegistration, LspPaymentDelivery, LspPaymentDeliveryStatus,
+            LspPaymentHashParams, LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus,
+            NewLspInvoiceParams, RegisterLspTenantParams, RegisterLspTenantResult,
             SendLspPaymentParams,
         },
         payment::{GetPaymentCommandResult, SendPaymentCommandParams},
@@ -75,6 +77,49 @@ fn authenticated_client(rpc_addr: std::net::SocketAddr, token: &str) -> HttpClie
         .set_headers(headers)
         .build(format!("http://{rpc_addr}"))
         .expect("build authenticated LSP RPC client")
+}
+
+async fn register_root_signer_tenant(
+    client: &HttpClient,
+    root_signer_key: &crate::fiber_types::Privkey,
+) -> Result<RegisterLspTenantResult, jsonrpsee::core::ClientError> {
+    let root_signer_pubkey = root_signer_key.pubkey();
+    let challenge: GetLspTenantRegistryNonceResult = client
+        .request(
+            "lsp_get_tenant_registry_nonce",
+            rpc_params![GetLspTenantRegistryNonceParams {
+                root_signer_pubkey: root_signer_pubkey.into(),
+            }],
+        )
+        .await
+        .expect("issue tenant registration nonce");
+    let lsp_node_id = crate::fiber_types::Pubkey::from_slice(&challenge.lsp_node_id.0)
+        .expect("valid LSP node id");
+    let payload = crate::fiber_types::TenantRegistryPayload::new(
+        lsp_node_id,
+        root_signer_pubkey,
+        challenge.nonce.0,
+    );
+    let signature = SECP256K1.sign_ecdsa(
+        &secp256k1::Message::from_digest(payload.digest()),
+        &root_signer_key.0,
+    );
+    client
+        .request(
+            "lsp_register_tenant",
+            rpc_params![RegisterLspTenantParams {
+                root_signer_pubkey: root_signer_pubkey.into(),
+                nonce: challenge.nonce,
+                signature: hex::encode(signature.serialize_compact()),
+            }],
+        )
+        .await
+}
+
+async fn register_legacy_test_tenant(actor: &ActorRef<LspServiceMessage>, tenant_id: TenantId) {
+    ractor::call!(actor, LspServiceMessage::RegisterTenant, tenant_id)
+        .expect("register legacy test tenant")
+        .expect("legacy test tenant registration");
 }
 
 struct ExistingRuntime {
@@ -382,6 +427,7 @@ async fn create_lsp_test_network(
         connect_in_process(&nodes[*lsp_node_index], &tenant).await;
         let record = HostedTenantRecord {
             tenant_id: tenant_id.clone(),
+            root_signer_pubkey: None,
             tenant_pubkey: tenant.pubkey,
             private_channel_id: None,
             created_at: crate::now_timestamp_as_millis_u64(),
@@ -474,20 +520,11 @@ async fn create_lsp_test_network(
     }
 
     for (tenant_id, lsp_node_index, _) in &tenants {
-        let client = &lsp_services
+        let service = lsp_services
             .iter()
             .find(|lsp| lsp.node_index == *lsp_node_index)
-            .expect("LSP service for tenant")
-            .client;
-        client
-            .request::<RegisterLspTenantResult, _>(
-                "lsp_register_tenant",
-                rpc_params![LspTenantParams {
-                    tenant_id: tenant_id.to_string(),
-                }],
-            )
-            .await
-            .expect("register hosted tenant");
+            .expect("LSP service for tenant");
+        register_legacy_test_tenant(&service.actor, tenant_id.clone()).await;
     }
 
     let mut hosted_tenants = Vec::with_capacity(tenants.len());
@@ -603,23 +640,20 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         .build(format!("http://{rpc_addr}"))
         .expect("build LSP RPC client");
 
-    let registered: RegisterLspTenantResult = client
-        .request(
-            "lsp_register_tenant",
-            rpc_params![LspTenantParams {
-                tenant_id: TENANT_ID.to_string(),
-            }],
-        )
-        .await
-        .expect("register hosted tenant");
+    let registered = ractor::call!(
+        lsp_actor,
+        LspServiceMessage::RegisterTenant,
+        tenant_id.clone()
+    )
+    .expect("register tenant actor reply")
+    .expect("register tenant");
     assert_eq!(
-        registered.tenant.invoice_pubkey,
-        expected_tenant.tenant_pubkey.into()
+        registered.status.record.tenant_pubkey,
+        expected_tenant.tenant_pubkey
     );
-    assert!(registered.access_token.is_none());
     assert!(matches!(
-        registered.tenant.runtime_status,
-        LspTenantRuntimeStatus::Cold
+        registered.status.runtime_status,
+        crate::lsp::TenantRuntimeStatus::Cold
     ));
 
     let ensured: crate::rpc::lsp::LspTenantStatus = client
@@ -662,6 +696,28 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         5_000
     )
     .expect("hosted tenant accepts Fiber core commands");
+    assert!(activity.is_idle());
+
+    // Funding and closing transaction tracers are linked children which stop normally once their
+    // result is delivered. Their termination must not cascade into the hosted tenant runtime.
+    let (completed_child, completed_child_handle) = Actor::spawn_linked(
+        None,
+        NoopNetworkActor,
+        (),
+        tenant_rpc_context.fiber_actor.get_cell(),
+    )
+    .await
+    .expect("start hosted tenant child");
+    completed_child.stop(Some("test child completed".to_string()));
+    completed_child_handle
+        .await
+        .expect("join completed hosted tenant child");
+    let activity = ractor::call_t!(
+        tenant_rpc_context.fiber_actor.clone(),
+        |reply| FiberActorMessage::new_command(FiberActorCommand::GetHostedTenantActivity(reply)),
+        5_000
+    )
+    .expect("hosted tenant survives linked child termination");
     assert!(activity.is_idle());
 
     let impostor = Actor::spawn(None, NoopNetworkActor, ())
@@ -755,7 +811,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         root_actor.get_cell(),
         Script::default(),
     ));
-    let tenant_id = TenantId::new(TENANT_ID).unwrap();
+    let root_signer_key = Privkey::from(&[42; 32]);
+    let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_key.pubkey());
     let expected_tenant = runtime_factory
         .provision(&tenant_id)
         .expect("provision hosted tenant identity");
@@ -830,15 +887,24 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     let admin_client = authenticated_client(rpc_addr, &admin_token);
     let public_client = authenticated_client(rpc_addr, &public_invoice_token);
 
-    let registered: RegisterLspTenantResult = admin_client
-        .request(
-            "lsp_register_tenant",
-            rpc_params![LspTenantParams {
-                tenant_id: TENANT_ID.to_string(),
+    assert!(public_client
+        .request::<GetLspTenantRegistryNonceResult, _>(
+            "lsp_get_tenant_registry_nonce",
+            rpc_params![GetLspTenantRegistryNonceParams {
+                root_signer_pubkey: root_signer_key.pubkey().into(),
             }],
         )
         .await
-        .expect("register hosted tenant");
+        .is_err());
+
+    let registered = register_root_signer_tenant(&admin_client, &root_signer_key)
+        .await
+        .expect("register RootSigner tenant");
+    assert_eq!(registered.tenant.tenant_id, tenant_id.as_str());
+    assert_eq!(
+        registered.tenant.root_signer_pubkey,
+        Some(root_signer_key.pubkey().into())
+    );
     assert!(matches!(
         registered.tenant.runtime_status,
         LspTenantRuntimeStatus::Cold
@@ -846,17 +912,11 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     let tenant_token = registered
         .access_token
         .expect("new tenant registration must issue an access token");
-    let duplicate: RegisterLspTenantResult = admin_client
-        .request(
-            "lsp_register_tenant",
-            rpc_params![LspTenantParams {
-                tenant_id: TENANT_ID.to_string(),
-            }],
-        )
-        .await
-        .expect("repeat hosted tenant registration");
-    assert_eq!(duplicate.tenant.tenant_id, TENANT_ID);
-    assert!(duplicate.access_token.is_none());
+    let duplicate = match register_root_signer_tenant(&admin_client, &root_signer_key).await {
+        Ok(_) => panic!("registration proof must be one-time"),
+        Err(error) => error,
+    };
+    assert!(duplicate.to_string().contains("already registered"));
     let tenant_client = authenticated_client(rpc_addr, &tenant_token);
 
     let channels: fiber_json_types::ListChannelsResult = tenant_client
@@ -993,6 +1053,68 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     })
     .await;
 
+    let accept = ractor::call!(public_t.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
+            crate::fiber::network::AcceptChannelCommand {
+                temp_channel_id: temporary_channel_id,
+                funding_amount: MIN_RESERVED_CKB,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            reply,
+        ))
+    })
+    .expect("public LSP network actor alive")
+    .expect("accept tenant channel");
+    let channel_id = accept.new_channel_id;
+    wait_until_async_timeout(|| {
+        let tenant_store = public_t
+            .store
+            .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+        async move {
+            crate::fiber::channel::ChannelActorStateStore::get_channel_actor_state(
+                &tenant_store,
+                &channel_id,
+            )
+            .is_some()
+        }
+    })
+    .await;
+
+    let signing_status: fiber_json_types::GetChannelSigningStatusResult = tenant_client
+        .request(
+            "get_channel_signing_status",
+            rpc_params![fiber_json_types::GetChannelSigningStatusParams {
+                channel_id: channel_id.into(),
+            }],
+        )
+        .await
+        .expect("read signing status from the tenant channel namespace");
+    assert!(matches!(
+        signing_status.status,
+        fiber_json_types::ChannelSigningStatus::Internal
+    ));
+
+    let submit_error = tenant_client
+        .request::<fiber_json_types::SubmitChannelSignatureResult, _>(
+            "submit_channel_signature",
+            rpc_params![fiber_json_types::SubmitChannelSignatureParams {
+                channel_id: channel_id.into(),
+                request_id: crate::fiber_types::Hash256::from([9; 32]).into(),
+                partial_signature: [1; 32],
+                next_material: None,
+            }],
+        )
+        .await
+        .expect_err("an internal tenant channel must reject external signatures");
+    assert!(submit_error
+        .to_string()
+        .contains("channel does not use an external signer"));
+
     let invoice: fiber_json_types::InvoiceResult = tenant_client
         .request(
             "new_invoice",
@@ -1001,7 +1123,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
                 description: Some("tenant-scoped RPC invoice".to_string()),
                 currency: fiber_json_types::Currency::Fibd,
                 payment_preimage: None,
-                payment_hash: None,
+                payment_hash: Some(crate::fiber_types::Hash256::from([0x42; 32]).into()),
                 expiry: Some(60 * 60),
                 fallback_address: None,
                 final_expiry_delta: None,
@@ -1028,7 +1150,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .get_lsp_invoice(&payment_hash)
         .expect("read hosted invoice registration")
         .expect("tenant new_invoice should register the hosted invoice");
-    assert_eq!(registration.tenant_id, TenantId::new(TENANT_ID).unwrap());
+    assert_eq!(registration.tenant_id, tenant_id);
     assert_eq!(registration.invoice.to_string(), invoice.invoice_address);
     assert_eq!(registration.hint.payload.lsp_node_id, public_t.pubkey);
     assert_eq!(registration.hint.payload.payment_hash, payment_hash);
@@ -1104,6 +1226,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     let starts = Arc::new(AtomicUsize::new(0));
     let tenant_record = HostedTenantRecord {
         tenant_id: TenantId::new(TENANT_ID).unwrap(),
+        root_signer_pubkey: None,
         tenant_pubkey: tenant.pubkey,
         private_channel_id: None,
         created_at: crate::now_timestamp_as_millis_u64(),
@@ -1171,23 +1294,19 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
     assert_eq!(status.registered_tenants, 0);
     assert_eq!(status.active_tenants, 0);
 
-    let registered: RegisterLspTenantResult = client
-        .request(
-            "lsp_register_tenant",
-            rpc_params![LspTenantParams {
-                tenant_id: TENANT_ID.to_string(),
-            }],
-        )
+    register_legacy_test_tenant(&lsp_actor, tenant_id.clone()).await;
+    let registered: ListLspTenantsResult = client
+        .request("lsp_list_tenants", rpc_params![])
         .await
-        .expect("register hosted tenant");
-    assert_eq!(registered.tenant.invoice_pubkey, tenant.pubkey.into());
-    assert_eq!(registered.tenant.private_channel_id, None);
-    assert!(registered.access_token.is_none());
+        .expect("list registered hosted tenant");
+    let registered = registered.tenants.first().expect("registered tenant");
+    assert_eq!(registered.invoice_pubkey, tenant.pubkey.into());
+    assert_eq!(registered.private_channel_id, None);
     assert!(matches!(
-        registered.tenant.runtime_status,
+        registered.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
-    assert!(!registered.tenant.channel_online);
+    assert!(!registered.channel_online);
 
     establish_channel_between_nodes(
         &mut payer,
@@ -1472,7 +1591,7 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
                     description: Some("cross LSP hosted payment".to_string()),
                     currency: fiber_json_types::Currency::Fibd,
                     payment_preimage: None,
-                    payment_hash: None,
+                    payment_hash: Some(crate::fiber_types::Hash256::from([0x43; 32]).into()),
                     expiry: Some(60 * 60),
                     fallback_address: None,
                     final_expiry_delta: None,

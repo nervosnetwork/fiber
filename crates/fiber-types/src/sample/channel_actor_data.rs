@@ -69,6 +69,9 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
 
     ChannelActorData {
         state: ChannelState::ChannelReady,
+        signer_state: crate::ChannelSignerState::Internal,
+        local_commitment_points: HashMap::new(),
+        local_public_nonces: HashMap::new(),
         public_channel_info: None,
         local_tlc_info: ChannelTlcInfo::default(),
         remote_tlc_info: None,
@@ -273,6 +276,9 @@ fn sample_full(seed: u64) -> ChannelActorData {
 
     ChannelActorData {
         state: ChannelState::ChannelReady,
+        signer_state: crate::ChannelSignerState::Internal,
+        local_commitment_points: HashMap::new(),
+        local_public_nonces: HashMap::new(),
         public_channel_info: Some(public_channel_info),
         local_tlc_info: ChannelTlcInfo {
             enabled: true,

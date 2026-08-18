@@ -1476,6 +1476,16 @@ impl PendingNotifySettleTlc {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorData {
     pub state: ChannelState,
+    /// Signer mode and the persistable external-signing sub-state machine.
+    #[serde(default)]
+    pub signer_state: crate::ChannelSignerState,
+    /// Local per-commitment points published by an external channel signer.
+    #[serde(default)]
+    pub local_commitment_points: HashMap<u64, Pubkey>,
+    /// Local public nonces published by an external channel signer.
+    #[serde_as(as = "HashMap<_, PubNonceAsBytes>")]
+    #[serde(default)]
+    pub local_public_nonces: HashMap<crate::NonceSlot, PubNonce>,
     /// The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,
 

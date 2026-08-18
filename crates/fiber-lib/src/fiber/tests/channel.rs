@@ -30,6 +30,13 @@ use crate::fiber::types::{
 use crate::fiber::ChannelConnectivityState;
 use crate::fiber::{FiberActorMessage, FiberActorRef};
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::channel::{
+    to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
+    GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
+    OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
+    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+};
 use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
@@ -66,6 +73,10 @@ use fiber_types::{
     TlcStatus, NO_SHARED_SECRET,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_lsp_sdk::{
+    ChannelSignature, ChannelSigner, ChannelSigningContent, MemoryStore, RootSigner,
+};
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};
@@ -1575,6 +1586,470 @@ async fn test_network_send_payment_send_each_other() {
     // so the balance should be node_a_old_balance - 1, node_b_old_balance + 1
     assert_eq!(node_a_new_balance, node_a_old_balance - 1);
     assert_eq!(node_b_new_balance, node_b_old_balance + 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
+    init_tracing();
+
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("sdk-signer-node-{index}")))
+            .base_dir_prefix(&format!("sdk-signer-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [mut node_a, node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let created = RootSigner::in_memory()
+        .await
+        .expect("create in-memory root signer");
+    let channel_signer = created
+        .root_signer
+        .create_channel()
+        .await
+        .expect("create local channel signer");
+    let material = channel_signer
+        .channel_open_material(false)
+        .await
+        .expect("channel open material");
+
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: 100_000_000_000,
+                public: Some(false),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .expect("open_channel_with_external_funding over HTTP");
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: signed_tx.into(),
+            },
+        )
+        .await
+        .expect("submit_signed_funding_tx over HTTP");
+
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: channel_signer,
+    };
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    let first_status = sdk.get_signing_status(channel_id).await.status;
+    let valid_submission = sdk.prepare_submission(channel_id, first_status).await;
+
+    let mut wrong_request = valid_submission.clone();
+    wrong_request.request_id = Hash256::from([0x11; 32]).into();
+    assert!(sdk
+        .submit(wrong_request)
+        .await
+        .expect_err("wrong request id must be rejected")
+        .contains("request id does not match"));
+
+    let mut invalid_signature = valid_submission.clone();
+    invalid_signature.partial_signature = [1; 32];
+    assert!(sdk
+        .submit(invalid_signature)
+        .await
+        .expect_err("invalid partial signature must be rejected")
+        .contains("signature is invalid"));
+
+    let mut conflicting_material = valid_submission.clone();
+    conflicting_material
+        .next_material
+        .as_mut()
+        .expect("SDK submission includes next material")
+        .next_commitment_point = Some(node_b.pubkey.into());
+    assert!(sdk
+        .submit(conflicting_material)
+        .await
+        .expect_err("conflicting next signer material must be rejected")
+        .contains("conflicts with persisted material"));
+
+    let applied = sdk
+        .submit(valid_submission.clone())
+        .await
+        .expect("valid signature must resume the channel");
+    assert_eq!(applied, SubmitChannelSignatureResult::Applied);
+    let replayed = sdk
+        .submit(valid_submission)
+        .await
+        .expect("identical signature submission must be idempotent");
+    assert_eq!(replayed, SubmitChannelSignatureResult::AlreadyApplied);
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a_ready = matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            );
+            let b_ready = node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady));
+            if a_ready && b_ready {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SDK-owned signer should take the channel to ChannelReady");
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        state.signer_state.signing_status(),
+        fiber_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+    assert_ne!(
+        state.local_channel_public_keys.funding_pubkey,
+        state.signer.funding_key.pubkey(),
+        "the node must not fall back to its local channel funding key"
+    );
+
+    let payment = node_a
+        .send_payment_keysend(&node_b, 10_000, false)
+        .await
+        .expect("start payment that requires an external commitment signature");
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    assert_ne!(
+        node_a.get_payment_status(payment.payment_hash).await,
+        PaymentStatus::Success,
+        "payment must remain paused before the signature is submitted"
+    );
+
+    let pending_before_restart = sdk.get_signing_status(channel_id).await.status;
+    let fiber_json_types::ChannelSigningStatus::SignatureRequired {
+        request_id: expected_request_id,
+        ..
+    } = pending_before_restart
+    else {
+        panic!("payment must persist a pending signing request");
+    };
+    let ExternalSignerHttpClient { signer, .. } = sdk;
+    node_a.restart().await;
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer,
+    };
+    let pending_after_restart = sdk.get_signing_status(channel_id).await.status;
+    assert!(matches!(
+        pending_after_restart,
+        fiber_json_types::ChannelSigningStatus::SignatureRequired {
+            request_id,
+            ..
+        } if request_id == expected_request_id
+    ));
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if node_a.get_payment_status(payment.payment_hash).await == PaymentStatus::Success {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("payment should finish while the HTTP client services signer requests");
+    assert!(matches!(
+        sdk.get_signing_status(channel_id).await.status,
+        fiber_json_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+
+    node_a
+        .send_shutdown(channel_id, false)
+        .await
+        .expect("start cooperative close that requires an external closing signature");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::Closed(CloseFlags::COOPERATIVE)
+            ) && node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| {
+                    matches!(state.state, ChannelState::Closed(CloseFlags::COOPERATIVE))
+                })
+            {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cooperative close should finish while the HTTP client services signer requests");
+    assert!(matches!(
+        sdk.get_signing_status(channel_id).await.status,
+        fiber_json_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_public_channel_announcement_pauses_until_signature_is_submitted() {
+    init_tracing();
+
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("sdk-public-signer-node-{index}")))
+            .base_dir_prefix(&format!("sdk-public-signer-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let created = RootSigner::in_memory()
+        .await
+        .expect("create in-memory root signer");
+    let channel_signer = created
+        .root_signer
+        .create_channel()
+        .await
+        .expect("create local channel signer");
+    let material = channel_signer
+        .channel_open_material(true)
+        .await
+        .expect("public channel open material");
+
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: 100_000_000_000,
+                public: Some(true),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .expect("open public channel with external funding over HTTP");
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: signed_tx.into(),
+            },
+        )
+        .await
+        .expect("submit_signed_funding_tx over HTTP");
+
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: channel_signer,
+    };
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a_ready = matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            );
+            let b_ready = node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady));
+            if a_ready && b_ready {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SDK-owned signer should announce a public channel and reach ChannelReady");
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(state.is_public());
+    assert!(state
+        .public_channel_info
+        .as_ref()
+        .and_then(|info| info.channel_announcement.as_ref())
+        .is_some_and(|announcement| announcement.is_signed()));
+    assert!(matches!(
+        state.signer_state.signing_status(),
+        fiber_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn bind_external_signer(
+    signer: &ChannelSigner<MemoryStore>,
+    unsigned_tx: &Transaction,
+    shutdown_script: Script,
+) {
+    let expected_inputs: Vec<_> = unsigned_tx
+        .raw()
+        .inputs()
+        .into_iter()
+        .map(|input| input.previous_output())
+        .collect();
+    signer
+        .bind_from_approved_funding(unsigned_tx, 0, shutdown_script, &expected_inputs)
+        .await
+        .expect("bind approved funding");
+}
+
+/// Phone-SDK stand-in: HTTP RPC to Fiber plus an independent local `fiber-signer`.
+///
+/// It never sends ChannelActor commands for query or submit, and the node does not
+/// start a signer actor for this channel.
+#[cfg(not(target_arch = "wasm32"))]
+struct ExternalSignerHttpClient<'a> {
+    node: &'a NetworkNode,
+    signer: ChannelSigner<MemoryStore>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ExternalSignerHttpClient<'_> {
+    async fn get_signing_status(&self, channel_id: Hash256) -> GetChannelSigningStatusResult {
+        self.node
+            .send_rpc_request(
+                "get_channel_signing_status",
+                GetChannelSigningStatusParams {
+                    channel_id: channel_id.into(),
+                },
+            )
+            .await
+            .expect("get_channel_signing_status over HTTP")
+    }
+
+    async fn try_sign_pending(&self, channel_id: Hash256) {
+        let status = self.get_signing_status(channel_id).await.status;
+        if !matches!(
+            status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        ) {
+            return;
+        }
+        let submission = self.prepare_submission(channel_id, status).await;
+        let result = self
+            .submit(submission)
+            .await
+            .expect("submit_channel_signature over HTTP");
+        assert_eq!(result, SubmitChannelSignatureResult::Applied);
+    }
+
+    async fn prepare_submission(
+        &self,
+        channel_id: Hash256,
+        status: fiber_json_types::ChannelSigningStatus,
+    ) -> SubmitChannelSignatureParams {
+        let fiber_json_types::ChannelSigningStatus::SignatureRequired {
+            request_id,
+            content,
+            ..
+        } = status
+        else {
+            panic!("channel must have a pending signing request");
+        };
+        let content = fiber_lsp_sdk::json::musig2_from_rpc(content)
+            .expect("RPC signing content must round-trip into fiber-signer plaintext");
+        let slot = content.slot;
+        let prepared = self
+            .signer
+            .prepare(ChannelSigningContent::Musig2(content))
+            .await
+            .expect("independent signer prepares the RPC plaintext");
+        let signature = self
+            .signer
+            .sign(prepared)
+            .await
+            .expect("independent signer signs the RPC plaintext");
+        let ChannelSignature::Musig2(signature) = signature else {
+            panic!("channel MuSig2 request must produce a MuSig2 signature");
+        };
+        let next_material = self
+            .signer
+            .next_material(slot)
+            .await
+            .expect("next public signer material");
+        SubmitChannelSignatureParams {
+            channel_id: channel_id.into(),
+            request_id,
+            partial_signature: signature.partial_signature.serialize(),
+            next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
+        }
+    }
+
+    async fn submit(
+        &self,
+        params: SubmitChannelSignatureParams,
+    ) -> Result<SubmitChannelSignatureResult, String> {
+        self.node
+            .send_rpc_request("submit_channel_signature", params)
+            .await
+    }
 }
 
 #[tokio::test]
@@ -5416,6 +5891,7 @@ async fn test_revoke_old_commitment_transaction() {
     let x_only_aggregated_pubkey = node_b
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::RemoteTxComplete(
+                _,
                 _,
                 _,
                 _,
@@ -10447,6 +10923,7 @@ async fn open_external_funding_channel(
                 tlc_fee_proportional_millionths: None,
                 max_tlc_value_in_flight: None,
                 max_tlc_number_in_flight: None,
+                external_channel_signer: None,
             },
             rpc_reply,
         ))
@@ -11138,6 +11615,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
                 tlc_fee_proportional_millionths: None,
                 max_tlc_value_in_flight: None,
                 max_tlc_number_in_flight: None,
+                external_channel_signer: None,
             },
             rpc_reply,
         ))
@@ -11183,6 +11661,7 @@ async fn test_external_funding_invalid_commitment_delay() {
                 tlc_fee_proportional_millionths: None,
                 max_tlc_value_in_flight: None,
                 max_tlc_number_in_flight: None,
+                external_channel_signer: None,
             },
             rpc_reply,
         ))
@@ -11231,6 +11710,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
                     tlc_fee_proportional_millionths: None,
                     max_tlc_value_in_flight: None,
                     max_tlc_number_in_flight: None,
+                    external_channel_signer: None,
                 },
                 rpc_reply,
             ))
@@ -12224,6 +12704,9 @@ mod udt_funding_cell_capacity {
         ChannelActorState {
             core: ChannelActorData {
                 state: ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty()),
+                signer_state: fiber_types::ChannelSignerState::Internal,
+                local_commitment_points: HashMap::new(),
+                local_public_nonces: HashMap::new(),
                 public_channel_info: None,
                 local_tlc_info: ChannelTlcInfo::default(),
                 remote_tlc_info: None,
@@ -12288,6 +12771,7 @@ mod udt_funding_cell_capacity {
             private_key: None,
             funding_abort_detail: None,
             needs_backup: false,
+            channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
         }
     }
 

@@ -43,7 +43,9 @@ use fiber_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
-use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
+use fiber_types::{
+    ChannelData, NodeId, Privkey, RevocationData, SettlementData, WatchtowerSignerState,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1724,7 +1726,8 @@ impl WatchtowerStore for Store {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
+        local_settlement_key: Option<Privkey>,
+        local_settlement_key_pubkey: Pubkey,
         remote_settlement_key: Pubkey,
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
@@ -1738,11 +1741,13 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let external = local_settlement_key.is_none();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
+                local_settlement_key_pubkey: Some(local_settlement_key_pubkey),
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
@@ -1753,8 +1758,26 @@ impl WatchtowerStore for Store {
             },
             "ChannelData",
         );
+        let signer_state = if external {
+            WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState {
+                state: fiber_types::WatchtowerExternalState::Ready,
+                last_applied: None,
+            })
+        } else {
+            WatchtowerSignerState::Internal
+        };
+        let signer_key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         let mut batch = self.batch();
         batch.put(key, value);
+        batch.put(
+            signer_key,
+            serialize_to_vec(&signer_state, "WatchtowerSignerState"),
+        );
         batch.commit();
     }
 
@@ -1786,6 +1809,14 @@ impl WatchtowerStore for Store {
             .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
             .unwrap_or_default();
         self.delete(key);
+        self.delete(
+            [
+                &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        );
         self.cleanup_unused_watch_preimages_locked(
             &node_id,
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
@@ -1894,6 +1925,52 @@ impl WatchtowerStore for Store {
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256> {
         self.get(Self::watchtower_preimage_key(node_id, payment_hash))
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
+    }
+
+    fn get_watch_channel(&self, node_id: &NodeId, channel_id: &Hash256) -> Option<ChannelData> {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "ChannelData"))
+    }
+
+    fn get_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+    ) -> WatchtowerSignerState {
+        let key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "WatchtowerSignerState"))
+            .unwrap_or(WatchtowerSignerState::Internal)
+    }
+
+    fn put_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        state: WatchtowerSignerState,
+    ) {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        let key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
+        batch.commit();
     }
 
     fn insert_onchain_tlc_settlement(

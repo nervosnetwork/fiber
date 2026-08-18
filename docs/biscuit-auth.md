@@ -113,6 +113,21 @@ rule(
 ); 
 rule("create_preimage", r#"allow if write("watchtower");"#); 
 rule("remove_preimage", r#"allow if write("watchtower");"#); 
+rule(
+    "get_watchtower_signing_status",
+    r#"
+    allow if read("watchtower");
+    allow if write("watchtower");
+    allow if read("channels");
+    "#,
+);
+rule(
+    "submit_watchtower_signature",
+    r#"
+    allow if write("watchtower");
+    allow if write("channels");
+    "#,
+);
 ```
 
 ## 3. How to Configure Biscuit Auth in Fiber

@@ -29,6 +29,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_channel`](#channel-update_channel)
         * [Method `open_channel_with_external_funding`](#channel-open_channel_with_external_funding)
         * [Method `submit_signed_funding_tx`](#channel-submit_signed_funding_tx)
+        * [Method `get_channel_signing_status`](#channel-get_channel_signing_status)
+        * [Method `submit_channel_signature`](#channel-submit_channel_signature)
     * [Module Dev](#module-dev)
         * [Method `commitment_signed`](#dev-commitment_signed)
         * [Method `add_tlc`](#dev-add_tlc)
@@ -49,6 +51,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `settle_invoice`](#invoice-settle_invoice)
     * [Module Lsp](#module-lsp)
         * [Method `lsp_get_status`](#lsp-lsp_get_status)
+        * [Method `lsp_get_tenant_registry_nonce`](#lsp-lsp_get_tenant_registry_nonce)
         * [Method `lsp_register_tenant`](#lsp-lsp_register_tenant)
         * [Method `lsp_ensure_tenant`](#lsp-lsp_ensure_tenant)
         * [Method `lsp_evict_tenant`](#lsp-lsp_evict_tenant)
@@ -78,13 +81,18 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_local_settlement`](#watchtower-update_local_settlement)
         * [Method `create_preimage`](#watchtower-create_preimage)
         * [Method `remove_preimage`](#watchtower-remove_preimage)
+        * [Method `get_watchtower_signing_status`](#watchtower-get_watchtower_signing_status)
+        * [Method `submit_watchtower_signature`](#watchtower-submit_watchtower_signature)
 * [RPC Types](#rpc-types)
 
     * [Type `Attribute`](#type-attribute)
     * [Type `CchInvoice`](#type-cchinvoice)
     * [Type `CchOrderStatus`](#type-cchorderstatus)
     * [Type `Channel`](#type-channel)
+    * [Type `ChannelBasePublicKeys`](#type-channelbasepublickeys)
     * [Type `ChannelInfo`](#type-channelinfo)
+    * [Type `ChannelOpenSignerMaterial`](#type-channelopensignermaterial)
+    * [Type `ChannelSigningStatus`](#type-channelsigningstatus)
     * [Type `ChannelState`](#type-channelstate)
     * [Type `ChannelUpdateInfo`](#type-channelupdateinfo)
     * [Type `CkbInvoice`](#type-ckbinvoice)
@@ -103,6 +111,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `LspTenantRuntimeStatus`](#type-lsptenantruntimestatus)
     * [Type `LspTenantStatus`](#type-lsptenantstatus)
     * [Type `NewInvoiceParams`](#type-newinvoiceparams)
+    * [Type `NextChannelSignerMaterial`](#type-nextchannelsignermaterial)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
     * [Type `PaymentCustomRecords`](#type-paymentcustomrecords)
@@ -125,6 +134,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `UdtCfgInfos`](#type-udtcfginfos)
     * [Type `UdtDep`](#type-udtdep)
     * [Type `UdtScript`](#type-udtscript)
+    * [Type `WatchtowerSigningStatus`](#type-watchtowersigningstatus)
 
 ## RPC Modules
 
@@ -445,6 +455,8 @@ Opens a channel with external funding. The node will negotiate the channel with 
  This parameter can not be updated after channel is opened.
 * `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
  This parameter can not be updated after channel is opened.
+* `external_channel_signer` - <em>Option<[ChannelOpenSignerMaterial](#type-channelopensignermaterial)></em>, Optional public channel-signer material. When present, the node treats the
+ channel as externally signed and never holds or falls back to local channel keys.
 
 ##### Returns
 
@@ -477,6 +489,55 @@ Submits a signed funding transaction for an externally funded channel.
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID.
 * `funding_tx_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the funding transaction that was submitted.
+
+---
+
+
+
+<a id="channel-get_channel_signing_status"></a>
+#### Method `get_channel_signing_status`
+
+Reads the current external signing status for a channel.
+
+ This method reads persisted channel state and does not require the channel actor
+ to process a command. When the status is `SignatureRequired`, the response includes
+ the structured MuSig2 plaintext. An external signer hashes that plaintext independently
+ and submits the resulting partial signature with `submit_channel_signature`.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel whose signer state should be read.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel whose signer state was read.
+* `status` - <em>[ChannelSigningStatus](#type-channelsigningstatus)</em>, Current signer status for this channel.
+
+---
+
+
+
+<a id="channel-submit_channel_signature"></a>
+#### Method `submit_channel_signature`
+
+Submits a partial signature for the channel's current outstanding signing request.
+
+ The node verifies `request_id` against the persisted request, checks the partial
+ signature against the saved plaintext, then resumes the channel
+ state machine. The caller cannot replace the transaction or signing content.
+ Optional `next_material` supplies the next commitment point and public nonces.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel that produced the outstanding signature request.
+* `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
+* `partial_signature` - <em>``</em>, MuSig2 partial signature over the persisted plaintext (32 bytes, `0x`-prefixed hex).
+* `next_material` - <em>Option<[NextChannelSignerMaterial](#type-nextchannelsignermaterial)></em>, Optional next-round public commitment point and nonces.
+
+##### Returns
+
+* `Applied` - <em>``</em>, The signature was verified and the channel state machine resumed.
+* `AlreadyApplied` - <em>``</em>, The same signature was already applied for this request.
 
 ---
 
@@ -566,7 +627,10 @@ Submit a commitment transaction to the chain
 <a id="dev-check_channel_shutdown"></a>
 #### Method `check_channel_shutdown`
 
-Manually trigger CheckShutdownTx on all channels
+Manually trigger CheckShutdownTx on a channel.
+
+ A tenant Biscuit routes this to the hosted tenant Fiber; other
+ callers hit the public host node.
 
 ##### Params
 
@@ -700,9 +764,11 @@ Generates a new invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
- If both preimage and hash are absent, a random preimage is generated.
+ If both preimage and hash are absent, a standalone node generates a random preimage.
+ Hosted tenant invoices must supply this or `payment_hash`; the LSP will not invent a settle secret.
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
  for which the tlc must be accepted and held until the preimage becomes known.
+ Hosted tenant invoices may supply only this field so the client keeps the preimage.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -818,6 +884,25 @@ Returns a summary of the hosted LSP service.
 
 
 
+<a id="lsp-lsp_get_tenant_registry_nonce"></a>
+#### Method `lsp_get_tenant_registry_nonce`
+
+Issues and persists a fresh one-time tenant registration nonce.
+
+##### Params
+
+* `root_signer_pubkey` - <em>[Pubkey](#type-pubkey)</em>, RootSigner identity that will sign the registration payload.
+
+##### Returns
+
+* `lsp_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public Fiber identity of the hosted LSP.
+* `root_signer_pubkey` - <em>[Pubkey](#type-pubkey)</em>, RootSigner identity associated with this nonce.
+* `nonce` - <em>[Hash256](#type-hash256)</em>, Cryptographically random, single-use 32-byte nonce.
+
+---
+
+
+
 <a id="lsp-lsp_register_tenant"></a>
 #### Method `lsp_register_tenant`
 
@@ -825,7 +910,9 @@ Persistently registers a hosted tenant without starting its Fiber runtime.
 
 ##### Params
 
-* `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>[Pubkey](#type-pubkey)</em>, RootSigner identity that deterministically derives the tenant ID.
+* `nonce` - <em>[Hash256](#type-hash256)</em>, Most recent nonce issued for this RootSigner by this LSP.
+* `signature` - <em>`String`</em>, Compact ECDSA signature over the canonical `TenantRegistryPayload`, as hex.
 
 ##### Returns
 
@@ -848,6 +935,8 @@ Starts a registered tenant execution context if it is currently cold.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, RootSigner identity that owns this tenant, when registered through the
+ authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
@@ -871,6 +960,8 @@ Stops a tenant execution context while retaining its persistent state and keys.
 ##### Returns
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, RootSigner identity that owns this tenant, when registered through the
+ authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
@@ -1355,13 +1446,22 @@ RPC module for watchtower related operations
 <a id="watchtower-create_watch_channel"></a>
 #### Method `create_watch_channel`
 
-Create a new watched channel
+Create a new watched channel.
+
+ Supplying `local_settlement_key` leaves the settlement secret on the
+ watchtower. Omit the private key and pass `local_settlement_key_pubkey`
+ for an externally signed channel. Settlement then pauses until the
+ owner submits a signature through `get_watchtower_signing_status` and
+ `submit_watchtower_signature`.
 
 ##### Params
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel ID
 * `funding_udt_type_script` - <em>`Option<Script>`</em>, Funding UDT type script
-* `local_settlement_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to settle the commitment transaction (hex without 0x prefix)
+* `local_settlement_key` - <em>Option<[Privkey](#type-privkey)></em>, The local party's private key used to settle the commitment transaction.
+ Omitted when an external signer owns the key.
+* `local_settlement_key_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, Public key committed to the local settlement path. Required when the
+ private key is omitted; legacy callers may omit it when providing the key.
 * `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
@@ -1482,6 +1582,44 @@ Remove preimage
 
 
 
+<a id="watchtower-get_watchtower_signing_status"></a>
+#### Method `get_watchtower_signing_status`
+
+Read the current external watchtower signing status for a watched channel.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel whose signer state should be read.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel whose signer state was read.
+* `status` - <em>[WatchtowerSigningStatus](#type-watchtowersigningstatus)</em>, Current signer status for this watched channel.
+
+---
+
+
+
+<a id="watchtower-submit_watchtower_signature"></a>
+#### Method `submit_watchtower_signature`
+
+Submit an external watchtower settlement or TLC signature.
+
+##### Params
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel that produced the outstanding signature request.
+* `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
+* `signature` - <em>``</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
+
+##### Returns
+
+* `Applied` - <em>``</em>, The signature was verified and the watchtower resumed.
+* `AlreadyApplied` - <em>``</em>, The same signature was already applied for this request.
+
+---
+
+
+
 
 ## RPC Types
 
@@ -1580,6 +1718,19 @@ The channel data structure.
  Only present when the channel is in a failed state (e.g. abandoned or funding aborted).
 ---
 
+<a id="#type-channelbasepublickeys"></a>
+### Type `ChannelBasePublicKeys`
+
+One counterparty's public keys which do not change over the life of a channel.
+
+
+#### Fields
+
+* `funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The public key used to sign commitment transactions, as it appears in the
+ on-chain 2-of-2 MuSig2 funding output.
+* `tlc_base_key` - <em>[Pubkey](#type-pubkey)</em>, The base point used to derive per-commitment TLC public keys.
+---
+
 <a id="#type-channelinfo"></a>
 ### Type `ChannelInfo`
 
@@ -1598,6 +1749,36 @@ The Channel information.
 * `capacity` - <em>`u128`</em>, The capacity of the channel.
 * `chain_hash` - <em>[Hash256](#type-hash256)</em>, The chain hash of the channel.
 * `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the channel.
+---
+
+<a id="#type-channelopensignermaterial"></a>
+### Type `ChannelOpenSignerMaterial`
+
+Public channel-signer material required to send Fiber's `OpenChannel` message.
+
+
+#### Fields
+
+* `base_public_keys` - <em>[ChannelBasePublicKeys](#type-channelbasepublickeys)</em>, Static funding and TLC public keys for this channel.
+* `first_commitment_point` - <em>[Pubkey](#type-pubkey)</em>, Per-commitment point for commitment number 1.
+* `second_commitment_point` - <em>[Pubkey](#type-pubkey)</em>, Per-commitment point for commitment number 2.
+* `commitment_nonce` - <em>`Vec<u8>`</em>, Commitment public nonce at the initial local commitment number, encoded as `0x`-prefixed hex.
+* `next_commitment_nonce` - <em>`Vec<u8>`</em>, Commitment public nonce published in `TxComplete`, encoded as `0x`-prefixed hex.
+* `revocation_nonce` - <em>`Vec<u8>`</em>, Revocation public nonce published with `OpenChannel`, encoded as `0x`-prefixed hex.
+* `channel_announcement_nonce` - <em>`Option<Vec<u8>>`</em>, Channel-announcement public nonce; required for public channels and forbidden for private ones.
+---
+
+<a id="#type-channelsigningstatus"></a>
+### Type `ChannelSigningStatus`
+
+Read-only projection of a channel's signer sub-state.
+
+
+#### Enum with values of
+
+* `Internal` - This channel uses the node's local signer.
+* `NoSignatureRequired` - This channel uses an external signer, but no signature is currently required.
+* `SignatureRequired` - Channel processing is paused until this exact signature is submitted.
 ---
 
 <a id="#type-channelstate"></a>
@@ -1869,6 +2050,8 @@ Hosted tenant state boundary and liveness information.
 #### Fields
 
 * `tenant_id` - <em>`String`</em>, Stable operator-facing tenant identifier.
+* `root_signer_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, RootSigner identity that owns this tenant, when registered through the
+ authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
 * `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
@@ -1889,9 +2072,11 @@ The parameter struct for generating a new invoice.
 * `description` - <em>`Option<String>`</em>, The description of the invoice.
 * `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
 * `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
- If both preimage and hash are absent, a random preimage is generated.
+ If both preimage and hash are absent, a standalone node generates a random preimage.
+ Hosted tenant invoices must supply this or `payment_hash`; the LSP will not invent a settle secret.
 * `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
  for which the tlc must be accepted and held until the preimage becomes known.
+ Hosted tenant invoices may supply only this field so the client keeps the preimage.
 * `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
 * `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
 * `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
@@ -1900,6 +2085,19 @@ The parameter struct for generating a new invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 * `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
+---
+
+<a id="#type-nextchannelsignermaterial"></a>
+### Type `NextChannelSignerMaterial`
+
+Follow-up public signer material submitted together with a channel signature.
+
+
+#### Fields
+
+* `next_commitment_point` - <em>Option<[Pubkey](#type-pubkey)></em>, Next local per-commitment point the node will need.
+* `next_commitment_nonce` - <em>`Option<Vec<u8>>`</em>, Next commitment public nonce, encoded as `0x`-prefixed hex.
+* `next_revocation_nonce` - <em>`Option<Vec<u8>>`</em>, Next revocation public nonce, encoded as `0x`-prefixed hex.
 ---
 
 <a id="#type-nodeinfo"></a>
@@ -2107,7 +2305,10 @@ Data needed to authorize and execute a Time-Locked Contract (TLC) settlement tra
 * `payment_amount` - <em>`u128`</em>, The amount of CKB/UDT involved in the TLC
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, The hash of the payment preimage
 * `expiry` - <em>`u64`</em>, The expiry time for the TLC in milliseconds
-* `local_key` - <em>[Privkey](#type-privkey)</em>, The local party's private key used to sign the TLC (hex without 0x prefix)
+* `local_key` - <em>Option<[Privkey](#type-privkey)></em>, The local party's private key used to sign the TLC (hex without 0x prefix).
+ Omitted when an external signer owns the channel keys.
+* `local_key_pubkey` - <em>Option<[Pubkey](#type-pubkey)></em>, The signer-owned TLC public key.
+* `local_key_commitment_number` - <em>`Option<u64>`</em>, Commitment point index used to derive an external TLC key.
 * `remote_key` - <em>[Pubkey](#type-pubkey)</em>, The remote party's public key used to verify the TLC (hex without 0x prefix)
 ---
 
@@ -2206,5 +2407,18 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node.
 * `code_hash` - <em>`H256`</em>, The code hash of the script.
 * `hash_type` - <em>`ScriptHashType`</em>, The hash type of the script.
 * `args` - <em>`String`</em>, The arguments of the script.
+---
+
+<a id="#type-watchtowersigningstatus"></a>
+### Type `WatchtowerSigningStatus`
+
+Read-only projection of a watchtower's external signer sub-state.
+
+
+#### Enum with values of
+
+* `Internal` - This watched channel holds a local settlement secret.
+* `NoSignatureRequired` - External signer, but no signature is currently required.
+* `SignatureRequired` - Settlement or TLC spend is paused until this signature is submitted.
 ---
 

@@ -128,10 +128,12 @@ pub struct NewInvoiceParams {
     /// The currency of the invoice.
     pub currency: Currency,
     /// The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
-    /// If both preimage and hash are absent, a random preimage is generated.
+    /// If both preimage and hash are absent, a standalone node generates a random preimage.
+    /// Hosted tenant invoices must supply this or `payment_hash`; the LSP will not invent a settle secret.
     pub payment_preimage: Option<Hash256>,
     /// The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
     /// for which the tlc must be accepted and held until the preimage becomes known.
+    /// Hosted tenant invoices may supply only this field so the client keeps the preimage.
     pub payment_hash: Option<Hash256>,
     /// The expiry time of the invoice, in seconds.
     #[serde_as(as = "Option<U64Hex>")]
