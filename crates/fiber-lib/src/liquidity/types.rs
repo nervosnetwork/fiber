@@ -44,6 +44,9 @@ pub enum LiquidityLoopOutError {
     /// The quote expired before it could be accepted or executed.
     #[error("quote expired")]
     QuoteExpired,
+    /// The absolute refund lock time cannot be encoded as a CKB since timestamp.
+    #[error("refund lock time overflows CKB since timestamp")]
+    RefundLockTimeOverflow,
     /// The requested state transition is not valid for the Loop Out role.
     #[error("invalid loop out state transition from {from:?} to {to:?}")]
     InvalidStateTransition {
