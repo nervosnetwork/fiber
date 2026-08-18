@@ -27,7 +27,7 @@ use crate::{
 use fiber_types::{Hash256, UdtCfgInfos};
 use fiber_types::{UdtArgInfo, UdtScript};
 
-use crate::ckb::CkbChainMessage;
+use crate::ckb::{CkbChainMessage, LiveCell};
 
 use ractor::{
     call_t, concurrency::Duration, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
@@ -43,6 +43,9 @@ pub enum CellStatus {
     // This cell has been consumed. If any transaction
     // tries to consume the same cell, it should be rejected.
     Consumed,
+    // The cell is pending or rejected, so it must not be reported as live.
+    Pending,
+    Rejected,
 }
 
 // The problem of channel announcement is that each nodes will query the block timestamp
@@ -796,11 +799,25 @@ impl Actor for MockChainActor {
                 // ignore
             }
 
-            GetLiveCell(_, reply_port) => {
+            GetLiveCell(outpoint, reply_port) => {
+                let live_cell = {
+                    let state_guard = state.shared.read().unwrap();
+                    if state_guard.cell_status.contains_key(&outpoint) {
+                        None
+                    } else {
+                        MOCK_CONTEXT
+                            .read()
+                            .unwrap()
+                            .context
+                            .get_cell(&outpoint)
+                            .map(|(output, data)| LiveCell {
+                                output,
+                                data: packed::Bytes::from(data.as_ref()),
+                            })
+                    }
+                };
                 if !reply_port.is_closed() {
-                    let _ = reply_port.send(Err(ckb_sdk::RpcError::Other(anyhow!(
-                        "GetLiveCell not implemented in mock"
-                    ))));
+                    let _ = reply_port.send(Ok(live_cell));
                 }
             }
 
@@ -819,6 +836,16 @@ impl Actor for MockChainActor {
     ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
+}
+
+pub async fn create_mock_chain_actor_with_shared_state(
+) -> (ActorRef<CkbChainMessage>, Arc<RwLock<MockChainState>>) {
+    let shared_state = Arc::new(RwLock::new(MockChainState::new()));
+    let actor = Actor::spawn(None, MockChainActor::new(), (None, shared_state.clone()))
+        .await
+        .expect("start mock chain actor")
+        .0;
+    (actor, shared_state)
 }
 
 pub async fn submit_tx(mock_actor: ActorRef<CkbChainMessage>, tx: TransactionView) -> TxStatus {

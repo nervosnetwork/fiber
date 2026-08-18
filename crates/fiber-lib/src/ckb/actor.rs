@@ -28,6 +28,14 @@ use super::{
 
 pub struct CkbChainActor {}
 
+/// A live cell output together with its cell data, used to validate the
+/// observed cells (e.g. UDT amounts) during liquidity swaps.
+#[derive(Clone, Debug)]
+pub struct LiveCell {
+    pub output: packed::CellOutput,
+    pub data: packed::Bytes,
+}
+
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
 #[derive(Clone, Debug)]
@@ -80,7 +88,7 @@ pub enum CkbChainMessage {
     ReportSendTxError(Hash256, RpcError),
     GetLiveCell(
         packed::OutPoint,
-        RpcReplyPort<Result<Option<packed::CellOutput>, RpcError>>,
+        RpcReplyPort<Result<Option<LiveCell>, RpcError>>,
     ),
 
     Stop,
@@ -370,11 +378,26 @@ impl Actor for CkbChainActor {
             CkbChainMessage::GetLiveCell(outpoint, reply_port) => {
                 let ckb_client = state.config.ckb_rpc_client();
                 let outpoint_json: ckb_jsonrpc_types::OutPoint = outpoint.clone().into();
-                let result = ckb_client
-                    .get_live_cell(outpoint_json, true)
-                    .await
-                    .map(|live_cell| live_cell.cell.map(|cell| cell.output.into()))
-                    .map_err(|e| RpcError::Other(anyhow::anyhow!("get_live_cell failed: {e}")));
+                let result: Result<Option<LiveCell>, RpcError> =
+                    match ckb_client.get_live_cell(outpoint_json, true).await {
+                        Ok(live_cell) => live_cell
+                            .cell
+                            .map(|cell| {
+                                let data = cell.data.ok_or_else(|| {
+                                    RpcError::Other(anyhow::anyhow!(
+                                        "get_live_cell response omitted requested cell data"
+                                    ))
+                                })?;
+                                Ok(LiveCell {
+                                    output: cell.output.into(),
+                                    data: packed::Bytes::from(data.content.as_bytes()),
+                                })
+                            })
+                            .transpose(),
+                        Err(e) => Err(RpcError::Other(anyhow::anyhow!(
+                            "get_live_cell failed: {e}"
+                        ))),
+                    };
                 if !reply_port.is_closed() {
                     let _ = reply_port.send(result);
                 }
