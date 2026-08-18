@@ -1609,7 +1609,7 @@ Submit an external watchtower settlement or TLC signature.
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The watched channel that produced the outstanding signature request.
 * `request_id` - <em>[Hash256](#type-hash256)</em>, Identifier of the outstanding signature request.
-* `signature` - <em>``</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
+* `signature` - <em>`Vec<u8>`</em>, Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
 
 ##### Returns
 
