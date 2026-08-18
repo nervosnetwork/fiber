@@ -1250,7 +1250,7 @@ where
             )
         })?;
 
-        let lock_script = cell.lock();
+        let lock_script = cell.output.lock();
         let args = lock_script.args().raw_data();
         validate_liquidity_lock_args(
             &args,
@@ -1262,7 +1262,7 @@ where
         )?;
 
         if quote.asset.kind == LiquidityAssetKind::Udt {
-            let cell_type_script = cell.type_().to_opt();
+            let cell_type_script = cell.output.type_().to_opt();
             let expected_type = quote.asset.udt_type_script.as_ref();
             match (cell_type_script, expected_type) {
                 (Some(cell_type), Some(expected)) => {
