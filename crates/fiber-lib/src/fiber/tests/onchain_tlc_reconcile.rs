@@ -9,9 +9,9 @@ use crate::fiber::tests::settle_tlc_set_command_tests::{
 use crate::gen_rand_sha256_hash;
 
 use fiber_types::{
-    AppliedFlags, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus,
-    RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus,
+    AppliedFlags, ChannelState, CloseFlags, CommitmentNumbers, Hash256, HashAlgorithm,
+    InboundTlcStatus, OutboundTlcStatus, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
 };
 
 const TEST_SHARED_SECRET: [u8; 32] = [7u8; 32];
@@ -251,15 +251,13 @@ fn resolve_ignores_locally_known_preimage_without_settlement_record() {
 }
 
 #[test]
-fn collect_skips_removed_and_uncommitted_tlcs() {
+fn collect_skips_removed_offered_tlcs() {
     let channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
     let active_preimage = gen_rand_sha256_hash();
     let removed_preimage = gen_rand_sha256_hash();
-    let uncommitted_preimage = gen_rand_sha256_hash();
     let active_hash = payment_hash_for(active_preimage, hash_algorithm);
     let removed_hash = payment_hash_for(removed_preimage, hash_algorithm);
-    let uncommitted_hash = payment_hash_for(uncommitted_preimage, hash_algorithm);
 
     let active = tlc_info(
         TLCId::Offered(0),
@@ -276,15 +274,9 @@ fn collect_skips_removed_and_uncommitted_tlcs() {
     removed.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
         payment_preimage: removed_preimage,
     }));
-    let uncommitted = tlc_info(
-        TLCId::Offered(2),
-        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        uncommitted_hash,
-        hash_algorithm,
-    );
 
     let mut state = empty_channel_state(channel_id);
-    state.tlc_state.offered_tlcs.tlcs = vec![active, removed, uncommitted];
+    state.tlc_state.offered_tlcs.tlcs = vec![active, removed];
     let store = MockStore::new()
         .with_onchain_preimage(
             channel_id,
@@ -299,10 +291,50 @@ fn collect_skips_removed_and_uncommitted_tlcs() {
             removed_hash,
             hash_algorithm,
             removed_preimage,
+        );
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
+
+    assert_eq!(fulfilled.len(), 1);
+    assert_eq!(fulfilled[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(fulfilled[0].preimage, active_preimage);
+}
+
+#[test]
+fn collect_skips_inbound_remote_announced() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let committed_preimage = gen_rand_sha256_hash();
+    let uncommitted_preimage = gen_rand_sha256_hash();
+    let committed_hash = payment_hash_for(committed_preimage, hash_algorithm);
+    let uncommitted_hash = payment_hash_for(uncommitted_preimage, hash_algorithm);
+
+    let committed = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        committed_hash,
+        hash_algorithm,
+    );
+    let uncommitted = tlc_info(
+        TLCId::Received(1),
+        TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
+        uncommitted_hash,
+        hash_algorithm,
+    );
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.received_tlcs.tlcs = vec![committed, uncommitted];
+    let store = MockStore::new()
+        .with_onchain_preimage(
+            channel_id,
+            TLCId::Received(0),
+            committed_hash,
+            hash_algorithm,
+            committed_preimage,
         )
         .with_onchain_preimage(
             channel_id,
-            TLCId::Offered(2),
+            TLCId::Received(1),
             uncommitted_hash,
             hash_algorithm,
             uncommitted_preimage,
@@ -311,8 +343,8 @@ fn collect_skips_removed_and_uncommitted_tlcs() {
     let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
 
     assert_eq!(fulfilled.len(), 1);
-    assert_eq!(fulfilled[0].tlc_id, TLCId::Offered(0));
-    assert_eq!(fulfilled[0].preimage, active_preimage);
+    assert_eq!(fulfilled[0].tlc_id, TLCId::Received(0));
+    assert_eq!(fulfilled[0].preimage, committed_preimage);
 }
 
 #[test]
@@ -634,4 +666,179 @@ fn forged_full_hash_does_not_inherit_removed_tlc_prefix_settlement() {
         collect_onchain_timeout_settled_tlcs(&state, &store, 100).is_empty(),
         "a settlement record for the removed TLC must not settle the forged full hash"
     );
+}
+
+fn closed_state_with_offered_local_announced(
+    channel_id: Hash256,
+    flags: CloseFlags,
+    tlc: TlcInfo,
+) -> crate::fiber::channel::ChannelActorState {
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(flags);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    state
+}
+
+#[test]
+fn collect_fulfilled_includes_offered_local_announced() {
+    // A signed remote commitment already includes offered LocalAnnounced TLCs. If the
+    // counterparty broadcasts that commitment and spends the TLC on-chain, fulfillment
+    // reconciliation must still pick it up.
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        hash_algorithm,
+    );
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_preimage(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+        preimage,
+    );
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
+    assert_eq!(fulfilled.len(), 1);
+    assert_eq!(fulfilled[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(fulfilled[0].preimage, preimage);
+}
+
+#[test]
+fn collect_timeout_includes_expired_offered_local_announced() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = gen_rand_sha256_hash();
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        hash_algorithm,
+    );
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_settled(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+    );
+
+    let expired = collect_onchain_timeout_settled_tlcs(&state, &store, 100);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(
+        expired[0].role,
+        OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
+    );
+}
+
+#[test]
+fn collect_timeout_includes_forwarded_local_announced() {
+    let channel_id = gen_rand_sha256_hash();
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = gen_rand_sha256_hash();
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        hash_algorithm,
+    );
+    tlc.forwarding_tlc = Some((upstream_channel_id, 7));
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_settled(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+    );
+
+    let expired = collect_onchain_timeout_settled_tlcs(&state, &store, 100);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(
+        expired[0].role,
+        OnChainTimeoutTlcRole::Forwarded {
+            forwarding_channel_id: upstream_channel_id,
+            forwarding_tlc_id: 7,
+        }
+    );
+}
+
+#[test]
+fn has_unresolved_keeps_local_announced_on_remote_force_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    let state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc,
+    );
+
+    assert!(
+        has_unresolved_onchain_tlcs(&state),
+        "a remote force-close can spend offered LocalAnnounced TLCs from the signed remote commitment"
+    );
+}
+
+#[test]
+fn has_unresolved_ignores_local_announced_on_local_force_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    let state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc,
+    );
+
+    assert!(
+        !has_unresolved_onchain_tlcs(&state),
+        "a local force-close broadcasts the local commitment, which omits offered LocalAnnounced TLCs"
+    );
+}
+
+#[test]
+fn set_offered_tlc_removed_accepts_local_announced() {
+    let channel_id = gen_rand_sha256_hash();
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+
+    state.tlc_state.set_offered_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &TEST_SHARED_SECRET,
+        )),
+    );
+
+    let updated = state
+        .tlc_state
+        .get(&TLCId::Offered(0))
+        .expect("offered tlc remains after on-chain remove");
+    assert_eq!(updated.outbound_status(), OutboundTlcStatus::RemoteRemoved);
+    assert!(updated.removed_reason.is_some());
 }
