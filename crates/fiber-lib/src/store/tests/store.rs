@@ -492,6 +492,77 @@ fn test_store_liquidity_chain_tx_signed_tx_round_trips_for_payout_role() {
     assert_eq!(loaded.as_slice(), tx.as_slice());
 }
 
+#[test]
+fn test_store_liquidity_chain_tx_list_by_swap_returns_all_roles_and_empty_for_unknown() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [7u8; 32].into();
+    let other_swap_id: fiber_types::Hash256 = [8u8; 32].into();
+
+    let records = [
+        fiber_types::LiquidityChainTxRecord {
+            swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: [1u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Planned,
+            failure_reason: None,
+            created_at: 10,
+            updated_at: 10,
+        },
+        fiber_types::LiquidityChainTxRecord {
+            swap_id,
+            role: fiber_types::LiquidityChainTxRole::Claim,
+            tx_hash: [2u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Broadcast,
+            failure_reason: None,
+            created_at: 11,
+            updated_at: 11,
+        },
+        fiber_types::LiquidityChainTxRecord {
+            swap_id,
+            role: fiber_types::LiquidityChainTxRole::Refund,
+            tx_hash: [3u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 12,
+            updated_at: 12,
+        },
+        fiber_types::LiquidityChainTxRecord {
+            swap_id: other_swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: [4u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Planned,
+            failure_reason: None,
+            created_at: 13,
+            updated_at: 13,
+        },
+    ];
+
+    for record in records {
+        store.insert_liquidity_chain_tx(record).unwrap();
+    }
+
+    let listed = store.list_liquidity_chain_txs_by_swap(&swap_id).unwrap();
+    assert_eq!(listed.len(), 3);
+    assert!(listed
+        .iter()
+        .any(|record| record.role == fiber_types::LiquidityChainTxRole::Payout));
+    assert!(listed
+        .iter()
+        .any(|record| record.role == fiber_types::LiquidityChainTxRole::Claim));
+    assert!(listed
+        .iter()
+        .any(|record| record.role == fiber_types::LiquidityChainTxRole::Refund));
+
+    assert!(store
+        .list_liquidity_chain_txs_by_swap(&[99u8; 32].into())
+        .unwrap()
+        .is_empty());
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_liquidity_check_validate_rejects_corrupt_records() {

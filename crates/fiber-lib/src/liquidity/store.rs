@@ -326,6 +326,12 @@ pub trait LiquidityStore {
         statuses: &[fiber_types::LiquidityChainTxStatus],
     ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError>;
 
+    /// List every persisted liquidity CKB transaction record for a swap.
+    fn list_liquidity_chain_txs_by_swap(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError>;
+
     /// Persist the signed serialized transaction bytes for a liquidity CKB transaction.
     ///
     /// The bytes are stored under a dedicated key, keeping the

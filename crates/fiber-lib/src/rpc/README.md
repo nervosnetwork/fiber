@@ -62,6 +62,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_liquidity_asset`](#liquidity-update_liquidity_asset)
         * [Method `disable_liquidity_asset`](#liquidity-disable_liquidity_asset)
         * [Method `list_liquidity_assets`](#liquidity-list_liquidity_assets)
+        * [Method `list_liquidity_chain_transactions`](#liquidity-list_liquidity_chain_transactions)
         * [Method `get_liquidity_provider_status`](#liquidity-get_liquidity_provider_status)
         * [Method `set_liquidity_provider_mode`](#liquidity-set_liquidity_provider_mode)
     * [Module Payment](#module-payment)
@@ -106,6 +107,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `LiquidityAssetInfo`](#type-liquidityassetinfo)
     * [Type `LiquidityAssetKind`](#type-liquidityassetkind)
+    * [Type `LiquidityChainTransaction`](#type-liquiditychaintransaction)
+    * [Type `LiquidityChainTransactionRole`](#type-liquiditychaintransactionrole)
     * [Type `LiquiditySwapKind`](#type-liquidityswapkind)
     * [Type `LiquiditySwapRecord`](#type-liquidityswaprecord)
     * [Type `NodeInfo`](#type-nodeinfo)
@@ -1173,6 +1176,23 @@ List configured provider assets.
 
 
 
+<a id="liquidity-list_liquidity_chain_transactions"></a>
+#### Method `list_liquidity_chain_transactions`
+
+Return persisted chain transactions for a liquidity swap.
+
+##### Params
+
+* `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
+
+##### Returns
+
+* `transactions` - <em>Vec<[LiquidityChainTransaction](#type-liquiditychaintransaction)></em>, Chain transaction records in stable role order.
+
+---
+
+
+
 <a id="liquidity-get_liquidity_provider_status"></a>
 #### Method `get_liquidity_provider_status`
 
@@ -2024,6 +2044,42 @@ Asset family in the provider liquidity registry.
 
 * `ckb` - Native CKB capacity denominated in shannons.
 * `udt` - User-defined token identified by a type script.
+---
+
+<a id="#type-liquiditychaintransaction"></a>
+### Type `LiquidityChainTransaction`
+
+Persisted chain transaction record returned by `list_liquidity_chain_transactions`.
+
+
+#### Fields
+
+* `role` - <em>[LiquidityChainTransactionRole](#type-liquiditychaintransactionrole)</em>, Semantic transaction role within the swap.
+* `tx_hash` - <em>[Hash256](#type-hash256)</em>, CKB transaction hash.
+* `outpoint` - <em>`Option<ckb_types::packed::OutPoint>`</em>, Created output outpoint, if tracked by recovery.
+* `status` - <em>`String`</em>, Current transaction status name.
+* `failure_reason` - <em>`Option<String>`</em>, Optional failure reason for rejected or failed transactions.
+* `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
+* `updated_at` - <em>`u64`</em>, Last update timestamp in milliseconds.
+---
+
+<a id="#type-liquiditychaintransactionrole"></a>
+### Type `LiquidityChainTransactionRole`
+
+Semantic role of a liquidity CKB transaction within a swap's lifecycle.
+
+ This is the externally visible role label. It diverges from the persisted
+ `LiquidityChainTxRole` for Loop In swaps, where the stored `Payout` role
+ represents the client's on-chain lock transaction and is surfaced as
+ `loop_in_lock`.
+
+
+#### Enum with values of
+
+* `payout` - Provider payout lock transaction (Loop Out).
+* `loop_in_lock` - Client on-chain lock transaction (Loop In, persisted as the payout role).
+* `claim` - Client claim transaction.
+* `refund` - Provider refund transaction.
 ---
 
 <a id="#type-liquidityswapkind"></a>

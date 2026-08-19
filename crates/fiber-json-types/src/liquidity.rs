@@ -1,7 +1,9 @@
 //! Liquidity management JSON-RPC types.
 
-use crate::schema_helpers::{schema_as_uint_hex, schema_as_uint_hex_optional};
-use crate::serde_utils::{Hash256, Pubkey, U128Hex, U64Hex};
+use crate::schema_helpers::{
+    schema_as_hex_bytes_optional, schema_as_uint_hex, schema_as_uint_hex_optional,
+};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -438,8 +440,70 @@ pub struct LiquidityProviderStatus {
     pub active_swaps: u64,
 }
 
+/// Semantic role of a liquidity CKB transaction within a swap's lifecycle.
+///
+/// This is the externally visible role label. It diverges from the persisted
+/// `LiquidityChainTxRole` for Loop In swaps, where the stored `Payout` role
+/// represents the client's on-chain lock transaction and is surfaced as
+/// `loop_in_lock`.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiquidityChainTransactionRole {
+    /// Provider payout lock transaction (Loop Out).
+    Payout,
+    /// Client on-chain lock transaction (Loop In, persisted as the payout role).
+    LoopInLock,
+    /// Client claim transaction.
+    Claim,
+    /// Provider refund transaction.
+    Refund,
+}
+
+/// Persisted chain transaction record returned by `list_liquidity_chain_transactions`.
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+pub struct LiquidityChainTransaction {
+    /// Semantic transaction role within the swap.
+    pub role: LiquidityChainTransactionRole,
+    /// CKB transaction hash.
+    pub tx_hash: Hash256,
+    /// Created output outpoint, if tracked by recovery.
+    #[serde_as(as = "Option<EntityHex>")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
+    pub outpoint: Option<ckb_types::packed::OutPoint>,
+    /// Current transaction status name.
+    pub status: String,
+    /// Optional failure reason for rejected or failed transactions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    /// Creation timestamp in milliseconds.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub created_at: u64,
+    /// Last update timestamp in milliseconds.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub updated_at: u64,
+}
+
+/// Parameters for listing a swap's persisted chain transactions.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+pub struct ListLiquidityChainTransactionsParams {
+    /// Local swap identifier.
+    pub swap_id: Hash256,
+}
+
+/// Response returned by `list_liquidity_chain_transactions`.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, JsonSchema)]
+pub struct ListLiquidityChainTransactionsResponse {
+    /// Chain transaction records in stable role order.
+    pub transactions: Vec<LiquidityChainTransaction>,
+}
+
 #[cfg(test)]
 mod tests {
+    use molecule::prelude::Entity;
+
     use super::*;
 
     #[test]
@@ -694,5 +758,65 @@ mod tests {
             "0x0101010101010101010101010101010101010101010101010101010101010101"
         );
         assert_eq!(value.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_liquidity_chain_transactions_dto_serializes_records_without_signed_tx() {
+        let outpoint = ckb_types::packed::OutPoint::new(
+            ckb_types::packed::Byte32::from_slice(&[9u8; 32]).unwrap(),
+            1,
+        );
+        let transaction = LiquidityChainTransaction {
+            role: LiquidityChainTransactionRole::LoopInLock,
+            tx_hash: Hash256([2u8; 32]),
+            outpoint: Some(outpoint),
+            status: "broadcast".to_string(),
+            failure_reason: None,
+            created_at: 42,
+            updated_at: 43,
+        };
+        let params = ListLiquidityChainTransactionsParams {
+            swap_id: Hash256([1u8; 32]),
+        };
+        let response = ListLiquidityChainTransactionsResponse {
+            transactions: vec![transaction],
+        };
+
+        let params_value = serde_json::to_value(&params).expect("params json");
+        let value = serde_json::to_value(&response).expect("response json");
+        let decoded: ListLiquidityChainTransactionsResponse =
+            serde_json::from_value(value.clone()).expect("decode response");
+
+        assert_eq!(
+            params_value["swap_id"],
+            "0x0101010101010101010101010101010101010101010101010101010101010101"
+        );
+        let tx = &value["transactions"][0];
+        assert_eq!(tx["role"], "loop_in_lock");
+        assert_eq!(tx["status"], "broadcast");
+        assert_eq!(
+            tx["tx_hash"],
+            "0x0202020202020202020202020202020202020202020202020202020202020202"
+        );
+        assert_eq!(tx["created_at"], "0x2a");
+        assert_eq!(tx["updated_at"], "0x2b");
+        assert!(tx.get("failure_reason").is_none());
+        assert!(tx.get("signed_tx").is_none());
+        assert!(tx.get("signed_tx_bytes").is_none());
+        assert_eq!(decoded.transactions, response.transactions);
+    }
+
+    #[test]
+    fn liquidity_chain_transaction_role_serializes_semantic_labels() {
+        let roles = [
+            (LiquidityChainTransactionRole::Payout, "payout"),
+            (LiquidityChainTransactionRole::LoopInLock, "loop_in_lock"),
+            (LiquidityChainTransactionRole::Claim, "claim"),
+            (LiquidityChainTransactionRole::Refund, "refund"),
+        ];
+
+        for (role, expected) in roles {
+            assert_eq!(serde_json::to_value(role).expect("role json"), expected);
+        }
     }
 }
