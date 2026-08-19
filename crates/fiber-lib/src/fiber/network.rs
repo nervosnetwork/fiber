@@ -771,7 +771,6 @@ pub struct SendPaymentResponse {
     pub failed_error: Option<String>,
     pub custom_records: Option<PaymentCustomRecords>,
     pub fee: u128,
-    pub preimage: Option<Hash256>,
     #[cfg(any(debug_assertions, test, feature = "bench"))]
     pub routers: Vec<SessionRoute>,
 }

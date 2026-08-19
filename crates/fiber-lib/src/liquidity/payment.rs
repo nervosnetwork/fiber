@@ -218,7 +218,7 @@ fn preimage_or_terminal_error(
 ) -> Result<Option<Hash256>, LiquidityLoopOutError> {
     match response.status {
         PaymentStatus::Success => response
-            .preimage
+            .payment_preimage
             .ok_or_else(|| {
                 LiquidityLoopOutError::PaymentFailed(
                     "settled payment is missing preimage".to_string(),
@@ -240,7 +240,7 @@ fn payment_status_from_response(
 ) -> Result<LoopOutPaymentStatus, LiquidityLoopOutError> {
     match response.status {
         PaymentStatus::Success => response
-            .preimage
+            .payment_preimage
             .ok_or_else(|| {
                 LiquidityLoopOutError::PaymentFailed(
                     "settled payment is missing preimage".to_string(),
@@ -575,7 +575,7 @@ mod tests {
             failed_error: (status == PaymentStatus::Failed).then(|| "route failed".to_string()),
             custom_records: None,
             fee: 0,
-            preimage,
+            payment_preimage: preimage,
             #[cfg(any(debug_assertions, test, feature = "bench"))]
             routers: vec![],
         }

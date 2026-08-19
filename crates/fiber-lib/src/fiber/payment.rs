@@ -631,14 +631,6 @@ impl From<PaymentSession> for SendPaymentResponse {
             .attempts()
             .filter(|attempt| attempt.is_success())
             .find_map(|attempt| attempt.preimage);
-        let preimage = if status == PaymentStatus::Success {
-            session
-                .attempts()
-                .find(|a| a.is_success())
-                .and_then(|a| a.preimage)
-        } else {
-            None
-        };
         let mut all_attempts = session
             .attempts()
             .map(|a| {
@@ -668,7 +660,6 @@ impl From<PaymentSession> for SendPaymentResponse {
             last_updated_at: session.last_updated_at,
             custom_records: session.request.custom_records.clone(),
             fee,
-            preimage,
             #[cfg(any(debug_assertions, test, feature = "bench"))]
             routers: attempts.iter().map(|a| a.route.clone()).collect::<Vec<_>>(),
         }
