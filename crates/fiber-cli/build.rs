@@ -627,8 +627,14 @@ fn extract_result_inner(ty: &syn::ReturnType) -> Option<String> {
                                     return Some("()".to_string());
                                 }
                             }
-                            // Otherwise return the type name
-                            return type_path_last_segment(inner);
+                            // Otherwise return the type name. An `Option<T>` result
+                            // cannot be represented as a bare ident import, so fall
+                            // back to a raw `Value` result for the CLI.
+                            let last_segment = type_path_last_segment(inner);
+                            if last_segment.as_deref() == Some("Option") {
+                                return Some("()".to_string());
+                            }
+                            return last_segment;
                         }
                     }
                 }
