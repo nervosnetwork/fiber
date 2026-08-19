@@ -1142,10 +1142,6 @@ where
                         if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
                             && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
                 );
-        // An ACK can consume the current revocation round without carrying TLC
-        // updates. Send an empty reciprocal commitment to complete the nonce rollover.
-        let needs_nonce_rollover = state.remote_revocation_nonce_for_send.is_none();
-
         if should_reply_external_funding_handshake && !state.tlc_state.waiting_ack {
             let previous_remote_nonce = previous_remote_nonce.ok_or_else(|| {
                 ProcessingChannelError::InvalidState(
@@ -1158,7 +1154,7 @@ where
             state.commit_remote_nonce(previous_remote_nonce);
             self.handle_commitment_signed_command(myself, state).await?;
             state.commit_remote_nonce(next_commitment_nonce);
-        } else if (need_commitment_signed || needs_nonce_rollover) && !state.tlc_state.waiting_ack {
+        } else if need_commitment_signed && !state.tlc_state.waiting_ack {
             self.handle_commitment_signed_command(myself, state).await?;
         }
 
