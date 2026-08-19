@@ -24,9 +24,7 @@ pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {
-    use crate::ckb::contracts::{
-        get_cell_deps_by_contracts, get_script_by_contract, try_get_script_by_contract, Contract,
-    };
+    use crate::ckb::contracts::{get_cell_deps_by_contracts, try_get_script_by_contract, Contract};
     use crate::ckb::CkbChainMessage;
     use crate::ckb::CkbConfig;
     use crate::fiber::gossip::GossipMessageStore;
@@ -283,16 +281,14 @@ pub mod server {
         }))
     }
 
-    fn liquidity_provider_identity(
+    fn liquidity_provider_pubkey(
         fiber_config: Option<&FiberConfig>,
-    ) -> Result<(fiber_types::Pubkey, ckb_types::packed::Script)> {
+    ) -> Result<fiber_types::Pubkey> {
         let fiber_config = fiber_config
             .ok_or_else(|| anyhow::anyhow!("liquidity RPC requires Fiber configuration"))?;
-        let provider_pubkey = crate::fiber::types::pubkey_from_tentacle(fiber_config.public_key());
-        let pubkey_hash = ckb_hash::blake2b_256(provider_pubkey.serialize());
-        let provider_funding_lock_script =
-            get_script_by_contract(Contract::Secp256k1Lock, &pubkey_hash[0..20]);
-        Ok((provider_pubkey, provider_funding_lock_script))
+        Ok(crate::fiber::types::pubkey_from_tentacle(
+            fiber_config.public_key(),
+        ))
     }
 
     #[allow(clippy::type_complexity)]
@@ -349,8 +345,16 @@ pub mod server {
         }
         let liquidity_actor = if config.is_module_enabled("liquidity") {
             {
-                let (provider_pubkey, provider_funding_lock_script) =
-                    liquidity_provider_identity(fiber_config.as_ref())?;
+                let provider_pubkey = liquidity_provider_pubkey(fiber_config.as_ref())?;
+                let provider_funding_lock_script = ckb_config
+                    .as_ref()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("liquidity RPC requires CKB configuration")
+                    })?
+                    .get_default_funding_lock_script()
+                    .map_err(|error| {
+                        anyhow::anyhow!("cannot derive provider funding lock script: {error}")
+                    })?;
                 match (network_actor.clone(), ckb_chain_actor.clone()) {
                     (Some(network_actor), Some(ckb_chain_actor)) => {
                         if let Some(liquidity_lock_script) =
@@ -546,32 +550,14 @@ pub mod server {
         let fiber_config = crate::tests::get_fiber_config(temp_dir.path(), None);
         let expected = crate::fiber::types::pubkey_from_tentacle(fiber_config.public_key());
 
-        let (actual, _funding_lock_script) =
-            liquidity_provider_identity(Some(&fiber_config)).unwrap();
+        let actual = liquidity_provider_pubkey(Some(&fiber_config)).unwrap();
 
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn liquidity_startup_provider_funding_lock_script_matches_node_identity() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let fiber_config = crate::tests::get_fiber_config(temp_dir.path(), None);
-        let expected_pubkey = crate::fiber::types::pubkey_from_tentacle(fiber_config.public_key());
-
-        let (provider_pubkey, funding_lock_script) =
-            liquidity_provider_identity(Some(&fiber_config)).unwrap();
-
-        assert_eq!(provider_pubkey, expected_pubkey);
-        let pubkey_hash = ckb_hash::blake2b_256(expected_pubkey.serialize());
-        assert_eq!(
-            funding_lock_script,
-            get_script_by_contract(Contract::Secp256k1Lock, &pubkey_hash[0..20])
-        );
-    }
-
-    #[test]
     fn liquidity_startup_requires_fiber_config() {
-        let error = liquidity_provider_identity(None).unwrap_err();
+        let error = liquidity_provider_pubkey(None).unwrap_err();
 
         assert!(error
             .to_string()
