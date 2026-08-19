@@ -154,8 +154,6 @@ pub struct QuoteLoopOutParams {
     pub amount: u128,
     /// Claimant lock script bytes encoded for the payout lock.
     pub claimant_lock: String,
-    /// Refund lock script bytes encoded for the payout lock.
-    pub refund_lock: String,
     /// Maximum provider fee accepted by the client.
     #[serde_as(as = "U128Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
@@ -182,8 +180,6 @@ pub struct ProviderQuoteLoopOutParams {
     pub amount: u128,
     /// Claimant lock script bytes encoded for the payout lock.
     pub claimant_lock: String,
-    /// Refund lock script bytes encoded for the payout lock.
-    pub refund_lock: String,
     /// Maximum provider fee accepted by the client.
     #[serde_as(as = "U128Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
@@ -271,8 +267,6 @@ pub struct QuoteLoopInParams {
     pub amount: u128,
     /// Client invoice the provider should pay.
     pub client_invoice: String,
-    /// Provider claim lock script bytes encoded for the client lock.
-    pub claimant_lock: String,
     /// Client refund lock script bytes encoded for the client lock.
     pub refund_lock: String,
     /// Maximum provider fee accepted by the client.
@@ -654,7 +648,6 @@ mod tests {
             asset_id: "ckb".to_string(),
             amount: 100,
             claimant_lock: "0x0102".to_string(),
-            refund_lock: "0x0304".to_string(),
             max_provider_fee: 2,
             max_routing_fee: 3,
             expires_after_seconds: 60,
@@ -663,7 +656,7 @@ mod tests {
         let value = serde_json::to_value(params).expect("json");
         assert_eq!(value["amount"], "0x64");
         assert_eq!(value["claimant_lock"], "0x0102");
-        assert_eq!(value["refund_lock"], "0x0304");
+        assert!(value.get("refund_lock").is_none());
         assert!(value.get("receiver").is_none());
         assert_eq!(value["max_provider_fee"], "0x2");
         assert_eq!(value["max_routing_fee"], "0x3");
