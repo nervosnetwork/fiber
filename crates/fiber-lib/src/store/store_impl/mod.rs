@@ -1849,6 +1849,12 @@ impl WatchtowerStore for Store {
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             batch.commit();
+        } else {
+            tracing::warn!(
+                node_id = %node_id,
+                channel_id = %channel_id,
+                "update_revocation ignored: watch channel row does not exist"
+            );
         }
     }
 

@@ -327,6 +327,12 @@ where
                                                 Ok(cell_with_status) => {
                                                     if cell_with_status.status == "live" {
                                                         warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
+                                                        let stored_commitment_number =
+                                                            revocation_data.commitment_number;
+                                                        let output_data_len = revocation_data
+                                                            .output_data
+                                                            .raw_data()
+                                                            .len();
                                                         match build_revocation_tx(
                                                             first_commitment_tx_out_point,
                                                             revocation_data,
@@ -343,12 +349,27 @@ where
                                                                         info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
                                                                     }
                                                                     Err(err) => {
-                                                                        error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                        error!(
+                                                                            channel_id = %channel_data.channel_id,
+                                                                            stored_commitment_number,
+                                                                            on_chain_commitment_number = commitment_number,
+                                                                            output_data_len,
+                                                                            "Failed to send revocation tx: {:?}, error: {:?}",
+                                                                            tx,
+                                                                            err
+                                                                        );
                                                                     }
                                                                 }
                                                             }
                                                             Err(err) => {
-                                                                error!("Failed to build revocation tx: {:?}", err);
+                                                                error!(
+                                                                    channel_id = %channel_data.channel_id,
+                                                                    stored_commitment_number,
+                                                                    on_chain_commitment_number = commitment_number,
+                                                                    output_data_len,
+                                                                    "Failed to build revocation tx: {:?}",
+                                                                    err
+                                                                );
                                                             }
                                                         }
                                                     }

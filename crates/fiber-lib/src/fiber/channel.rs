@@ -6159,7 +6159,7 @@ impl ChannelActorState {
             commitment_number,
             aggregated_signature,
             output: output.clone(),
-            output_data: output_data.clone().pack(),
+            output_data: packed_bytes_from_revocation_signable(output_data)?,
         };
         let settlement_data = self.build_settlement_data(true)?;
         self.increment_local_commitment_number();
@@ -11547,6 +11547,22 @@ pub struct PartiallySignedCommitmentTransaction {
 /// refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
 pub const XUDT_COMPATIBLE_WITNESS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
 
+/// Restore `RevocationData.output_data` from the molecule slice stored in
+/// `Musig2SignableContent::Revocation`.
+///
+/// That slice is already `packed::Bytes::as_slice()`. Packing it again wraps a
+/// second length prefix, so the justice transaction's cell data no longer
+/// matches the signed message and commitment-lock auth fails with error 110.
+fn packed_bytes_from_revocation_signable(
+    output_data: &[u8],
+) -> Result<Bytes, ProcessingChannelError> {
+    Bytes::from_slice(output_data).map_err(|err| {
+        ProcessingChannelError::InvalidState(format!(
+            "revocation output_data is not packed Bytes: {err}"
+        ))
+    })
+}
+
 pub fn create_witness_for_funding_cell(
     lock_key_xonly: [u8; 32],
     signature: CompactSignature,
@@ -11963,5 +11979,24 @@ mod tests {
             state.check_tlc_limits(20, false),
             Err(ProcessingChannelError::TlcValueInflightExceedLimit)
         ));
+    }
+
+    #[test]
+    fn revocation_signable_output_data_roundtrips_packed_bytes() {
+        let empty = Bytes::default();
+        let restored = packed_bytes_from_revocation_signable(empty.as_slice())
+            .expect("empty packed Bytes should restore");
+        assert_eq!(restored, empty);
+        assert_ne!(
+            empty.as_slice().to_vec().pack(),
+            empty,
+            "packing the molecule slice again must not be used as cell data"
+        );
+
+        let udt_amount = 123u128.to_le_bytes().pack();
+        let restored = packed_bytes_from_revocation_signable(udt_amount.as_slice())
+            .expect("UDT packed Bytes should restore");
+        assert_eq!(restored, udt_amount);
+        assert_ne!(udt_amount.as_slice().to_vec().pack(), udt_amount);
     }
 }
