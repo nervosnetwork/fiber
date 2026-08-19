@@ -471,6 +471,28 @@ fn test_store_liquidity_chain_tx_rejects_duplicate_role_for_swap() {
     assert!(store.insert_liquidity_chain_tx(record).is_err());
 }
 
+#[test]
+fn test_store_liquidity_chain_tx_signed_tx_round_trips_for_each_role() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [8u8; 32].into();
+    let tx = Transaction::default().as_advanced_builder().build().data();
+
+    for role in [
+        fiber_types::LiquidityChainTxRole::Payout,
+        fiber_types::LiquidityChainTxRole::Claim,
+        fiber_types::LiquidityChainTxRole::Refund,
+    ] {
+        store
+            .insert_liquidity_chain_tx_signed_tx(&swap_id, role, tx.clone())
+            .unwrap();
+        let loaded = store
+            .get_liquidity_chain_tx_signed_tx(&swap_id, role)
+            .unwrap()
+            .expect("signed tx bytes are persisted per role");
+        assert_eq!(loaded.as_slice(), tx.as_slice());
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_store_liquidity_check_validate_rejects_corrupt_records() {

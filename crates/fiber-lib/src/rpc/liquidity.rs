@@ -805,6 +805,23 @@ mod tests {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))
         }
 
+        fn insert_liquidity_chain_tx_signed_tx(
+            &self,
+            _swap_id: &Hash256,
+            _role: fiber_types::LiquidityChainTxRole,
+            _tx: ckb_types::packed::Transaction,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn get_liquidity_chain_tx_signed_tx(
+            &self,
+            _swap_id: &Hash256,
+            _role: fiber_types::LiquidityChainTxRole,
+        ) -> Result<Option<ckb_types::packed::Transaction>, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
         fn upsert_liquidity_asset(
             &self,
             _asset: LiquidityAsset,

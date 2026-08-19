@@ -2642,6 +2642,8 @@ mod tests {
         quote_writes: Shared<usize>,
         assets: Shared<HashMap<String, LiquidityAsset>>,
         chain_txs: Shared<HashMap<(Hash256, LiquidityChainTxRole), LiquidityChainTxRecord>>,
+        signed_txs:
+            Shared<HashMap<(Hash256, LiquidityChainTxRole), ckb_types::packed::Transaction>>,
         events: Shared<Vec<&'static str>>,
         listed_swap_kinds: Shared<Vec<LiquiditySwapKind>>,
         label: Option<&'static str>,
@@ -2657,6 +2659,7 @@ mod tests {
                 quote_writes: Shared::new(0),
                 assets: Shared::new(HashMap::new()),
                 chain_txs: Shared::new(HashMap::new()),
+                signed_txs: Shared::new(HashMap::new()),
                 events,
                 listed_swap_kinds: Shared::new(Vec::new()),
                 label: Some(label),
@@ -2908,6 +2911,24 @@ mod tests {
             role: LiquidityChainTxRole,
         ) -> Result<Option<LiquidityChainTxRecord>, LiquidityStoreError> {
             Ok(self.chain_txs.borrow().get(&(*swap_id, role)).cloned())
+        }
+
+        fn insert_liquidity_chain_tx_signed_tx(
+            &self,
+            swap_id: &Hash256,
+            role: LiquidityChainTxRole,
+            tx: ckb_types::packed::Transaction,
+        ) -> Result<(), LiquidityStoreError> {
+            self.signed_txs.borrow_mut().insert((*swap_id, role), tx);
+            Ok(())
+        }
+
+        fn get_liquidity_chain_tx_signed_tx(
+            &self,
+            swap_id: &Hash256,
+            role: LiquidityChainTxRole,
+        ) -> Result<Option<ckb_types::packed::Transaction>, LiquidityStoreError> {
+            Ok(self.signed_txs.borrow().get(&(*swap_id, role)).cloned())
         }
 
         fn update_liquidity_chain_tx_status(
