@@ -454,6 +454,9 @@ fn collect_timeout_settled_skips_already_removed() {
     tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
         payment_preimage: gen_rand_sha256_hash(),
     }));
+    // A confirmed remove has completed its commitment handshake and was already propagated
+    // upstream, so on-chain timeout reconciliation must skip it.
+    tlc.removed_confirmed_at = Some(1);
 
     let mut state = empty_channel_state(channel_id);
     state.tlc_state.offered_tlcs.tlcs = vec![tlc];
@@ -465,6 +468,44 @@ fn collect_timeout_settled_skips_already_removed() {
     );
 
     assert!(collect_onchain_timeout_settled_tlcs(&state, &store, 100).is_empty());
+}
+
+#[test]
+fn collect_timeout_settled_collects_uncommitted_removed() {
+    // Issue #1612: a TLC marked removed by a peer RemoveTlc message whose remove commitment
+    // handshake never completed (channel shutting down with WAITING_COMMITMENT_CONFIRMATION)
+    // still needs on-chain timeout reconciliation. `removed_reason` is set but
+    // `removed_confirmed_at` is not, so the upstream RemoveTlc was never propagated.
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = gen_rand_sha256_hash();
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved),
+        payment_hash,
+        hash_algorithm,
+    );
+    tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+        &TEST_SHARED_SECRET,
+    )));
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_settled(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+    );
+
+    let expired = collect_onchain_timeout_settled_tlcs(&state, &store, 100);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(
+        expired[0].role,
+        OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
+    );
 }
 
 #[test]
