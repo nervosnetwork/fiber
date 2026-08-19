@@ -617,7 +617,6 @@ impl Actor for MockNetworkActor {
                         failed_error: None,
                         custom_records: None,
                         fee: 0,
-                        preimage: None,
                         #[cfg(any(debug_assertions, test, feature = "bench"))]
                         routers: vec![],
                     };
