@@ -1,7 +1,7 @@
 use crate::ckb::tests::test_utils::{
     complete_commitment_tx, MockChainActorMiddleware, MockChainActorState,
 };
-use crate::ckb::{CkbChainMessage, FundingContext, FundingTx};
+use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse, ChannelActor,
     ChannelActorMessage, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
@@ -49,11 +49,12 @@ use crate::{
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
 use ckb_types::bytes::BufMut;
-use ckb_types::core::EpochNumberWithFraction;
+use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::{
     core::{tx_pool::TxStatus, Capacity, FeeRate},
     packed::{Bytes, CellDep, CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
+    H256,
 };
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
@@ -7080,6 +7081,281 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
             _ => false,
         })
         .await;
+}
+
+#[tokio::test]
+async fn test_force_shutdown_awaiting_channel_ready_with_local_commitment() {
+    init_tracing();
+
+    let (_node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        node_b_state.latest_commitment_transaction.is_some(),
+        "test setup must have a local commitment transaction to publish"
+    );
+    node_b_state.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    node_b_state.commitment_numbers.local = node_b_state
+        .commitment_numbers
+        .local
+        .checked_sub(1)
+        .expect("established channel has an initial local commitment");
+    node_b_state.commitment_numbers.remote = node_b_state
+        .commitment_numbers
+        .remote
+        .checked_sub(1)
+        .expect("established channel has an initial remote commitment");
+    node_b_state.connectivity_state = ChannelConnectivityState::Offline;
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    node_b
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("force shutdown should succeed with a local commitment transaction");
+
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            node_b_state.state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        ) || matches!(
+            node_b_state.state,
+            ChannelState::Closed(flags)
+                if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                    && flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
+        ),
+        "force shutdown should publish the local commitment, got {:?}",
+        node_b_state.state
+    );
+}
+
+#[tokio::test]
+async fn test_force_shutdown_awaiting_channel_ready_without_local_commitment_should_fail() {
+    init_tracing();
+
+    let (_node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    node_b_state.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    node_b_state.commitment_numbers.local = node_b_state
+        .commitment_numbers
+        .local
+        .checked_sub(1)
+        .expect("established channel has an initial local commitment");
+    node_b_state.commitment_numbers.remote = node_b_state
+        .commitment_numbers
+        .remote
+        .checked_sub(1)
+        .expect("established channel has an initial remote commitment");
+    node_b_state.connectivity_state = ChannelConnectivityState::Offline;
+    node_b_state.latest_commitment_transaction = None;
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let error = node_b
+        .send_shutdown(channel_id, true)
+        .await
+        .expect_err("force shutdown must fail without a local commitment transaction");
+
+    assert!(error.contains("invalid state"), "unexpected error: {error}");
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        node_b_state.state,
+        ChannelState::AwaitingChannelReady(flags)
+            if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+    ));
+}
+
+async fn prepare_force_shutdown_awaiting_channel_ready_peer_states(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    channel_id: Hash256,
+) -> TransactionView {
+    let mut node_a_state = node_a.get_channel_actor_state(channel_id);
+    node_a_state.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::THEIR_CHANNEL_READY);
+    node_a_state.commitment_numbers.local = node_a_state
+        .commitment_numbers
+        .local
+        .checked_sub(1)
+        .expect("established channel has an initial local commitment");
+    node_a_state.commitment_numbers.remote = node_a_state
+        .commitment_numbers
+        .remote
+        .checked_sub(1)
+        .expect("established channel has an initial remote commitment");
+    node_a
+        .update_channel_actor_state(
+            node_a_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_id);
+    let remote_commitment_tx = node_b_state
+        .latest_commitment_transaction
+        .clone()
+        .expect("test setup must have a local commitment transaction to publish")
+        .into_view();
+    node_b_state.state =
+        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::OUR_CHANNEL_READY);
+    node_b_state.commitment_numbers.local = node_b_state
+        .commitment_numbers
+        .local
+        .checked_sub(1)
+        .expect("established channel has an initial local commitment");
+    node_b_state.commitment_numbers.remote = node_b_state
+        .commitment_numbers
+        .remote
+        .checked_sub(1)
+        .expect("established channel has an initial remote commitment");
+    node_b
+        .update_channel_actor_state(
+            node_b_state,
+            Some(ReloadParams {
+                notify_changes: false,
+            }),
+        )
+        .await;
+
+    remote_commitment_tx
+}
+
+fn channel_closed_with_flags(
+    node: &NetworkNode,
+    channel_id: Hash256,
+    expected_flags: CloseFlags,
+) -> bool {
+    matches!(
+        node.get_channel_actor_state(channel_id).state,
+        ChannelState::Closed(flags) if flags.contains(expected_flags)
+    )
+}
+
+#[tokio::test]
+async fn test_remote_force_shutdown_awaiting_channel_ready_closes_both_sides() {
+    init_tracing();
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+    let _remote_commitment_tx =
+        prepare_force_shutdown_awaiting_channel_ready_peer_states(&node_a, &node_b, channel_id)
+            .await;
+
+    node_b
+        .send_shutdown(channel_id, true)
+        .await
+        .expect("initiator force shutdown should succeed with a local commitment transaction");
+    wait_until_timeout(30_000, || {
+        channel_closed_with_flags(
+            &node_b,
+            channel_id,
+            CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        ) && node_b
+            .get_channel_actor_state(channel_id)
+            .shutdown_transaction_hash
+            .is_some()
+    })
+    .await;
+
+    let node_b_state = node_b.get_channel_actor_state(channel_id);
+    let expected_shutdown_tx_hash = node_b_state
+        .shutdown_transaction_hash
+        .clone()
+        .expect("initiator should record shutdown transaction hash");
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::ClosingTransactionConfirmed(
+                node_b.pubkey,
+                channel_id,
+                expected_shutdown_tx_hash.pack(),
+                true,
+                false,
+            ),
+        ))
+        .expect("node_a network actor alive");
+
+    wait_until_timeout(30_000, || {
+        channel_closed_with_flags(
+            &node_a,
+            channel_id,
+            CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        )
+    })
+    .await;
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        node_a_state.shutdown_transaction_hash,
+        Some(expected_shutdown_tx_hash)
+    );
+    assert_eq!(
+        node_a_state.shutdown_transaction_hash,
+        node_b_state.shutdown_transaction_hash
+    );
+}
+
+#[tokio::test]
+async fn test_remote_force_shutdown_awaiting_channel_ready_after_restart() {
+    init_tracing();
+
+    let (mut node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, false).await;
+    let remote_commitment_tx =
+        prepare_force_shutdown_awaiting_channel_ready_peer_states(&node_a, &node_b, channel_id)
+            .await;
+    let shutdown_tx_hash = remote_commitment_tx.hash();
+    let expected_shutdown_tx_hash: H256 = shutdown_tx_hash.unpack();
+
+    node_a.restart().await;
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::RemoteForceShutdownChannel(
+                channel_id,
+                Some(GetShutdownTxResponse {
+                    transaction: Some(remote_commitment_tx),
+                    tx_status: TxStatus::Committed(0, Default::default(), 0),
+                }),
+            ),
+        ))
+        .expect("node_a network actor alive");
+
+    wait_until_timeout(30_000, || {
+        channel_closed_with_flags(
+            &node_a,
+            channel_id,
+            CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        )
+    })
+    .await;
+
+    let node_a_state = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        node_a_state.shutdown_transaction_hash,
+        Some(expected_shutdown_tx_hash)
+    );
 }
 
 #[tokio::test]

@@ -2216,6 +2216,15 @@ where
                         &flags
                     );
                 }
+                ChannelState::AwaitingChannelReady(flags)
+                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                        && state.latest_commitment_transaction.is_some() =>
+                {
+                    debug!(
+                        "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
+                        &flags
+                    );
+                }
                 _ => {
                     return Err(ProcessingChannelError::InvalidState(format!(
                         "Handling force shutdown command invalid state {:?}",
@@ -9980,7 +9989,9 @@ impl ChannelActorState {
         match self.state {
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
-            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+            ChannelState::ChannelReady
+            | ChannelState::ShuttingDown(..)
+            | ChannelState::AwaitingChannelReady(_)
                 if force && !close_by_us => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
