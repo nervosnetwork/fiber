@@ -6,10 +6,11 @@ use fiber_json_types::{
     AddLiquidityAssetParams, GetSwapParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
     LiquidityProviderStatus, LiquidityQuoteEnvelope,
     LiquiditySwapRecord as JsonLiquiditySwapRecord, LiquiditySwapResponse,
-    ListLiquidityAssetsResponse, ListSwapsParams, ListSwapsResponse, LoopInParams, LoopOutParams,
-    ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
-    QuoteLoopInParams, QuoteLoopOutParams, SetLiquidityProviderModeParams,
-    UpdateLiquidityAssetParams,
+    ListLiquidityAssetsResponse, ListLiquidityChainTransactionsParams,
+    ListLiquidityChainTransactionsResponse, ListSwapsParams, ListSwapsResponse, LoopInParams,
+    LoopOutParams, ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams,
+    ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
+    SetLiquidityProviderModeParams, UpdateLiquidityAssetParams,
 };
 use fiber_types::LiquiditySwapState;
 #[cfg(not(target_arch = "wasm32"))]
@@ -134,6 +135,13 @@ trait LiquidityRpc {
     #[method(name = "list_liquidity_assets")]
     async fn list_liquidity_assets(&self) -> Result<ListLiquidityAssetsResponse, ErrorObjectOwned>;
 
+    /// Return persisted chain transactions for a liquidity swap.
+    #[method(name = "list_liquidity_chain_transactions")]
+    async fn list_liquidity_chain_transactions(
+        &self,
+        params: ListLiquidityChainTransactionsParams,
+    ) -> Result<ListLiquidityChainTransactionsResponse, ErrorObjectOwned>;
+
     /// Return provider status.
     #[method(name = "get_liquidity_provider_status")]
     async fn get_liquidity_provider_status(
@@ -174,6 +182,7 @@ pub fn liquidity_rpc_method_names() -> Vec<&'static str> {
         "update_liquidity_asset",
         "disable_liquidity_asset",
         "list_liquidity_assets",
+        "list_liquidity_chain_transactions",
         "get_liquidity_provider_status",
         "set_liquidity_provider_mode",
     ]
@@ -285,6 +294,13 @@ where
 
     async fn list_liquidity_assets(&self) -> Result<ListLiquidityAssetsResponse, ErrorObjectOwned> {
         self.list_liquidity_assets().await
+    }
+
+    async fn list_liquidity_chain_transactions(
+        &self,
+        params: ListLiquidityChainTransactionsParams,
+    ) -> Result<ListLiquidityChainTransactionsResponse, ErrorObjectOwned> {
+        self.list_liquidity_chain_transactions(params).await
     }
 
     async fn get_liquidity_provider_status(
@@ -523,6 +539,22 @@ where
         call_liquidity_actor(actor.clone(), message, &log_params).await
     }
 
+    /// Return persisted chain transactions for a liquidity swap.
+    pub async fn list_liquidity_chain_transactions(
+        &self,
+        params: ListLiquidityChainTransactionsParams,
+    ) -> Result<ListLiquidityChainTransactionsResponse, ErrorObjectOwned> {
+        let actor = self
+            .actor
+            .as_ref()
+            .ok_or_else(|| rpc_error("liquidity actor is not available"))?;
+        let log_params = params.clone();
+        let message =
+            move |reply| LiquidityActorMessage::ListLiquidityChainTransactions(params, reply);
+
+        call_liquidity_actor(actor.clone(), message, &log_params).await
+    }
+
     /// Return provider status.
     pub async fn get_liquidity_provider_status(
         &self,
@@ -647,7 +679,9 @@ mod tests {
     use std::time::Duration;
 
     use fiber_json_types::{
-        GetSwapParams, Hash256 as JsonHash256, ImportLiquidityQuoteParams, LiquidityQuoteEnvelope,
+        GetSwapParams, Hash256 as JsonHash256, ImportLiquidityQuoteParams,
+        LiquidityChainTransaction, LiquidityChainTransactionRole, LiquidityQuoteEnvelope,
+        ListLiquidityChainTransactionsParams, ListLiquidityChainTransactionsResponse,
         ListSwapsParams, LoopInParams, QuoteLoopInParams,
     };
     use fiber_types::{Hash256, LiquidityAsset, LiquiditySwapState};
@@ -801,6 +835,13 @@ mod tests {
         fn list_liquidity_chain_txs_by_status(
             &self,
             _statuses: &[fiber_types::LiquidityChainTxStatus],
+        ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn list_liquidity_chain_txs_by_swap(
+            &self,
+            _swap_id: &Hash256,
         ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError> {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))
         }
@@ -991,6 +1032,13 @@ mod tests {
                     status.enabled = params.enabled;
                     let _ = reply.send(Ok(status));
                 }
+                LiquidityActorMessage::ListLiquidityChainTransactions(_params, reply) => {
+                    events
+                        .lock()
+                        .expect("events lock")
+                        .push("list_liquidity_chain_transactions");
+                    let _ = reply.send(Ok(liquidity_chain_transactions_response()));
+                }
                 _ => {}
             }
             Ok(())
@@ -1023,7 +1071,8 @@ mod tests {
                 LiquidityActorMessage::QuoteLoopIn(_, _)
                 | LiquidityActorMessage::ImportLiquidityQuote(_, _)
                 | LiquidityActorMessage::LoopIn(_, _)
-                | LiquidityActorMessage::SetLiquidityProviderMode(_, _) => {
+                | LiquidityActorMessage::SetLiquidityProviderMode(_, _)
+                | LiquidityActorMessage::ListLiquidityChainTransactions(_, _) => {
                     pending::<()>().await;
                 }
                 _ => {}
@@ -1273,6 +1322,7 @@ mod tests {
 
         assert_eq!(methods, expected);
         assert!(methods.contains("import_liquidity_quote"));
+        assert!(methods.contains("list_liquidity_chain_transactions"));
     }
 
     #[tokio::test]
@@ -1797,5 +1847,76 @@ mod tests {
 
         assert!(swap.is_none());
         assert_eq!(swaps.swaps.len(), 1);
+    }
+
+    fn list_liquidity_chain_transactions_params() -> ListLiquidityChainTransactionsParams {
+        ListLiquidityChainTransactionsParams {
+            swap_id: JsonHash256([1u8; 32]),
+        }
+    }
+
+    fn liquidity_chain_transactions_response() -> ListLiquidityChainTransactionsResponse {
+        ListLiquidityChainTransactionsResponse {
+            transactions: vec![LiquidityChainTransaction {
+                role: LiquidityChainTransactionRole::LoopInLock,
+                tx_hash: JsonHash256([2u8; 32]),
+                outpoint: None,
+                status: "broadcast".to_string(),
+                failure_reason: None,
+                created_at: 11,
+                updated_at: 12,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_chain_transactions_rpc_delegates_to_actor() {
+        let actor = spawn_liquidity_rpc_mock().await;
+        let rpc =
+            LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.ref_.clone()));
+
+        let response = rpc
+            .list_liquidity_chain_transactions(list_liquidity_chain_transactions_params())
+            .await
+            .expect("list liquidity chain transactions");
+
+        assert_eq!(response.transactions.len(), 1);
+        assert_eq!(
+            response.transactions[0].role,
+            LiquidityChainTransactionRole::LoopInLock
+        );
+        assert_eq!(
+            actor.take_events(),
+            vec!["list_liquidity_chain_transactions"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_chain_transactions_rpc_reports_actor_unavailable() {
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), None);
+
+        let error = rpc
+            .list_liquidity_chain_transactions(list_liquidity_chain_transactions_params())
+            .await
+            .expect_err("missing actor");
+
+        assert!(error.message().contains("liquidity actor is not available"));
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_chain_transactions_rpc_times_out_when_actor_stalls() {
+        let actor = spawn_stalled_liquidity_rpc_mock().await;
+        let rpc = LiquidityRpcServerImpl::new(MockLiquidityStore::default(), Some(actor.clone()));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            rpc.list_liquidity_chain_transactions(list_liquidity_chain_transactions_params()),
+        )
+        .await
+        .expect("rpc call should time out internally");
+        let error = result.expect_err("stalled actor");
+
+        assert!(error.message().contains("liquidity actor call timed out"));
+        actor.stop(None);
     }
 }

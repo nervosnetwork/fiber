@@ -1917,6 +1917,17 @@ impl LiquidityStore for Store {
         Ok(records)
     }
 
+    fn list_liquidity_chain_txs_by_swap(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+        let prefix = [&[LIQUIDITY_CHAIN_TX_PREFIX], swap_id.as_ref()].concat();
+        self.collect_by_prefix(&prefix)
+            .into_iter()
+            .map(|kv| deserialize_liquidity(kv.value.as_ref(), "LiquidityChainTxRecord"))
+            .collect()
+    }
+
     fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
         asset.validate()?;
 

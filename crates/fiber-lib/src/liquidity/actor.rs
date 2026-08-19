@@ -10,9 +10,11 @@ use async_trait::async_trait;
 use ckb_types::packed::OutPoint;
 use fiber_json_types::{
     AddLiquidityAssetParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
-    LiquidityProviderStatus, LiquidityQuoteEnvelope, LiquiditySwapResponse,
-    ListLiquidityAssetsResponse, LoopInParams, LoopOutParams, ProviderAcceptLoopInParams,
-    ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
+    LiquidityChainTransaction, LiquidityChainTransactionRole, LiquidityProviderStatus,
+    LiquidityQuoteEnvelope, LiquiditySwapResponse, ListLiquidityAssetsResponse,
+    ListLiquidityChainTransactionsParams, ListLiquidityChainTransactionsResponse, LoopInParams,
+    LoopOutParams, ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams,
+    ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
     SetLiquidityProviderModeParams, UpdateLiquidityAssetParams,
 };
 use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
@@ -103,6 +105,11 @@ pub enum LiquidityActorMessage {
     ),
     /// List configured provider assets.
     ListLiquidityAssets(RpcReplyPort<Result<ListLiquidityAssetsResponse, LiquidityLoopOutError>>),
+    /// List persisted chain transactions for a swap.
+    ListLiquidityChainTransactions(
+        ListLiquidityChainTransactionsParams,
+        RpcReplyPort<Result<ListLiquidityChainTransactionsResponse, LiquidityLoopOutError>>,
+    ),
     /// Return provider status.
     GetLiquidityProviderStatus(
         RpcReplyPort<Result<LiquidityProviderStatus, LiquidityLoopOutError>>,
@@ -148,6 +155,7 @@ impl LiquidityActorMessage {
             "update_liquidity_asset",
             "disable_liquidity_asset",
             "list_liquidity_assets",
+            "list_liquidity_chain_transactions",
             "get_liquidity_provider_status",
             "set_liquidity_provider_mode",
             "resume_non_terminal",
@@ -354,6 +362,10 @@ where
             }
             LiquidityActorMessage::ListLiquidityAssets(reply) => {
                 let result = state.handle_list_liquidity_assets();
+                let _ = reply.send(result);
+            }
+            LiquidityActorMessage::ListLiquidityChainTransactions(params, reply) => {
+                let result = state.handle_list_liquidity_chain_transactions(params);
                 let _ = reply.send(result);
             }
             LiquidityActorMessage::GetLiquidityProviderStatus(reply) => {
@@ -629,6 +641,31 @@ where
             .map_err(map_store_error)?;
         let assets = assets.iter().map(liquidity_asset_to_json_info).collect();
         Ok(ListLiquidityAssetsResponse { assets })
+    }
+
+    fn handle_list_liquidity_chain_transactions(
+        &self,
+        params: ListLiquidityChainTransactionsParams,
+    ) -> Result<ListLiquidityChainTransactionsResponse, LiquidityLoopOutError> {
+        let swap_id: Hash256 = params.swap_id.into();
+        let Some(swap) = self
+            .store
+            .get_liquidity_swap(&swap_id)
+            .map_err(map_store_error)?
+        else {
+            return Ok(ListLiquidityChainTransactionsResponse {
+                transactions: Vec::new(),
+            });
+        };
+        let mut transactions: Vec<LiquidityChainTransaction> = self
+            .store
+            .list_liquidity_chain_txs_by_swap(&swap_id)
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(|record| liquidity_chain_transaction_from_store(record, swap.swap_kind))
+            .collect();
+        transactions.sort_by_key(|transaction| chain_tx_role_order(transaction.role));
+        Ok(ListLiquidityChainTransactionsResponse { transactions })
     }
 
     fn handle_get_liquidity_provider_status(
@@ -2492,6 +2529,58 @@ fn map_store_error(error: LiquidityStoreError) -> LiquidityLoopOutError {
     }
 }
 
+fn liquidity_chain_transaction_from_store(
+    record: fiber_types::LiquidityChainTxRecord,
+    swap_kind: LiquiditySwapKind,
+) -> LiquidityChainTransaction {
+    LiquidityChainTransaction {
+        role: semantic_chain_tx_role(swap_kind, record.role),
+        tx_hash: record.tx_hash.into(),
+        outpoint: record.outpoint,
+        status: chain_tx_status_to_string(record.status),
+        failure_reason: record.failure_reason,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
+/// Map a persisted chain tx role to its semantic role for the swap kind.
+///
+/// A Loop In swap stores its client on-chain lock transaction under the
+/// `Payout` role; that role is surfaced as [`LiquidityChainTransactionRole::LoopInLock`].
+fn semantic_chain_tx_role(
+    swap_kind: LiquiditySwapKind,
+    role: LiquidityChainTxRole,
+) -> LiquidityChainTransactionRole {
+    match (swap_kind, role) {
+        (LiquiditySwapKind::LoopIn, LiquidityChainTxRole::Payout) => {
+            LiquidityChainTransactionRole::LoopInLock
+        }
+        (_, LiquidityChainTxRole::Payout) => LiquidityChainTransactionRole::Payout,
+        (_, LiquidityChainTxRole::Claim) => LiquidityChainTransactionRole::Claim,
+        (_, LiquidityChainTxRole::Refund) => LiquidityChainTransactionRole::Refund,
+    }
+}
+
+/// Stable ordering key for chain transactions regardless of store iteration order.
+fn chain_tx_role_order(role: LiquidityChainTransactionRole) -> u8 {
+    match role {
+        LiquidityChainTransactionRole::Payout | LiquidityChainTransactionRole::LoopInLock => 0,
+        LiquidityChainTransactionRole::Claim => 1,
+        LiquidityChainTransactionRole::Refund => 2,
+    }
+}
+
+fn chain_tx_status_to_string(status: LiquidityChainTxStatus) -> String {
+    match status {
+        LiquidityChainTxStatus::Planned => "planned",
+        LiquidityChainTxStatus::Broadcast => "broadcast",
+        LiquidityChainTxStatus::Confirmed => "confirmed",
+        LiquidityChainTxStatus::Rejected => "rejected",
+    }
+    .to_string()
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2583,6 +2672,7 @@ mod tests {
                 "update_liquidity_asset",
                 "disable_liquidity_asset",
                 "list_liquidity_assets",
+                "list_liquidity_chain_transactions",
                 "get_liquidity_provider_status",
                 "set_liquidity_provider_mode",
                 "resume_non_terminal",
@@ -2958,6 +3048,19 @@ mod tests {
                 .borrow()
                 .values()
                 .filter(|record| statuses.contains(&record.status))
+                .cloned()
+                .collect())
+        }
+
+        fn list_liquidity_chain_txs_by_swap(
+            &self,
+            swap_id: &Hash256,
+        ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+            Ok(self
+                .chain_txs
+                .borrow()
+                .values()
+                .filter(|record| record.swap_id == *swap_id)
                 .cloned()
                 .collect())
         }
@@ -3811,6 +3914,151 @@ mod tests {
             )
         })
         .unwrap()
+    }
+
+    async fn call_list_liquidity_chain_transactions(
+        actor: &ractor::ActorRef<LiquidityActorMessage>,
+        swap_id: Hash256,
+    ) -> Result<ListLiquidityChainTransactionsResponse, LiquidityLoopOutError> {
+        ractor::call!(actor, |reply| {
+            LiquidityActorMessage::ListLiquidityChainTransactions(
+                ListLiquidityChainTransactionsParams {
+                    swap_id: swap_id.into(),
+                },
+                reply,
+            )
+        })
+        .unwrap()
+    }
+
+    fn loop_in_swap_record(swap_id: Hash256) -> LiquiditySwapRecord {
+        LiquiditySwapRecord {
+            swap_id,
+            quote_id: swap_id,
+            role: LiquiditySwapRole::Client,
+            swap_kind: LiquiditySwapKind::LoopIn,
+            asset_id: "ckb".to_string(),
+            state: LiquiditySwapState::OnchainLocked,
+            payment_hash: [7u8; 32].into(),
+            payment_preimage: None,
+            amount: 1_000,
+            onchain_outpoint: None,
+            payout_deadline: None,
+            refund_after_lock_time: 1_000,
+            expires_at: 2_000,
+            failure_reason: None,
+            created_at: 10,
+            updated_at: 10,
+        }
+    }
+
+    fn liquidity_chain_tx_record(
+        swap_id: Hash256,
+        role: LiquidityChainTxRole,
+        tx_seed: u8,
+    ) -> LiquidityChainTxRecord {
+        LiquidityChainTxRecord {
+            swap_id,
+            role,
+            tx_hash: [tx_seed; 32].into(),
+            outpoint: None,
+            status: LiquidityChainTxStatus::Planned,
+            failure_reason: None,
+            created_at: 10,
+            updated_at: 10,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_chain_transactions_labels_loop_in_payout_and_orders_stably() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let swap_id: Hash256 = [5u8; 32].into();
+        store
+            .insert_liquidity_swap(loop_in_swap_record(swap_id))
+            .unwrap();
+        for (role, seed) in [
+            (LiquidityChainTxRole::Refund, 3u8),
+            (LiquidityChainTxRole::Payout, 1u8),
+            (LiquidityChainTxRole::Claim, 2u8),
+        ] {
+            store
+                .insert_liquidity_chain_tx(liquidity_chain_tx_record(swap_id, role, seed))
+                .unwrap();
+        }
+
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new(events.clone()),
+        )
+        .await;
+
+        let response = call_list_liquidity_chain_transactions(&actor, swap_id)
+            .await
+            .unwrap();
+
+        let roles: Vec<_> = response.transactions.iter().map(|tx| tx.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                LiquidityChainTransactionRole::LoopInLock,
+                LiquidityChainTransactionRole::Claim,
+                LiquidityChainTransactionRole::Refund,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_chain_transactions_labels_loop_out_payout() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let swap = recovery_swap(11, LiquiditySwapState::PayoutLocked);
+        let swap_id = swap.swap_id;
+        store.insert_liquidity_swap(swap).unwrap();
+        store
+            .insert_liquidity_chain_tx(liquidity_chain_tx_record(
+                swap_id,
+                LiquidityChainTxRole::Payout,
+                1,
+            ))
+            .unwrap();
+
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new(events.clone()),
+        )
+        .await;
+
+        let response = call_list_liquidity_chain_transactions(&actor, swap_id)
+            .await
+            .unwrap();
+
+        assert_eq!(response.transactions.len(), 1);
+        assert_eq!(
+            response.transactions[0].role,
+            LiquidityChainTransactionRole::Payout
+        );
+        assert_eq!(response.transactions[0].status, "planned");
+    }
+
+    #[tokio::test]
+    async fn list_liquidity_chain_transactions_returns_empty_for_unknown_swap() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new(events.clone()),
+            TestLiquidityChain::new(events.clone()),
+        )
+        .await;
+
+        let response = call_list_liquidity_chain_transactions(&actor, [42u8; 32].into())
+            .await
+            .unwrap();
+
+        assert!(response.transactions.is_empty());
     }
 
     async fn wait_for_event(events: &Shared<Vec<&'static str>>, expected: &'static str) {

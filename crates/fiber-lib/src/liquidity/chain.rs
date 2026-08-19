@@ -2278,6 +2278,20 @@ mod tests {
                 .collect())
         }
 
+        fn list_liquidity_chain_txs_by_swap(
+            &self,
+            swap_id: &Hash256,
+        ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+            Ok(self
+                .chain_txs
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|record| record.swap_id == *swap_id)
+                .cloned()
+                .collect())
+        }
+
         fn upsert_liquidity_asset(
             &self,
             _asset: LiquidityAsset,
