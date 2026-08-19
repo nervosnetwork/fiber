@@ -1449,7 +1449,7 @@ where
                     "cannot resolve UDT cell deps for claim transaction: {error}"
                 ))
             })?;
-            claim_cell_deps.extend(udt_cell_deps.into_iter());
+            claim_cell_deps.extend(udt_cell_deps);
         }
         let tx = match (swap.swap_kind, swap.role) {
             (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Provider) => {
@@ -1625,7 +1625,7 @@ where
                     "cannot resolve UDT cell deps for refund transaction: {error}"
                 ))
             })?;
-            refund_cell_deps.extend(udt_cell_deps.into_iter());
+            refund_cell_deps.extend(udt_cell_deps);
         }
         let tx = match (record.swap_kind, record.role) {
             (LiquiditySwapKind::LoopIn, LiquiditySwapRole::Client) => {
@@ -3055,7 +3055,7 @@ mod tests {
             &quote,
             &client_lock_outpoint,
             preimage,
-            &[cell_dep.clone()],
+            std::slice::from_ref(&cell_dep),
         )
         .expect("loop in provider claim transaction");
 
@@ -3091,7 +3091,7 @@ mod tests {
             &quote,
             &client_lock_outpoint,
             quote.refund_after_lock_time,
-            &[cell_dep.clone()],
+            std::slice::from_ref(&cell_dep),
         )
         .expect("loop in client refund transaction");
 
@@ -3191,7 +3191,7 @@ mod tests {
             &quote,
             &payout_outpoint,
             preimage,
-            &[cell_dep.clone()],
+            std::slice::from_ref(&cell_dep),
         )
         .expect("claim transaction");
 
@@ -3272,7 +3272,7 @@ mod tests {
             &quote,
             &payout_outpoint,
             quote.refund_after_lock_time,
-            &[cell_dep.clone()],
+            std::slice::from_ref(&cell_dep),
         )
         .expect("refund transaction");
 
@@ -4813,12 +4813,12 @@ mod tests {
             claimant_lock: packed::Script::new_builder()
                 .code_hash([10u8; 32].pack())
                 .hash_type(packed::Byte::new(0))
-                .args(vec![1u8; 20].pack())
+                .args([1u8; 20].pack())
                 .build(),
             refund_lock: packed::Script::new_builder()
                 .code_hash([11u8; 32].pack())
                 .hash_type(packed::Byte::new(0))
-                .args(vec![2u8; 20].pack())
+                .args([2u8; 20].pack())
                 .build(),
             client_invoice: None,
         }

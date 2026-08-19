@@ -1310,21 +1310,16 @@ where
             );
             return Ok(false);
         }
-        let should_broadcast_refund = match self
-            .store
-            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Refund)
-            .map_err(map_store_error)?
-        {
+        let should_broadcast_refund = !matches!(
+            self.store
+                .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Refund)
+                .map_err(map_store_error)?,
             Some(record)
                 if matches!(
                     record.status,
                     LiquidityChainTxStatus::Broadcast | LiquidityChainTxStatus::Confirmed
-                ) =>
-            {
-                false
-            }
-            _ => true,
-        };
+                )
+        );
         if should_broadcast_refund {
             self.chain
                 .broadcast_refund(&swap)
