@@ -181,6 +181,8 @@ pub struct LiquidityActorArguments<S, P, C> {
     pub chain: C,
     /// Fiber public key advertised by the serving provider node.
     pub provider_pubkey: fiber_types::Pubkey,
+    /// Provider's own recovery lock script derived from the node identity.
+    pub provider_funding_lock_script: ckb_types::packed::Script,
 }
 
 /// Durable mutation actor for liquidity workflows.
@@ -192,6 +194,7 @@ pub struct LiquidityActorState<S, P, C> {
     payment: P,
     chain: C,
     provider_pubkey: fiber_types::Pubkey,
+    provider_funding_lock_script: ckb_types::packed::Script,
     watched_payout_swaps: HashSet<Hash256>,
     active_payment_swaps: HashSet<Hash256>,
     watched_claim_swaps: HashSet<Hash256>,
@@ -221,6 +224,7 @@ where
             payment: args.payment,
             chain: args.chain,
             provider_pubkey: args.provider_pubkey,
+            provider_funding_lock_script: args.provider_funding_lock_script,
             watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
@@ -440,7 +444,6 @@ where
         let now_ms = now_ms();
         let expires_at = quote_expires_at(now_ms, params.expires_after_seconds)?;
         let claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
-        let refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
         let validated = validate_loop_out_quote_request(
             &asset,
             params.amount,
@@ -467,7 +470,7 @@ where
                 validated.expires_at.saturating_add(20_000),
             )?,
             claimant_lock,
-            refund_lock,
+            refund_lock: self.provider_funding_lock_script.clone(),
             client_invoice: None,
         };
         self.store
@@ -499,7 +502,7 @@ where
             expires_at,
             1_000,
         )?;
-        terms.claimant_lock = parse_script_hex(&params.claimant_lock, "claimant_lock")?;
+        terms.claimant_lock = self.provider_funding_lock_script.clone();
         terms.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
         if terms.provider_fee > params.max_provider_fee {
             return Err(LiquidityLoopOutError::ProviderFeeTooHigh);
@@ -520,7 +523,6 @@ where
             asset_id,
             amount,
             claimant_lock,
-            refund_lock,
             max_provider_fee,
             max_routing_fee,
             expires_after_seconds,
@@ -530,7 +532,6 @@ where
             asset_id,
             amount,
             claimant_lock,
-            refund_lock,
             max_provider_fee,
             max_routing_fee,
             expires_after_seconds,
@@ -1613,7 +1614,6 @@ fn loop_out_quote_hash(params: &ProviderQuoteLoopOutParams, now_ms: u64, domain:
     seed.extend_from_slice(params.asset_id.as_bytes());
     seed.extend_from_slice(&params.amount.to_le_bytes());
     seed.extend_from_slice(params.claimant_lock.as_bytes());
-    seed.extend_from_slice(params.refund_lock.as_bytes());
     seed.extend_from_slice(&params.max_provider_fee.to_le_bytes());
     seed.extend_from_slice(&params.max_routing_fee.to_le_bytes());
     seed.extend_from_slice(&params.expires_after_seconds.to_le_bytes());
@@ -1627,7 +1627,6 @@ fn loop_in_quote_hash(params: &QuoteLoopInParams, now_ms: u64, domain: &[u8]) ->
     seed.extend_from_slice(params.asset_id.as_bytes());
     seed.extend_from_slice(&params.amount.to_le_bytes());
     seed.extend_from_slice(params.client_invoice.as_bytes());
-    seed.extend_from_slice(params.claimant_lock.as_bytes());
     seed.extend_from_slice(params.refund_lock.as_bytes());
     seed.extend_from_slice(&params.max_provider_fee.to_le_bytes());
     seed.extend_from_slice(&params.max_routing_fee.to_le_bytes());
@@ -3759,6 +3758,7 @@ mod tests {
                     payment: self.payment.clone(),
                     chain: self.chain.clone(),
                     provider_pubkey,
+                    provider_funding_lock_script: deterministic_provider_funding_lock_script(),
                 },
             )
             .await
@@ -3779,6 +3779,7 @@ mod tests {
                     payment: self.payment.clone(),
                     chain: self.chain.clone(),
                     provider_pubkey: deterministic_provider_pubkey(),
+                    provider_funding_lock_script: deterministic_provider_funding_lock_script(),
                 },
             )
             .await
@@ -3799,6 +3800,7 @@ mod tests {
                 payment,
                 chain,
                 provider_pubkey: deterministic_provider_pubkey(),
+                provider_funding_lock_script: deterministic_provider_funding_lock_script(),
             },
         )
         .await
@@ -4638,6 +4640,7 @@ mod tests {
             .0,
             chain: TestLiquidityChain::new_with_label(events.clone(), "runtime_client"),
             provider_pubkey: deterministic_provider_pubkey(),
+            provider_funding_lock_script: deterministic_provider_funding_lock_script(),
             watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
@@ -4745,6 +4748,7 @@ mod tests {
             payment: TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
             chain: TestLiquidityChain::new_with_label(events, "runtime_client"),
             provider_pubkey: deterministic_provider_pubkey(),
+            provider_funding_lock_script: deterministic_provider_funding_lock_script(),
             watched_payout_swaps: HashSet::new(),
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
@@ -4914,6 +4918,14 @@ mod tests {
         format!("0x{}", hex::encode(script.as_slice()))
     }
 
+    fn deterministic_provider_funding_lock_script() -> ckb_types::packed::Script {
+        let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+        let pubkey_hash = ckb_hash::blake2b_256(sk.public_key(SECP256K1).serialize());
+        ckb_types::packed::Script::new_builder()
+            .args(ckb_types::bytes::Bytes::from(pubkey_hash[0..20].to_vec()).pack())
+            .build()
+    }
+
     fn valid_client_invoice(amount: u128, payment_hash: Hash256) -> String {
         let (private_key, public_key) = gen_deterministic_secp256k1_keypair_tuple();
         InvoiceBuilder::new(Currency::Fibb)
@@ -4988,6 +5000,7 @@ mod tests {
                 payment: harness.payment.clone(),
                 chain: harness.chain.clone(),
                 provider_pubkey: deterministic_provider_pubkey(),
+                provider_funding_lock_script: deterministic_provider_funding_lock_script(),
             },
         )
         .await
@@ -6048,7 +6061,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
                 claimant_lock: script_hex(&script("provider-quote-claimant")),
-                refund_lock: script_hex(&script("provider-quote-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -6096,7 +6108,6 @@ mod tests {
                     asset_id: "ckb".to_string(),
                     amount: 1_000,
                     claimant_lock: script_hex(&script("provider-identity-loop-out-claimant")),
-                    refund_lock: script_hex(&script("provider-identity-loop-out-refund")),
                     max_provider_fee: 100,
                     max_routing_fee: 50,
                     expires_after_seconds: 60,
@@ -6131,7 +6142,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
                 claimant_lock: "not-hex".to_string(),
-                refund_lock: script_hex(&script("valid-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -6147,41 +6157,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_quote_loop_out_rejects_malformed_refund_before_side_effects() {
-        let harness = RuntimeActorHarness::new_provider_with_asset();
-
-        let error = harness
-            .call_provider_quote(ProviderQuoteLoopOutParams {
-                asset_id: "ckb".to_string(),
-                amount: 1000,
-                claimant_lock: script_hex(&script("valid-claimant")),
-                refund_lock: "not-hex".to_string(),
-                max_provider_fee: 100,
-                max_routing_fee: 50,
-                expires_after_seconds: 60,
-            })
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("refund_lock"));
-        assert!(harness.store.quotes.borrow().is_empty());
-        assert_eq!(*harness.store.quote_writes.borrow(), 0);
-        assert!(harness.events().is_empty());
-        assert!(harness.chain.payout_locks.borrow().is_empty());
-    }
-
-    #[tokio::test]
     async fn provider_loop_out_quote_persists_final_scripts() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
         let claimant_lock = script("quote-final-claimant");
-        let refund_lock = script("quote-final-refund");
+        let provider_funding_lock = deterministic_provider_funding_lock_script();
 
         let quote = harness
             .call_provider_quote(ProviderQuoteLoopOutParams {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
                 claimant_lock: script_hex(&claimant_lock),
-                refund_lock: script_hex(&refund_lock),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -6195,7 +6180,62 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(persisted.claimant_lock, claimant_lock);
-        assert_eq!(persisted.refund_lock, refund_lock);
+        assert_eq!(persisted.refund_lock, provider_funding_lock);
+    }
+
+    #[tokio::test]
+    async fn loop_out_quote_refund_lock_is_provider_funding_script_not_client_input() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let provider_funding_lock = deterministic_provider_funding_lock_script();
+
+        let quote = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                claimant_lock: script_hex(&script("client-claimant")),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.refund_lock, provider_funding_lock);
+        assert_eq!(persisted.claimant_lock, script("client-claimant"));
+    }
+
+    #[tokio::test]
+    async fn loop_in_quote_claimant_lock_is_provider_funding_script_not_client_input() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let provider_funding_lock = deterministic_provider_funding_lock_script();
+        let client_refund_lock = script("client-refund");
+
+        let quote = harness
+            .call_quote_loop_in(QuoteLoopInParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                client_invoice: valid_client_invoice(100, [42u8; 32].into()),
+                refund_lock: script_hex(&client_refund_lock),
+                max_provider_fee: 100,
+                max_routing_fee: 17,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.claimant_lock, provider_funding_lock);
+        assert_eq!(persisted.refund_lock, client_refund_lock);
     }
 
     #[tokio::test]
@@ -6228,7 +6268,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
                 claimant_lock: script_hex(&script("local-quote-claimant")),
-                refund_lock: script_hex(&script("local-quote-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,
@@ -6255,7 +6294,7 @@ mod tests {
     async fn quote_loop_in_returns_complete_envelope_with_invoice_identity_asset_and_scripts() {
         let harness = RuntimeActorHarness::new_provider_with_asset();
         let client_invoice = valid_client_invoice(100, [44u8; 32].into());
-        let claimant_lock = script("loop-in-claimant");
+        let provider_funding_lock = deterministic_provider_funding_lock_script();
         let refund_lock = script("loop-in-refund");
 
         let quote = harness
@@ -6264,7 +6303,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice: client_invoice.clone(),
-                claimant_lock: script_hex(&claimant_lock),
                 refund_lock: script_hex(&refund_lock),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6274,7 +6312,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(quote.routing_fee_limit, 17);
-        assert_eq!(quote.claimant_lock, script_hex(&claimant_lock));
+        assert_eq!(quote.claimant_lock, script_hex(&provider_funding_lock));
         assert_eq!(quote.refund_lock, script_hex(&refund_lock));
         assert_eq!(quote.client_invoice, Some(client_invoice));
         assert_eq!(quote.asset.asset_id, "ckb");
@@ -6288,7 +6326,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(persisted.routing_fee_limit, 17);
-        assert_eq!(persisted.claimant_lock, claimant_lock);
+        assert_eq!(persisted.claimant_lock, provider_funding_lock);
         assert_eq!(persisted.refund_lock, refund_lock);
     }
 
@@ -6311,7 +6349,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice: valid_client_invoice(100, [43u8; 32].into()),
-                claimant_lock: script_hex(&script("provider-identity-loop-in-claimant")),
                 refund_lock: script_hex(&script("provider-identity-loop-in-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6348,7 +6385,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 claimant_lock: script_hex(&script("disabled-claimant")),
-                refund_lock: script_hex(&script("disabled-refund")),
                 max_provider_fee: 10,
                 max_routing_fee: 5,
                 expires_after_seconds: 60,
@@ -6424,7 +6460,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice: valid_client_invoice(100, [43u8; 32].into()),
-                claimant_lock: script_hex(&script("disabled-loop-in-claimant")),
                 refund_lock: script_hex(&script("disabled-loop-in-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6490,7 +6525,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice,
-                claimant_lock: script_hex(&script("loop-in-provider-claim")),
                 refund_lock: script_hex(&script("loop-in-client-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6538,7 +6572,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice: valid_client_invoice(100, [52u8; 32].into()),
-                claimant_lock: script_hex(&script("loop-in-idempotent-provider-claim")),
                 refund_lock: script_hex(&script("loop-in-idempotent-client-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6633,7 +6666,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice,
-                claimant_lock: script_hex(&script("loop-in-provider-claim")),
                 refund_lock: script_hex(&script("loop-in-client-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6666,7 +6698,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 100,
                 client_invoice,
-                claimant_lock: script_hex(&script("loop-in-provider-claim")),
                 refund_lock: script_hex(&script("loop-in-client-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 17,
@@ -6717,7 +6748,6 @@ mod tests {
                 asset_id: "ckb".to_string(),
                 amount: 1000,
                 claimant_lock: script_hex(&script("manual-claimant")),
-                refund_lock: script_hex(&script("manual-refund")),
                 max_provider_fee: 100,
                 max_routing_fee: 50,
                 expires_after_seconds: 60,

@@ -818,7 +818,6 @@ Request a Loop Out quote from a provider.
 * `asset_id` - <em>`String`</em>, Provider asset registry identifier.
 * `amount` - <em>`u128`</em>, Raw on-chain destination amount before routing fees.
 * `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
-* `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
 * `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
@@ -917,7 +916,6 @@ Request a Loop In quote from a provider.
 * `asset_id` - <em>`String`</em>, Provider asset registry identifier.
 * `amount` - <em>`u128`</em>, Raw Fiber destination amount before routing fees.
 * `client_invoice` - <em>`String`</em>, Client invoice the provider should pay.
-* `claimant_lock` - <em>`String`</em>, Provider claim lock script bytes encoded for the client lock.
 * `refund_lock` - <em>`String`</em>, Client refund lock script bytes encoded for the client lock.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
@@ -1015,7 +1013,6 @@ Provider-side quote endpoint for a Loop Out request.
 * `asset_id` - <em>`String`</em>, Provider asset registry identifier.
 * `amount` - <em>`u128`</em>, Raw on-chain destination amount before routing fees.
 * `claimant_lock` - <em>`String`</em>, Claimant lock script bytes encoded for the payout lock.
-* `refund_lock` - <em>`String`</em>, Refund lock script bytes encoded for the payout lock.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted by the client.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted by the client.
 * `expires_after_seconds` - <em>`u64`</em>, Relative quote expiry requested by the client.
