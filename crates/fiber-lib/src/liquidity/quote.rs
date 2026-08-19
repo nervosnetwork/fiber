@@ -332,6 +332,7 @@ pub fn validate_imported_quote(
 }
 
 /// Build quote terms for a Loop In request after provider-side validation.
+#[allow(clippy::too_many_arguments)]
 pub fn build_loop_in_quote_terms(
     quote_id: Hash256,
     provider: Pubkey,
