@@ -348,9 +348,7 @@ pub mod server {
                 let provider_pubkey = liquidity_provider_pubkey(fiber_config.as_ref())?;
                 let provider_funding_lock_script = ckb_config
                     .as_ref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("liquidity RPC requires CKB configuration")
-                    })?
+                    .ok_or_else(|| anyhow::anyhow!("liquidity RPC requires CKB configuration"))?
                     .get_default_funding_lock_script()
                     .map_err(|error| {
                         anyhow::anyhow!("cannot derive provider funding lock script: {error}")
