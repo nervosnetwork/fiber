@@ -463,65 +463,52 @@ and commit with `git commit -m "fix: encode liquidity refund lock time as CKB si
 
 ### Task 12: Persist Signed Transactions For Restart Recovery
 
+> **Implementation note (user-approved deviation):** persisted under a dedicated
+> store key (`LiquidityChainTxSignedTx`) instead of an inline `LiquidityChainTxRecord`
+> field, avoiding a bincode migration and new `fiber-store` dependencies. Payout and
+> Loop In lock are persisted; claim/refund are deterministic rebuilds and are not
+> persisted. See spec section 1.7.
+
 **Files:**
-- Modify: `crates/fiber-types/src/liquidity.rs`
-- Modify: `crates/fiber-lib/src/liquidity/store.rs`
-- Modify: store implementations and migration snapshots selected by `make check-migrate`
-- Add: `crates/fiber-store/src/migrations/mig_<date>_liquidity_signed_transactions.rs`
-- Modify: `crates/fiber-store/src/migrations/mod.rs`
+- Modify: `crates/fiber-types/src/schema.rs` (new key prefix)
+- Modify: `crates/fiber-lib/src/liquidity/store.rs` (trait methods)
+- Modify: `crates/fiber-lib/src/store/store_impl/mod.rs` and mock stores
 - Modify: `crates/fiber-lib/src/liquidity/chain.rs`
 
 - [ ] **Step 1: Write RED serialization/store tests**
 
-Add an optional signed transaction field to the persisted chain record model in
-the test first. Round-trip a real packed transaction and assert exact serialized
-bytes. Add store tests that
-round-trip records for payout, Loop In lock, claim, and refund.
+Add `insert/get_liquidity_chain_tx_signed_tx` store methods and round-trip a real
+packed transaction for the payout role (Loop In lock reuses the `Payout` role).
 
 - [ ] **Step 2: Run RED tests**
 
-Run: `cargo nextest run -p fnn --features rocksdb -E 'test(/liquidity.*signed_transaction/)'`
+Run: `cargo nextest run -p fnn --features rocksdb -E 'test(liquidity_chain_tx_signed_tx)'`
 
 - [ ] **Step 3: Persist before broadcast**
 
-Represent the optional packed transaction with the repository's `EntityHex`
-serde convention. For every locally built role, persist signed bytes and the
-matching hash/outpoint/status before `SendTx`. Remote-observed records keep the
-field absent. Never expose signed bytes through JSON-RPC.
+Persist payout and Loop In lock signed bytes before `SendTx`; remote-observed
+records never store bytes. Never expose signed bytes through JSON-RPC.
 
-- [ ] **Step 4: Add explicit bincode migration**
+- [ ] **Step 4: Write RED restart/hash tests**
 
-Define the exact legacy chain-record shape in the migration, decode existing
-bincode values, and rewrite the new shape with `signed_transaction: None`. For
-Loop In owners, migrate the old `Payout` role to `LoopInLock`. Add migration tests
-using bytes produced by the legacy struct, not JSON fixtures. Register the
-migration in `migrations/mod.rs`; add a crate dependency only if the migration
-cannot use existing types.
+Recreate `CkbLiquidityChainWatcher` with an empty in-memory pending map and assert
+it reloads and rebroadcasts the exact transaction. Add missing bytes and hash
+mismatch tests that fail closed.
 
-- [ ] **Step 5: Write RED restart/hash tests**
-
-For every locally built role, recreate `CkbLiquidityChainWatcher` with an empty
-in-memory pending map and assert it reloads and rebroadcasts the exact transaction.
-Add missing bytes, malformed bytes, and hash mismatch tests that fail closed and
-record a rejection reason.
-
-- [ ] **Step 6: Implement safe reload and run GREEN**
+- [ ] **Step 5: Implement safe reload and run GREEN**
 
 Decode persisted bytes, compare `tx.hash()` with the chain record, and only then
-rebroadcast or resume tracing. Run:
+rebroadcast. Run the focused selection, `liquidity::chain`, store, and `make check-migrate`.
 
-```bash
-cargo nextest run -p fnn --features rocksdb -E 'test(/liquidity.*signed_transaction/)'
-cargo nextest run -p fiber-store -E 'test(liquidity_signed_transactions)'
-make check-migrate
-```
+- [ ] **Step 6: Commit scoped persistence changes**
 
-- [ ] **Step 7: Commit scoped persistence changes**
-
-Stage only the listed source and generated migration files, inspect the cached
-diff, and commit with `git commit -m "feat: persist signed liquidity transactions"`.
+Commit with `git commit -m "feat: persist and reload signed liquidity transactions"`.
 
 ### Task 13: Public Chain Transaction Query RPC
+
+> **Implementation note (user-approved deviation):** no stored `LoopInLock` role is
+> added. The actor maps a Loop In swap's stored `Payout` role to a `loop_in_lock`
+> semantic label in the JSON response. See spec section 1.7.
 
 **Files:**
 - Modify: `crates/fiber-json-types/src/liquidity.rs`
@@ -534,9 +521,8 @@ diff, and commit with `git commit -m "feat: persist signed liquidity transaction
 
 Define documented `ListLiquidityChainTransactionsParams { swap_id }`, public
 record/response DTOs containing role, hash, optional outpoint, status, failure
-reason, and timestamps, but no signed bytes. Add distinct internal/public
-`LoopInLock` role support and update RocksDB role-key mappings. Test stable
-`Payout`, `LoopInLock`, `Claim`, `Refund` ordering and an empty result for an
+reason, and timestamps, but no signed bytes. Test stable
+`payout`/`loop_in_lock`/`claim`/`refund` ordering and an empty result for an
 unknown swap.
 
 - [ ] **Step 2: Run RED tests**
@@ -545,9 +531,10 @@ Run: `cargo nextest run -p fnn --features rocksdb -E 'test(/list_liquidity_chain
 
 - [ ] **Step 3: Add store, actor, and RPC implementation**
 
-Add `list_liquidity_chain_txs_by_swap(&Hash256)`, map internal enum values to JSON
-strings/enums, add the actor message, and register/delegate
-`list_liquidity_chain_transactions` with existing timeout/error semantics.
+Add `list_liquidity_chain_txs_by_swap(&Hash256)`, map the stored role to the
+semantic JSON label (Loop In `Payout` → `loop_in_lock`), add the actor message,
+and register/delegate `list_liquidity_chain_transactions` with existing
+timeout/error semantics.
 
 - [ ] **Step 4: Run GREEN, regenerate docs, and commit**
 

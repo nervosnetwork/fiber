@@ -167,12 +167,15 @@ stop recovery for already-persisted non-terminal swaps.
 
 ### 1.7 Durable Transactions And Public Observability
 
-Every locally built payout, Loop In lock, claim, and refund transaction is stored
-as signed serialized bytes before its first broadcast. Its `LiquidityChainTxRecord`
-is persisted in the same ordered operation. Recovery decodes the bytes, verifies
-that the transaction hash equals the persisted record, and only then rebroadcasts
-or resumes tracing. Missing, malformed, or hash-mismatched bytes fail closed and
-are exposed through the transaction record rather than causing an unsafe rebuild.
+Every locally built payout and Loop In lock transaction is stored as signed
+serialized bytes before its first broadcast, under a dedicated store key
+(`LiquidityChainTxSignedTx`) so the persisted `LiquidityChainTxRecord` bincode
+shape is unchanged and no data migration is required. Recovery decodes the bytes,
+verifies that the transaction hash equals the persisted record, and only then
+rebroadcasts instead of failing closed. Missing, malformed, or hash-mismatched
+bytes fail closed with a descriptive reason. Claim and refund transactions are
+deterministic secp256k1 rebuilds already hash-verified against their record, so
+they are not persisted as signed bytes.
 
 Add `list_liquidity_chain_transactions({ swap_id })`. It returns all persisted
 transactions for that swap with:
@@ -188,9 +191,11 @@ Results use a stable role order. Unknown swaps return an empty list. This RPC is
 the public source for E2E ordering, confirmation, rejection, refund, restart, and
 diagnostic assertions; tests do not read liquidity stores directly.
 
-Chain transaction roles are distinct: `Payout`, `LoopInLock`, `Claim`, and
-`Refund`. Existing Loop In records previously stored as `Payout` are migrated to
-`LoopInLock` according to their owning swap direction.
+Chain transaction roles are reported with a distinct semantic label in the query
+response: `payout`, `loop_in_lock`, `claim`, and `refund`. The stored internal role
+enum remains `{Payout, Claim, Refund}`; a Loop In lock is labeled `loop_in_lock`
+by the actor from the owning swap's direction, avoiding a stored-enum change and a
+data migration.
 
 ## 2. In-Process Integration Test Layer
 
@@ -323,7 +328,8 @@ The E2E phase is complete only when:
 - at least one real-process refund case and one restart-recovery case pass;
 - cross-node tests use only public RPC and never copy stores;
 - provider identity in every envelope matches the serving node;
-- every locally built transaction can be recovered from persisted signed bytes;
+- every locally built payout/Loop In lock can be recovered from persisted signed
+  bytes, and claim/refund recover deterministically with hash verification;
 - public chain-transaction records agree with CKB transaction/live-cell state;
 - generated RPC documentation and migration checks are current;
 - CI commands, prerequisites, timeouts, and failure artifacts are documented.
