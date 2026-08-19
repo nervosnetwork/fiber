@@ -141,10 +141,10 @@ pub(crate) fn resolve_onchain_tlc(
                 return OnChainTlcResolution::Fulfilled(preimage);
             }
             warn!(
-                "Ignoring invalid on-chain preimage for channel {:?} tlc {:?} tx {:?}: derived hash {:?}, expected {:?}",
+                "On-chain preimage for channel {:?} tlc {:?} tx {:?} does not match the full payment hash (derived {:?}, expected {:?}); treating as settled without preimage",
                 channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
             );
-            OnChainTlcResolution::Unknown
+            OnChainTlcResolution::SettledWithoutPreimage
         }
         StoredOnChainTlcSettlement::Legacy(legacy) => {
             let Some(preimage) = legacy.preimage else {

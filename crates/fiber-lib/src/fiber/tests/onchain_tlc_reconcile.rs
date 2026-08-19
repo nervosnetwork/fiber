@@ -82,7 +82,7 @@ fn resolve_returns_fulfilled_when_preimage_matches() {
 }
 
 #[test]
-fn resolve_returns_unknown_when_preimage_mismatches() {
+fn resolve_returns_settled_without_preimage_when_preimage_mismatches() {
     let channel_id = gen_rand_sha256_hash();
     let correct_preimage = gen_rand_sha256_hash();
     let wrong_preimage = gen_rand_sha256_hash();
@@ -104,7 +104,7 @@ fn resolve_returns_unknown_when_preimage_mismatches() {
             payment_hash,
             hash_algorithm,
         ),
-        OnChainTlcResolution::Unknown
+        OnChainTlcResolution::SettledWithoutPreimage
     );
 }
 
