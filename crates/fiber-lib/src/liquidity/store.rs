@@ -326,6 +326,25 @@ pub trait LiquidityStore {
         statuses: &[fiber_types::LiquidityChainTxStatus],
     ) -> Result<Vec<fiber_types::LiquidityChainTxRecord>, LiquidityStoreError>;
 
+    /// Persist the signed serialized transaction bytes for a liquidity CKB transaction.
+    ///
+    /// The bytes are stored under a dedicated key, keeping the
+    /// [`fiber_types::LiquidityChainTxRecord`] bincode shape unchanged. Recovery reloads
+    /// these bytes to rebroadcast a locally built transaction after restart.
+    fn insert_liquidity_chain_tx_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: fiber_types::LiquidityChainTxRole,
+        tx: ckb_types::packed::Transaction,
+    ) -> Result<(), LiquidityStoreError>;
+
+    /// Get the signed serialized transaction bytes for a liquidity CKB transaction.
+    fn get_liquidity_chain_tx_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: fiber_types::LiquidityChainTxRole,
+    ) -> Result<Option<ckb_types::packed::Transaction>, LiquidityStoreError>;
+
     /// Insert or update a provider asset registry entry.
     fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError>;
 

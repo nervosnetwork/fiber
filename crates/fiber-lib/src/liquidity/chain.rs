@@ -9,7 +9,7 @@ use ckb_types::{
     core::tx_pool::TxStatus,
     core::TransactionView,
     packed,
-    prelude::{Builder, Entity, Pack},
+    prelude::{Builder, Entity, IntoTransactionView, Pack},
 };
 use fiber_types::{
     Hash256, HashAlgorithm, LiquidityAssetKind, LiquidityChainTxRole, LiquiditySwapState,
@@ -878,6 +878,57 @@ where
     }
 }
 
+impl<S> CkbLiquidityChainWatcher<S>
+where
+    S: LiquidityStore + Send + Sync,
+{
+    fn persist_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+        tx: &TransactionView,
+    ) -> Result<(), LiquidityLoopOutError> {
+        self.store
+            .insert_liquidity_chain_tx_signed_tx(swap_id, role, tx.data())
+            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))
+    }
+
+    fn reload_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+        expected_tx_hash: &Hash256,
+        context: &str,
+    ) -> Result<TransactionView, LiquidityLoopOutError> {
+        if let Some(tx) = self.pending_payout_txs.get(swap_id).cloned() {
+            let tx_hash: Hash256 = tx.hash().into();
+            if tx_hash != *expected_tx_hash {
+                return Err(LiquidityLoopOutError::Chain(format!(
+                    "{context}: pending signed transaction hash does not match persisted record"
+                )));
+            }
+            return Ok(tx);
+        }
+        let packed_tx = self
+            .store
+            .get_liquidity_chain_tx_signed_tx(swap_id, role)
+            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Chain(format!(
+                    "{context}: missing persisted signed transaction"
+                ))
+            })?;
+        let tx: TransactionView = packed_tx.into_view();
+        let tx_hash: Hash256 = tx.hash().into();
+        if tx_hash != *expected_tx_hash {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "{context}: persisted signed transaction hash does not match persisted record"
+            )));
+        }
+        Ok(tx)
+    }
+}
+
 #[async_trait]
 impl<S> LiquidityChainWatcher for CkbLiquidityChainWatcher<S>
 where
@@ -951,6 +1002,7 @@ where
                     })?;
             }
         }
+        self.persist_signed_tx(&quote.quote_id, LiquidityChainTxRole::Payout, &tx)?;
         self.pending_payout_txs.insert(quote.quote_id, tx);
 
         Ok(outpoint)
@@ -980,19 +1032,13 @@ where
                     .to_string(),
             ));
         }
-        let tx = self.pending_payout_txs.get(&quote.quote_id).cloned().ok_or_else(|| {
-            LiquidityLoopOutError::Chain(
-                "cannot broadcast payout after restart without pending signed transaction; refusing to rebuild unsafely"
-                    .to_string(),
-            )
-        })?;
+        let tx = self.reload_signed_tx(
+            &quote.quote_id,
+            LiquidityChainTxRole::Payout,
+            &record.tx_hash,
+            "cannot broadcast payout",
+        )?;
         let tx_hash: Hash256 = tx.hash().into();
-        if tx_hash != record.tx_hash {
-            return Err(LiquidityLoopOutError::Chain(
-                "cannot broadcast payout: pending transaction hash does not match persisted payout record"
-                    .to_string(),
-            ));
-        }
 
         let send_result = ractor::call_t!(
             self.ckb_chain_actor,
@@ -1122,36 +1168,23 @@ where
                     return self.watch_loop_in_lock(quote.quote_id, myself).await;
                 }
                 fiber_types::LiquidityChainTxStatus::Planned => {
-                    let Some(tx) = self.pending_payout_txs.get(&quote.quote_id).cloned() else {
-                        return self.watch_loop_in_lock(quote.quote_id, myself).await;
-                    };
-                    let pending_tx_hash: Hash256 = tx.hash().into();
-                    if pending_tx_hash != record.tx_hash {
-                        return Err(LiquidityLoopOutError::Chain(
-                            "cannot retry loop in lock: pending signed transaction hash does not match persisted record"
-                                .to_string(),
-                        ));
-                    }
+                    let tx = self.reload_signed_tx(
+                        &quote.quote_id,
+                        LiquidityChainTxRole::Payout,
+                        &record.tx_hash,
+                        "cannot retry loop in lock",
+                    )?;
                     return self
                         .send_loop_in_lock_tx(quote, funding_tx, tx, myself)
                         .await;
                 }
                 fiber_types::LiquidityChainTxStatus::Rejected => {
-                    let tx = self.pending_payout_txs.get(&quote.quote_id).cloned().ok_or_else(
-                        || {
-                            LiquidityLoopOutError::Chain(
-                                "cannot retry rejected loop in lock: missing pending signed transaction"
-                                    .to_string(),
-                            )
-                        },
+                    let tx = self.reload_signed_tx(
+                        &quote.quote_id,
+                        LiquidityChainTxRole::Payout,
+                        &record.tx_hash,
+                        "cannot retry rejected loop in lock",
                     )?;
-                    let pending_tx_hash: Hash256 = tx.hash().into();
-                    if pending_tx_hash != record.tx_hash {
-                        return Err(LiquidityLoopOutError::Chain(
-                            "cannot retry loop in lock: pending signed transaction hash does not match persisted record"
-                                .to_string(),
-                        ));
-                    }
                     self.store
                         .update_liquidity_chain_tx_status(
                             &quote.quote_id,
@@ -1198,6 +1231,7 @@ where
                     },
                 )
                 .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
+            self.persist_signed_tx(&quote.quote_id, LiquidityChainTxRole::Payout, &tx)?;
             self.pending_payout_txs.insert(quote.quote_id, tx.clone());
             tx
         };
@@ -1480,6 +1514,7 @@ where
                 })
                 .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
         }
+        self.persist_signed_tx(&request.swap_id, LiquidityChainTxRole::Claim, &tx)?;
         let send_result = ractor::call_t!(
             self.ckb_chain_actor,
             CkbChainMessage::SendTx,
@@ -1648,6 +1683,7 @@ where
                 })
                 .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
         }
+        self.persist_signed_tx(&record.swap_id, LiquidityChainTxRole::Refund, &tx)?;
         let send_result = ractor::call_t!(
             self.ckb_chain_actor,
             CkbChainMessage::SendTx,
@@ -2077,6 +2113,7 @@ mod tests {
         quotes: Arc<Mutex<HashMap<Hash256, LoopOutQuoteTerms>>>,
         swaps: Arc<Mutex<HashMap<Hash256, LiquiditySwapRecord>>>,
         chain_txs: Arc<Mutex<HashMap<(Hash256, LiquidityChainTxRole), LiquidityChainTxRecord>>>,
+        signed_txs: Arc<Mutex<HashMap<(Hash256, LiquidityChainTxRole), packed::Transaction>>>,
         status_events: Arc<Mutex<Vec<LiquidityChainTxStatus>>>,
     }
 
@@ -2173,6 +2210,29 @@ mod tests {
         ) -> Result<Option<LiquidityChainTxRecord>, LiquidityStoreError> {
             Ok(self
                 .chain_txs
+                .lock()
+                .unwrap()
+                .get(&(*swap_id, role))
+                .cloned())
+        }
+
+        fn insert_liquidity_chain_tx_signed_tx(
+            &self,
+            swap_id: &Hash256,
+            role: LiquidityChainTxRole,
+            tx: packed::Transaction,
+        ) -> Result<(), LiquidityStoreError> {
+            self.signed_txs.lock().unwrap().insert((*swap_id, role), tx);
+            Ok(())
+        }
+
+        fn get_liquidity_chain_tx_signed_tx(
+            &self,
+            swap_id: &Hash256,
+            role: LiquidityChainTxRole,
+        ) -> Result<Option<packed::Transaction>, LiquidityStoreError> {
+            Ok(self
+                .signed_txs
                 .lock()
                 .unwrap()
                 .get(&(*swap_id, role))
@@ -3628,6 +3688,145 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ckb_watcher_rebroadcasts_persisted_payout_after_restart() {
+        let quote = test_loop_out_quote_terms();
+        let funded_tx = test_funding_transaction_with_script(&quote, 0);
+        let signed_tx = test_funding_transaction_with_script(&quote, 1);
+        let expected_outpoint = packed::OutPoint::new(signed_tx.hash(), 1);
+        let reserve_events = Arc::new(Mutex::new(Vec::new()));
+        let (reserve_ckb_actor, _handle) = ractor::Actor::spawn(
+            None,
+            PayoutMockCkbActor,
+            PayoutMockCkbActorArgs {
+                events: reserve_events.clone(),
+                funded_tx,
+                signed_tx: signed_tx.clone(),
+                send_error: false,
+            },
+        )
+        .await
+        .unwrap();
+        let store = NoopLiquidityStore::default();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            reserve_ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+        let outpoint = watcher.reserve_payout_lock_outpoint(&quote).await.unwrap();
+        assert_eq!(outpoint, expected_outpoint);
+        wait_for_mock_events(&reserve_events, 4).await;
+
+        // Simulate restart: fresh watcher with an empty in-memory pending map.
+        let sent_txs = Arc::new(Mutex::new(Vec::new()));
+        let (broadcast_ckb_actor, _handle) =
+            ractor::Actor::spawn(None, TxCapturingCkbActor, sent_txs.clone())
+                .await
+                .unwrap();
+        let mut restarted_watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            broadcast_ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+        assert!(restarted_watcher.pending_payout_txs.is_empty());
+
+        restarted_watcher
+            .broadcast_payout_lock(
+                &quote,
+                &expected_outpoint,
+                spawn_mock_liquidity_actor().await.0,
+            )
+            .await
+            .unwrap();
+
+        let sent = sent_txs.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let sent_hash: Hash256 = sent[0].hash().into();
+        assert_eq!(sent_hash, signed_tx.hash().into());
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_payout_rebroadcast_missing_signed_tx_fails_closed() {
+        let quote = test_loop_out_quote_terms();
+        let outpoint = test_outpoint(41);
+        let (ckb_actor, _handle) =
+            ractor::Actor::spawn(None, MockCkbActor, Arc::new(Mutex::new(Vec::new())))
+                .await
+                .unwrap();
+        let store = NoopLiquidityStore::default();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [42u8; 32].into(),
+                outpoint: Some(outpoint.clone()),
+                status: LiquidityChainTxStatus::Planned,
+                failure_reason: None,
+                created_at: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+
+        let error = watcher
+            .broadcast_payout_lock(&quote, &outpoint, spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("missing persisted signed transaction"));
+    }
+
+    #[tokio::test]
+    async fn ckb_watcher_payout_rebroadcast_hash_mismatch_fails_closed() {
+        let quote = test_loop_out_quote_terms();
+        let outpoint = test_outpoint(43);
+        let signed_tx = test_funding_transaction_with_script(&quote, 1);
+        let (ckb_actor, _handle) =
+            ractor::Actor::spawn(None, MockCkbActor, Arc::new(Mutex::new(Vec::new())))
+                .await
+                .unwrap();
+        let store = NoopLiquidityStore::default();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: quote.quote_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [44u8; 32].into(),
+                outpoint: Some(outpoint.clone()),
+                status: LiquidityChainTxStatus::Planned,
+                failure_reason: None,
+                created_at: 1,
+                updated_at: 2,
+            })
+            .unwrap();
+        store
+            .insert_liquidity_chain_tx_signed_tx(
+                &quote.quote_id,
+                LiquidityChainTxRole::Payout,
+                signed_tx.data(),
+            )
+            .unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store.clone(),
+            liquidity_lock_artifact(),
+        );
+
+        let error = watcher
+            .broadcast_payout_lock(&quote, &outpoint, spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("persisted signed transaction hash does not match persisted record"));
+    }
+
+    #[tokio::test]
     async fn ckb_watcher_broadcast_loop_in_lock_persists_tx_identity_before_send_tx() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let quote = test_loop_in_quote_terms();
@@ -3860,7 +4059,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("missing pending signed transaction"));
+            .contains("missing persisted signed transaction"));
         assert!(events.lock().unwrap().is_empty());
         assert_eq!(
             store

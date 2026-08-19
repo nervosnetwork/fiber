@@ -149,6 +149,15 @@ impl Store {
         .concat()
     }
 
+    fn liquidity_chain_tx_signed_tx_key(swap_id: &Hash256, role: LiquidityChainTxRole) -> Vec<u8> {
+        [
+            &[LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX],
+            swap_id.as_ref(),
+            &[liquidity_chain_tx_role_key(role)],
+        ]
+        .concat()
+    }
+
     fn liquidity_chain_tx_status_index_key(
         status: LiquidityChainTxStatus,
         swap_id: &Hash256,
@@ -544,6 +553,13 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 );
             }
             LIQUIDITY_CHAIN_TX_STATUS_PREFIX => {}
+            LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX => {
+                check_deserialization::<Vec<u8>>(
+                    &value,
+                    "LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX",
+                    &mut errors,
+                );
+            }
             #[cfg(not(target_arch = "wasm32"))]
             CCH_ORDER_PREFIX => {
                 check_deserialization::<CchOrder>(&value, "CCH_ORDER_PREFIX", &mut errors);
@@ -740,6 +756,7 @@ pub enum KeyValue {
     LoopOutQuote(Hash256, LoopOutQuoteRecord),
     LiquidityChainTx((Hash256, LiquidityChainTxRole), LiquidityChainTxRecord),
     LiquidityChainTxStatusIndex((LiquidityChainTxStatus, Hash256, LiquidityChainTxRole)),
+    LiquidityChainTxSignedTx((Hash256, LiquidityChainTxRole), Vec<u8>),
 }
 
 /// Recorded store changes.
@@ -903,6 +920,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::LiquidityChainTxStatusIndex((status, swap_id, role)) => {
                 Store::liquidity_chain_tx_status_index_key(*status, swap_id, *role)
             }
+            KeyValue::LiquidityChainTxSignedTx((swap_id, role), _) => {
+                Store::liquidity_chain_tx_signed_tx_key(swap_id, *role)
+            }
         }
     }
 
@@ -962,6 +982,9 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(record, "LiquidityChainTxRecord")
             }
             KeyValue::LiquidityChainTxStatusIndex(_) => Vec::new(),
+            KeyValue::LiquidityChainTxSignedTx(_, bytes) => {
+                serialize_to_vec(bytes, "LiquidityChainTxSignedTx")
+            }
         }
     }
 }
@@ -1862,6 +1885,38 @@ impl LiquidityStore for Store {
         let key = Self::liquidity_chain_tx_key(swap_id, role);
         self.get(key)
             .map(|value| deserialize_liquidity(value.as_ref(), "LiquidityChainTxRecord"))
+            .transpose()
+    }
+
+    fn insert_liquidity_chain_tx_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+        tx: ckb_types::packed::Transaction,
+    ) -> Result<(), LiquidityStoreError> {
+        let mut batch = self.batch();
+        let kv = KeyValue::LiquidityChainTxSignedTx((*swap_id, role), tx.as_slice().to_vec());
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_chain_tx_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+    ) -> Result<Option<ckb_types::packed::Transaction>, LiquidityStoreError> {
+        let key = Self::liquidity_chain_tx_signed_tx_key(swap_id, role);
+        self.get(key)
+            .map(|value| {
+                let bytes: Vec<u8> =
+                    deserialize_liquidity(value.as_ref(), "LiquidityChainTxSignedTx")?;
+                ckb_types::packed::Transaction::from_slice(&bytes).map_err(|error| {
+                    LiquidityStoreError::Backend(format!(
+                        "deserialization of LiquidityChainTxSignedTx failed: {error}"
+                    ))
+                })
+            })
             .transpose()
     }
 
