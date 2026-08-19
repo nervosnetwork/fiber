@@ -1514,7 +1514,10 @@ where
                 })
                 .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
         }
-        self.persist_signed_tx(&request.swap_id, LiquidityChainTxRole::Claim, &tx)?;
+        // The claim transaction is deterministically rebuilt from the persisted swap
+        // record (secp256k1 RFC6979 signatures) and its rebuilt hash is already
+        // verified against the persisted `LiquidityChainTxRecord::tx_hash` above, so
+        // the signed bytes are never persisted or reloaded.
         let send_result = ractor::call_t!(
             self.ckb_chain_actor,
             CkbChainMessage::SendTx,
@@ -1683,7 +1686,10 @@ where
                 })
                 .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?;
         }
-        self.persist_signed_tx(&record.swap_id, LiquidityChainTxRole::Refund, &tx)?;
+        // The refund transaction is deterministically rebuilt from the persisted swap
+        // record (secp256k1 RFC6979 signatures) and its rebuilt hash is already
+        // verified against the persisted `LiquidityChainTxRecord::tx_hash` above, so
+        // the signed bytes are never persisted or reloaded.
         let send_result = ractor::call_t!(
             self.ckb_chain_actor,
             CkbChainMessage::SendTx,
@@ -4155,6 +4161,13 @@ mod tests {
         assert_eq!(record.role, LiquidityChainTxRole::Claim);
         assert_eq!(record.status, LiquidityChainTxStatus::Broadcast);
         assert!(record.outpoint.is_none());
+        assert!(
+            store
+                .get_liquidity_chain_tx_signed_tx(&quote.quote_id, LiquidityChainTxRole::Claim)
+                .unwrap()
+                .is_none(),
+            "claim is deterministically rebuilt and hash-verified, so its signed tx is not persisted"
+        );
     }
 
     #[tokio::test]
@@ -4333,6 +4346,13 @@ mod tests {
         assert_eq!(record.role, LiquidityChainTxRole::Refund);
         assert_eq!(record.status, LiquidityChainTxStatus::Broadcast);
         assert!(record.outpoint.is_none());
+        assert!(
+            store
+                .get_liquidity_chain_tx_signed_tx(&quote.quote_id, LiquidityChainTxRole::Refund)
+                .unwrap()
+                .is_none(),
+            "refund is deterministically rebuilt and hash-verified, so its signed tx is not persisted"
+        );
     }
 
     #[tokio::test]
