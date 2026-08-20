@@ -130,6 +130,12 @@ impl MockContext {
                     "../../../../../tests/deploy/contracts/commitment-lock"
                 )),
             ),
+            (
+                Contract::LiquidityLock,
+                Bytes::from_static(include_bytes!(
+                    "../../../../../tests/deploy/contracts/liquidity-lock"
+                )),
+            ),
             // mock secp256k1 lock script
             (
                 Contract::Secp256k1Lock,
