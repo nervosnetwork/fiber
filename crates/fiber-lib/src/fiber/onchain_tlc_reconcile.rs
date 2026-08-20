@@ -5,7 +5,8 @@
 
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
 use fiber_types::{
-    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, RemoveTlcReason, TLCId, TlcInfo,
+    ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus,
+    RemoveTlcReason, TLCId, TlcInfo,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -253,9 +254,15 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
     expect_expiry: u64,
 ) -> Vec<OnChainTimeoutSettledTlc> {
     let channel_id = state.get_id();
+    // Live-channel expiry handling still uses `get_expired_offered_tlcs`, which omits
+    // LocalAnnounced TLCs because they are not in the local commitment. On-chain timeout
+    // reconciliation must include them: a signed remote commitment already contains the TLC.
     state
         .tlc_state
-        .get_expired_offered_tlcs(expect_expiry)
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .filter(|tlc| tlc.removed_confirmed_at.is_none() && tlc.expiry < expect_expiry)
         .filter_map(|tlc| {
             if !matches!(
                 resolve_onchain_tlc(
@@ -325,10 +332,21 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
 }
 
 pub(crate) fn has_unresolved_onchain_tlcs(state: &ChannelActorState) -> bool {
-    state
-        .tlc_state
-        .all_tlcs()
-        .any(can_reconcile_onchain_fulfillment)
+    // Offered LocalAnnounced TLCs are only in the remote commitment. A local force-close
+    // spends the local commitment, so they must not block settlement completion.
+    let remote_uncooperative_close = matches!(
+        state.state,
+        ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
+    );
+    state.tlc_state.all_tlcs().any(|tlc| {
+        if !can_reconcile_onchain_fulfillment(tlc) {
+            return false;
+        }
+        if tlc.is_offered() && matches!(tlc.outbound_status(), OutboundTlcStatus::LocalAnnounced) {
+            return remote_uncooperative_close;
+        }
+        true
+    })
 }
 
 pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
@@ -337,7 +355,10 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
     }
 
     if tlc.is_offered() {
-        matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
+        matches!(
+            tlc.outbound_status(),
+            OutboundTlcStatus::LocalAnnounced | OutboundTlcStatus::Committed
+        )
     } else {
         matches!(
             tlc.inbound_status(),
