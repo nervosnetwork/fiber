@@ -1,6 +1,4 @@
-use super::test_utils::{
-    create_mock_chain_actor_with_shared_state, submit_tx, CellStatus, MOCK_CONTEXT,
-};
+use super::test_utils::{create_mock_chain_actor_with_shared_state, submit_tx, CellStatus};
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
 use crate::ckb::{CkbChainMessage, LiveCell};
 use crate::create_mock_chain_actor;
@@ -224,10 +222,10 @@ async fn get_live_cell(
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 async fn test_get_live_cell_returns_output_and_exact_data() {
-    let actor = create_mock_chain_actor().await;
+    let (actor, shared_state) = create_mock_chain_actor_with_shared_state().await;
     let data: Vec<u8> = (0..16u8).collect();
     let output = CellOutput::new_builder().capacity(100u64).build();
-    let outpoint = MOCK_CONTEXT
+    let outpoint = shared_state
         .write()
         .unwrap()
         .context
@@ -251,16 +249,14 @@ async fn test_get_live_cell_missing_returns_none() {
 async fn assert_non_live_outpoint_returns_none(status: CellStatus) {
     let (actor, shared_state) = create_mock_chain_actor_with_shared_state().await;
     let output = CellOutput::new_builder().capacity(100u64).build();
-    let outpoint = MOCK_CONTEXT
-        .write()
-        .unwrap()
-        .context
-        .create_cell(output, Bytes::from(vec![7u8; 16]));
-    shared_state
-        .write()
-        .unwrap()
-        .cell_status
-        .insert(outpoint.clone(), status);
+    let outpoint = {
+        let mut state = shared_state.write().unwrap();
+        let outpoint = state
+            .context
+            .create_cell(output, Bytes::from(vec![7u8; 16]));
+        state.cell_status.insert(outpoint.clone(), status);
+        outpoint
+    };
 
     let live = get_live_cell(&actor, outpoint).await.unwrap();
     assert!(live.is_none());
