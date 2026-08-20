@@ -215,11 +215,12 @@ impl MockContext {
 // mock chain actor.
 struct TraceTxReplier {
     tx_hash: Hash256,
+    mask: CkbTxTracingMask,
 }
 
 impl TraceTxReplier {
-    pub fn new(tx_hash: Hash256) -> Self {
-        Self { tx_hash }
+    pub fn new(tx_hash: Hash256, mask: CkbTxTracingMask) -> Self {
+        Self { tx_hash, mask }
     }
 }
 
@@ -245,8 +246,9 @@ impl Actor for TraceTxReplier {
         });
 
         let tx_hash = self.tx_hash;
+        let mask = self.mask;
         notifier.subscribe(myself, move |notification| {
-            if notification.tx_hash == tx_hash {
+            if notification.tx_hash == tx_hash && mask.contains((&notification.tx_status).into()) {
                 Some(notification)
             } else {
                 None
@@ -284,12 +286,24 @@ pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn MockChainActorMiddleware>;
 }
 
-#[derive(Clone, Debug)]
 pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
     pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
+    pub context: Context,
+    controlled: bool,
+}
+
+impl std::fmt::Debug for MockChainState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MockChainState")
+            .field("txs", &self.txs)
+            .field("cell_status", &self.cell_status)
+            .field("controlled", &self.controlled)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for MockChainState {
@@ -305,7 +319,154 @@ impl MockChainState {
             tx_tracing_tasks: HashMap::new(),
             tx_notifications: Arc::new(OutputPort::default()),
             cell_status: HashMap::new(),
+            context: MockContext::new().context,
+            controlled: false,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MockChainController {
+    shared: Arc<RwLock<MockChainState>>,
+}
+
+impl Default for MockChainController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockChainController {
+    pub fn new() -> Self {
+        let mut state = MockChainState::new();
+        state.controlled = true;
+        Self {
+            shared: Arc::new(RwLock::new(state)),
+        }
+    }
+
+    pub fn shared_state(&self) -> Arc<RwLock<MockChainState>> {
+        self.shared.clone()
+    }
+
+    pub fn transaction_status(&self, tx_hash: Hash256) -> Option<TxStatus> {
+        self.shared
+            .read()
+            .unwrap()
+            .txs
+            .get(&tx_hash)
+            .map(|response| response.tx_status.clone())
+    }
+
+    pub fn pending_transactions(&self) -> Vec<TransactionView> {
+        self.shared
+            .read()
+            .unwrap()
+            .txs
+            .values()
+            .filter(|response| matches!(response.tx_status, TxStatus::Pending))
+            .filter_map(|response| response.transaction.clone())
+            .collect()
+    }
+
+    pub fn commit(&self, tx_hash: Hash256) -> Result<(), String> {
+        const MAX_CYCLES: u64 = 100_000_000;
+
+        let mut state = self.shared.write().unwrap();
+        let response = state
+            .txs
+            .get(&tx_hash)
+            .cloned()
+            .ok_or_else(|| format!("transaction {tx_hash} was not submitted"))?;
+        match response.tx_status {
+            TxStatus::Committed(..) => return Ok(()),
+            TxStatus::Rejected(reason) => {
+                return Err(format!(
+                    "transaction {tx_hash} was already rejected: {reason}"
+                ));
+            }
+            TxStatus::Pending => {}
+            status => {
+                return Err(format!(
+                    "transaction {tx_hash} cannot be committed from status {status:?}"
+                ));
+            }
+        }
+
+        let tx = response
+            .transaction
+            .expect("submitted mock transaction has transaction data");
+        for input in tx.input_pts_iter() {
+            if state.cell_status.get(&input) == Some(&CellStatus::Consumed) {
+                return Err(format!("cell {input:?} was already consumed"));
+            }
+        }
+        if !tx.inputs().is_empty() {
+            state
+                .context
+                .verify_tx(&tx, MAX_CYCLES)
+                .map_err(|error| format!("failed to verify transaction {tx_hash}: {error:?}"))?;
+        }
+
+        for input in tx.input_pts_iter() {
+            state.cell_status.insert(input, CellStatus::Consumed);
+        }
+        for outpoint in tx.output_pts_iter() {
+            let index: u32 = outpoint.index().unpack();
+            let output = tx.outputs().get(index as usize).expect("output exists");
+            let data = tx
+                .outputs_data()
+                .get(index as usize)
+                .expect("output data exists");
+            state
+                .context
+                .create_cell_with_out_point(outpoint, output, data.raw_data());
+        }
+
+        let tx_status = TxStatus::Committed(0, H256::default(), 0);
+        state.txs.insert(
+            tx_hash,
+            GetTxResponse {
+                transaction: Some(tx),
+                tx_status: tx_status.clone(),
+            },
+        );
+        state
+            .tx_notifications
+            .send(CkbTxTracingResult { tx_hash, tx_status });
+        Ok(())
+    }
+
+    pub fn reject(&self, tx_hash: Hash256, reason: impl Into<String>) -> Result<(), String> {
+        let reason = reason.into();
+        let mut state = self.shared.write().unwrap();
+        let response = state
+            .txs
+            .get_mut(&tx_hash)
+            .ok_or_else(|| format!("transaction {tx_hash} was not submitted"))?;
+        match &response.tx_status {
+            TxStatus::Rejected(existing) if existing == &reason => return Ok(()),
+            TxStatus::Rejected(existing) => {
+                return Err(format!(
+                    "transaction {tx_hash} was already rejected for a different reason: {existing}"
+                ));
+            }
+            TxStatus::Committed(..) => {
+                return Err(format!("transaction {tx_hash} was already committed"));
+            }
+            TxStatus::Pending => {}
+            status => {
+                return Err(format!(
+                    "transaction {tx_hash} cannot be rejected from status {status:?}"
+                ));
+            }
+        }
+        response.tx_status = TxStatus::Rejected(reason.clone());
+        state.tx_notifications.send(CkbTxTracingResult {
+            tx_hash,
+            tx_status: TxStatus::Rejected(reason),
+        });
+        Ok(())
     }
 }
 
@@ -352,13 +513,14 @@ impl MockChainActor {
         &self,
         myself: ActorRef<CkbChainMessage>,
         tx_hash: Hash256,
+        mask: CkbTxTracingMask,
         notifier: Arc<OutputPort<CkbTxTracingResult>>,
         timeout: Duration,
         reply_port: RpcReplyPort<CkbTxTracingResult>,
     ) {
         let _ = Actor::spawn_linked(
             None,
-            TraceTxReplier::new(tx_hash),
+            TraceTxReplier::new(tx_hash, mask),
             (notifier, timeout, reply_port),
             myself.get_cell(),
         )
@@ -566,93 +728,37 @@ impl Actor for MockChainActor {
                 }
             }
             SendTx(tx, reply_port) => {
-                const MAX_CYCLES: u64 = 100_000_000;
-                let f = || {
-                    // Mark the inputs as consumed
-                    for input in tx.input_pts_iter() {
-                        let mut state_guard = state.shared.write().unwrap();
-                        match state_guard.cell_status.entry(input.clone()) {
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() == CellStatus::Consumed {
-                                    return (
-                                        TxStatus::Rejected("Cell already consumed".to_string()),
-                                        Err(ckb_sdk::RpcError::Other(anyhow!(
-                                            "Cell {:?} already consumed",
-                                            &input
-                                        ))),
-                                    );
-                                }
-                                *entry.get_mut() = CellStatus::Consumed;
-                            }
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                debug!("Consuming cell {:?}", &input);
-                                entry.insert(CellStatus::Consumed);
-                            }
-                        }
-                    }
-
-                    // The inputs will always not empty for production environment, but it may empty for test environment,
-                    // `MockChainActor` only used in testing, so we skip VM verification for these synthetic transactions
-                    let has_inputs = !tx.inputs().is_empty();
-                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
-                    let verify_result = if has_inputs {
-                        context.verify_tx(&tx, MAX_CYCLES).map(Some)
-                    } else {
-                        Ok(None)
-                    };
-                    match verify_result {
-                        Ok(cycles) => {
-                            if let Some(c) = cycles {
-                                debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
-                            } else {
-                                debug!(
-                                    "Funding transaction {:?} committed without script verification",
-                                    tx
-                                );
-                            }
-                            // Also save the outputs to the context, so that we can refer to
-                            // these out points later.
-                            for outpoint in tx.output_pts().into_iter() {
-                                let index: u32 = outpoint.index().unpack();
-                                let index = index as usize;
-                                let cell = tx.outputs().get(index).unwrap();
-                                let data = tx.outputs_data().get(index).unwrap();
-                                context.create_cell_with_out_point(
-                                    outpoint.clone(),
-                                    cell,
-                                    data.as_bytes(),
-                                );
-                            }
-                            (TxStatus::Committed(0, H256::default(), 0), Ok(()))
-                        }
-                        Err(e) => (
-                            TxStatus::Rejected("Failed to verify transaction".to_string()),
-                            Err(ckb_sdk::RpcError::Other(anyhow!(
-                                "Failed to verify transaction: {:?}, error: {:?}",
-                                tx,
-                                e
-                            ))),
-                        ),
-                    }
-                };
-                let (tx_status, result) = f();
-                debug!(
-                    "Transaction verification result: tx {:?}, status: {:?}",
-                    &tx, &tx_status
-                );
                 let tx_hash = tx.hash().into();
-                let mut state_guard = state.shared.write().unwrap();
-                state_guard.tx_notifications.send(CkbTxTracingResult {
-                    tx_hash,
-                    tx_status: tx_status.clone(),
-                });
-                state_guard.txs.insert(
-                    tx_hash,
-                    GetTxResponse {
-                        transaction: Some(tx),
-                        tx_status,
-                    },
-                );
+                let controlled = {
+                    let mut state_guard = state.shared.write().unwrap();
+                    let controlled = state_guard.controlled;
+                    let status = state_guard.txs.get(&tx_hash).map(|tx| &tx.tx_status);
+                    if status.is_none() {
+                        state_guard.txs.insert(
+                            tx_hash,
+                            GetTxResponse {
+                                transaction: Some(tx),
+                                tx_status: TxStatus::Pending,
+                            },
+                        );
+                        state_guard.tx_notifications.send(CkbTxTracingResult {
+                            tx_hash,
+                            tx_status: TxStatus::Pending,
+                        });
+                    }
+                    controlled
+                };
+                let result = if controlled {
+                    Ok(())
+                } else {
+                    let controller = MockChainController {
+                        shared: state.shared.clone(),
+                    };
+                    controller.commit(tx_hash).map_err(|error| {
+                        let _ = controller.reject(tx_hash, error.clone());
+                        ckb_sdk::RpcError::Other(anyhow!(error))
+                    })
+                };
                 if let Err(e) = reply_port.send(result) {
                     error!(
                         "[{}] send reply failed: {:?}",
@@ -673,7 +779,7 @@ impl Actor for MockChainActor {
                 };
 
                 match maybe_tx {
-                    Some(tx) => {
+                    Some(tx) if tracer.mask.contains((&tx.tx_status).into()) => {
                         let _ = tracer.callback.send(CkbTxTracingResult {
                             tx_hash: tracer.tx_hash,
                             tx_status: tx.tx_status.clone(),
@@ -681,10 +787,11 @@ impl Actor for MockChainActor {
                     }
                     // The transaction is not found in the tx_status, we need to wait for the
                     // tx notification from the mock chain actor.
-                    None => {
+                    _ => {
                         self.start_trace_tx_replier(
                             myself,
                             tracer.tx_hash,
+                            tracer.mask,
                             notifications,
                             Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
                             tracer.callback,
@@ -812,9 +919,7 @@ impl Actor for MockChainActor {
                     if state_guard.cell_status.contains_key(&outpoint) {
                         None
                     } else {
-                        MOCK_CONTEXT
-                            .read()
-                            .unwrap()
+                        state_guard
                             .context
                             .get_cell(&outpoint)
                             .map(|(output, data)| LiveCell {
