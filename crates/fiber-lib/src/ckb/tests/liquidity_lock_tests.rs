@@ -1,4 +1,8 @@
 use ckb_hash::blake2b_256;
+use ckb_testtool::{
+    ckb_error::Error as CkbError,
+    ckb_script::{ScriptError, TransactionScriptError},
+};
 use ckb_types::{
     bytes::Bytes,
     core::TransactionView,
@@ -22,13 +26,18 @@ use crate::{
 
 const MAX_CYCLES: u64 = 100_000_000;
 const CAPACITY: u64 = 10_000_000_000;
+const INVALID_SINCE_ERROR: i8 = 7;
+const PREIMAGE_HASH_ERROR: i8 = 9;
 
 enum Unlock {
     Claim([u8; 32]),
     Refund { since: u64 },
 }
 
-async fn liquidity_lock_vm_verifies(payment_preimage: [u8; 32], unlock: Unlock) -> bool {
+async fn verify_liquidity_lock_vm(
+    payment_preimage: [u8; 32],
+    unlock: Unlock,
+) -> Result<u64, CkbError> {
     let claimant_lock = Script::new_builder()
         .args(Bytes::from_static(b"claimant").pack())
         .build();
@@ -83,7 +92,21 @@ async fn liquidity_lock_vm_verifies(payment_preimage: [u8; 32], unlock: Unlock) 
         .witness(witness)
         .build();
 
-    mock_context.context.verify_tx(&tx, MAX_CYCLES).is_ok()
+    mock_context.context.verify_tx(&tx, MAX_CYCLES)
+}
+
+fn assert_validation_failure(result: Result<u64, CkbError>, expected_code: i8) {
+    let error = result.expect_err("liquidity-lock verification should fail");
+    let transaction_error = error
+        .root_cause()
+        .downcast_ref::<TransactionScriptError>()
+        .expect("verification should fail in the liquidity-lock script");
+    match transaction_error.script_error() {
+        ScriptError::ValidationFailure(_, actual_code) => {
+            assert_eq!(*actual_code, expected_code);
+        }
+        other => panic!("expected validation failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -98,15 +121,23 @@ async fn liquidity_lock_mock_context_resolves_script_and_deps() {
 #[tokio::test]
 async fn liquidity_lock_vm_accepts_valid_claim() {
     let preimage = [7; 32];
-    assert!(liquidity_lock_vm_verifies(preimage, Unlock::Claim(preimage)).await);
+    verify_liquidity_lock_vm(preimage, Unlock::Claim(preimage))
+        .await
+        .expect("valid claim should pass liquidity-lock verification");
 }
 
 #[tokio::test]
 async fn liquidity_lock_vm_rejects_wrong_preimage() {
-    assert!(!liquidity_lock_vm_verifies([7; 32], Unlock::Claim([8; 32])).await);
+    assert_validation_failure(
+        verify_liquidity_lock_vm([7; 32], Unlock::Claim([8; 32])).await,
+        PREIMAGE_HASH_ERROR,
+    );
 }
 
 #[tokio::test]
 async fn liquidity_lock_vm_rejects_early_refund() {
-    assert!(!liquidity_lock_vm_verifies([7; 32], Unlock::Refund { since: 41 }).await);
+    assert_validation_failure(
+        verify_liquidity_lock_vm([7; 32], Unlock::Refund { since: 41 }).await,
+        INVALID_SINCE_ERROR,
+    );
 }
