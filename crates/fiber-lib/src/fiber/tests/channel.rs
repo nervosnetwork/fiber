@@ -7765,8 +7765,8 @@ async fn test_remote_force_shutdown_awaiting_channel_ready_closes_both_sides() {
         .expect("initiator should record shutdown transaction hash");
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionConfirmed(
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ClosingTransactionConfirmed(
                 node_b.pubkey,
                 channel_id,
                 expected_shutdown_tx_hash.pack(),
@@ -7811,8 +7811,8 @@ async fn test_remote_force_shutdown_awaiting_channel_ready_after_restart() {
     node_a.restart().await;
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::RemoteForceShutdownChannel(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::RemoteForceShutdownChannel(
                 channel_id,
                 Some(GetShutdownTxResponse {
                     transaction: Some(remote_commitment_tx),
