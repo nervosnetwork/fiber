@@ -1065,40 +1065,11 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .expect("get active LSP status");
     assert_eq!(active.active_tenants, 1);
 
-    let public_channel_error = match tenant_client
+    let open_channel_error = match tenant_client
         .request::<fiber_json_types::OpenChannelResult, _>(
             "open_channel",
             rpc_params![fiber_json_types::OpenChannelParams {
                 pubkey: public_t.pubkey.into(),
-                funding_amount: 1_000,
-                public: Some(true),
-                one_way: None,
-                shutdown_script: None,
-                commitment_delay_epoch: None,
-                funding_udt_type_script: None,
-                commitment_fee_rate: None,
-                funding_fee_rate: None,
-                tlc_expiry_delta: None,
-                tlc_min_value: None,
-                tlc_fee_proportional_millionths: None,
-                max_tlc_value_in_flight: None,
-                max_tlc_number_in_flight: None,
-            }],
-        )
-        .await
-    {
-        Ok(_) => panic!("tenant must not open a public channel"),
-        Err(error) => error,
-    };
-    assert!(public_channel_error
-        .to_string()
-        .contains("hosted tenant channels must be private"));
-
-    let wrong_peer_error = match tenant_client
-        .request::<fiber_json_types::OpenChannelResult, _>(
-            "open_channel",
-            rpc_params![fiber_json_types::OpenChannelParams {
-                pubkey: expected_tenant.tenant_pubkey.into(),
                 funding_amount: 1_000,
                 public: Some(false),
                 one_way: None,
@@ -1116,122 +1087,16 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         )
         .await
     {
-        Ok(_) => panic!("tenant must not open a channel to another peer"),
+        Ok(_) => panic!("tenant token must not call open_channel"),
         Err(error) => error,
     };
-    assert!(wrong_peer_error
-        .to_string()
-        .contains("hosted tenants may only open a channel to the public LSP node"));
+    assert!(
+        open_channel_error.to_string().contains("Unauthorized"),
+        "open_channel should be unauthorized for tenant tokens, got {open_channel_error}"
+    );
 
-    let opened: fiber_json_types::OpenChannelResult = tenant_client
-        .request(
-            "open_channel",
-            rpc_params![fiber_json_types::OpenChannelParams {
-                pubkey: public_t.pubkey.into(),
-                funding_amount: MIN_RESERVED_CKB,
-                public: Some(false),
-                one_way: None,
-                shutdown_script: None,
-                commitment_delay_epoch: None,
-                funding_udt_type_script: None,
-                commitment_fee_rate: None,
-                funding_fee_rate: None,
-                tlc_expiry_delta: None,
-                tlc_min_value: None,
-                tlc_fee_proportional_millionths: None,
-                max_tlc_value_in_flight: None,
-                max_tlc_number_in_flight: None,
-            }],
-        )
-        .await
-        .expect("open tenant private channel through the standard RPC");
-    let temporary_channel_id = opened.temporary_channel_id.into();
-    wait_until_async_timeout(|| {
-        let public_network_actor = public_t.network_actor.clone();
-        async move {
-            ractor::call_t!(
-                public_network_actor,
-                |reply| NetworkActorMessage::new_command(
-                    FiberActorCommand::GetPendingAcceptChannels(reply)
-                ),
-                5_000
-            )
-            .ok()
-            .and_then(Result::ok)
-            .is_some_and(|pending| {
-                pending.iter().any(|channel| {
-                    channel.channel_id == temporary_channel_id
-                        && channel.pubkey == expected_tenant.tenant_pubkey
-                })
-            })
-        }
-    })
-    .await;
-
-    let accept = ractor::call!(public_t.network_actor, |reply| {
-        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
-            crate::fiber::network::AcceptChannelCommand {
-                temp_channel_id: temporary_channel_id,
-                funding_amount: MIN_RESERVED_CKB,
-                shutdown_script: None,
-                max_tlc_number_in_flight: None,
-                max_tlc_value_in_flight: None,
-                min_tlc_value: None,
-                tlc_fee_proportional_millionths: None,
-                tlc_expiry_delta: None,
-            },
-            reply,
-        ))
-    })
-    .expect("public LSP network actor alive")
-    .expect("accept tenant channel");
-    let channel_id = accept.new_channel_id;
-    wait_until_async_timeout(|| {
-        let tenant_store = public_t
-            .store
-            .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
-        async move {
-            crate::fiber::channel::ChannelActorStateStore::get_channel_actor_state(
-                &tenant_store,
-                &channel_id,
-            )
-            .is_some()
-        }
-    })
-    .await;
-
-    let signing_status: fiber_json_types::GetChannelSigningStatusResult = tenant_client
-        .request(
-            "get_channel_signing_status",
-            rpc_params![fiber_json_types::GetChannelSigningStatusParams {
-                channel_id: channel_id.into(),
-            }],
-        )
-        .await
-        .expect("read signing status from the tenant channel namespace");
-    assert!(matches!(
-        signing_status.status,
-        fiber_json_types::ChannelSigningStatus::Internal
-    ));
-
-    let submit_error = tenant_client
-        .request::<fiber_json_types::SubmitChannelSignatureResult, _>(
-            "submit_channel_signature",
-            rpc_params![fiber_json_types::SubmitChannelSignatureParams {
-                channel_id: channel_id.into(),
-                request_id: crate::fiber_types::Hash256::from([9; 32]).into(),
-                partial_signature: [1; 32],
-                next_material: None,
-            }],
-        )
-        .await
-        .expect_err("an internal tenant channel must reject external signatures");
-    assert!(submit_error
-        .to_string()
-        .contains("channel does not use an external signer"));
-
-    let invoice: fiber_json_types::InvoiceResult = tenant_client
-        .request(
+    let new_invoice_error = match tenant_client
+        .request::<fiber_json_types::InvoiceResult, _>(
             "new_invoice",
             rpc_params![fiber_json_types::NewInvoiceParams {
                 amount: 1_000,
@@ -1249,26 +1114,76 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             }],
         )
         .await
-        .expect("create invoice through the standard tenant RPC");
-    let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
-        .expect("decode tenant invoice");
+    {
+        Ok(_) => panic!("tenant token must not call new_invoice"),
+        Err(error) => error,
+    };
+    assert!(
+        new_invoice_error.to_string().contains("Unauthorized"),
+        "new_invoice should be unauthorized for tenant tokens, got {new_invoice_error}"
+    );
+
+    let missing_channel = crate::fiber_types::Hash256::from([0x11; 32]);
+    let signing_status_error = match tenant_client
+        .request::<fiber_json_types::GetChannelSigningStatusResult, _>(
+            "get_channel_signing_status",
+            rpc_params![fiber_json_types::GetChannelSigningStatusParams {
+                channel_id: missing_channel.into(),
+            }],
+        )
+        .await
+    {
+        Ok(_) => panic!("unknown tenant channel must not have signing status"),
+        Err(error) => error,
+    };
+    assert!(
+        signing_status_error.to_string().contains("not found"),
+        "allowlisted signing RPC should reach the tenant handler, got {signing_status_error}"
+    );
+
+    let invoice: LspInvoiceRegistration = admin_client
+        .request(
+            "lsp_new_invoice",
+            rpc_params![NewLspInvoiceParams {
+                tenant_id: tenant_id.as_str().to_string(),
+                invoice: fiber_json_types::NewInvoiceParams {
+                    amount: 1_000,
+                    description: Some("operator-created hosted invoice".to_string()),
+                    currency: fiber_json_types::Currency::Fibd,
+                    payment_preimage: None,
+                    payment_hash: Some(crate::fiber_types::Hash256::from([0x42; 32]).into()),
+                    expiry: Some(60 * 60),
+                    fallback_address: None,
+                    final_expiry_delta: None,
+                    udt_type_script: None,
+                    hash_algorithm: None,
+                    allow_mpp: None,
+                    allow_trampoline_routing: Some(true),
+                },
+                buffer_duration_ms: None,
+            }],
+        )
+        .await
+        .expect("create hosted invoice through the operator LSP RPC");
+    let decoded =
+        crate::invoice::CkbInvoice::from_str(&invoice.invoice).expect("decode hosted invoice");
     let expected_tenant_pubkey: secp256k1::PublicKey = expected_tenant.tenant_pubkey.into();
     assert_eq!(decoded.payee_pub_key(), Some(&expected_tenant_pubkey));
     assert_eq!(
         decoded.trampoline_route_hint(),
         Some(&secp256k1::PublicKey::from(public_t.pubkey))
     );
-    let payment_hash = invoice.invoice.data.payment_hash.into();
+    let payment_hash = decoded.payment_hash();
     let registration = public_t
         .store
         .namespaced(NodeNamespace::lsp_metadata())
-        .get_lsp_invoice(&payment_hash)
+        .get_lsp_invoice(payment_hash)
         .expect("read hosted invoice registration")
-        .expect("tenant new_invoice should register the hosted invoice");
+        .expect("lsp_new_invoice should register the hosted invoice");
     assert_eq!(registration.tenant_id, tenant_id);
-    assert_eq!(registration.invoice.to_string(), invoice.invoice_address);
+    assert_eq!(registration.invoice.to_string(), invoice.invoice);
     assert_eq!(registration.hint.payload.lsp_node_id, public_t.pubkey);
-    assert_eq!(registration.hint.payload.payment_hash, payment_hash);
+    assert_eq!(registration.hint.payload.payment_hash, *payment_hash);
     assert_eq!(
         registration.hint.payload.buffer_duration_ms,
         crate::lsp::DEFAULT_LSP_BUFFER_DURATION_MS
@@ -1278,17 +1193,17 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .request(
             "get_invoice",
             rpc_params![fiber_json_types::InvoiceParams {
-                payment_hash: invoice.invoice.data.payment_hash,
+                payment_hash: (*payment_hash).into(),
             }],
         )
         .await
         .expect("read tenant invoice from its namespace");
-    assert_eq!(tenant_invoice.invoice_address, invoice.invoice_address);
+    assert_eq!(tenant_invoice.invoice_address, invoice.invoice);
     if public_client
         .request::<fiber_json_types::GetInvoiceResult, _>(
             "get_invoice",
             rpc_params![fiber_json_types::InvoiceParams {
-                payment_hash: invoice.invoice.data.payment_hash,
+                payment_hash: (*payment_hash).into(),
             }],
         )
         .await

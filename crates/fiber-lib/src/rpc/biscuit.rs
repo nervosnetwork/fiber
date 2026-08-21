@@ -384,28 +384,39 @@ mod tests {
             .unwrap();
         let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
 
-        let (biscuit, _) = auth.check_permission("open_channel", &token).unwrap();
+        let (biscuit, _) = auth
+            .check_permission("get_channel_signing_status", &token)
+            .unwrap();
         assert_eq!(
             extract_tenant_id(&biscuit).unwrap(),
             Some(TenantId::new("u1".to_string()).unwrap())
         );
         assert_eq!(extract_node_id(&biscuit).unwrap(), node_id);
-        auth.check_permission("new_invoice", &token).unwrap();
-        auth.check_permission("send_payment", &token).unwrap();
-        auth.check_permission("get_channel_signing_status", &token)
-            .unwrap();
         auth.check_permission("submit_channel_signature", &token)
             .unwrap();
+        auth.check_permission("list_channels", &token).unwrap();
+        auth.check_permission("get_invoice", &token).unwrap();
+        auth.check_permission("get_payment", &token).unwrap();
+        auth.check_permission("list_payments", &token).unwrap();
         auth.check_permission("get_watchtower_signing_status", &token)
             .unwrap();
         auth.check_permission("submit_watchtower_signature", &token)
             .unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("get_channel_signing_status", &biscuit)
+            .unwrap();
+        assert!(
+            crate::rpc::tenant::enforce_tenant_method_allowlist("open_channel", &biscuit).is_err()
+        );
+        // write("channels") still exists so biscuit allows node-operation
+        // methods; middleware is the tenant method gate.
+        auth.check_permission("open_channel", &token).unwrap();
+        assert!(auth.check_permission("new_invoice", &token).is_err());
+        assert!(auth.check_permission("send_payment", &token).is_err());
         auth.check_permission("create_preimage", &token).unwrap();
-        auth.check_permission("remove_preimage", &token).unwrap();
-        auth.check_permission("create_watch_channel", &token)
-            .unwrap();
-        auth.check_permission("remove_watch_channel", &token)
-            .unwrap();
+        assert!(
+            crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit)
+                .is_err()
+        );
         assert!(auth
             .check_permission("lsp_register_tenant", &token)
             .is_err());

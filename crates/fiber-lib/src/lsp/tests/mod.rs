@@ -1528,14 +1528,15 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     .unwrap();
     let token = issued.access_token;
     let auth = BiscuitAuth::from_pubkey(biscuit_root.public().to_string()).unwrap();
-    auth.check_permission("open_channel", &token).unwrap();
     auth.check_permission("get_channel_signing_status", &token)
         .unwrap();
+    auth.check_permission("list_channels", &token).unwrap();
     assert!(auth
         .check_permission("lsp_register_tenant", &token)
         .is_err());
+    assert!(auth.check_permission("new_invoice", &token).is_err());
     let expected_node = tenant_watchtower_node_id(&issued.status.record.tenant_pubkey);
-    let (biscuit, _) = auth.check_permission("new_invoice", &token).unwrap();
+    let (biscuit, _) = auth.check_permission("get_invoice", &token).unwrap();
     assert_eq!(
         crate::rpc::biscuit::extract_tenant_id(&biscuit).unwrap(),
         Some(issued.status.record.tenant_id)
@@ -1548,8 +1549,11 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
         crate::rpc::biscuit::scoped_rpc_node_id(&biscuit).unwrap(),
         expected_node
     );
-    auth.check_permission("create_watch_channel", &token)
-        .unwrap();
+    crate::rpc::tenant::enforce_tenant_method_allowlist("get_invoice", &biscuit).unwrap();
+    assert!(
+        crate::rpc::tenant::enforce_tenant_method_allowlist("create_watch_channel", &biscuit)
+            .is_err()
+    );
     auth.check_permission("create_preimage", &token).unwrap();
 }
 

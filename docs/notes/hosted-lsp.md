@@ -72,11 +72,12 @@ but middleware and the watchtower RPC bind every call to the token's
 
 ## Invoice registration and payer hint
 
-When a tenant token calls the standard `new_invoice` RPC, the hosted runtime
-creates a normal finite-expiry Fiber invoice, signs it with the tenant invoice
-key, and embeds Public T in the signed trampoline route hint. Before the RPC
-returns, the LSP also registers the invoice payment hash and creates an internal
-signed `LspInvoiceHint` delivery-policy record. The record binds:
+When an operator creates a hosted invoice with `lsp_new_invoice` (or a future
+data-plane token is allowed to call `new_invoice`), the hosted runtime creates
+a normal finite-expiry Fiber invoice, signs it with the tenant invoice key, and
+embeds Public T in the signed trampoline route hint. Before the RPC returns,
+the LSP also registers the invoice payment hash and creates an internal signed
+`LspInvoiceHint` delivery-policy record. The record binds:
 
 - Public T's public trampoline identity;
 - payment hash;
@@ -241,25 +242,25 @@ untrusted clients without authentication.
 
 Hosted tenant data-plane requests reuse the standard Fiber RPC method names.
 The authority block of the Biscuit token contains `tenant("<tenant_id>")` plus
-the normal resource capabilities such as `write("channels")`,
-`write("payments")`, or `read("invoices")`. The authentication middleware puts
-the verified tenant identity in the request extensions; it is not accepted as a
-JSON-RPC parameter. The channel, invoice, and payment RPC handlers then resolve
-that tenant's active actor and Store namespace through `TenantSupervisor`.
-Tokens without a tenant fact continue to address Public T.
+the capabilities needed for the tenant allowlist (`read`/`write("channels")`,
+`read("invoices")`, `read("payments")`, and `read`/`write("watchtower")`).
+After Biscuit capability checks, the authentication middleware rejects tenant
+tokens that call any method outside that allowlist:
 
-When a tenant token calls the standard `new_invoice` method, the hosted runtime
-signs the invoice with the tenant invoice key, adds Public T as its trampoline
-route hint, and registers the payment hash with the LSP service before returning
-the invoice. Clients do not register hosted invoices separately.
+- signing: `get_channel_signing_status`, `submit_channel_signature`,
+  `get_watchtower_signing_status`, `submit_watchtower_signature`
+- isolated reads: `list_channels`, `get_invoice`, `get_payment`, `list_payments`
 
-For example, a hosted wallet calls the existing `open_channel` method with
-Public T's pubkey, its own `funding_amount`, and `public: false`. A tenant-scoped
-request cannot open a public channel or target another peer. `new_invoice`,
-`get_invoice`, and the payment RPCs use the same request-scoped routing. The
-operator-oriented `lsp_new_invoice` composite remains available for callers
-that explicitly select a tenant and buffer duration and need the full
-registration record. Hosted clients use the standard `new_invoice` method.
+The middleware puts the verified tenant identity in the request extensions; it
+is not accepted as a JSON-RPC parameter. Allowlisted channel, invoice, and
+payment handlers then resolve that tenant's active actor and Store namespace
+through `TenantSupervisor`. Tokens without a tenant fact continue to address
+Public T and are not constrained by the tenant method allowlist.
+
+Node-operating methods such as `open_channel`, `new_invoice`, and
+`send_payment` require an operator token. The operator-oriented
+`lsp_new_invoice` composite remains available for callers that explicitly
+select a tenant and buffer duration and need the full registration record.
 
 ## Current boundaries
 

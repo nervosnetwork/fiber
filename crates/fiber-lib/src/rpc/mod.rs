@@ -22,7 +22,7 @@ pub mod prof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pubsub;
 #[cfg(not(target_arch = "wasm32"))]
-mod tenant;
+pub(crate) mod tenant;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]

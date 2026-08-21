@@ -12,7 +12,7 @@ use jsonrpsee::types::{ErrorObject, ErrorObjectOwned, Id, Request};
 use jsonrpsee::{Extensions, MethodResponse};
 
 use crate::rpc::biscuit::{extract_tenant_id, scoped_rpc_node_id};
-use crate::rpc::tenant::AuthenticatedTenant;
+use crate::rpc::tenant::{enforce_tenant_method_allowlist, AuthenticatedTenant};
 use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
 
@@ -75,6 +75,7 @@ impl<S> BiscuitAuthMiddleware<S> {
         if self.enable_auth {
             let token = self.auth_token()?;
             let (token, rule) = self.auth.check_permission(&req.method, &token)?;
+            enforce_tenant_method_allowlist(&req.method, &token)?;
             self.inject_authenticated_tenant(req.extensions_mut(), &token)?;
             if rule.require_rpc_context {
                 let node_id = scoped_rpc_node_id(&token)?;
@@ -114,6 +115,7 @@ impl<S> BiscuitAuthMiddleware<S> {
         if self.enable_auth {
             let token = self.auth_token()?;
             let (token, _) = self.auth.check_permission(notify.method_name(), &token)?;
+            enforce_tenant_method_allowlist(notify.method_name(), &token)?;
             self.inject_authenticated_tenant(notify.extensions_mut(), &token)
         } else {
             Ok(())
