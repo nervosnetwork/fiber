@@ -1212,10 +1212,6 @@ where
                         if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT)
                             && !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT)
                 );
-        // An ACK can consume the current revocation round without carrying TLC
-        // updates. Send an empty reciprocal commitment to complete the nonce rollover.
-        let needs_nonce_rollover = state.remote_revocation_nonce_for_send.is_none();
-
         if should_reply_external_funding_handshake && !state.tlc_state.waiting_ack {
             let previous_remote_nonce = previous_remote_nonce.ok_or_else(|| {
                 ProcessingChannelError::InvalidState(
@@ -1228,7 +1224,7 @@ where
             state.commit_remote_nonce(previous_remote_nonce);
             self.handle_commitment_signed_command(myself, state).await?;
             state.commit_remote_nonce(next_commitment_nonce);
-        } else if (need_commitment_signed || needs_nonce_rollover) && !state.tlc_state.waiting_ack {
+        } else if need_commitment_signed && !state.tlc_state.waiting_ack {
             self.handle_commitment_signed_command(myself, state).await?;
         }
 
@@ -2660,6 +2656,15 @@ where
                         &flags
                     );
                 }
+                ChannelState::AwaitingChannelReady(flags)
+                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY)
+                        && state.latest_commitment_transaction.is_some() =>
+                {
+                    debug!(
+                        "Handling force shutdown command in AwaitingChannelReady state, flags: {:?}",
+                        &flags
+                    );
+                }
                 _ => {
                     return Err(ProcessingChannelError::InvalidState(format!(
                         "Handling force shutdown command invalid state {:?}",
@@ -3535,7 +3540,16 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     if let TLCId::Offered(id) = tlc.tlc_id {
-                        state.tlc_state.set_offered_tlc_removed(id, reason);
+                        // A peer RemoveTlc may already have marked this TLC removed without the
+                        // commitment handshake completing (issue #1612). Only mark it again when
+                        // it was never removed: `set_offered_tlc_removed` asserts Committed.
+                        if state
+                            .tlc_state
+                            .get(&TLCId::Offered(id))
+                            .is_some_and(|t| t.removed_reason.is_none())
+                        {
+                            state.tlc_state.set_offered_tlc_removed(id, reason);
+                        }
                     }
                 }
             }
@@ -11278,7 +11292,9 @@ impl ChannelActorState {
         match self.state {
             ChannelState::ShuttingDown(flags)
                 if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
-            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+            ChannelState::ChannelReady
+            | ChannelState::ShuttingDown(..)
+            | ChannelState::AwaitingChannelReady(_)
                 if force && !close_by_us => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(

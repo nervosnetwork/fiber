@@ -36,7 +36,7 @@ TODO
 curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | bash
 
 # Install mainnet non-interactively with a trusted CKB RPC endpoint
-curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber FNN_VERSION=0.8.0 NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash
+curl -sSfL https://raw.githubusercontent.com/nervosnetwork/fiber/main/tools/install/install.sh | INSTALL_DIR=/opt/fiber FNN_VERSION=0.9.0 NETWORK=mainnet CKB_RPC_URL=https://your-trusted-mainnet-ckb-rpc.example bash
 ```
 
 Mainnet installations do not select a public CKB RPC endpoint automatically.
@@ -97,22 +97,21 @@ rm -rf /folder-to/my-fnn/fiber/store
 3. Replace the fnn binary with the new version and start the node again.
 
 
-If you want to keep the channel state, you may try to migrate the storage format manually:
+If you want to keep the channel state, check whether your upgrade path supports
+in-place migration before replacing binaries. Since v0.9.0, supported storage
+migrations are integrated into the `fnn` startup process, and release bundles no
+longer include a standalone `fnn-migrate` binary.
 
 1. Stop the node.
 
 2. Backup the storage folder `/folder-to/my-fnn/fiber/store`.
 
-3. Run the fnn-migrate (it can be found in the release binary package) to migrate the storage format:
+3. Replace the `fnn` binary with the new version and start the node again.
 
-```
-./fnn-migrate -d /path/to/fiber-dir
-```
-
-The `-d` / `--dir` flag takes the Fiber data directory (same as `fnn -d`).
-The tool opens the RocksDB store at `<dir>/store` automatically.
-
-4. Replace the fnn binary with the new version and start the node again.
+If the new `fnn` reports that the database is too old for the built-in migration
+path, use the legacy `fnn-migrate` tool from the matching v0.8.x release first.
+For the v0.7.x to v0.8.0 legacy migration flow, see
+[v0.8.0 Migration Guide](./docs/notes/v0.8.0-migration-guide.md).
 
 ## Documentation
 

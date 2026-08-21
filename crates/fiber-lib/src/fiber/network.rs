@@ -2788,7 +2788,9 @@ where
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {
                     if matches!(
                         channel_state,
-                        ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+                        ChannelState::ChannelReady
+                            | ChannelState::ShuttingDown(..)
+                            | ChannelState::AwaitingChannelReady(_)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
                             let funding_lock_script = state
@@ -3684,8 +3686,17 @@ where
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     if let TLCId::Offered(id) = tlc.tlc_id {
-                        actor_state.tlc_state.set_offered_tlc_removed(id, reason);
-                        actor_state_changed = true;
+                        // A peer RemoveTlc may already have marked this TLC removed without the
+                        // commitment handshake completing (issue #1612). Only mark it again when
+                        // it was never removed: `set_offered_tlc_removed` asserts Committed.
+                        if actor_state
+                            .tlc_state
+                            .get(&TLCId::Offered(id))
+                            .is_some_and(|t| t.removed_reason.is_none())
+                        {
+                            actor_state.tlc_state.set_offered_tlc_removed(id, reason);
+                            actor_state_changed = true;
+                        }
                     }
                 }
             }
@@ -4134,7 +4145,9 @@ where
 
         if !matches!(
             state.state,
-            ChannelState::ChannelReady | ChannelState::ShuttingDown(..)
+            ChannelState::ChannelReady
+                | ChannelState::ShuttingDown(..)
+                | ChannelState::AwaitingChannelReady(_)
         ) {
             return;
         }
@@ -8277,7 +8290,9 @@ where
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new()));
+        let peer_message_policy = Arc::new(StdMutex::new(PeerMessagePolicy::new(
+            config.peer_message_policy,
+        )));
         let handle = NetworkServiceHandle::new(myself.clone(), peer_message_policy.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
         let peer_channel_index = PeerChannelIndex::build(&self.core.store);
