@@ -1360,7 +1360,10 @@ fn encode_unsigned_invoice(raw_invoice_data: gen_invoice::RawInvoiceData) -> Str
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_parse_malformed_compressed_invoice_returns_error_without_panic() {
     let mut data = vec![u5::try_from_u8(0).unwrap()];
-    data.extend(std::iter::repeat(u5::try_from_u8(31).unwrap()).take(SIGNATURE_U5_SIZE));
+    data.extend(std::iter::repeat_n(
+        u5::try_from_u8(31).unwrap(),
+        SIGNATURE_U5_SIZE,
+    ));
     let invoice = encode("fibb", data, Variant::Bech32m).unwrap();
 
     let result = std::panic::catch_unwind(|| CkbInvoice::from_str_allowing_unsigned(&invoice));
@@ -1393,9 +1396,7 @@ fn test_decompressed_invoice_data_length_is_limited() {
 fn test_malformed_text_attribute_returns_error_without_panic() {
     let attr = InvoiceAttr::new_builder()
         .set(InvoiceAttrUnion::Description(
-            Description::new_builder()
-                .value(vec![0xff; 200].pack())
-                .build(),
+            Description::new_builder().value([0xff; 200].pack()).build(),
         ))
         .build();
     let invoice = encode_unsigned_invoice(raw_invoice_data_with_attrs(vec![attr]));
@@ -1415,7 +1416,7 @@ fn test_malformed_payee_public_key_returns_error_without_panic() {
     let attr = InvoiceAttr::new_builder()
         .set(InvoiceAttrUnion::PayeePublicKey(
             PayeePublicKey::new_builder()
-                .value(vec![1, 2, 3].pack())
+                .value([1, 2, 3].pack())
                 .build(),
         ))
         .build();

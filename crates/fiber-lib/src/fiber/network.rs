@@ -2063,7 +2063,7 @@ where
 
     async fn handle_peer_message(
         &self,
-        myself: FiberActorRef,
+        _myself: FiberActorRef,
         state: &mut FiberActorState<S, C>,
         peer_pubkey: Pubkey,
         message: FiberMessage,
@@ -2115,7 +2115,7 @@ where
                                 &open_channel,
                                 temp_channel_id,
                             );
-                            debug_event!(myself, "ChannelAutoAcceptFailed");
+                            debug_event!(_myself, "ChannelAutoAcceptFailed");
                         }
                     }
                     Err(err) => {
