@@ -2,6 +2,7 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::{
     LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
 };
@@ -45,19 +46,21 @@ use ckb_types::H256;
 use core::cmp::Ordering;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_store::backend::BatchWriter;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_store::backend::StorageBackend;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_store::IteratorDirection;
 use fiber_types::protocol::AnnouncedNodeName;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
+use fiber_types::CloseFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
     SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
-use fiber_types::{
-    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::{Attempt, AttemptStatus, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute};
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;

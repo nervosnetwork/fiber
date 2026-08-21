@@ -7,9 +7,11 @@ use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::network::*;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::*;
 use crate::fiber::types::*;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::ChannelConnectivityState;
 use crate::fiber::FiberActorCommand;
 use crate::fiber::NetworkActorMessage;
@@ -39,6 +41,7 @@ use crate::tests::test_utils::*;
 use crate::watchtower::WatchtowerStore;
 use crate::NetworkServiceEvent;
 use bech32::{encode, u5, Variant};
+#[cfg(not(target_arch = "wasm32"))]
 use ckb_sdk::core::TransactionBuilder;
 use ckb_types::packed::Script;
 use ckb_types::{core::tx_pool::TxStatus, packed::OutPoint};
@@ -49,11 +52,13 @@ use fiber_sphinx::OnionSharedSecretIter;
 use fiber_types::Hash256 as InternalHash256;
 use fiber_types::HashAlgorithm;
 use fiber_types::HopHint;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::OutboundTlcStatus;
 use fiber_types::RemoveTlcFulfill;
 use fiber_types::RouterHop;
 use fiber_types::SessionRoute;
 use fiber_types::TlcErrPacket;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::TlcInfo;
 use fiber_types::SIGNATURE_U5_SIZE;
 use fiber_types::{Attempt, AttemptStatus, PrevTlcInfo, TrampolineContext};

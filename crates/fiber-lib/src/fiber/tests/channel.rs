@@ -21,6 +21,7 @@ use crate::fiber::network::{
     DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
     PeerDisconnectReason, TestFiberMessageKind, CHECK_CHANNELS_INTERVAL,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{

@@ -1052,7 +1052,7 @@ fn try_into_next_channel_signer_material(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn to_rpc_channel_open_signer_material(
     material: &ChannelOpenSignerMaterial,
 ) -> fiber_json_types::ChannelOpenSignerMaterial {
