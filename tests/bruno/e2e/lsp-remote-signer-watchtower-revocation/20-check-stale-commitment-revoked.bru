@@ -29,6 +29,15 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  const txHash = bru.getVar("TX_HASH") || bru.getEnvVar("TX_HASH");
+  if (txHash) {
+    body.params[0].tx_hash = txHash;
+    req.setBody(body);
+  }
+}
+
 vars:post-response {
   REVOKE_MAX_ITERATIONS: 60
 }

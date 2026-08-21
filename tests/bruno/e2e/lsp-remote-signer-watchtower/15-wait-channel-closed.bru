@@ -19,6 +19,13 @@ body:json {
   {"id":"42","jsonrpc":"2.0","method":"list_channels","params":[{"include_closed":true}]}
 }
 
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
 vars:post-response {
   REMOTE_CLOSED_MAX_ITERATIONS: 60
 }

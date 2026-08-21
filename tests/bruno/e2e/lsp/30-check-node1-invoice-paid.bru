@@ -26,6 +26,12 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_OUTGOING_PAYMENT_HASH");
+  req.setBody(body);
+}
+
 assert {
   res.body.error: isUndefined
   res.body.result.status: eq "Paid"

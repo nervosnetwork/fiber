@@ -22,6 +22,9 @@ script:post-response {
     bru.setVar("REMOTE_TENANT_TOKEN", res.body.tenant_token);
     bru.setVar("REMOTE_ROOT_PUBKEY", res.body.root_signer_pubkey);
     bru.setVar("REMOTE_OPEN_MATERIAL", res.body.channel_open_signer_material);
+    bru.setEnvVar("REMOTE_TENANT_ID", res.body.tenant_id);
+    bru.setEnvVar("REMOTE_TENANT_TOKEN", res.body.tenant_token);
+    bru.setEnvVar("REMOTE_ROOT_PUBKEY", res.body.root_signer_pubkey);
     bru.setVar("AGENT_STATUS_ITERATION", 0);
     return;
   }

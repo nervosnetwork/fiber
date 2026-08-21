@@ -12,7 +12,7 @@ post {
 
 headers {
   Content-Type: application/json
-  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
 }
 
 body:json {
@@ -31,7 +31,7 @@ body:json {
 
 script:pre-request {
   const body = req.getBody();
-  body.params[0].channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  body.params[0].channel_id = bru.getVar("REMOTE_CHANNEL_ID") || bru.getEnvVar("REMOTE_CHANNEL_ID");
   req.setBody(body);
 }
 
@@ -42,4 +42,5 @@ assert {
 
 script:post-response {
   bru.setVar("TX_HASH", res.body.result.tx_hash);
+  bru.setEnvVar("TX_HASH", res.body.result.tx_hash);
 }

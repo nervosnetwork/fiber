@@ -413,9 +413,9 @@ mod tests {
         assert!(auth.check_permission("new_invoice", &token).is_err());
         assert!(auth.check_permission("send_payment", &token).is_err());
         auth.check_permission("create_preimage", &token).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit).unwrap();
         assert!(
-            crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit)
-                .is_err()
+            crate::rpc::tenant::enforce_tenant_method_allowlist("new_invoice", &biscuit).is_err()
         );
         assert!(auth
             .check_permission("lsp_register_tenant", &token)

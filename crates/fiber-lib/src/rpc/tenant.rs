@@ -20,14 +20,24 @@ pub(crate) struct AuthenticatedTenant(pub(crate) TenantId);
 /// tenant state in its handler (`resolve_tenant_rpc_context` or
 /// `scoped_rpc_node_id`).
 pub(crate) const TENANT_ALLOWED_METHODS: &[&str] = &[
+    "check_channel_shutdown",
+    "create_preimage",
+    "create_watch_channel",
     "get_channel_signing_status",
     "get_invoice",
     "get_payment",
     "get_watchtower_signing_status",
     "list_channels",
     "list_payments",
+    "open_channel_with_external_funding",
+    "remove_preimage",
+    "remove_watch_channel",
+    "shutdown_channel",
     "submit_channel_signature",
+    "submit_commitment_transaction",
+    "submit_signed_funding_tx",
     "submit_watchtower_signature",
+    "update_channel",
 ];
 
 pub(crate) fn is_tenant_allowed_method(method: &str) -> bool {
@@ -113,8 +123,11 @@ mod tests {
             "send_payment",
             "node_info",
             "lsp_register_tenant",
-            "create_preimage",
-            "create_watch_channel",
+            "lsp_ensure_tenant",
+            "lsp_evict_tenant",
+            "lsp_list_tenants",
+            "lsp_new_invoice",
+            "lsp_send_payment",
         ] {
             assert!(!is_tenant_allowed_method(method));
             assert!(enforce_tenant_method_allowlist(method, &tenant)

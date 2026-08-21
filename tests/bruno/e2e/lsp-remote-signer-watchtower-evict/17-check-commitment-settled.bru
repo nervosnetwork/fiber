@@ -23,6 +23,12 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].tx_hash = bru.getVar("TX_HASH") || bru.getEnvVar("TX_HASH");
+  req.setBody(body);
+}
+
 assert {
   res.body.result.status: eq "unknown"
 }

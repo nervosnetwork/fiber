@@ -25,6 +25,12 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_INCOMING_PAYMENT_HASH");
+  req.setBody(body);
+}
+
 vars:post-response {
   LSP_INCOMING_PAYMENT_MAX_ITERATIONS: 60
 }

@@ -20,6 +20,8 @@ script:post-response {
     if (res.body.tenant_id !== bru.getVar("REMOTE_TENANT_ID")) throw new Error("tenant identity changed after restart");
     if (res.body.tenant_token !== bru.getVar("REMOTE_TENANT_TOKEN")) throw new Error("tenant token changed after restart");
     if (!res.body.bound_channel_ids.includes(bru.getVar("REMOTE_CHANNEL_ID"))) throw new Error("binding was not restored");
+    bru.setVar("REMOTE_TENANT_TOKEN", res.body.tenant_token);
+    bru.setEnvVar("REMOTE_TENANT_TOKEN", res.body.tenant_token);
     return;
   }
   if (iteration + 1 < Number(bru.getVar("RESTART_MAX_ITERATIONS"))) {

@@ -60,6 +60,7 @@ impl HttpFiberRpc {
         Ok(Self {
             url,
             client: reqwest::Client::builder()
+                .no_proxy()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
                 .context("build HTTP client")?,

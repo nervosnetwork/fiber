@@ -37,3 +37,9 @@ assert {
   res.body.error: isUndefined
   res.body.result.runtime_status: eq "active"
 }
+
+script:post-response {
+  if (res.body.error) {
+    console.log("Step 22 ERROR:", JSON.stringify(res.body.error));
+  }
+}

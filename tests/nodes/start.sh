@@ -100,14 +100,15 @@ export TESTING_CONTRACTS_DIR="$deploy_dir/contracts"
 
 if [ -n "$should_clean_fiber_state" ]; then
     echo "starting to clean fiber store ...."
-    rm -rf "$nodes_dir"/*/fiber/store
+    rm -rf "$nodes_dir"/*/fiber/store "$nodes_dir"/*/lsp
 elif [ -n "$should_remove_old_state" ]; then
     echo "starting to reset ...."
-    rm -rf "$nodes_dir"/*/fiber/store
+    rm -rf "$nodes_dir"/*/fiber/store "$nodes_dir"/*/lsp
     "$deploy_dir/init-dev-chain.sh" -f
     if is_lsp_e2e; then
         rm -rf "$nodes_dir/lsp-sdk-agent"
         rm -f "$nodes_dir/lsp-sdk-agent-status.json"
+        rm -f "$nodes_dir/lsp-sdk-agent.log"
     fi
 fi
 

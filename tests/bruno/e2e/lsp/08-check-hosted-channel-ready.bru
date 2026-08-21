@@ -27,6 +27,13 @@ body:json {
   }
 }
 
+script:pre-request {
+  const token = bru.getVar("LSP_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
 vars:post-response {
   HOSTED_READY_MAX_ITERATIONS: 30
 }

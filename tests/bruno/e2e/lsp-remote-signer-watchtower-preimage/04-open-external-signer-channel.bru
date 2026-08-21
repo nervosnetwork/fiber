@@ -25,6 +25,10 @@ body:json {
 }
 
 script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
   const body = req.getBody();
   body.params[0].shutdown_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
   body.params[0].funding_lock_script = bru.getVar("REMOTE_FUNDING_SCRIPT");

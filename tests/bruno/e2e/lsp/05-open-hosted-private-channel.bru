@@ -13,7 +13,7 @@ post {
 headers {
   Content-Type: application/json
   Accept: application/json
-  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
 }
 
 body:json {
@@ -23,7 +23,7 @@ body:json {
     "method": "open_channel",
     "params": [
       {
-        "pubkey": "{{NODE2_PUBKEY}}",
+        "pubkey": "{{HOSTED_TENANT_PUBKEY}}",
         "funding_amount": "0xba43b7400",
         "public": false
       }

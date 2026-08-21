@@ -1550,10 +1550,8 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
         expected_node
     );
     crate::rpc::tenant::enforce_tenant_method_allowlist("get_invoice", &biscuit).unwrap();
-    assert!(
-        crate::rpc::tenant::enforce_tenant_method_allowlist("create_watch_channel", &biscuit)
-            .is_err()
-    );
+    crate::rpc::tenant::enforce_tenant_method_allowlist("create_watch_channel", &biscuit).unwrap();
+    assert!(crate::rpc::tenant::enforce_tenant_method_allowlist("open_channel", &biscuit).is_err());
     auth.check_permission("create_preimage", &token).unwrap();
 }
 

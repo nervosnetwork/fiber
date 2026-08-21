@@ -26,6 +26,16 @@ body:json {
   }
 }
 
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_INCOMING_PAYMENT_HASH");
+  req.setBody(body);
+}
+
 vars:post-response {
   HOLD_RECEIVED_MAX_ITERATIONS: 60
 }

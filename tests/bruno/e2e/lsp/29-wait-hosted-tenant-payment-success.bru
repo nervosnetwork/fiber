@@ -29,6 +29,16 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_OUTGOING_PAYMENT_HASH");
+  req.setBody(body);
+  const token = bru.getVar("LSP_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
 vars:post-response {
   LSP_OUTGOING_MAX_ITERATIONS: 30
 }

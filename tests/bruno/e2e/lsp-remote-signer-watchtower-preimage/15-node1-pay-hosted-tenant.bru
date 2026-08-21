@@ -28,6 +28,12 @@ body:json {
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].invoice = bru.getVar("LSP_INCOMING_INVOICE");
+  req.setBody(body);
+}
+
 assert {
   res.body.error: isUndefined
   res.body.result.payment_hash: eq "{{LSP_INCOMING_PAYMENT_HASH}}"

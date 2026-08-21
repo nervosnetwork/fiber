@@ -12,40 +12,46 @@ post {
 
 headers {
   Content-Type: application/json
-  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
 }
 
 body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "new_invoice",
+    "method": "lsp_new_invoice",
     "params": [
       {
-        "amount": "0xf4240",
-        "currency": "Fibd",
-        "description": "hosted remote-signer revocation invoice",
-        "expiry": "0xe10",
-        "allow_trampoline_routing": true,
-        "payment_preimage": "0x2222222222222222222222222222222222222222222222222222222222222222"
+        "tenant_id": "placeholder",
+        "invoice": {
+          "amount": "0xf4240",
+          "currency": "Fibd",
+          "description": "hosted remote-signer revocation invoice",
+          "expiry": "0xe10",
+          "allow_trampoline_routing": true,
+          "payment_preimage": "0x2222222222222222222222222222222222222222222222222222222222222222"
+        }
       }
     ]
   }
 }
 
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].tenant_id = bru.getVar("REMOTE_TENANT_ID");
+  req.setBody(body);
+}
+
 assert {
   res.body.error: isUndefined
-  res.body.result.invoice_address: isDefined
-  res.body.result.invoice.data.payment_hash: isDefined
+  res.body.result.invoice: isDefined
+  res.body.result.hint.payment_hash: isDefined
 }
 
 script:post-response {
-  const routeHint = res.body.result.invoice.data.attrs.find(
-    (attr) => attr.trampoline_route_hint !== undefined
-  );
-  if (!routeHint || routeHint.trampoline_route_hint !== bru.getEnvVar("NODE2_PUBKEY")) {
+  if (res.body.result.hint.lsp_node_id !== bru.getEnvVar("NODE2_PUBKEY")) {
     throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
   }
-  bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice_address);
-  bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
+  bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice);
+  bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.hint.payment_hash);
 }

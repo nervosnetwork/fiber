@@ -34,4 +34,6 @@ script:post-response {
   if (res.body.result.root_signer_pubkey !== bru.getVar("REMOTE_ROOT_PUBKEY")) {
     throw new Error("tenant RootSigner identity does not match the SDK agent");
   }
+  bru.setVar("HOSTED_TENANT_PUBKEY", res.body.result.invoice_pubkey);
+  bru.setEnvVar("HOSTED_TENANT_PUBKEY", res.body.result.invoice_pubkey);
 }
