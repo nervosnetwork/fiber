@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Display;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, Liquidi
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 #[cfg(test)]
 use secp256k1::{SecretKey, SECP256K1};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub use crate::liquidity::chain::{
     LiquidityChainWatcher as LoopOutChainAdapter, LoopOutClaimPlan, LoopOutClaimRequest,
@@ -199,6 +201,8 @@ pub struct LiquidityActorState<S, P, C> {
     active_payment_swaps: HashSet<Hash256>,
     watched_claim_swaps: HashSet<Hash256>,
     active_refund_swaps: HashSet<Hash256>,
+    job_cancellation: CancellationToken,
+    jobs: TaskTracker,
 }
 
 #[async_trait]
@@ -229,6 +233,8 @@ where
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
             active_refund_swaps: HashSet::new(),
+            job_cancellation: CancellationToken::new(),
+            jobs: TaskTracker::new(),
         })
     }
 
@@ -383,6 +389,17 @@ where
         }
         Ok(())
     }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        state.job_cancellation.cancel();
+        state.jobs.close();
+        state.jobs.wait().await;
+        Ok(())
+    }
 }
 
 impl<S, P, C> LiquidityActorState<S, P, C>
@@ -393,6 +410,16 @@ where
     C: LoopOutChainAdapter,
     C::Error: Display,
 {
+    fn spawn_job(&self, future: impl Future<Output = ()> + Send + 'static) {
+        let cancellation = self.job_cancellation.clone();
+        self.jobs.spawn(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {}
+                _ = future => {}
+            }
+        });
+    }
+
     async fn handle_loop_in(
         &mut self,
         params: LoopInParams,
@@ -776,7 +803,7 @@ where
                 self.active_payment_swaps.insert(swap_id);
                 let mut payment = self.payment.clone();
                 let store = self.store.clone();
-                tokio::spawn(async move {
+                self.spawn_job(async move {
                     match payment.send_loop_out_payment(request).await {
                         Ok(preimage) => {
                             send_payment_settled(&myself, swap_id, preimage);
@@ -1125,7 +1152,7 @@ where
                     let store = self.store.clone();
                     let actor = myself.clone();
                     let swap_id = swap.swap_id;
-                    tokio::spawn(async move {
+                    self.spawn_job(async move {
                         match payment.send_loop_out_payment(request).await {
                             Ok(preimage) => send_payment_settled(&actor, swap_id, preimage),
                             Err(error) => {
@@ -1165,7 +1192,7 @@ where
                     let actor = myself.clone();
                     let swap_id = swap.swap_id;
                     let payment_hash = swap.payment_hash;
-                    tokio::spawn(async move {
+                    self.spawn_job(async move {
                         reconcile_loop_out_payment(
                             store,
                             payment,
@@ -1394,7 +1421,7 @@ where
                 let actor = myself.clone();
                 let swap_id = swap.swap_id;
                 let payment_hash = swap.payment_hash;
-                tokio::spawn(async move {
+                self.spawn_job(async move {
                     reconcile_loop_out_payment(
                         store,
                         payment,
@@ -1460,7 +1487,7 @@ where
         let mut payment = self.payment.clone();
         let store = self.store.clone();
         let swap_id = swap.swap_id;
-        tokio::spawn(async move {
+        self.spawn_job(async move {
             match payment.send_loop_out_payment(request).await {
                 Ok(preimage) => send_payment_settled(&myself, swap_id, preimage),
                 Err(error) => {
@@ -4645,6 +4672,8 @@ mod tests {
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
             active_refund_swaps: HashSet::new(),
+            job_cancellation: CancellationToken::new(),
+            jobs: TaskTracker::new(),
         };
         state.active_payment_swaps.insert(swap.swap_id);
 
@@ -4753,6 +4782,8 @@ mod tests {
             active_payment_swaps: HashSet::new(),
             watched_claim_swaps: HashSet::new(),
             active_refund_swaps: HashSet::new(),
+            job_cancellation: CancellationToken::new(),
+            jobs: TaskTracker::new(),
         };
         let swap_id = [22u8; 32].into();
         state.watched_payout_swaps.insert(swap_id);
@@ -6995,6 +7026,61 @@ mod tests {
             LiquiditySwapState::ClaimPending
         );
         assert!(events.borrow().contains(&"reload_payment"));
+    }
+
+    #[tokio::test]
+    async fn liquidity_actor_stop_cancels_blocked_payment_job_before_termination() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_client");
+        let (payment, release_payment) =
+            TestLoopOutPayment::with_pending_result_and_reload_statuses(events.clone(), vec![]);
+        let quote = test_loop_out_quote(now_ms() + 60_000);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        let (actor, handle) = ractor::Actor::spawn(
+            None,
+            LiquidityActor::<_, _, _>(std::marker::PhantomData),
+            LiquidityActorArguments {
+                store,
+                payment,
+                chain,
+                provider_pubkey: deterministic_provider_pubkey(),
+                provider_funding_lock_script: deterministic_provider_funding_lock_script(),
+            },
+        )
+        .await
+        .unwrap();
+
+        ractor::call!(actor.clone(), |reply| LiquidityActorMessage::LoopOut(
+            LoopOutParams {
+                quote_id: quote.quote_id.into(),
+                max_provider_fee: 1,
+                max_routing_fee: 1,
+            },
+            reply
+        ))
+        .unwrap()
+        .unwrap();
+        actor
+            .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
+            .unwrap();
+        wait_for_event(&events, "send_payment").await;
+
+        actor.stop(Some("test actor-owned job cancellation".to_string()));
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("liquidity actor stop timed out")
+            .expect("liquidity actor task panicked");
+
+        assert!(
+            release_payment
+                .send(Err("late completion".to_string()))
+                .is_err(),
+            "blocked payment job retained its receiver after actor termination"
+        );
+        assert_eq!(event_count(&events, "reload_payment"), 0);
     }
 
     #[tokio::test]

@@ -38,6 +38,7 @@ use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+const LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn cli_confirm(plan: MigrationPlan) -> bool {
     eprintln!("{}", plan.message);
@@ -554,9 +555,14 @@ async fn run_node(
         if let Some(actor) = liquidity_actor {
             actor.stop(Some("stopping liquidity actor".to_string()));
             actor
-                .wait(None)
+                .wait(Some(LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT))
                 .await
-                .map_err(|err| ExitMessage(format!("failed to stop liquidity actor: {err}")))?;
+                .map_err(|err| {
+                    ExitMessage(format!(
+                        "liquidity actor did not stop within {LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT:?}: \
+                         {err}"
+                    ))
+                })?;
         }
     }
     cancel_tasks_and_wait_for_completion().await;
