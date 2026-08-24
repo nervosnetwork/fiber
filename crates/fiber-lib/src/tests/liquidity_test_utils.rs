@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use ckb_types::{core::TransactionView, packed::OutPoint};
 use fiber_json_types::{
     AddLiquidityAssetParams, GetSwapParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
     LiquidityChainTransaction, LiquidityChainTransactionRole, LiquidityProviderStatus,
@@ -15,9 +16,11 @@ use jsonrpsee::{
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
 };
+use ractor::call;
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::ckb::tests::test_utils::MockChainController;
+use crate::ckb::{CkbChainMessage, LiveCell};
 use crate::fiber::Hash256;
 use crate::tests::{
     establish_channel_between_nodes, gen_liquidity_rpc_config, ChannelParameters, NetworkNode,
@@ -196,8 +199,26 @@ impl LiquidityNetworkFixture {
         Self { nodes, chain }
     }
 
-    pub(crate) fn chain(&self) -> MockChainController {
-        self.chain.clone()
+    pub(crate) fn pending_transactions(&self) -> Vec<TransactionView> {
+        self.chain.pending_transactions()
+    }
+
+    pub(crate) fn commit(&self, tx_hash: Hash256) -> Result<(), String> {
+        self.chain.commit(tx_hash)
+    }
+
+    pub(crate) fn reject(&self, tx_hash: Hash256, reason: impl Into<String>) -> Result<(), String> {
+        self.chain.reject(tx_hash, reason)
+    }
+
+    pub(crate) async fn live_cell(&self, node: usize, outpoint: OutPoint) -> Option<LiveCell> {
+        call!(
+            self.nodes[node].node.chain_actor,
+            CkbChainMessage::GetLiveCell,
+            outpoint
+        )
+        .expect("chain actor alive")
+        .expect("live-cell query succeeds")
     }
 
     pub(crate) async fn establish_funded_channel(
@@ -321,6 +342,64 @@ async fn liquidity_network_fixture_provider_status_responds() {
 
     fixture.nodes[0].restart().await;
     assert!(!fixture.nodes[0].provider_status().await.enabled);
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn liquidity_network_fixture_chain_control_is_narrow_and_operational() {
+    use ckb_types::{
+        bytes::Bytes,
+        packed::CellOutput,
+        prelude::{Builder, Entity, Pack},
+    };
+
+    let fixture = LiquidityNetworkFixture::new().await;
+    let committed_output = CellOutput::new_builder().capacity(100u64).build();
+    let committed_data = Bytes::from_static(b"liquidity fixture committed cell");
+    let committed_tx = TransactionView::new_advanced_builder()
+        .output(committed_output.clone())
+        .output_data(committed_data.pack())
+        .build();
+    let committed_hash = committed_tx.hash().into();
+    let committed_outpoint = committed_tx.output_pts_iter().next().expect("one output");
+    let rejected_tx = TransactionView::new_advanced_builder().build();
+    let rejected_hash = rejected_tx.hash().into();
+
+    call!(
+        fixture.nodes[0].node.chain_actor,
+        CkbChainMessage::SendTx,
+        committed_tx
+    )
+    .expect("chain actor alive")
+    .expect("submit committed transaction");
+    call!(
+        fixture.nodes[0].node.chain_actor,
+        CkbChainMessage::SendTx,
+        rejected_tx
+    )
+    .expect("chain actor alive")
+    .expect("submit rejected transaction");
+
+    let pending_hashes = fixture
+        .pending_transactions()
+        .into_iter()
+        .map(|tx| Hash256::from(tx.hash()))
+        .collect::<Vec<_>>();
+    assert!(pending_hashes.contains(&committed_hash));
+    assert!(pending_hashes.contains(&rejected_hash));
+
+    fixture.commit(committed_hash).expect("commit transaction");
+    fixture
+        .reject(rejected_hash, "fixture rejection")
+        .expect("reject transaction");
+
+    let live_cell = fixture
+        .live_cell(1, committed_outpoint)
+        .await
+        .expect("committed output is live");
+    assert_eq!(live_cell.output, committed_output);
+    assert_eq!(live_cell.data.raw_data(), committed_data);
 
     fixture.shutdown().await;
 }

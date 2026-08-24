@@ -1,7 +1,11 @@
 use crate::ckb::client::CkbChainClient;
-use crate::ckb::tests::test_utils::{MockChainActorMiddleware, MockChainController};
+use crate::ckb::tests::test_utils::MockChainActorMiddleware;
+#[cfg(test)]
+use crate::ckb::tests::test_utils::MockChainController;
 use crate::ckb::CkbConfig;
-use crate::ckb::{CkbTxTracer, CkbTxTracingMask, GetTxResponse};
+use crate::ckb::GetTxResponse;
+#[cfg(test)]
+use crate::ckb::{CkbTxTracer, CkbTxTracingMask};
 use crate::fiber::channel::*;
 use crate::fiber::config::CKB_SHANNONS;
 use crate::fiber::gossip::get_gossip_actor_name;
@@ -30,11 +34,16 @@ use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
 use ckb_sdk::core::TransactionBuilder;
+#[cfg(test)]
 use ckb_types::bytes::Bytes;
 use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
-    packed::{CellOutput, OutPoint, Script},
+    packed::{OutPoint, Script},
+};
+#[cfg(test)]
+use ckb_types::{
+    packed::CellOutput,
     prelude::{Builder, Entity, Pack},
 };
 use fiber_types::TLCId;
