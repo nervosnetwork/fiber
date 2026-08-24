@@ -1001,6 +1001,9 @@ where
                     existing.role, existing.swap_kind
                 )));
             }
+            let quote = self.quote_terms(&quote_id)?;
+            self.register_provider_loop_out_invoice_for_quote(&quote)
+                .await?;
             return self.swap_response(&quote_id);
         }
         let quote = self.quote_terms(&quote_id)?;
@@ -1014,9 +1017,19 @@ where
             .await
             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
         let quote = self.quote_terms(&quote_id)?;
+        self.register_provider_loop_out_invoice_for_quote(&quote)
+            .await?;
+        self.swap_response(&swap_id)
+    }
+
+    async fn register_provider_loop_out_invoice_for_quote(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+    ) -> Result<(), LiquidityLoopOutError> {
         let preimage = quote.payment_preimage.ok_or_else(|| {
             LiquidityLoopOutError::Store(format!(
-                "provider loop out quote {quote_id:?} is missing its preimage"
+                "provider loop out quote {:?} is missing its preimage",
+                quote.quote_id
             ))
         })?;
         let gross_amount = loop_out_gross_payment_amount(
@@ -1033,8 +1046,7 @@ where
                 udt_type_script,
             )
             .await
-            .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
-        self.swap_response(&swap_id)
+            .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))
     }
 
     async fn handle_provider_accept_loop_in(
@@ -3505,6 +3517,7 @@ mod tests {
         pending_result: Shared<Option<oneshot::Receiver<Result<Hash256, String>>>>,
         reload_statuses: Shared<Vec<LoopOutPaymentStatus>>,
         registered_invoices: Shared<Vec<Hash256>>,
+        fail_registration: Shared<bool>,
     }
 
     impl TestLoopOutPayment {
@@ -3517,6 +3530,7 @@ mod tests {
                 pending_result: Shared::new(None),
                 reload_statuses: Shared::new(Vec::new()),
                 registered_invoices: Shared::new(Vec::new()),
+                fail_registration: Shared::new(false),
             }
         }
 
@@ -3529,6 +3543,7 @@ mod tests {
                 pending_result: Shared::new(None),
                 reload_statuses: Shared::new(Vec::new()),
                 registered_invoices: Shared::new(Vec::new()),
+                fail_registration: Shared::new(false),
             }
         }
 
@@ -3545,6 +3560,7 @@ mod tests {
                 pending_result: Shared::new(Some(recv)),
                 reload_statuses: Shared::new(reload_statuses),
                 registered_invoices: Shared::new(Vec::new()),
+                fail_registration: Shared::new(false),
             };
             (payment, send)
         }
@@ -3555,6 +3571,10 @@ mod tests {
 
         fn registered_invoices(&self) -> Vec<Hash256> {
             self.registered_invoices.borrow().clone()
+        }
+
+        fn fail_next_registration(&self) {
+            *self.fail_registration.borrow_mut() = true;
         }
     }
 
@@ -3601,6 +3621,15 @@ mod tests {
             _amount: u128,
             _udt_type_script: Option<ckb_types::packed::Script>,
         ) -> Result<(), Self::Error> {
+            let fail = {
+                let mut flag = self.fail_registration.borrow_mut();
+                let fail = *flag;
+                *flag = false;
+                fail
+            };
+            if fail {
+                return Err("registration failed".to_string());
+            }
             self.events.borrow_mut().push("register_invoice");
             self.registered_invoices.borrow_mut().push(payment_hash);
             Ok(())
@@ -7027,6 +7056,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_accept_loop_out_reregisters_invoice_on_idempotent_accept() {
+        let harness = RuntimeActorHarness::new_provider();
+        let preimage: Hash256 = [7u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let mut quote = harness.loop_out_quote_terms();
+        quote.payment_hash = payment_hash;
+        quote.payment_preimage = Some(preimage);
+        harness.store_quote(quote.clone());
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
+
+        harness.payment.fail_next_registration();
+        let error = call_provider_accept_loop_out(&actor, quote.quote_id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("registration failed"));
+        assert_eq!(harness.payment.registered_invoices(), Vec::<Hash256>::new());
+
+        let response = call_provider_accept_loop_out(&actor, quote.quote_id)
+            .await
+            .unwrap();
+        assert_eq!(response.swap_id, quote.quote_id.into());
+        assert_eq!(harness.payment.registered_invoices(), vec![payment_hash]);
+        assert_eq!(event_count(&harness.events, "reserve_payout"), 1);
+        assert_eq!(event_count(&harness.events, "broadcast_payout"), 1);
+        assert_eq!(event_count(&harness.events, "watch_payout"), 1);
+        assert_eq!(harness.chain.payout_locks.borrow().len(), 1);
+        stop_liquidity_actor(actor, handle).await;
+    }
+
+    #[tokio::test]
     async fn provider_accept_loop_out_is_idempotent() {
         let harness = RuntimeActorHarness::new_provider();
         let quote = harness.loop_out_quote_terms();
@@ -7036,7 +7095,6 @@ mod tests {
         let first_response = call_provider_accept_loop_out(&actor, quote.quote_id)
             .await
             .unwrap();
-        let events_after_first_accept = harness.events();
         let second_response = call_provider_accept_loop_out(&actor, quote.quote_id)
             .await
             .unwrap();
@@ -7045,12 +7103,12 @@ mod tests {
         assert_eq!(second_response.state, first_response.state);
         assert_eq!(second_response.payment_hash, first_response.payment_hash);
         assert_eq!(second_response.created_at, first_response.created_at);
-        assert_eq!(harness.events(), events_after_first_accept);
         assert_eq!(event_count(&harness.events, "provider_insert_created"), 1);
         assert_eq!(event_count(&harness.events, "reserve_payout"), 1);
         assert_eq!(event_count(&harness.events, "broadcast_payout"), 1);
         assert_eq!(event_count(&harness.events, "watch_payout"), 1);
         assert_eq!(event_count(&harness.events, "send_payment"), 0);
+        assert_eq!(event_count(&harness.events, "register_invoice"), 2);
         assert_eq!(harness.chain.payout_locks.borrow().len(), 1);
         assert_eq!(*harness.store.quote_writes.borrow(), 1);
         stop_liquidity_actor(actor, handle).await;
