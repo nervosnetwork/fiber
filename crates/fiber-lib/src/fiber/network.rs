@@ -67,6 +67,7 @@ use super::gossip::{
     GossipMessageUpdates,
 };
 use super::graph::{NetworkGraph, NetworkGraphStateStore, OwnedChannelUpdateEvent};
+use super::signer_actor::{SignerActor, SignerActorMessage, SubmitChannelSignatureCommand};
 use super::types::{
     BroadcastMessageWithTimestamp, FiberMessage, ForwardTlcResult, GossipMessage, Init, OpenChannel,
 };
@@ -1126,6 +1127,11 @@ pub enum FiberActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
+    /// Submit an external channel signature to the signer actor.
+    SubmitChannelSignature(
+        SubmitChannelSignatureCommand,
+        RpcReplyPort<Result<fiber_types::SubmitSignatureOutcome, String>>,
+    ),
     #[cfg(any(test, feature = "bench"))]
     GetChannelActor(Hash256, RpcReplyPort<Option<ActorRef<ChannelActorMessage>>>),
     // Send an onion packet to the next hop. The `PeeledPaymentOnionPacket::current` contains
@@ -1720,6 +1726,8 @@ pub(crate) struct FiberActorCore<S, C> {
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
     store_actor: Option<ActorRef<StoreActorMessage>>,
+    // Signs channel MuSig2 requests for every channel hosted by this runtime.
+    signer_actor: ActorRef<SignerActorMessage>,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
     chain_client: C,
 }
@@ -1775,6 +1783,7 @@ where
         store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
+        signer_actor: ActorRef<SignerActorMessage>,
     ) -> Self {
         Self {
             event_sender,
@@ -1783,6 +1792,7 @@ where
             store_actor,
             network_graph,
             chain_client,
+            signer_actor,
         }
     }
 
@@ -1830,6 +1840,7 @@ where
         FiberActorState {
             store: self.store.clone(),
             store_actor: self.store_actor.clone(),
+            signer_actor: self.signer_actor.clone(),
             private_key,
             entropy,
             default_shutdown_script,
@@ -3030,6 +3041,22 @@ where
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
+            }
+            FiberActorCommand::SubmitChannelSignature(command, reply) => {
+                let SubmitChannelSignatureCommand {
+                    channel_id,
+                    request_id,
+                    partial_signature,
+                    next_material,
+                } = command;
+                self.signer_actor
+                    .send_message(SignerActorMessage::SubmitSignature {
+                        channel_id,
+                        request_id,
+                        partial_signature,
+                        next_material,
+                        rpc_reply: Some(reply),
+                    })?;
             }
             #[cfg(any(test, feature = "bench"))]
             FiberActorCommand::GetChannelActor(channel_id, reply) => {
@@ -5288,6 +5315,7 @@ where
         store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
         chain_client: C,
+        signer_actor: ActorRef<SignerActorMessage>,
     ) -> Self {
         Self {
             core: FiberActorCore::new(
@@ -5297,6 +5325,7 @@ where
                 store_actor,
                 network_graph,
                 chain_client,
+                signer_actor,
             ),
         }
     }
@@ -5730,6 +5759,8 @@ where
 pub struct FiberActorState<S, C> {
     store: S,
     store_actor: Option<ActorRef<StoreActorMessage>>,
+    // Signs channel MuSig2 requests for every channel hosted by this runtime.
+    signer_actor: ActorRef<SignerActorMessage>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
     // This is the entropy used to generate various random values.
@@ -6693,13 +6724,17 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.store_actor.clone(),
-            ),
+            {
+                let mut channel_actor = ChannelActor::new(
+                    self.get_public_key(),
+                    remote_pubkey,
+                    network.clone(),
+                    store,
+                    self.store_actor.clone(),
+                );
+                channel_actor.set_signer_actor(self.signer_actor.clone());
+                channel_actor
+            },
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
@@ -6809,13 +6844,17 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.store_actor.clone(),
-            ),
+            {
+                let mut channel_actor = ChannelActor::new(
+                    self.get_public_key(),
+                    remote_pubkey,
+                    network.clone(),
+                    store,
+                    self.store_actor.clone(),
+                );
+                channel_actor.set_signer_actor(self.signer_actor.clone());
+                channel_actor
+            },
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
@@ -6908,13 +6947,17 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                network.clone(),
-                store,
-                self.store_actor.clone(),
-            ),
+            {
+                let mut channel_actor = ChannelActor::new(
+                    self.get_public_key(),
+                    remote_pubkey,
+                    network.clone(),
+                    store,
+                    self.store_actor.clone(),
+                );
+                channel_actor.set_signer_actor(self.signer_actor.clone());
+                channel_actor
+            },
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                     funding_amount,
@@ -7393,13 +7436,17 @@ where
                 &self.get_public_key(),
                 &remote_pubkey,
             )),
-            ChannelActor::new(
-                self.get_public_key(),
-                remote_pubkey,
-                self.network.clone(),
-                self.store.clone(),
-                self.store_actor.clone(),
-            ),
+            {
+                let mut channel_actor = ChannelActor::new(
+                    self.get_public_key(),
+                    remote_pubkey,
+                    self.network.clone(),
+                    self.store.clone(),
+                    self.store_actor.clone(),
+                );
+                channel_actor.set_signer_actor(self.signer_actor.clone());
+                channel_actor
+            },
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -9044,6 +9091,15 @@ pub async fn start_network<
 ) -> ActorRef<NetworkActorMessage> {
     let my_pubkey = config.public_key();
 
+    // One signer actor per channel-hosting runtime: it owns MuSig2 signing
+    // for every channel this node hosts.
+    // Unnamed: ractor's registry would reject a reused name when this runtime
+    // restarts inside the same process (tests / tenant eviction + rehydrate).
+    let (signer_actor, _signer_handle) =
+        Actor::spawn_linked(None, SignerActor, (), root_actor.clone())
+            .await
+            .expect("Failed to start signer actor");
+
     let (actor, _handle) = Actor::spawn_linked(
         Some(format!("Network {:?}", my_pubkey)),
         NetworkActor::new(
@@ -9053,6 +9109,7 @@ pub async fn start_network<
             store_actor,
             network_graph,
             chain_client,
+            signer_actor,
         ),
         NetworkActorStartArguments {
             config,
@@ -9094,6 +9151,11 @@ pub(crate) async fn start_hosted_tenant_actor<
     default_shutdown_script: Script,
 ) -> Result<FiberActorRef, String> {
     let actor_name = format!("HostedTenant {:?}", config.public_key());
+    // Unnamed: see start_network — a fixed name breaks in-process restart.
+    let (signer_actor, _signer_handle) =
+        Actor::spawn_linked(None, SignerActor, (), root_actor.clone())
+            .await
+            .map_err(|error| format!("failed to start signer actor: {error}"))?;
     Actor::spawn_linked(
         Some(actor_name),
         HostedTenantActor::new(FiberActorCore::new(
@@ -9103,6 +9165,7 @@ pub(crate) async fn start_hosted_tenant_actor<
             store_actor,
             network_graph,
             chain_client,
+            signer_actor,
         )),
         HostedTenantActorStartArguments {
             config,

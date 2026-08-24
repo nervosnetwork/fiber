@@ -167,12 +167,24 @@ trait WatchtowerRpc {
 #[cfg(feature = "watchtower")]
 pub struct WatchtowerRpcServerImpl<S> {
     store: S,
+    signer_actor: Option<ractor::ActorRef<crate::fiber::signer_actor::SignerActorMessage>>,
 }
 
 #[cfg(feature = "watchtower")]
 impl<S> WatchtowerRpcServerImpl<S> {
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            signer_actor: None,
+        }
+    }
+
+    pub fn with_signer_actor(
+        mut self,
+        signer_actor: Option<ractor::ActorRef<crate::fiber::signer_actor::SignerActorMessage>>,
+    ) -> Self {
+        self.signer_actor = signer_actor;
+        self
     }
 }
 
@@ -394,6 +406,19 @@ where
         {
             return Err(rpc_error("watched channel not found"));
         }
+        if let Some(signer_actor) = self.signer_actor.as_ref() {
+            return ractor::call!(signer_actor, |rpc_reply| {
+                crate::fiber::signer_actor::SignerActorMessage::SubmitWatchtowerSignature {
+                    node_id,
+                    channel_id,
+                    request_id,
+                    signature,
+                    rpc_reply: Some(rpc_reply),
+                }
+            })
+            .map_err(|error| rpc_error(error.to_string()))?
+            .map_err(rpc_error);
+        }
         let current = self.store.get_watchtower_signer(&node_id, &channel_id);
         let WatchtowerSignerState::External(mut external) = current else {
             return Err(rpc_error("watched channel does not use an external signer"));
@@ -442,6 +467,15 @@ where
             &channel_id,
             WatchtowerSignerState::External(external),
         );
+        if let Some(signer_actor) = self.signer_actor.as_ref() {
+            let _ = signer_actor.send_message(
+                crate::fiber::signer_actor::SignerActorMessage::ClearWatchtowerPending {
+                    node_id,
+                    channel_id,
+                    request_id,
+                },
+            );
+        }
         Ok(SubmitWatchtowerSignatureResult::Applied)
     }
 }

@@ -40,7 +40,8 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
-            channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
+            signer_buffers: Default::default(),
+            signer_actor: None,
         }
     }
 
@@ -66,7 +67,8 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
-            channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
+            signer_buffers: Default::default(),
+            signer_actor: None,
         }
     }
 }

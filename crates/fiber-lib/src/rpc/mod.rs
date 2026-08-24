@@ -61,6 +61,7 @@ pub mod server {
     use crate::{ckb::CkbChainMessage, fiber::types::Hash256};
     #[cfg(feature = "watchtower")]
     use crate::{
+        fiber::signer_actor::SignerActorMessage,
         rpc::watchtower::{WatchtowerRpcServer, WatchtowerRpcServerImpl},
         watchtower::WatchtowerStore,
     };
@@ -279,6 +280,9 @@ pub mod server {
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
+        #[cfg(feature = "watchtower")] watchtower_signer_actor: Option<
+            ActorRef<SignerActorMessage>,
+        >,
         cch_actor: Option<ActorRef<CchMessage>>,
         lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
         store: S,
@@ -377,7 +381,11 @@ pub mod server {
             #[cfg(feature = "watchtower")]
             if config.is_module_enabled("watchtower") {
                 modules
-                    .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
+                    .merge(
+                        WatchtowerRpcServerImpl::new(store.clone())
+                            .with_signer_actor(watchtower_signer_actor.clone())
+                            .into_rpc(),
+                    )
                     .unwrap();
             }
 

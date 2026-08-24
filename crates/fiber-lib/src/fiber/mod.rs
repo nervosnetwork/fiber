@@ -7,6 +7,7 @@ pub mod network;
 pub mod payment;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
 pub mod profiling;
+pub mod signer_actor;
 pub mod types;
 
 mod fee;

@@ -24,7 +24,6 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use secp256k1::{Message, SecretKey, SECP256K1};
 use strum::AsRefStr;
 use tracing::{debug, error, info, warn};
 
@@ -35,18 +34,20 @@ use crate::{
         signer::LocalSigner,
         CkbConfig,
     },
-    fiber::channel::{
-        settlement_data_to_witness, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
-        XUDT_COMPATIBLE_WITNESS,
+    fiber::{
+        channel::{
+            settlement_data_to_witness, settlement_tlc_local_pubkey_hash,
+            settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS,
+        },
+        onchain_tlc_reconcile::OnChainTlcSettlement,
+        signer_actor::{verify_onchain_signature, SignerActorMessage, SignerNotification},
     },
-    fiber::onchain_tlc_reconcile::OnChainTlcSettlement,
     now_timestamp_as_millis_u64,
     utils::{
         actor::ActorHandleLogGuard,
         arithmetic::{
             checked_add_u64, checked_mul_u64, checked_sub_u64, checked_sub_usize, ArithmeticError,
         },
-        tx::compute_tx_message,
     },
     watchtower::{
         channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
@@ -66,6 +67,7 @@ pub struct WatchtowerActor<S> {
     store: S,
     // a node_id represent the watchtower itself
     node_id: NodeId,
+    signer_actor: Option<ActorRef<SignerActorMessage>>,
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
@@ -88,11 +90,20 @@ fn tx_size_with_extra_inputs(
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
         let node_id = NodeId::local();
-        Self { store, node_id }
+        Self {
+            store,
+            node_id,
+            signer_actor: None,
+        }
+    }
+
+    pub fn with_signer_actor(mut self, signer_actor: Option<ActorRef<SignerActorMessage>>) -> Self {
+        self.signer_actor = signer_actor;
+        self
     }
 }
 
-#[derive(AsRefStr)]
+#[derive(AsRefStr, Debug)]
 pub enum WatchtowerMessage {
     CreateChannel(
         Hash256,
@@ -110,6 +121,7 @@ pub enum WatchtowerMessage {
     UpdateLocalSettlement(Hash256, SettlementData),
     CreatePreimage(Hash256, Hash256),
     RemovePreimage(Hash256),
+    SignerNotification(SignerNotification),
     PeriodicCheck,
 }
 
@@ -145,7 +157,7 @@ where
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -214,6 +226,9 @@ where
             WatchtowerMessage::RemovePreimage(payment_hash) => self
                 .store
                 .remove_watch_preimage(NodeId::local(), payment_hash),
+            WatchtowerMessage::SignerNotification(notification) => {
+                self.handle_signer_notification(notification)?
+            }
             WatchtowerMessage::PeriodicCheck => {
                 // Check if a periodic check is already running
                 if state
@@ -230,12 +245,14 @@ where
                 let rpc_url = state.config.rpc_url.clone();
                 let periodic_check_running = state.periodic_check_running.clone();
                 let signer = state.signer.clone();
+                let myself = myself.clone();
+                let signer_actor = self.signer_actor.clone();
                 tokio::task::spawn_blocking(move || {
                     // Use RAII guard to ensure flag is reset even on panic
                     let _guard = PeriodicCheckGuard(periodic_check_running);
                     info!("PeriodicCheck started");
                     let start = now_timestamp_as_millis_u64();
-                    run_periodic_check(store, node_id, signer, rpc_url);
+                    run_periodic_check(store, node_id, signer, rpc_url, myself, signer_actor);
                     let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
                     info!("PeriodicCheck finished elapsed: {}ms", elapsed);
                 });
@@ -254,8 +271,94 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
+impl<S> WatchtowerActor<S>
 where
+    S: WatchtowerStore + Send + Sync + Clone + 'static,
+{
+    fn handle_signer_notification(
+        &self,
+        notification: SignerNotification,
+    ) -> Result<(), ActorProcessingErr> {
+        use fiber_json_types::SubmitWatchtowerSignatureResult;
+        use fiber_types::{
+            LastAppliedWatchtowerSignature, WatchtowerExternalState, WatchtowerSignerState,
+        };
+
+        let (node_id, channel_id, request_id, signature, rpc_reply) = match notification {
+            SignerNotification::WatchtowerSignatureReady {
+                node_id,
+                channel_id,
+                request_id,
+                signature,
+                rpc_reply,
+            } => (node_id, channel_id, request_id, signature, rpc_reply),
+            #[allow(unreachable_patterns)]
+            _ => {
+                return Err(ActorProcessingErr::from(
+                    "unexpected signer notification for watchtower actor".to_string(),
+                ));
+            }
+        };
+
+        let result: Result<SubmitWatchtowerSignatureResult, String> = (|| {
+            let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
+                return Err("watched channel not found".to_string());
+            };
+            let current = self.store.get_watchtower_signer(&node_id, &channel_id);
+            let WatchtowerSignerState::External(mut external) = current else {
+                return Err("watched channel does not use an external signer".to_string());
+            };
+            let WatchtowerExternalState::AwaitingSignature {
+                request_id: expected,
+                content,
+            } = external.state
+            else {
+                return Err("watched channel is not waiting for an external signature".to_string());
+            };
+            if expected != request_id {
+                return Err("signature request id does not match the current request".to_string());
+            }
+            let signature = signature?;
+            verify_onchain_signature(&channel.local_settlement_pubkey(), &content, &signature)?;
+            external.last_applied = Some(LastAppliedWatchtowerSignature {
+                request_id,
+                signature,
+            });
+            external.state = WatchtowerExternalState::Signed {
+                request_id,
+                content,
+                signature,
+            };
+            self.store.put_watchtower_signer(
+                &node_id,
+                &channel_id,
+                WatchtowerSignerState::External(external),
+            );
+            if let Some(signer_actor) = self.signer_actor.as_ref() {
+                let _ = signer_actor.send_message(SignerActorMessage::ClearWatchtowerPending {
+                    node_id,
+                    channel_id,
+                    request_id,
+                });
+            }
+            Ok(SubmitWatchtowerSignatureResult::Applied)
+        })();
+
+        if let Some(reply) = rpc_reply {
+            let _ = reply.send(result);
+        }
+        Ok(())
+    }
+}
+
+fn run_periodic_check<S>(
+    store: S,
+    _node_id: NodeId,
+    signer: LocalSigner,
+    rpc_url: String,
+    myself: ActorRef<WatchtowerMessage>,
+    signer_actor: Option<ActorRef<SignerActorMessage>>,
+) where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
@@ -391,6 +494,8 @@ where
                                                 &store,
                                                 channel_node_id.clone(),
                                                 first_commitment_block_number,
+                                                &myself,
+                                                signer_actor.as_ref(),
                                             );
                                         }
                                     }
@@ -406,6 +511,8 @@ where
                                         &store,
                                         channel_node_id.clone(),
                                         first_commitment_block_number,
+                                        &myself,
+                                        signer_actor.as_ref(),
                                     );
                                 }
                             } else {
@@ -553,6 +660,8 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
+    myself: &ActorRef<WatchtowerMessage>,
+    signer_actor: Option<&ActorRef<SignerActorMessage>>,
 ) {
     let lock_args = commitment_lock.args().raw_data();
     let initial_tlcs = tracked_settlement_tlcs(&commitment_lock, &channel_data, for_remote);
@@ -742,6 +851,8 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         signer,
                         cell_collector,
                         store,
+                        &myself,
+                        signer_actor,
                     ) {
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
@@ -1193,6 +1304,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
     signer: &LocalSigner,
     cell_collector: &mut DefaultCellCollector,
     store: &S,
+    myself: &ActorRef<WatchtowerMessage>,
+    signer_actor: Option<&ActorRef<SignerActorMessage>>,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
@@ -1763,19 +1876,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     vec![new_commitment_output, adjusted_settlement_output]
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
-                let Some(unlock_key) = unlock_key else {
-                    return persist_or_apply_external_settlement(
-                        store,
-                        self_node_id,
-                        channel_data.channel_id,
-                        tx,
-                        onchain_key_purpose(unlock.unlock_type, commitment_number),
-                        unlock.with_preimage,
-                        signer,
-                    );
-                };
-                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
-                return Ok(Some(tx));
+                return build_signed_settlement_tx(
+                    store,
+                    self_node_id,
+                    channel_data.channel_id,
+                    tx,
+                    onchain_key_purpose(unlock.unlock_type, commitment_number),
+                    unlock.with_preimage,
+                    unlock_key,
+                    signer,
+                    myself,
+                    signer_actor,
+                );
             }
         }
 
@@ -2005,19 +2117,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs(outputs)
                     .set_outputs_data(outputs_data)
                     .build();
-                let Some(unlock_key) = unlock_key else {
-                    return persist_or_apply_external_settlement(
-                        store,
-                        self_node_id,
-                        channel_data.channel_id,
-                        tx,
-                        onchain_key_purpose(unlock.unlock_type, commitment_number),
-                        unlock.with_preimage,
-                        signer,
-                    );
-                };
-                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
-                return Ok(Some(tx));
+                return build_signed_settlement_tx(
+                    store,
+                    self_node_id,
+                    channel_data.channel_id,
+                    tx,
+                    onchain_key_purpose(unlock.unlock_type, commitment_number),
+                    unlock.with_preimage,
+                    unlock_key,
+                    signer,
+                    myself,
+                    signer_actor,
+                );
             }
         }
 
@@ -2033,14 +2144,17 @@ fn onchain_key_purpose(unlock_type: u8, commitment_number: u64) -> fiber_types::
     }
 }
 
-fn persist_or_apply_external_settlement<S: WatchtowerStore>(
+fn build_signed_settlement_tx<S: WatchtowerStore>(
     store: &S,
     node_id: &NodeId,
     channel_id: Hash256,
     tx: TransactionView,
     key_purpose: fiber_types::OnchainKeyPurpose,
     with_preimage: bool,
+    unlock_key: Option<Privkey>,
     change_signer: &LocalSigner,
+    myself: &ActorRef<WatchtowerMessage>,
+    signer_actor: Option<&ActorRef<SignerActorMessage>>,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     use fiber_types::{
         OnchainSigningContent, WatchtowerExternalSignerState, WatchtowerExternalState,
@@ -2051,6 +2165,21 @@ fn persist_or_apply_external_settlement<S: WatchtowerStore>(
         key_purpose,
         transaction: tx.data(),
     };
+
+    if let Some(key) = unlock_key {
+        let signature =
+            crate::fiber::signer_actor::sign_onchain_request(&key, &content).map_err(|e| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    as Box<dyn std::error::Error>
+            })?;
+        return Ok(Some(apply_settlement_signature(
+            tx,
+            change_signer,
+            signature,
+            with_preimage,
+        )?));
+    }
+
     match store.get_watchtower_signer(node_id, &channel_id) {
         WatchtowerSignerState::External(external) => match external.state {
             WatchtowerExternalState::Signed {
@@ -2058,7 +2187,7 @@ fn persist_or_apply_external_settlement<S: WatchtowerStore>(
                 signature,
                 ..
             } if signed.transaction.as_slice() == content.transaction.as_slice() => Ok(Some(
-                apply_external_settlement_signature(tx, change_signer, signature, with_preimage)?,
+                apply_settlement_signature(tx, change_signer, signature, with_preimage)?,
             )),
             WatchtowerExternalState::AwaitingSignature {
                 content: pending, ..
@@ -2072,11 +2201,26 @@ fn persist_or_apply_external_settlement<S: WatchtowerStore>(
                     WatchtowerSignerState::External(WatchtowerExternalSignerState {
                         state: WatchtowerExternalState::AwaitingSignature {
                             request_id,
-                            content,
+                            content: content.clone(),
                         },
                         last_applied: external.last_applied,
                     }),
                 );
+                if let Some(signer_actor) = signer_actor {
+                    signer_actor
+                        .send_message(SignerActorMessage::SignWatchtower {
+                            node_id: node_id.clone(),
+                            channel_id,
+                            request_id,
+                            signer: None,
+                            content,
+                            reply_to: Some(myself.clone()),
+                        })
+                        .map_err(|error| {
+                            Box::new(std::io::Error::other(error.to_string()))
+                                as Box<dyn std::error::Error>
+                        })?;
+                }
                 Ok(None)
             }
         },
@@ -2090,7 +2234,7 @@ fn persist_or_apply_external_settlement<S: WatchtowerStore>(
     }
 }
 
-fn apply_external_settlement_signature(
+fn apply_settlement_signature(
     tx: TransactionView,
     change_signer: &LocalSigner,
     signature_bytes: [u8; 65],
@@ -2150,54 +2294,6 @@ fn sign_tx(
         tx.witnesses().get(0).expect("get witness at index 0"),
         witness.as_bytes().pack(),
     ];
-
-    Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
-}
-
-fn sign_tx_with_settlement(
-    tx: TransactionView,
-    change_signer: &LocalSigner,
-    settlement_secret_key: SecretKey,
-    with_preimage: bool,
-) -> Result<TransactionView, Box<dyn std::error::Error>> {
-    let tx = tx.data().into_view();
-
-    let message = compute_tx_message(&tx);
-    let secp256k1_message = Message::from_digest_slice(&message)?;
-    let signature = SECP256K1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
-    let (recov_id, data) = signature.serialize_compact();
-    let mut signature_bytes = [0u8; 65];
-    signature_bytes[0..64].copy_from_slice(&data[0..64]);
-    signature_bytes[64] = i32::from(recov_id) as u8;
-    let mut settlement_witness = tx
-        .witnesses()
-        .get(0)
-        .expect("get witness at index 0")
-        .raw_data()
-        .to_vec();
-    if with_preimage {
-        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
-        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
-        settlement_witness.splice(start..end, signature_bytes);
-    } else {
-        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
-        settlement_witness.splice(start.., signature_bytes);
-    }
-
-    let witness = tx.witnesses().get(1).expect("get witness at index 1");
-    let mut blake2b = new_blake2b();
-    blake2b.update(tx.hash().as_slice());
-    blake2b.update(&(witness.item_count() as u64).to_le_bytes());
-    blake2b.update(&witness.raw_data());
-    let mut message = [0u8; 32];
-    blake2b.finalize(&mut message);
-    let signature_bytes = change_signer.sign_recoverable(&message);
-    let change_witness = WitnessArgs::new_builder()
-        .lock(Some(ckb_types::bytes::Bytes::from(signature_bytes.to_vec())).pack())
-        .build()
-        .as_bytes();
-
-    let witnesses = vec![settlement_witness.pack(), change_witness.pack()];
 
     Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
 }

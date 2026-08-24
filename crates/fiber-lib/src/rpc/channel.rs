@@ -1,12 +1,13 @@
 use crate::fiber::{
     channel::{
         ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,
-        ShutdownCommand, SubmitChannelSignatureCommand, UpdateCommand,
+        ShutdownCommand, UpdateCommand,
     },
     network::{
         AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
         PendingAcceptChannel,
     },
+    signer_actor::SubmitChannelSignatureCommand,
     FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};
@@ -826,18 +827,14 @@ where
             .transpose()
             .rpc_err()?;
         let message = |rpc_reply| {
-            FiberActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
-                ChannelCommandWithId {
+            FiberActorMessage::new_command(FiberActorCommand::SubmitChannelSignature(
+                SubmitChannelSignatureCommand {
                     channel_id,
-                    command: ChannelCommand::SubmitChannelSignature(
-                        SubmitChannelSignatureCommand {
-                            request_id,
-                            partial_signature,
-                            next_material: next_material.clone(),
-                        },
-                        rpc_reply,
-                    ),
+                    request_id,
+                    partial_signature,
+                    next_material: next_material.clone(),
                 },
+                rpc_reply,
             ))
         };
         handle_actor_call!(self.actor, message, params).map(|outcome| match outcome {

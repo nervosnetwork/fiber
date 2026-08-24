@@ -24,6 +24,7 @@ use crate::fiber::network::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
+use crate::fiber::signer_actor::{SignerActor, SignerNotification};
 use crate::fiber::types::{
     AddTlc, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256, Init,
     PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
@@ -130,6 +131,36 @@ impl Actor for CapturingNetworkActor {
 }
 
 struct NoopChannelActor;
+
+/// Captures signer-actor notifications addressed to a channel actor.
+struct SignerNotificationProbe;
+
+#[async_trait::async_trait]
+impl Actor for SignerNotificationProbe {
+    type Msg = ChannelActorMessage;
+    type State = Arc<Mutex<Vec<SignerNotification>>>;
+    type Arguments = Arc<Mutex<Vec<SignerNotification>>>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        captured: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(captured)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let ChannelActorMessage::SignerNotification(notification) = message {
+            state.lock().expect("probe lock").push(notification);
+        }
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl Actor for NoopChannelActor {
@@ -9843,16 +9874,32 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
             .expect("spawn A capture network actor");
     state_a.network = Some(FiberActorRef::from_network(&network_a));
     state_a.private_key = Some(node_a.private_key.clone());
-    let channel_a = ChannelActor::new(
+    node_a.store.insert_channel_actor_state(state_a.clone());
+
+    let (signer_a, signer_a_handle) = Actor::spawn(None, SignerActor, ())
+        .await
+        .expect("spawn A signer actor");
+    let mut channel_a = ChannelActor::new(
         node_a.pubkey,
         node_b.pubkey,
         FiberActorRef::from_network(&network_a),
         node_a.store.clone(),
         None,
     );
-    let (channel_a_ref, channel_a_handle) = Actor::spawn(None, NoopChannelActor, ())
-        .await
-        .expect("spawn A no-op channel actor");
+    channel_a.set_signer_actor(signer_a);
+    let (channel_a_ref, channel_a_handle) = Actor::spawn(
+        None,
+        channel_a,
+        crate::fiber::channel::ChannelInitializationParameter {
+            operation: crate::fiber::channel::ChannelInitializationOperation::RestoreOfflineChannel(
+                channel_id,
+            ),
+            ephemeral_config: Default::default(),
+            private_key: node_a.private_key.clone(),
+        },
+    )
+    .await
+    .expect("spawn A channel actor");
 
     channel_b
         .handle_peer_message(
@@ -9860,8 +9907,8 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
             &mut state_b,
             FiberChannelMessage::ReestablishChannel(ReestablishChannel {
                 channel_id,
-                local_commitment_number: state_a.get_local_commitment_number(),
-                remote_commitment_number: state_a.get_remote_commitment_number(),
+                local_commitment_number: original_a_commitments.local,
+                remote_commitment_number: original_a_commitments.remote,
             }),
         )
         .await
@@ -9915,18 +9962,25 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
     drop(reestablish_messages);
     drop(commitment_messages);
 
+    // Discard any initial messages emitted by A on startup
+    let _ = take_captured_actor_messages(&network_a, &captured_a).await;
+
     for message in messages_from_b {
         assert_eq!(message.target, node_a.pubkey);
         let FiberMessage::ChannelNormalOperation(message) = message.message else {
             panic!("B emitted a non-channel message during reestablish")
         };
-        channel_a
-            .handle_peer_message(&channel_a_ref, &mut state_a, message)
-            .await
+        channel_a_ref
+            .send_message(ChannelActorMessage::PeerMessage(message))
             .expect("A must process B's captured reestablish output");
     }
 
+    wait_until_async_timeout(|| async { !captured_a.lock().unwrap().is_empty() }).await;
     let messages_from_a = take_captured_actor_messages(&network_a, &captured_a).await;
+    let state_a = node_a
+        .store
+        .get_channel_actor_state(&channel_id)
+        .expect("get state A");
     assert_eq!(
         reestablish_message_count,
         1,
@@ -9993,6 +10047,7 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
     channel_b_handle.abort();
     network_a_handle.abort();
     network_b_handle.abort();
+    signer_a_handle.abort();
 }
 
 #[tokio::test]
@@ -10774,6 +10829,146 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
             _ => None,
         })
         .await;
+}
+
+/// POC end-to-end: with a signer actor attached, the revoke-owing side
+/// delegates MuSig2 signing via messages and only sends the peer message once
+/// the signature notification arrives.
+#[tokio::test]
+async fn test_signer_actor_signs_revocation_via_messages() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Hold B's CommitmentSigned so A ends up in the revoke-owing nonce
+    // boundary (same setup as the reestablish replay test).
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    node_a
+        .send_payment_keysend(&node_b, 2000, false)
+        .await
+        .expect("start keysend payment");
+    node_b.wait_for_held_fiber_messages(1).await;
+
+    let live_state_a = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            let state = node_a.get_channel_actor_state(channel_id);
+            if state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_none()
+                && state.remote_revocation_nonce_for_next.is_some()
+                && state.remote_revocation_nonce_for_send != state.remote_revocation_nonce_for_next
+            {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("A must reach the revoke-owing nonce boundary");
+
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a.remote_revocation_nonce_for_send,
+        live_state_a.remote_revocation_nonce_for_send
+    );
+    let remote_commitment_number_before = state_a.get_remote_commitment_number();
+
+    // Manual harness: capturing network + signer actor + hand-driven channel.
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network_a, _network_handle) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .expect("spawn capture network actor");
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
+    state_a.private_key = Some(node_a.private_key.clone());
+
+    let signer_notifications = Arc::new(Mutex::new(Vec::new()));
+    let (signer_actor_ref, _signer_handle) = Actor::spawn(None, SignerActor, ())
+        .await
+        .expect("spawn signer actor");
+
+    let mut channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network_a),
+        node_a.store.clone(),
+        None,
+    );
+    channel.set_signer_actor(signer_actor_ref.clone());
+    // In production the channel actor copies its handle into the state during
+    // pre_start; this manual harness skips pre_start, so set it directly.
+    state_a.signer_actor = Some(signer_actor_ref);
+    // The probe doubles as the channel actor ref: it is passed as `myself` to
+    // the signing call and notifications routed there land in its buffer.
+    let (channel_actor_ref, _channel_actor_handle) =
+        Actor::spawn(None, SignerNotificationProbe, signer_notifications.clone())
+            .await
+            .expect("spawn notification probe");
+
+    // Sending the revoke now goes through the signer actor: nothing may be
+    // put on the wire yet.
+    state_a
+        .send_revoke_and_ack_message(&channel_actor_ref, false)
+        .await
+        .expect("revoke delegated to signer actor");
+    assert!(
+        take_captured_actor_messages(&network_a, &captured)
+            .await
+            .is_empty(),
+        "no peer message may be sent before the signature notification"
+    );
+
+    // The signature comes back asynchronously; feeding the notification into
+    // the channel resumes the transition and sends the RevokeAndAck.
+    let notification = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            if let Some(notification) = signer_notifications.lock().expect("probe lock").pop() {
+                return notification;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("signature notification within timeout");
+    let SignerNotification::ChannelSignatureReady {
+        channel_id: notified_channel_id,
+        ..
+    } = &notification
+    else {
+        panic!("expected ChannelSignatureReady");
+    };
+    assert_eq!(*notified_channel_id, channel_id);
+
+    channel
+        .handle_signer_notification(&channel_actor_ref, &mut state_a, notification)
+        .await
+        .expect("continuation succeeds");
+
+    let messages = take_captured_actor_messages(&network_a, &captured).await;
+    assert!(
+        messages.iter().any(|m| matches!(
+            &m.message,
+            FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke))
+                if revoke.channel_id == channel_id
+        )),
+        "RevokeAndAck must be sent after the signature notification, got {:?}",
+        messages
+            .iter()
+            .map(|m| format!("{:?}", m.message))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state_a.get_remote_commitment_number(),
+        remote_commitment_number_before + 1
+    );
+    assert!(state_a.last_revoke_ack_msg.is_some());
 }
 
 #[tokio::test]
@@ -13050,7 +13245,8 @@ mod udt_funding_cell_capacity {
             private_key: None,
             funding_abort_detail: None,
             needs_backup: false,
-            channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
+            signer_buffers: Default::default(),
+            signer_actor: None,
         }
     }
 

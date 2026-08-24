@@ -10,6 +10,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         graph::PathFindError,
+        signer_actor::SignerActorMessage,
         InFlightCkbTxActorMessage, NetworkActorMessage,
     },
 };
@@ -49,6 +50,8 @@ pub enum Error {
     FiberMessagingErr(#[from] MessagingErr<crate::fiber::FiberActorMessage>),
     #[error("Failed to in-flight tx actor message: {0}")]
     InFlightCkbTxActorMessagingErr(#[from] MessagingErr<InFlightCkbTxActorMessage>),
+    #[error("Failed to send signer actor message: {0}")]
+    SignerMessagingErr(#[from] MessagingErr<SignerActorMessage>),
     #[error("Failed to processing channel: {0}")]
     ChannelError(#[from] ProcessingChannelError),
     #[error("Invoice error: {0:?}")]

@@ -1391,7 +1391,8 @@ fn test_channel_actor_state_store() {
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
-        channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
+        signer_buffers: Default::default(),
+        signer_actor: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1536,7 +1537,8 @@ fn sample_channel_actor_state(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
-        channel_signer: crate::fiber::channel::ChannelSignerRuntime::Local,
+        signer_buffers: Default::default(),
+        signer_actor: None,
     }
 }
 

@@ -550,6 +550,8 @@ async fn create_lsp_test_network(
             None,
             None,
             None,
+            #[cfg(feature = "watchtower")]
+            None,
             None,
             Some(lsp_actor.clone()),
             nodes[lsp_node_index].store.clone(),
@@ -730,6 +732,8 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         rpc_config,
         None,
         None,
+        None,
+        #[cfg(feature = "watchtower")]
         None,
         None,
         Some(lsp_actor.clone()),
@@ -987,6 +991,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         None,
         Some(public_t.fiber_config.clone()),
         Some(public_t.network_actor.clone()),
+        #[cfg(feature = "watchtower")]
+        None,
         None,
         Some(lsp_actor.clone()),
         public_t.store.clone(),
@@ -1300,6 +1306,8 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         rpc_config,
         None,
         None,
+        None,
+        #[cfg(feature = "watchtower")]
         None,
         None,
         Some(lsp_actor.clone()),

@@ -623,6 +623,25 @@ impl ChannelSignerState {
         )
     }
 
+    /// The currently awaited signature request, if any.
+    ///
+    /// Used to re-drive a persisted request after a process restart: local
+    /// signing is deterministic, so re-submitting the same request yields the
+    /// same signature and the idempotency receipt keeps the completion safe.
+    pub fn awaiting_signature(&self) -> Option<(SignatureRequestId, ChannelSignatureRequest)> {
+        match self {
+            Self::External(ExternalChannelSignerState {
+                state:
+                    ExternalSignerState::AwaitingSignature {
+                        request_id,
+                        request,
+                    },
+                ..
+            }) => Some((*request_id, request.clone())),
+            _ => None,
+        }
+    }
+
     /// Public projection of the current signer state.
     pub fn signing_status(&self) -> ChannelSigningStatus {
         match self {

@@ -12,6 +12,7 @@ use fnn::event_handler::forward_event_to_client;
 use fnn::fiber::{
     graph::NetworkGraph,
     network::{init_chain_hash, NetworkActorMessage, PublicNetworkCommand},
+    signer_actor::SignerActor,
 };
 use fnn::fiber_types::Privkey;
 use fnn::lsp::{BiscuitTokenIssuer, FiberTenantRuntimeFactory, LspService, LspServiceArgs};
@@ -351,12 +352,27 @@ async fn run_node(
                 None
             };
 
-            let watchtower_actor = if fiber_config.disable_built_in_watchtower.unwrap_or_default() {
-                None
+            let (watchtower_actor, watchtower_signer_actor) = if fiber_config
+                .disable_built_in_watchtower
+                .unwrap_or_default()
+            {
+                (None, None)
             } else {
+                let watchtower_signer_actor = Actor::spawn_linked(
+                    Some("watchtower_signer".to_string()),
+                    SignerActor,
+                    (),
+                    root_actor.get_cell(),
+                )
+                .await
+                .map_err(|err| {
+                    ExitMessage(format!("failed to start watchtower signer actor: {}", err))
+                })?
+                .0;
                 let watchtower_actor = Actor::spawn_linked(
                     Some("watchtower".to_string()),
-                    WatchtowerActor::new(store.clone()),
+                    WatchtowerActor::new(store.clone())
+                        .with_signer_actor(Some(watchtower_signer_actor.clone())),
                     ckb_config,
                     root_actor.get_cell(),
                 )
@@ -372,7 +388,7 @@ async fn run_node(
                     ),
                     || WatchtowerMessage::PeriodicCheck,
                 );
-                Some(watchtower_actor)
+                (Some(watchtower_actor), Some(watchtower_signer_actor))
             };
 
             #[cfg(feature = "metrics")]
@@ -637,6 +653,8 @@ async fn run_node(
                 config.ckb,
                 config.fiber,
                 network_actor,
+                #[cfg(feature = "watchtower")]
+                watchtower_signer_actor,
                 cch_actor,
                 lsp_actor,
                 store,
