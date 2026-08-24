@@ -38,7 +38,9 @@ use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
     LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
 };
-use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
+use crate::liquidity::types::{
+    loop_out_gross_payment_amount, LiquidityLoopOutError, LoopOutQuoteTerms,
+};
 
 #[cfg(not(test))]
 const LOOP_OUT_PAYMENT_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
@@ -1011,6 +1013,27 @@ where
             .watch_payout_lock(swap_id, myself)
             .await
             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+        let quote = self.quote_terms(&quote_id)?;
+        let preimage = quote.payment_preimage.ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!(
+                "provider loop out quote {quote_id:?} is missing its preimage"
+            ))
+        })?;
+        let gross_amount = loop_out_gross_payment_amount(
+            quote.amount,
+            quote.provider_fee,
+            quote.routing_fee_limit,
+        )?;
+        let udt_type_script = quote.asset.udt_type_script.clone().map(Into::into);
+        self.payment
+            .register_provider_loop_out_invoice(
+                quote.payment_hash,
+                preimage,
+                gross_amount,
+                udt_type_script,
+            )
+            .await
+            .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
         self.swap_response(&swap_id)
     }
 
@@ -1757,6 +1780,15 @@ pub trait LoopOutPaymentAdapter {
         &mut self,
         payment_hash: Hash256,
     ) -> Result<LoopOutPaymentStatus, Self::Error>;
+
+    /// Register the provider invoice + preimage so an incoming Loop Out payment settles.
+    async fn register_provider_loop_out_invoice(
+        &mut self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        amount: u128,
+        udt_type_script: Option<ckb_types::packed::Script>,
+    ) -> Result<(), Self::Error>;
 }
 
 /// Reloaded Loop Out payment state used by actor reconciliation.
@@ -3472,6 +3504,7 @@ mod tests {
         requests: Shared<Vec<crate::liquidity::payment::LoopOutPaymentRequest>>,
         pending_result: Shared<Option<oneshot::Receiver<Result<Hash256, String>>>>,
         reload_statuses: Shared<Vec<LoopOutPaymentStatus>>,
+        registered_invoices: Shared<Vec<Hash256>>,
     }
 
     impl TestLoopOutPayment {
@@ -3483,6 +3516,7 @@ mod tests {
                 requests: Shared::new(Vec::new()),
                 pending_result: Shared::new(None),
                 reload_statuses: Shared::new(Vec::new()),
+                registered_invoices: Shared::new(Vec::new()),
             }
         }
 
@@ -3494,6 +3528,7 @@ mod tests {
                 requests: Shared::new(Vec::new()),
                 pending_result: Shared::new(None),
                 reload_statuses: Shared::new(Vec::new()),
+                registered_invoices: Shared::new(Vec::new()),
             }
         }
 
@@ -3509,12 +3544,17 @@ mod tests {
                 requests: Shared::new(Vec::new()),
                 pending_result: Shared::new(Some(recv)),
                 reload_statuses: Shared::new(reload_statuses),
+                registered_invoices: Shared::new(Vec::new()),
             };
             (payment, send)
         }
 
         fn requests(&self) -> Vec<crate::liquidity::payment::LoopOutPaymentRequest> {
             self.requests.borrow().clone()
+        }
+
+        fn registered_invoices(&self) -> Vec<Hash256> {
+            self.registered_invoices.borrow().clone()
         }
     }
 
@@ -3552,6 +3592,18 @@ mod tests {
             } else {
                 Ok(statuses.remove(0))
             }
+        }
+
+        async fn register_provider_loop_out_invoice(
+            &mut self,
+            payment_hash: Hash256,
+            _preimage: Hash256,
+            _amount: u128,
+            _udt_type_script: Option<ckb_types::packed::Script>,
+        ) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("register_invoice");
+            self.registered_invoices.borrow_mut().push(payment_hash);
+            Ok(())
         }
     }
 
@@ -3623,7 +3675,9 @@ mod tests {
         }
 
         fn loop_out_quote_terms(&self) -> LoopOutQuoteTerms {
-            test_loop_out_quote(now_ms() + 60_000)
+            let mut quote = test_loop_out_quote(now_ms() + 60_000);
+            quote.payment_preimage = Some([4u8; 32].into());
+            quote
         }
 
         fn store_quote(&self, quote: LoopOutQuoteTerms) {
@@ -6093,6 +6147,7 @@ mod tests {
                 "provider_persist_outpoint",
                 "broadcast_payout",
                 "watch_payout",
+                "register_invoice",
             ]
         );
     }
@@ -6116,6 +6171,7 @@ mod tests {
                 "send_tx",
                 "create_tx_tracer",
                 "watch_payout",
+                "register_invoice",
             ]
         );
     }
@@ -6949,6 +7005,25 @@ mod tests {
             .unwrap();
         assert_eq!(persisted_quote.claimant_lock, claimant_lock);
         assert_eq!(persisted_quote.refund_lock, refund_lock);
+    }
+
+    #[tokio::test]
+    async fn provider_accept_loop_out_registers_invoice_with_preimage() {
+        let harness = RuntimeActorHarness::new_provider();
+        let preimage: Hash256 = [7u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let mut quote = harness.loop_out_quote_terms();
+        quote.payment_hash = payment_hash;
+        quote.payment_preimage = Some(preimage);
+        harness.store_quote(quote.clone());
+        let (actor, handle) = harness.spawn_actor_with_handle().await;
+
+        call_provider_accept_loop_out(&actor, quote.quote_id)
+            .await
+            .unwrap();
+
+        assert_eq!(harness.payment.registered_invoices(), vec![payment_hash]);
+        stop_liquidity_actor(actor, handle).await;
     }
 
     #[tokio::test]

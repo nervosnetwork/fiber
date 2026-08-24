@@ -8,6 +8,7 @@ use ractor::{call, ActorRef};
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::invoice::{Currency, InvoiceBuilder, InvoiceError};
 use crate::liquidity::actor::{LoopOutPaymentAdapter, LoopOutPaymentStatus};
 use crate::liquidity::types::{loop_out_gross_payment_amount, LiquidityLoopOutError};
 
@@ -66,6 +67,7 @@ impl LoopOutPaymentRequest {
 pub struct NetworkLoopOutPaymentAdapter {
     network_actor: ActorRef<NetworkActorMessage>,
     polling_policy: NetworkLoopOutPaymentPollingPolicy,
+    currency: Currency,
 }
 
 /// Bounded polling policy for waiting on a sent Loop Out payment to settle.
@@ -89,7 +91,16 @@ impl Default for NetworkLoopOutPaymentPollingPolicy {
 impl NetworkLoopOutPaymentAdapter {
     /// Create a network-backed Loop Out payment adapter.
     pub fn new(network_actor: ActorRef<NetworkActorMessage>) -> Self {
-        Self::with_polling_policy(network_actor, NetworkLoopOutPaymentPollingPolicy::default())
+        Self::with_currency(network_actor, Currency::Fibd)
+    }
+
+    /// Create a network-backed Loop Out payment adapter for a specific invoice currency.
+    pub fn with_currency(network_actor: ActorRef<NetworkActorMessage>, currency: Currency) -> Self {
+        Self::with_polling_policy_and_currency(
+            network_actor,
+            NetworkLoopOutPaymentPollingPolicy::default(),
+            currency,
+        )
     }
 
     /// Create a network-backed Loop Out payment adapter with a custom polling policy.
@@ -97,9 +108,18 @@ impl NetworkLoopOutPaymentAdapter {
         network_actor: ActorRef<NetworkActorMessage>,
         polling_policy: NetworkLoopOutPaymentPollingPolicy,
     ) -> Self {
+        Self::with_polling_policy_and_currency(network_actor, polling_policy, Currency::Fibd)
+    }
+
+    fn with_polling_policy_and_currency(
+        network_actor: ActorRef<NetworkActorMessage>,
+        polling_policy: NetworkLoopOutPaymentPollingPolicy,
+        currency: Currency,
+    ) -> Self {
         Self {
             network_actor,
             polling_policy,
+            currency,
         }
     }
 
@@ -210,6 +230,43 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
     ) -> Result<LoopOutPaymentStatus, Self::Error> {
         self.reload_loop_out_payment_status(payment_hash).await
     }
+
+    async fn register_provider_loop_out_invoice(
+        &mut self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        amount: u128,
+        udt_type_script: Option<ckb_types::packed::Script>,
+    ) -> Result<(), Self::Error> {
+        let mut builder = InvoiceBuilder::new(self.currency)
+            .amount(Some(amount))
+            .payment_preimage(preimage);
+        if let Some(script) = udt_type_script {
+            builder = builder.udt_type_script(script);
+        }
+        let invoice = builder
+            .build()
+            .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
+        let invoice_hash = invoice.payment_hash();
+        if *invoice_hash != payment_hash {
+            return Err(LiquidityLoopOutError::PaymentFailed(format!(
+                "provider invoice payment hash mismatch: expected {payment_hash:?}, got {invoice_hash:?}"
+            )));
+        }
+        let result = call!(self.network_actor, |reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AddInvoice(
+                invoice.clone(),
+                Some(preimage),
+                reply,
+            ))
+        })
+        .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
+        match result {
+            Ok(()) => Ok(()),
+            Err(InvoiceError::InvoiceAlreadyExists) => Ok(()),
+            Err(error) => Err(LiquidityLoopOutError::PaymentFailed(error.to_string())),
+        }
+    }
 }
 
 fn preimage_or_terminal_error(
@@ -258,16 +315,18 @@ fn payment_status_from_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use fiber_types::PaymentStatus;
+    use fiber_types::{HashAlgorithm, PaymentStatus};
     use ractor::{Actor, ActorProcessingErr, ActorRef};
     use secp256k1::{SecretKey, SECP256K1};
 
     use crate::fiber::network::SendPaymentResponse;
     use crate::fiber::payment::SendPaymentCommand;
     use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+    use crate::invoice::{CkbInvoice, CkbInvoiceStatus};
 
     use super::*;
 
@@ -429,10 +488,54 @@ mod tests {
         assert!(error.to_string().contains("missing preimage"));
     }
 
+    #[tokio::test]
+    async fn register_provider_invoice_stores_invoice_and_preimage() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([0u8; 32].into())).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+
+        adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+            .await
+            .unwrap();
+
+        assert_eq!(network.take_events(), vec!["add_invoice"]);
+        let invoices = network.take_invoices();
+        assert_eq!(invoices.len(), 1);
+        let (invoice, stored_preimage) = invoices.into_iter().next().unwrap();
+        assert_eq!(*invoice.payment_hash(), payment_hash);
+        assert_eq!(stored_preimage, Some(preimage));
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_is_idempotent_when_invoice_already_exists() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([0u8; 32].into())).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+
+        adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+            .await
+            .unwrap();
+        adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+            .await
+            .unwrap();
+
+        assert_eq!(network.take_events(), vec!["add_invoice", "add_invoice"]);
+        assert_eq!(network.take_invoices().len(), 1);
+    }
+
+    type MockInvoice = (CkbInvoice, Option<Hash256>);
+    type MockInvoiceStore = Arc<Mutex<HashMap<Hash256, MockInvoice>>>;
+
     struct NetworkPaymentMock {
         actor: ActorRef<NetworkActorMessage>,
         events: Arc<Mutex<Vec<&'static str>>>,
         send_commands: Arc<Mutex<Vec<SendPaymentCommand>>>,
+        invoices: MockInvoiceStore,
     }
 
     impl NetworkPaymentMock {
@@ -442,6 +545,15 @@ mod tests {
 
         fn take_send_commands(&self) -> Vec<SendPaymentCommand> {
             std::mem::take(&mut self.send_commands.lock().unwrap())
+        }
+
+        fn take_invoices(&self) -> Vec<MockInvoice> {
+            self.invoices
+                .lock()
+                .unwrap()
+                .drain()
+                .map(|(_, invoice)| invoice)
+                .collect()
         }
     }
 
@@ -460,12 +572,14 @@ mod tests {
         mode: NetworkPaymentMockMode,
         events: Arc<Mutex<Vec<&'static str>>>,
         send_commands: Arc<Mutex<Vec<SendPaymentCommand>>>,
+        invoices: MockInvoiceStore,
     }
 
     struct NetworkPaymentMockArguments {
         mode: NetworkPaymentMockMode,
         events: Arc<Mutex<Vec<&'static str>>>,
         send_commands: Arc<Mutex<Vec<SendPaymentCommand>>>,
+        invoices: MockInvoiceStore,
     }
 
     #[async_trait]
@@ -483,6 +597,7 @@ mod tests {
                 mode: args.mode,
                 events: args.events,
                 send_commands: args.send_commands,
+                invoices: args.invoices,
             })
         }
 
@@ -534,6 +649,33 @@ mod tests {
                         };
                         let _ = reply.send(Ok(payment_response(payment_hash, status, preimage)));
                     }
+                    NetworkActorCommand::AddInvoice(invoice, preimage, reply) => {
+                        state.events.lock().unwrap().push("add_invoice");
+                        let payment_hash = *invoice.payment_hash();
+                        let mut invoices = state.invoices.lock().unwrap();
+                        let result = match invoices.entry(payment_hash) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert((invoice, preimage));
+                                Ok(())
+                            }
+                            std::collections::hash_map::Entry::Occupied(_) => {
+                                Err(InvoiceError::InvoiceAlreadyExists)
+                            }
+                        };
+                        let _ = reply.send(result);
+                    }
+                    NetworkActorCommand::GetInvoice(payment_hash, reply) => {
+                        state.events.lock().unwrap().push("get_invoice");
+                        let result = state
+                            .invoices
+                            .lock()
+                            .unwrap()
+                            .get(&payment_hash)
+                            .cloned()
+                            .map(|(invoice, _)| (invoice, CkbInvoiceStatus::Open))
+                            .ok_or(InvoiceError::InvoiceNotFound);
+                        let _ = reply.send(result);
+                    }
                     _ => unreachable!("unexpected network command"),
                 }
             }
@@ -544,6 +686,7 @@ mod tests {
     async fn spawn_payment_mock(mode: NetworkPaymentMockMode) -> NetworkPaymentMock {
         let events = Arc::new(Mutex::new(Vec::new()));
         let send_commands = Arc::new(Mutex::new(Vec::new()));
+        let invoices = Arc::new(Mutex::new(HashMap::new()));
         let (actor, _handle) = ractor::Actor::spawn(
             None,
             NetworkPaymentMockActor,
@@ -551,6 +694,7 @@ mod tests {
                 mode,
                 events: events.clone(),
                 send_commands: send_commands.clone(),
+                invoices: invoices.clone(),
             },
         )
         .await
@@ -559,6 +703,7 @@ mod tests {
             actor,
             events,
             send_commands,
+            invoices,
         }
     }
 
