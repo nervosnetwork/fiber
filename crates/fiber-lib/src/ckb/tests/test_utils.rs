@@ -15,7 +15,7 @@ use once_cell::sync::{Lazy, OnceCell};
 
 use crate::ckb::client::CkbChainClient;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
-use tokio::sync::RwLock as TokioRwLock;
+use tokio::sync::{Notify, RwLock as TokioRwLock};
 
 use crate::{
     ckb::{
@@ -294,6 +294,7 @@ pub struct MockChainState {
     pub indexer_cells: Vec<ckb_sdk::rpc::ckb_indexer::Cell>,
     pub context: Context,
     controlled: bool,
+    next_tracer_registration_gate: Option<MockTracerRegistrationGate>,
 }
 
 impl std::fmt::Debug for MockChainState {
@@ -303,6 +304,10 @@ impl std::fmt::Debug for MockChainState {
             .field("txs", &self.txs)
             .field("cell_status", &self.cell_status)
             .field("controlled", &self.controlled)
+            .field(
+                "tracer_registration_paused",
+                &self.next_tracer_registration_gate.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -323,7 +328,36 @@ impl MockChainState {
             indexer_cells: Vec::new(),
             context: MockContext::new().context,
             controlled: false,
+            next_tracer_registration_gate: None,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MockTracerRegistrationGate {
+    paused: Arc<Notify>,
+    resumed: Arc<Notify>,
+}
+
+impl MockTracerRegistrationGate {
+    fn new() -> Self {
+        Self {
+            paused: Arc::new(Notify::new()),
+            resumed: Arc::new(Notify::new()),
+        }
+    }
+
+    async fn pause(&self) {
+        self.paused.notify_one();
+        self.resumed.notified().await;
+    }
+
+    pub async fn wait_until_paused(&self) {
+        self.paused.notified().await;
+    }
+
+    pub fn resume(&self) {
+        self.resumed.notify_one();
     }
 }
 
@@ -349,6 +383,12 @@ impl MockChainController {
 
     pub fn shared_state(&self) -> Arc<RwLock<MockChainState>> {
         self.shared.clone()
+    }
+
+    pub fn pause_next_tracer_registration(&self) -> MockTracerRegistrationGate {
+        let gate = MockTracerRegistrationGate::new();
+        self.shared.write().unwrap().next_tracer_registration_gate = Some(gate.clone());
+        gate
     }
 
     pub fn transaction_status(&self, tx_hash: Hash256) -> Option<TxStatus> {
@@ -519,15 +559,16 @@ impl MockChainActor {
         notifier: Arc<OutputPort<CkbTxTracingResult>>,
         timeout: Duration,
         reply_port: RpcReplyPort<CkbTxTracingResult>,
-    ) {
-        let _ = Actor::spawn_linked(
+    ) -> ActorRef<CkbTxTracingResult> {
+        Actor::spawn_linked(
             None,
             TraceTxReplier::new(tx_hash, mask),
             (notifier, timeout, reply_port),
             myself.get_cell(),
         )
         .await
-        .expect("start trace tx replier");
+        .expect("start trace tx replier")
+        .0
     }
 }
 #[async_trait::async_trait]
@@ -790,15 +831,40 @@ impl Actor for MockChainActor {
                     // The transaction is not found in the tx_status, we need to wait for the
                     // tx notification from the mock chain actor.
                     _ => {
-                        self.start_trace_tx_replier(
-                            myself,
-                            tracer.tx_hash,
-                            tracer.mask,
-                            notifications,
-                            Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
-                            tracer.callback,
-                        )
-                        .await;
+                        let registration_gate = state
+                            .shared
+                            .write()
+                            .unwrap()
+                            .next_tracer_registration_gate
+                            .take();
+                        if let Some(gate) = registration_gate {
+                            gate.pause().await;
+                        }
+                        let replier = self
+                            .start_trace_tx_replier(
+                                myself,
+                                tracer.tx_hash,
+                                tracer.mask,
+                                notifications,
+                                Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
+                                tracer.callback,
+                            )
+                            .await;
+                        let current_status = state
+                            .shared
+                            .read()
+                            .unwrap()
+                            .txs
+                            .get(&tracer.tx_hash)
+                            .map(|tx| tx.tx_status.clone());
+                        if let Some(tx_status) = current_status {
+                            if tracer.mask.contains((&tx_status).into()) {
+                                let _ = replier.send_message(CkbTxTracingResult {
+                                    tx_hash: tracer.tx_hash,
+                                    tx_status,
+                                });
+                            }
+                        }
                     }
                 };
             }
