@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 use ckb_types::{core::TransactionView, packed::OutPoint};
@@ -19,6 +20,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::ckb::tests::test_utils::MockChainController;
 use crate::ckb::{CkbChainMessage, LiveCell};
+use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::Hash256;
 use crate::rpc::channel::{ChannelState, ListChannelsParams, ListChannelsResult};
 use crate::rpc::peer::ListPeersResult;
@@ -30,6 +32,20 @@ use crate::NetworkServiceEvent;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CHANNEL_FUNDING_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn await_before_deadline<T>(
+    deadline: Instant,
+    operation: &str,
+    future: impl Future<Output = T>,
+) -> Result<T, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(format!("{operation} exceeded its deadline"));
+    }
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| format!("{operation} exceeded its deadline"))
+}
 
 /// One real Fiber node with an HTTP client for its public liquidity RPC module.
 pub(crate) struct LiquidityNetworkNode {
@@ -252,6 +268,7 @@ impl LiquidityNetworkFixture {
         }
 
         let chain = self.chain.clone();
+        let channel_store = self.nodes[0].node.store.clone();
         let (left, right) = self.nodes.split_at_mut(1);
         let node_0 = &mut left[0].node;
         let node_1 = &mut right[0].node;
@@ -273,14 +290,24 @@ impl LiquidityNetworkFixture {
                 .iter()
                 .map(|tx| Hash256::from(tx.hash()))
                 .collect::<Vec<_>>();
-            match pending_hashes.as_slice() {
+            let funding_hashes = channel_store
+                .get_all_channel_states()
+                .into_iter()
+                .filter_map(|state| {
+                    state
+                        .funding_tx
+                        .as_ref()
+                        .map(|tx| Hash256::from(tx.calc_tx_hash()))
+                })
+                .filter(|hash| pending_hashes.contains(hash))
+                .collect::<Vec<_>>();
+            match funding_hashes.as_slice() {
                 [] if Instant::now() < deadline => continue,
                 [] => {
-                    return Err(
-                        "timed out waiting for the channel funding transaction; no transactions \
-                         were pending"
-                            .to_string(),
-                    );
+                    return Err(format!(
+                        "timed out waiting for a pending transaction matching persisted \
+                             channel funding state; pending hashes: {pending_hashes:?}"
+                    ));
                 }
                 [funding_hash] => {
                     chain.commit(*funding_hash)?;
@@ -288,8 +315,8 @@ impl LiquidityNetworkFixture {
                 }
                 _ => {
                     return Err(format!(
-                        "expected exactly one channel funding transaction, found pending hashes: \
-                         {pending_hashes:?}"
+                        "multiple pending transactions matched persisted channel funding state: \
+                         {funding_hashes:?}; all pending hashes: {pending_hashes:?}"
                     ));
                 }
             }
@@ -344,17 +371,39 @@ impl LiquidityNetworkFixture {
                 );
                 latest_event = Some(event);
             }
-            let peers: ListPeersResult = self.nodes[node].request("list_peers", ()).await;
-            let channels: ListChannelsResult = self.nodes[node]
-                .request(
+            let peers: ListPeersResult = await_before_deadline(
+                deadline,
+                "list_peers readiness request",
+                self.nodes[node].request("list_peers", ()),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error} for liquidity node {node}, peer {peer_pubkey:?}, channel \
+                     {channel_id:?}; saw ChannelReady event: {saw_channel_ready_event}; latest \
+                     event: {latest_event:?}"
+                )
+            });
+            let channels: ListChannelsResult = await_before_deadline(
+                deadline,
+                "list_channels readiness request",
+                self.nodes[node].request(
                     "list_channels",
                     ListChannelsParams {
                         pubkey: None,
                         include_closed: None,
                         only_pending: None,
                     },
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error} for liquidity node {node}, peer {peer_pubkey:?}, channel \
+                     {channel_id:?}; latest peers: {peers:?}; saw ChannelReady event: \
+                     {saw_channel_ready_event}; latest event: {latest_event:?}"
                 )
-                .await;
+            });
             let peer_ready = peers.peers.iter().any(|peer| peer.pubkey == peer_pubkey);
             let channel_ready = channels.channels.iter().any(|channel| {
                 channel.channel_id == channel_id.into()
@@ -550,4 +599,46 @@ async fn liquidity_network_fixture_channel_setup_rejects_unrelated_pending_trans
         .any(|tx| Hash256::from(tx.hash()) == unrelated_hash));
 
     fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn liquidity_network_fixture_channel_setup_ignores_concurrent_unrelated_transaction() {
+    let mut fixture = LiquidityNetworkFixture::new().await;
+    let chain_actor = fixture.nodes[0].node.chain_actor.clone();
+    let unrelated_tx = TransactionView::new_advanced_builder().build();
+    let unrelated_hash = Hash256::from(unrelated_tx.hash());
+
+    let (channel, ()) = tokio::join!(
+        fixture.establish_funded_channel(MIN_RESERVED_CKB + 10_000, MIN_RESERVED_CKB),
+        async move {
+            tokio::task::yield_now().await;
+            call!(chain_actor, CkbChainMessage::SendTx, unrelated_tx)
+                .expect("chain actor alive")
+                .expect("submit concurrent unrelated transaction");
+        }
+    );
+    channel.expect("establish channel despite unrelated pending transaction");
+
+    assert!(fixture
+        .pending_transactions()
+        .iter()
+        .any(|tx| Hash256::from(tx.hash()) == unrelated_hash));
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn liquidity_network_fixture_request_deadline_bounds_stalled_rpc() {
+    let deadline = Instant::now() + Duration::from_millis(50);
+
+    let error = await_before_deadline(
+        deadline,
+        "list_peers readiness request",
+        std::future::pending::<()>(),
+    )
+    .await
+    .expect_err("stalled RPC must respect fixture deadline");
+
+    assert!(error.contains("list_peers readiness request"));
+    assert!(error.contains("deadline"));
 }

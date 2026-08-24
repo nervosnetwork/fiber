@@ -28,6 +28,7 @@ use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -547,27 +548,41 @@ async fn run_node(
     };
 
     signal_listener().await;
-    if let Some((handle, _, liquidity_actor)) = rpc_server_handle {
-        handle
-            .stop()
-            .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
-        handle.stopped().await;
-        if let Some(actor) = liquidity_actor {
-            actor.stop(Some("stopping liquidity actor".to_string()));
-            actor
-                .wait(Some(LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT))
-                .await
-                .map_err(|err| {
-                    ExitMessage(format!(
-                        "liquidity actor did not stop within {LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT:?}: \
-                         {err}"
-                    ))
-                })?;
+    let actor_shutdown = async {
+        if let Some((handle, _, liquidity_actor)) = rpc_server_handle {
+            handle
+                .stop()
+                .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
+            handle.stopped().await;
+            if let Some(actor) = liquidity_actor {
+                actor.stop(Some("stopping liquidity actor".to_string()));
+                actor
+                    .wait(Some(LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT))
+                    .await
+                    .map_err(|err| {
+                        ExitMessage(format!(
+                            "liquidity actor did not stop within {LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT:?}: \
+                             {err}"
+                        ))
+                    })?;
+            }
         }
-    }
-    cancel_tasks_and_wait_for_completion().await;
+        Ok(())
+    };
 
-    Ok(())
+    finish_shutdown(actor_shutdown, cancel_tasks_and_wait_for_completion()).await
+}
+
+/// Sequence production shutdown so the global task cancellation/drain always runs,
+/// even when the liquidity actor wait reports a timeout error. The actor shutdown
+/// error (if any) is returned only after the drain future has completed.
+async fn finish_shutdown(
+    actor_shutdown: impl Future<Output = Result<(), ExitMessage>>,
+    drain: impl Future<Output = ()>,
+) -> Result<(), ExitMessage> {
+    let actor_result = actor_shutdown.await;
+    drain.await;
+    actor_result
 }
 
 fn forward_event_to_actor(
@@ -676,4 +691,29 @@ async fn signal_listener() {
         .await
         .expect("listen for Ctrl-c signal");
     tracing::info!("Ctrl-c received, shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_error_is_returned_after_global_task_drain() {
+        let drained = Arc::new(AtomicBool::new(false));
+        let drained_by_shutdown = drained.clone();
+
+        let result = finish_shutdown(
+            async { Err(ExitMessage("liquidity shutdown timed out".to_string())) },
+            async move {
+                drained_by_shutdown.store(true, Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(drained.load(Ordering::SeqCst));
+    }
 }
