@@ -2544,6 +2544,50 @@ async fn shared_mock_chain_tracer_waits_for_requested_resolution() {
 }
 
 #[tokio::test]
+async fn shared_mock_chain_tracer_cannot_miss_resolution_during_registration() {
+    let controller = MockChainController::new();
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .mock_chain_state(controller.shared_state())
+            .build(),
+    )
+    .await;
+    let tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(100u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let tx_hash = tx.hash().into();
+    call!(node.chain_actor, CkbChainMessage::SendTx, tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+
+    let registration = controller.pause_next_tracer_registration();
+    let (tracer_tx, tracer_rx) = oneshot::channel();
+    node.chain_actor
+        .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
+            tx_hash,
+            confirmations: 1,
+            mask: CkbTxTracingMask::Committed,
+            callback: tracer_tx.into(),
+        }))
+        .expect("chain actor alive");
+    tokio::time::timeout(event_wait_timeout(), registration.wait_until_paused())
+        .await
+        .expect("tracer registration did not pause");
+
+    controller
+        .commit(tx_hash)
+        .expect("commit while tracer registration is paused");
+    registration.resume();
+
+    let traced = tokio::time::timeout(event_wait_timeout(), tracer_rx)
+        .await
+        .expect("tracer notification timeout")
+        .expect("tracer callback dropped");
+    assert!(matches!(traced.tx_status, TxStatus::Committed(..)));
+}
+
+#[tokio::test]
 async fn shared_mock_chain_controller_orders_and_repeats_resolutions_safely() {
     let controller = MockChainController::new();
     let mut node = NetworkNode::new_with_config(
