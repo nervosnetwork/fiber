@@ -207,6 +207,7 @@ fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
         onchain_fee_estimate_ckb: 1_000,
         capacity_requirement_ckb: 10_000,
         payment_hash: [seed.wrapping_add(1); 32].into(),
+        payment_preimage: None,
         expires_at: 20_000,
         payout_deadline: 30_000,
         refund_after_lock_time: 40_000,

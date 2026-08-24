@@ -18,7 +18,9 @@ use fiber_json_types::{
     ProviderQuoteLoopOutParams, QuoteLoopInParams, QuoteLoopOutParams,
     SetLiquidityProviderModeParams, UpdateLiquidityAssetParams,
 };
-use fiber_types::{Hash256, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState};
+use fiber_types::{
+    Hash256, HashAlgorithm, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 #[cfg(test)]
 use secp256k1::{SecretKey, SECP256K1};
@@ -488,8 +490,11 @@ where
             now_ms,
             expires_at,
         )?;
+        let preimage = crate::gen_rand_sha256_hash();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let quote_id: Hash256 = crate::gen_rand_sha256_hash();
         let terms = LoopOutQuoteTerms {
-            quote_id: loop_out_quote_hash(&params, now_ms, b"quote"),
+            quote_id,
             swap_kind: LiquiditySwapKind::LoopOut,
             provider: self.provider_pubkey,
             asset,
@@ -498,7 +503,8 @@ where
             routing_fee_limit: validated.routing_fee_limit,
             onchain_fee_estimate_ckb: 1_000,
             capacity_requirement_ckb: 10_000,
-            payment_hash: loop_out_quote_hash(&params, now_ms, b"payment"),
+            payment_hash,
+            payment_preimage: Some(preimage),
             expires_at: validated.expires_at,
             payout_deadline: validated.expires_at.saturating_add(10_000),
             refund_after_lock_time: absolute_timestamp_since(
@@ -1658,19 +1664,6 @@ fn quote_expires_at(now_ms: u64, expires_after_seconds: u64) -> Result<u64, Liqu
         .checked_mul(1_000)
         .and_then(|ttl_ms| now_ms.checked_add(ttl_ms))
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
-}
-
-fn loop_out_quote_hash(params: &ProviderQuoteLoopOutParams, now_ms: u64, domain: &[u8]) -> Hash256 {
-    let mut seed = Vec::new();
-    seed.extend_from_slice(domain);
-    seed.extend_from_slice(params.asset_id.as_bytes());
-    seed.extend_from_slice(&params.amount.to_le_bytes());
-    seed.extend_from_slice(params.claimant_lock.as_bytes());
-    seed.extend_from_slice(&params.max_provider_fee.to_le_bytes());
-    seed.extend_from_slice(&params.max_routing_fee.to_le_bytes());
-    seed.extend_from_slice(&params.expires_after_seconds.to_le_bytes());
-    seed.extend_from_slice(&now_ms.to_le_bytes());
-    ckb_hash::blake2b_256(seed).into()
 }
 
 fn loop_in_quote_hash(params: &QuoteLoopInParams, now_ms: u64, domain: &[u8]) -> Hash256 {
@@ -5051,6 +5044,7 @@ mod tests {
             onchain_fee_estimate_ckb: 1_000,
             capacity_requirement_ckb: 10_000,
             payment_hash: HashAlgorithm::CkbHash.hash([4u8; 32]).into(),
+            payment_preimage: None,
             expires_at,
             payout_deadline: expires_at + 10_000,
             refund_after_lock_time: expires_at + 20_000,
@@ -6178,6 +6172,69 @@ mod tests {
         assert_eq!(persisted_quote.amount, quote.amount);
         assert_eq!(persisted_quote.provider_fee, quote.provider_fee);
         assert_eq!(persisted_quote.routing_fee_limit, quote.routing_fee_limit);
+    }
+
+    #[tokio::test]
+    async fn provider_loop_out_quote_payment_hash_is_blake2b_of_fresh_preimage() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+
+        let quote = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 1000,
+                claimant_lock: script_hex(&script("provider-quote-preimage-claimant")),
+                max_provider_fee: 100,
+                max_routing_fee: 50,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+
+        let persisted = harness
+            .store
+            .get_loop_out_quote(&quote.quote_id.into())
+            .unwrap()
+            .unwrap();
+        let preimage = persisted
+            .payment_preimage
+            .expect("provider quote persists its preimage");
+        assert_ne!(preimage, Hash256::default());
+        let expected: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        assert_eq!(persisted.payment_hash, expected);
+    }
+
+    #[tokio::test]
+    async fn two_provider_quotes_with_same_params_get_distinct_quote_ids_and_preimages() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let params = || ProviderQuoteLoopOutParams {
+            asset_id: "ckb".to_string(),
+            amount: 1000,
+            claimant_lock: script_hex(&script("provider-quote-uniqueness-claimant")),
+            max_provider_fee: 100,
+            max_routing_fee: 50,
+            expires_after_seconds: 60,
+        };
+
+        let first = harness.call_provider_quote(params()).await.unwrap();
+        let second = harness.call_provider_quote(params()).await.unwrap();
+
+        assert_ne!(first.quote_id, second.quote_id);
+
+        let first_preimage = harness
+            .store
+            .get_loop_out_quote(&first.quote_id.into())
+            .unwrap()
+            .unwrap()
+            .payment_preimage
+            .expect("first quote preimage");
+        let second_preimage = harness
+            .store
+            .get_loop_out_quote(&second.quote_id.into())
+            .unwrap()
+            .unwrap()
+            .payment_preimage
+            .expect("second quote preimage");
+        assert_ne!(first_preimage, second_preimage);
     }
 
     #[tokio::test]
