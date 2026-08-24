@@ -1887,6 +1887,12 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_pubkey),
         )
         .await;
+        self.chain_actor
+            .stop(Some("stopping chain actor on request".to_string()));
+        self.chain_actor
+            .wait(Some(event_wait_timeout()))
+            .await
+            .expect("timed out stopping chain actor");
     }
 
     pub async fn restart(&mut self) {
@@ -2585,6 +2591,47 @@ async fn shared_mock_chain_tracer_cannot_miss_resolution_during_registration() {
         .expect("tracer notification timeout")
         .expect("tracer callback dropped");
     assert!(matches!(traced.tx_status, TxStatus::Committed(..)));
+}
+
+#[tokio::test]
+async fn shared_mock_chain_restart_stops_old_chain_actor_and_preserves_backend() {
+    let controller = MockChainController::new();
+    let shared_state = controller.shared_state();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .mock_chain_state(shared_state.clone())
+            .build(),
+    )
+    .await;
+    let pending_tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(100u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let pending_hash = pending_tx.hash().into();
+    call!(node.chain_actor, CkbChainMessage::SendTx, pending_tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+    let old_chain_actor = node.chain_actor.clone();
+
+    node.restart().await;
+
+    assert_eq!(old_chain_actor.get_status(), ractor::ActorStatus::Stopped);
+    assert!(Arc::ptr_eq(&node.mock_chain_state, &shared_state));
+    assert!(matches!(
+        controller.transaction_status(pending_hash),
+        Some(TxStatus::Pending)
+    ));
+
+    let stale_tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(101u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let stale_hash = stale_tx.hash().into();
+    assert!(
+        call!(old_chain_actor, CkbChainMessage::SendTx, stale_tx).is_err(),
+        "stopped chain actor must reject stale requests"
+    );
+    assert!(controller.transaction_status(stale_hash).is_none());
 }
 
 #[tokio::test]
