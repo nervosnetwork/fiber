@@ -546,11 +546,18 @@ async fn run_node(
     };
 
     signal_listener().await;
-    if let Some((handle, _)) = rpc_server_handle {
+    if let Some((handle, _, liquidity_actor)) = rpc_server_handle {
         handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
         handle.stopped().await;
+        if let Some(actor) = liquidity_actor {
+            actor.stop(Some("stopping liquidity actor".to_string()));
+            actor
+                .wait(None)
+                .await
+                .map_err(|err| ExitMessage(format!("failed to stop liquidity actor: {err}")))?;
+        }
     }
     cancel_tasks_and_wait_for_completion().await;
 

@@ -22,6 +22,8 @@ use crate::fiber::{
 use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::liquidity::actor::LiquidityActorMessage;
 use crate::rpc::config::RpcConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
@@ -207,6 +209,12 @@ pub fn gen_rpc_config() -> RpcConfig {
     }
 }
 
+pub fn gen_liquidity_rpc_config() -> RpcConfig {
+    let mut config = gen_rpc_config();
+    config.enabled_modules.push("liquidity".to_string());
+    config
+}
+
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
 pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
@@ -280,11 +288,14 @@ pub struct NetworkNode {
     pub(crate) gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
+    event_forwarder_task: Option<tokio::task::JoinHandle<()>>,
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
     pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub liquidity_actor: Option<ActorRef<LiquidityActorMessage>>,
     pub auth_token: Option<String>,
 }
 
@@ -399,6 +410,7 @@ impl NetworkNodeConfigBuilder {
                 funding_tx_shell_builder: None,
                 #[cfg(target_arch = "wasm32")]
                 wasm_secret_key: None,
+                test_secret_key: Some(SECP256K1.generate_keypair(&mut OsRng).0),
             })
         } else {
             None
@@ -1738,7 +1750,7 @@ impl NetworkNode {
         let unexpected_events_clone = unexpected_events.clone();
         let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
         // spawn a new thread to collect all the events from event_receiver
-        tokio::spawn(async move {
+        let event_forwarder_task = tokio::spawn(async move {
             while let Some(event) = event_receiver.recv().await {
                 if self_event_sender.send(event.clone()).await.is_err() {
                     debug!("event receiver dropped, stopping event forwarder task");
@@ -1766,29 +1778,27 @@ impl NetworkNode {
         let gossip_actor =
             ractor::registry::where_is(get_gossip_actor_name(&started_pubkey)).map(Into::into);
         #[cfg(not(target_arch = "wasm32"))]
-        let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
-            Some(
-                start_rpc(
-                    rpc_config,
-                    ckb_config.clone(),
-                    Some(fiber_config.clone()),
-                    Some(network_actor.clone()),
-                    None,
-                    store.clone(),
-                    None,
-                    Some(network_graph.clone()),
-                    root.get_cell(),
-                    None,
-                    #[cfg(debug_assertions)]
-                    None,
-                    #[cfg(debug_assertions)]
-                    None,
-                )
-                .await
-                .unwrap(),
+        let (rpc_server, liquidity_actor) = if let Some(rpc_config) = rpc_config.clone() {
+            let (server, address, liquidity_actor) = start_rpc(
+                rpc_config,
+                ckb_config.clone(),
+                Some(fiber_config.clone()),
+                Some(network_actor.clone()),
+                None,
+                store.clone(),
+                None,
+                Some(network_graph.clone()),
+                root.get_cell(),
+                None,
+                Some(chain_actor.clone()),
+                #[cfg(debug_assertions)]
+                None,
             )
+            .await
+            .unwrap();
+            (Some((server, address)), liquidity_actor)
         } else {
-            None
+            (None, None)
         };
 
         Self {
@@ -1809,11 +1819,14 @@ impl NetworkNode {
             gossip_actor,
             private_key,
             event_emitter: self_event_receiver,
+            event_forwarder_task: Some(event_forwarder_task),
             pubkey,
             unexpected_events,
             triggered_unexpected_events,
             #[cfg(not(target_arch = "wasm32"))]
             rpc_server,
+            #[cfg(not(target_arch = "wasm32"))]
+            liquidity_actor,
             auth_token: None,
         }
     }
@@ -1880,6 +1893,19 @@ impl NetworkNode {
     }
 
     pub async fn stop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((rpc_server, _)) = self.rpc_server.take() {
+            rpc_server.stop().expect("stop RPC server");
+            rpc_server.stopped().await;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(liquidity_actor) = self.liquidity_actor.take() {
+            liquidity_actor.stop(Some("stopping liquidity actor on request".to_string()));
+            liquidity_actor
+                .wait(Some(event_wait_timeout()))
+                .await
+                .expect("timed out stopping liquidity actor");
+        }
         self.network_actor
             .stop(Some("stopping actor on request".to_string()));
         let my_pubkey = self.pubkey;
@@ -1887,6 +1913,16 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_pubkey),
         )
         .await;
+        self.network_actor
+            .wait(Some(event_wait_timeout()))
+            .await
+            .expect("timed out stopping network actor");
+        if let Some(event_forwarder_task) = self.event_forwarder_task.take() {
+            tokio::time::timeout(event_wait_timeout(), event_forwarder_task)
+                .await
+                .expect("timed out stopping event forwarder task")
+                .expect("event forwarder task panicked");
+        }
         self.chain_actor
             .stop(Some("stopping chain actor on request".to_string()));
         self.chain_actor
