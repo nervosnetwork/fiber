@@ -377,8 +377,12 @@ pub mod server {
                                             LiquidityActor::<_, _, _>(std::marker::PhantomData),
                                             LiquidityActorArguments {
                                                 store: store.clone(),
-                                                payment: NetworkLoopOutPaymentAdapter::new(
+                                                payment: NetworkLoopOutPaymentAdapter::with_currency(
                                                     network_actor,
+                                                    fiber_config
+                                                        .as_ref()
+                                                        .map(FiberConfig::currency)
+                                                        .unwrap_or_default(),
                                                 ),
                                                 chain: CkbLiquidityChainWatcher::new_with_liquidity_lock_script(
                                                     ckb_chain_actor,
