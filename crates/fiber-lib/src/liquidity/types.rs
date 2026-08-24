@@ -141,6 +141,9 @@ pub struct LoopOutQuoteTerms {
     pub capacity_requirement_ckb: u64,
     /// Payment hash used for the Fiber payment and on-chain lock.
     pub payment_hash: Hash256,
+    /// Provider-generated preimage revealed only through payment settlement.
+    /// Always `None` on the client side.
+    pub payment_preimage: Option<Hash256>,
     /// Quote expiration timestamp in milliseconds.
     pub expires_at: u64,
     /// Deadline timestamp by which the payout lock must be confirmed.

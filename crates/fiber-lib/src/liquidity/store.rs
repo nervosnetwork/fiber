@@ -76,6 +76,7 @@ pub(crate) fn loop_out_quote_record_from_terms(
         onchain_fee_estimate_ckb: quote.onchain_fee_estimate_ckb,
         capacity_requirement_ckb: quote.capacity_requirement_ckb,
         payment_hash: quote.payment_hash,
+        payment_preimage: quote.payment_preimage,
         expires_at: quote.expires_at,
         payout_deadline: quote.payout_deadline,
         refund_after_lock_time: quote.refund_after_lock_time,
@@ -100,12 +101,62 @@ pub(crate) fn loop_out_quote_terms_from_record(
         onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
         capacity_requirement_ckb: record.capacity_requirement_ckb,
         payment_hash: record.payment_hash,
+        payment_preimage: record.payment_preimage,
         expires_at: record.expires_at,
         payout_deadline: record.payout_deadline,
         refund_after_lock_time: record.refund_after_lock_time,
         claimant_lock: record.claimant_lock,
         refund_lock: record.refund_lock,
         client_invoice: record.client_invoice,
+    }
+}
+
+#[serde_as]
+#[derive(Deserialize, Serialize)]
+struct LoopOutQuoteRecordWithoutPreimage {
+    quote_id: Hash256,
+    swap_kind: fiber_types::LiquiditySwapKind,
+    provider: Pubkey,
+    asset: LiquidityAsset,
+    amount: u128,
+    provider_fee: u128,
+    routing_fee_limit: u128,
+    onchain_fee_estimate_ckb: u64,
+    capacity_requirement_ckb: u64,
+    payment_hash: Hash256,
+    expires_at: u64,
+    payout_deadline: u64,
+    refund_after_lock_time: u64,
+    #[serde_as(as = "EntityHex")]
+    claimant_lock: ckb_types::packed::Script,
+    #[serde_as(as = "EntityHex")]
+    refund_lock: ckb_types::packed::Script,
+    client_invoice: Option<String>,
+    created_at: u64,
+}
+
+impl From<LoopOutQuoteRecordWithoutPreimage> for fiber_types::LoopOutQuoteRecord {
+    fn from(record: LoopOutQuoteRecordWithoutPreimage) -> Self {
+        Self {
+            quote_id: record.quote_id,
+            swap_kind: record.swap_kind,
+            provider: record.provider,
+            asset: record.asset,
+            amount: record.amount,
+            provider_fee: record.provider_fee,
+            routing_fee_limit: record.routing_fee_limit,
+            onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
+            capacity_requirement_ckb: record.capacity_requirement_ckb,
+            payment_hash: record.payment_hash,
+            payment_preimage: None,
+            expires_at: record.expires_at,
+            payout_deadline: record.payout_deadline,
+            refund_after_lock_time: record.refund_after_lock_time,
+            claimant_lock: record.claimant_lock,
+            refund_lock: record.refund_lock,
+            client_invoice: record.client_invoice,
+            created_at: record.created_at,
+        }
     }
 }
 
@@ -150,6 +201,7 @@ impl From<QuoteRecordWithoutClientInvoice> for fiber_types::LoopOutQuoteRecord {
             onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
             capacity_requirement_ckb: record.capacity_requirement_ckb,
             payment_hash: record.payment_hash,
+            payment_preimage: None,
             expires_at: record.expires_at,
             payout_deadline: record.payout_deadline,
             refund_after_lock_time: record.refund_after_lock_time,
@@ -196,6 +248,7 @@ impl From<LegacyLoopOutQuoteRecord> for fiber_types::LoopOutQuoteRecord {
             onchain_fee_estimate_ckb: record.onchain_fee_estimate_ckb,
             capacity_requirement_ckb: record.capacity_requirement_ckb,
             payment_hash: record.payment_hash,
+            payment_preimage: None,
             expires_at: record.expires_at,
             payout_deadline: record.payout_deadline,
             refund_after_lock_time: record.refund_after_lock_time,
@@ -211,6 +264,9 @@ pub(crate) fn loop_out_quote_record_from_bytes(
     value: &[u8],
 ) -> Result<fiber_types::LoopOutQuoteRecord, LiquidityStoreError> {
     bincode::deserialize::<fiber_types::LoopOutQuoteRecord>(value)
+        .or_else(|_| {
+            bincode::deserialize::<LoopOutQuoteRecordWithoutPreimage>(value).map(Into::into)
+        })
         .or_else(|_| bincode::deserialize::<QuoteRecordWithoutClientInvoice>(value).map(Into::into))
         .or_else(|_| bincode::deserialize::<LegacyLoopOutQuoteRecord>(value).map(Into::into))
         .map_err(|err| {
@@ -467,6 +523,7 @@ mod tests {
             onchain_fee_estimate_ckb: 1_000,
             capacity_requirement_ckb: 10_000,
             payment_hash: [2u8; 32].into(),
+            payment_preimage: None,
             expires_at: 20_000,
             payout_deadline: 20_000,
             refund_after_lock_time: 40_000,
