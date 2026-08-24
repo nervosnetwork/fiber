@@ -95,6 +95,10 @@ pub struct CkbConfig {
     #[arg(skip)]
     #[cfg(target_arch = "wasm32")]
     pub wasm_secret_key: Option<SecretKey>,
+
+    #[cfg(any(test, feature = "bench"))]
+    #[arg(skip)]
+    pub test_secret_key: Option<SecretKey>,
 }
 
 impl CkbConfig {
@@ -120,6 +124,10 @@ impl CkbConfig {
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_secret_key(&self) -> Result<SecretKey> {
+        #[cfg(any(test, feature = "bench"))]
+        if let Some(secret_key) = self.test_secret_key {
+            return Ok(secret_key);
+        }
         self.create_base_dir()?;
         let password = std::env::var(ENV_FIBER_SECRET_KEY_PASSWORD).map_err(|_| {
             crate::Error::SecretKeyFileError(format!(

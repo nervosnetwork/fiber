@@ -308,7 +308,11 @@ pub mod server {
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
         >,
-    ) -> Result<(ServerHandle, SocketAddr)> {
+    ) -> Result<(
+        ServerHandle,
+        SocketAddr,
+        Option<ActorRef<LiquidityActorMessage>>,
+    )> {
         let listening_addr = config.listening_addr.as_deref().unwrap_or("[::1]:0");
         if config.biscuit_public_key.is_none() && is_public_addr(listening_addr)? {
             bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
@@ -429,7 +433,9 @@ pub mod server {
 
         if config.is_module_enabled("liquidity") {
             modules
-                .merge(LiquidityRpcServerImpl::new(store.clone(), liquidity_actor).into_rpc())
+                .merge(
+                    LiquidityRpcServerImpl::new(store.clone(), liquidity_actor.clone()).into_rpc(),
+                )
                 .unwrap();
         }
         if let Some(network_actor) = network_actor {
@@ -531,7 +537,7 @@ pub mod server {
         )
         .await?;
         debug!("started listen to RPC addr {:?}", &listening_addr);
-        Ok((handle, addr))
+        Ok((handle, addr, liquidity_actor))
     }
 
     #[test]
