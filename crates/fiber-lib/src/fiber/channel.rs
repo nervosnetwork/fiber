@@ -1,8 +1,8 @@
+use super::channel_signer::{ChannelSignOutcome, ChannelSigner, SignerNotification};
 use super::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS,
     DEFAULT_FUNDING_TIMEOUT_SECONDS, DEFAULT_HOLD_TLC_TIMEOUT,
 };
-use super::signer_actor::{SignerActorMessage, SignerNotification};
 use super::types::{new_channel_update_unsigned, UpdateTlcInfo};
 use super::{
     gossip::SOFT_BROADCAST_MESSAGES_CONSIDERED_STALE_DURATION, graph::ChannelUpdateInfo,
@@ -177,7 +177,8 @@ pub enum ChannelActorMessage {
     Event(ChannelEvent),
     /// PeerMessage are the messages sent from the peer.
     PeerMessage(FiberChannelMessage),
-    /// Signature results delivered asynchronously by the signer actor.
+    /// Signature results delivered asynchronously by the channel signer
+    /// (local immediate send-to-self, or external submit via network/RPC).
     SignerNotification(SignerNotification),
 }
 
@@ -472,9 +473,6 @@ pub struct ChannelActor<S> {
     network: FiberActorRef,
     store: S,
     store_actor: Option<ActorRef<StoreActorMessage>>,
-    /// Signer actor (POC). When set, MuSig2 signing is delegated to it via
-    /// messages instead of being executed inline.
-    signer_actor: Option<ActorRef<SignerActorMessage>>,
 }
 
 impl<S> ChannelActor<S>
@@ -494,14 +492,7 @@ where
             network,
             store,
             store_actor,
-            signer_actor: None,
         }
-    }
-
-    /// Attach the signer actor (POC). Must be called before the channel actor
-    /// is spawned; see `fiber::signer_actor` for the message contract.
-    pub fn set_signer_actor(&mut self, signer_actor: ActorRef<SignerActorMessage>) {
-        self.signer_actor = Some(signer_actor);
     }
 
     pub fn get_local_pubkey(&self) -> Pubkey {
@@ -2192,7 +2183,7 @@ where
         Ok(())
     }
 
-    /// Shared execution of continuation after a signature (from RPC or SignerActor) is ready.
+    /// Shared execution of continuation after a signature (from RPC or ChannelSigner) is ready.
     async fn execute_channel_signature_continuation(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2285,7 +2276,7 @@ where
         Ok(())
     }
 
-    /// Resume the channel after the signer actor delivered a signature.
+    /// Resume the channel after the channel signer delivered a signature.
     pub(crate) async fn handle_signer_notification(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -2296,17 +2287,10 @@ where
             SignerNotification::ChannelSignatureReady {
                 channel_id,
                 request_id,
-                request: _,
                 signature,
                 next_material,
                 rpc_reply,
             } => (channel_id, request_id, signature, next_material, rpc_reply),
-            #[allow(unreachable_patterns)]
-            _ => {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "unexpected signer notification for channel actor".to_string(),
-                ));
-            }
         };
         if channel_id != state.get_id() {
             let err_msg = format!(
@@ -2323,7 +2307,7 @@ where
             Ok(sig) => sig,
             Err(error) => {
                 let err_msg = format!(
-                    "signer actor failed to sign request {:?}: {}",
+                    "channel signer failed to sign request {:?}: {}",
                     request_id, error
                 );
                 if let Some(reply) = rpc_reply {
@@ -2378,12 +2362,6 @@ where
         // submitted signature twice; channel reestablishment owns wire replay.
         self.store.insert_channel_actor_state(state.clone());
 
-        if let Some(signer_actor) = self.signer_actor.as_ref() {
-            let _ = signer_actor.send_message(SignerActorMessage::ClearPending {
-                channel_id,
-                request_id,
-            });
-        }
         if let Some(reply) = rpc_reply {
             let _ = reply.send(Ok(fiber_types::SubmitSignatureOutcome::Applied));
         }
@@ -3313,7 +3291,6 @@ where
                     .get_channel_actor_state(&state.get_id())
                     .expect("load channel state failed");
                 state.network = Some(self.network.clone());
-                state.signer_actor = self.signer_actor.clone();
                 state.hydrate_external_funding_runtime();
                 state.private_key = private_key.clone();
                 let ReloadParams { notify_changes } = reload_params;
@@ -4866,18 +4843,13 @@ where
         let external_funding_runtime = state.ephemeral_config.external_funding.clone();
         state.ephemeral_config = args.ephemeral_config;
         state.ephemeral_config.external_funding = external_funding_runtime;
-        state.signer_actor = self.signer_actor.clone();
-        if let Some(signer_actor) = self.signer_actor.clone() {
-            if state.signer_state.is_awaiting_signature() {
-                if let Some((request_id, request)) = state.signer_state.awaiting_signature() {
-                    signer_actor
-                        .send_message(SignerActorMessage::SignChannel {
-                            channel_id: state.get_id(),
-                            request_id,
-                            signer: state.get_local_signer(),
-                            request,
-                            reply_to: _myself.clone(),
-                        })
+        if state.signer_state.is_awaiting_signature() {
+            if let Some((request_id, request)) = state.signer_state.awaiting_signature() {
+                let outcome = ChannelSigner::from_local_material(state.get_local_signer())
+                    .request_signature(state.get_id(), request_id, request);
+                if let ChannelSignOutcome::Ready(notification) = outcome {
+                    _myself
+                        .send_message(ChannelActorMessage::SignerNotification(notification))
                         .map_err(|error| -> ActorProcessingErr { Box::new(error) })?;
                 }
             }
@@ -5316,14 +5288,9 @@ pub struct ChannelActorState {
 
     /// Runtime round-trip buffers for signer delegation.
     /// These buffers hold deferred peer messages and state machine tail flags
-    /// while an asynchronous signature request is in flight to the signer actor.
+    /// while an asynchronous signature request is in flight.
     #[doc = "skip_store"]
     pub(crate) signer_buffers: ChannelSignerBuffers,
-
-    /// Signer actor handle (runtime only). MuSig2 signing requests
-    /// are delegated to the signer actor via messages.
-    #[doc = "skip_store"]
-    pub signer_actor: Option<ActorRef<SignerActorMessage>>,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -5399,7 +5366,6 @@ impl<'de> Deserialize<'de> for ChannelActorState {
             private_key: None,
             needs_backup: false,
             signer_buffers: Default::default(),
-            signer_actor: None,
         };
         state.hydrate_external_funding_runtime();
         Ok(state)
@@ -5855,15 +5821,11 @@ impl ChannelActorState {
         self.signer_state
             .request_signature(request_id, request.clone())
             .map_err(|error| ProcessingChannelError::InvalidState(error.to_string()))?;
-        if let Some(signer_actor) = self.signer_actor.as_ref() {
-            signer_actor
-                .send_message(SignerActorMessage::SignChannel {
-                    channel_id: self.get_id(),
-                    request_id,
-                    signer: self.get_local_signer(),
-                    request,
-                    reply_to: myself.clone(),
-                })
+        let outcome = ChannelSigner::from_local_material(self.get_local_signer())
+            .request_signature(self.get_id(), request_id, request);
+        if let ChannelSignOutcome::Ready(notification) = outcome {
+            myself
+                .send_message(ChannelActorMessage::SignerNotification(notification))
                 .map_err(|error| ProcessingChannelError::InvalidState(error.to_string()))?;
         }
         Ok(())
@@ -6897,7 +6859,6 @@ impl ChannelActorState {
             private_key: Some(private_key),
             needs_backup: true,
             signer_buffers: Default::default(),
-            signer_actor: None,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -6998,7 +6959,6 @@ impl ChannelActorState {
             private_key: Some(private_key),
             needs_backup: true,
             signer_buffers: Default::default(),
-            signer_actor: None,
         };
         state.log_ack_state("[ack] new_outbound_channel");
         state
@@ -9123,9 +9083,7 @@ impl ChannelActorState {
             ChannelState::NegotiatingFunding(flags)
                 if flags.contains(NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING)
                     && self.ephemeral_config.external_funding.enabled
-                    && !self.ephemeral_config.external_funding.signed_submitted =>
-            {
-            }
+                    && !self.ephemeral_config.external_funding.signed_submitted => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Unable to verify commitment signed message in state {:?}",
@@ -11434,7 +11392,6 @@ mod tests {
             private_key: None,
             needs_backup: false,
             signer_buffers: Default::default(),
-            signer_actor: None,
         }
     }
 

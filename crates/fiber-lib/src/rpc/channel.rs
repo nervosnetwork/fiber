@@ -3,11 +3,11 @@ use crate::fiber::{
         ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelOpenRecordStore,
         ShutdownCommand, UpdateCommand,
     },
+    channel_signer::SubmitChannelSignatureCommand,
     network::{
         AcceptChannelCommand, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
         PendingAcceptChannel,
     },
-    signer_actor::SubmitChannelSignatureCommand,
     FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
 use crate::rpc::utils::{rpc_error, RpcResultExt};

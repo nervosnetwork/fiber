@@ -1680,15 +1680,6 @@ impl NetworkNode {
             true,
         )));
 
-        let (signer_actor, _signer_handle) = Actor::spawn_linked(
-            None,
-            crate::fiber::signer_actor::SignerActor,
-            (),
-            root.get_cell(),
-        )
-        .await
-        .expect("spawn signer actor");
-
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {}", base_dir.to_str())),
             NetworkActor::new(
@@ -1698,7 +1689,6 @@ impl NetworkNode {
                 None,
                 network_graph.clone(),
                 chain_client.clone(),
-                signer_actor,
             ),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
@@ -1777,8 +1767,6 @@ impl NetworkNode {
                     ckb_config.clone(),
                     Some(fiber_config.clone()),
                     Some(network_actor.clone()),
-                    #[cfg(feature = "watchtower")]
-                    None,
                     None,
                     None,
                     store.clone(),

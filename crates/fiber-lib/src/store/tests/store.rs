@@ -1392,7 +1392,6 @@ fn test_channel_actor_state_store() {
         private_key: None,
         needs_backup: false,
         signer_buffers: Default::default(),
-        signer_actor: None,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1538,7 +1537,6 @@ fn sample_channel_actor_state(
         private_key: None,
         needs_backup: false,
         signer_buffers: Default::default(),
-        signer_actor: None,
     }
 }
 

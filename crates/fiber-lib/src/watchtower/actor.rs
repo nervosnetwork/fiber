@@ -40,7 +40,6 @@ use crate::{
             settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS,
         },
         onchain_tlc_reconcile::OnChainTlcSettlement,
-        signer_actor::{verify_onchain_signature, SignerActorMessage, SignerNotification},
     },
     now_timestamp_as_millis_u64,
     utils::{
@@ -59,7 +58,7 @@ use fiber_types::{
     TLCId,
 };
 
-use super::WatchtowerStore;
+use super::{WatchtowerSignOutcome, WatchtowerSigner, WatchtowerStore};
 
 pub const DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS: u64 = 60;
 
@@ -67,7 +66,6 @@ pub struct WatchtowerActor<S> {
     store: S,
     // a node_id represent the watchtower itself
     node_id: NodeId,
-    signer_actor: Option<ActorRef<SignerActorMessage>>,
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
@@ -90,16 +88,7 @@ fn tx_size_with_extra_inputs(
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
         let node_id = NodeId::local();
-        Self {
-            store,
-            node_id,
-            signer_actor: None,
-        }
-    }
-
-    pub fn with_signer_actor(mut self, signer_actor: Option<ActorRef<SignerActorMessage>>) -> Self {
-        self.signer_actor = signer_actor;
-        self
+        Self { store, node_id }
     }
 }
 
@@ -121,7 +110,6 @@ pub enum WatchtowerMessage {
     UpdateLocalSettlement(Hash256, SettlementData),
     CreatePreimage(Hash256, Hash256),
     RemovePreimage(Hash256),
-    SignerNotification(SignerNotification),
     PeriodicCheck,
 }
 
@@ -157,7 +145,7 @@ where
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -226,9 +214,6 @@ where
             WatchtowerMessage::RemovePreimage(payment_hash) => self
                 .store
                 .remove_watch_preimage(NodeId::local(), payment_hash),
-            WatchtowerMessage::SignerNotification(notification) => {
-                self.handle_signer_notification(notification)?
-            }
             WatchtowerMessage::PeriodicCheck => {
                 // Check if a periodic check is already running
                 if state
@@ -245,14 +230,12 @@ where
                 let rpc_url = state.config.rpc_url.clone();
                 let periodic_check_running = state.periodic_check_running.clone();
                 let signer = state.signer.clone();
-                let myself = myself.clone();
-                let signer_actor = self.signer_actor.clone();
                 tokio::task::spawn_blocking(move || {
                     // Use RAII guard to ensure flag is reset even on panic
                     let _guard = PeriodicCheckGuard(periodic_check_running);
                     info!("PeriodicCheck started");
                     let start = now_timestamp_as_millis_u64();
-                    run_periodic_check(store, node_id, signer, rpc_url, myself, signer_actor);
+                    run_periodic_check(store, node_id, signer, rpc_url);
                     let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
                     info!("PeriodicCheck finished elapsed: {}ms", elapsed);
                 });
@@ -271,94 +254,8 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-impl<S> WatchtowerActor<S>
+fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
 where
-    S: WatchtowerStore + Send + Sync + Clone + 'static,
-{
-    fn handle_signer_notification(
-        &self,
-        notification: SignerNotification,
-    ) -> Result<(), ActorProcessingErr> {
-        use fiber_json_types::SubmitWatchtowerSignatureResult;
-        use fiber_types::{
-            LastAppliedWatchtowerSignature, WatchtowerExternalState, WatchtowerSignerState,
-        };
-
-        let (node_id, channel_id, request_id, signature, rpc_reply) = match notification {
-            SignerNotification::WatchtowerSignatureReady {
-                node_id,
-                channel_id,
-                request_id,
-                signature,
-                rpc_reply,
-            } => (node_id, channel_id, request_id, signature, rpc_reply),
-            #[allow(unreachable_patterns)]
-            _ => {
-                return Err(ActorProcessingErr::from(
-                    "unexpected signer notification for watchtower actor".to_string(),
-                ));
-            }
-        };
-
-        let result: Result<SubmitWatchtowerSignatureResult, String> = (|| {
-            let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
-                return Err("watched channel not found".to_string());
-            };
-            let current = self.store.get_watchtower_signer(&node_id, &channel_id);
-            let WatchtowerSignerState::External(mut external) = current else {
-                return Err("watched channel does not use an external signer".to_string());
-            };
-            let WatchtowerExternalState::AwaitingSignature {
-                request_id: expected,
-                content,
-            } = external.state
-            else {
-                return Err("watched channel is not waiting for an external signature".to_string());
-            };
-            if expected != request_id {
-                return Err("signature request id does not match the current request".to_string());
-            }
-            let signature = signature?;
-            verify_onchain_signature(&channel.local_settlement_pubkey(), &content, &signature)?;
-            external.last_applied = Some(LastAppliedWatchtowerSignature {
-                request_id,
-                signature,
-            });
-            external.state = WatchtowerExternalState::Signed {
-                request_id,
-                content,
-                signature,
-            };
-            self.store.put_watchtower_signer(
-                &node_id,
-                &channel_id,
-                WatchtowerSignerState::External(external),
-            );
-            if let Some(signer_actor) = self.signer_actor.as_ref() {
-                let _ = signer_actor.send_message(SignerActorMessage::ClearWatchtowerPending {
-                    node_id,
-                    channel_id,
-                    request_id,
-                });
-            }
-            Ok(SubmitWatchtowerSignatureResult::Applied)
-        })();
-
-        if let Some(reply) = rpc_reply {
-            let _ = reply.send(result);
-        }
-        Ok(())
-    }
-}
-
-fn run_periodic_check<S>(
-    store: S,
-    _node_id: NodeId,
-    signer: LocalSigner,
-    rpc_url: String,
-    myself: ActorRef<WatchtowerMessage>,
-    signer_actor: Option<ActorRef<SignerActorMessage>>,
-) where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
@@ -494,8 +391,6 @@ fn run_periodic_check<S>(
                                                 &store,
                                                 channel_node_id.clone(),
                                                 first_commitment_block_number,
-                                                &myself,
-                                                signer_actor.as_ref(),
                                             );
                                         }
                                     }
@@ -511,8 +406,6 @@ fn run_periodic_check<S>(
                                         &store,
                                         channel_node_id.clone(),
                                         first_commitment_block_number,
-                                        &myself,
-                                        signer_actor.as_ref(),
                                     );
                                 }
                             } else {
@@ -660,8 +553,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
-    myself: &ActorRef<WatchtowerMessage>,
-    signer_actor: Option<&ActorRef<SignerActorMessage>>,
 ) {
     let lock_args = commitment_lock.args().raw_data();
     let initial_tlcs = tracked_settlement_tlcs(&commitment_lock, &channel_data, for_remote);
@@ -851,8 +742,6 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         signer,
                         cell_collector,
                         store,
-                        &myself,
-                        signer_actor,
                     ) {
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
@@ -1304,8 +1193,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
     signer: &LocalSigner,
     cell_collector: &mut DefaultCellCollector,
     store: &S,
-    myself: &ActorRef<WatchtowerMessage>,
-    signer_actor: Option<&ActorRef<SignerActorMessage>>,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
@@ -1885,8 +1772,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock.with_preimage,
                     unlock_key,
                     signer,
-                    myself,
-                    signer_actor,
                 );
             }
         }
@@ -2126,8 +2011,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock.with_preimage,
                     unlock_key,
                     signer,
-                    myself,
-                    signer_actor,
                 );
             }
         }
@@ -2144,6 +2027,7 @@ fn onchain_key_purpose(unlock_type: u8, commitment_number: u64) -> fiber_types::
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_signed_settlement_tx<S: WatchtowerStore>(
     store: &S,
     node_id: &NodeId,
@@ -2153,8 +2037,6 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
     with_preimage: bool,
     unlock_key: Option<Privkey>,
     change_signer: &LocalSigner,
-    myself: &ActorRef<WatchtowerMessage>,
-    signer_actor: Option<&ActorRef<SignerActorMessage>>,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     use fiber_types::{
         OnchainSigningContent, WatchtowerExternalSignerState, WatchtowerExternalState,
@@ -2166,71 +2048,58 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
         transaction: tx.data(),
     };
 
-    if let Some(key) = unlock_key {
-        let signature =
-            crate::fiber::signer_actor::sign_onchain_request(&key, &content).map_err(|e| {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    as Box<dyn std::error::Error>
-            })?;
-        return Ok(Some(apply_settlement_signature(
+    let watchtower_signer = match store.get_watch_channel(node_id, &channel_id) {
+        Some(channel) => WatchtowerSigner::from_channel_data(&channel),
+        None => WatchtowerSigner::external(),
+    };
+    let outcome = watchtower_signer
+        .request_onchain_with_key(content.clone(), unlock_key)
+        .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
+    match outcome {
+        WatchtowerSignOutcome::Ready(signature) => Ok(Some(apply_settlement_signature(
             tx,
             change_signer,
             signature,
             with_preimage,
-        )?));
-    }
-
-    match store.get_watchtower_signer(node_id, &channel_id) {
-        WatchtowerSignerState::External(external) => match external.state {
-            WatchtowerExternalState::Signed {
-                content: signed,
-                signature,
-                ..
-            } if signed.transaction.as_slice() == content.transaction.as_slice() => Ok(Some(
-                apply_settlement_signature(tx, change_signer, signature, with_preimage)?,
-            )),
-            WatchtowerExternalState::AwaitingSignature {
-                content: pending, ..
-            } if pending.transaction.as_slice() == content.transaction.as_slice() => Ok(None),
-            _ => {
-                let request_id =
-                    Hash256::from(ckb_hash::blake2b_256(content.transaction.as_slice()));
-                store.put_watchtower_signer(
-                    node_id,
-                    &channel_id,
-                    WatchtowerSignerState::External(WatchtowerExternalSignerState {
-                        state: WatchtowerExternalState::AwaitingSignature {
-                            request_id,
-                            content: content.clone(),
-                        },
-                        last_applied: external.last_applied,
-                    }),
-                );
-                if let Some(signer_actor) = signer_actor {
-                    signer_actor
-                        .send_message(SignerActorMessage::SignWatchtower {
-                            node_id: node_id.clone(),
-                            channel_id,
-                            request_id,
-                            signer: None,
-                            content,
-                            reply_to: Some(myself.clone()),
-                        })
-                        .map_err(|error| {
-                            Box::new(std::io::Error::other(error.to_string()))
-                                as Box<dyn std::error::Error>
-                        })?;
+        )?)),
+        WatchtowerSignOutcome::AwaitingExternal {
+            request_id,
+            content: awaiting,
+        } => match store.get_watchtower_signer(node_id, &channel_id) {
+            WatchtowerSignerState::External(external) => match external.state {
+                WatchtowerExternalState::Signed {
+                    content: signed,
+                    signature,
+                    ..
+                } if signed.transaction.as_slice() == awaiting.transaction.as_slice() => Ok(Some(
+                    apply_settlement_signature(tx, change_signer, signature, with_preimage)?,
+                )),
+                WatchtowerExternalState::AwaitingSignature {
+                    content: pending, ..
+                } if pending.transaction.as_slice() == awaiting.transaction.as_slice() => Ok(None),
+                _ => {
+                    store.put_watchtower_signer(
+                        node_id,
+                        &channel_id,
+                        WatchtowerSignerState::External(WatchtowerExternalSignerState {
+                            state: WatchtowerExternalState::AwaitingSignature {
+                                request_id,
+                                content: awaiting,
+                            },
+                            last_applied: external.last_applied,
+                        }),
+                    );
+                    Ok(None)
                 }
+            },
+            WatchtowerSignerState::Internal => {
+                warn!(
+                    channel_id = %channel_id,
+                    "watchtower settlement has no local key and no external signer state"
+                );
                 Ok(None)
             }
         },
-        WatchtowerSignerState::Internal => {
-            warn!(
-                channel_id = %channel_id,
-                "watchtower settlement has no local key and no external signer state"
-            );
-            Ok(None)
-        }
     }
 }
 
@@ -2599,6 +2468,7 @@ mod tests {
     use std::sync::Mutex;
 
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
+    use secp256k1::SecretKey;
 
     use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 

@@ -15,6 +15,7 @@ use crate::fiber::config::{
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 
+use crate::fiber::channel_signer::SignerNotification;
 use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
@@ -24,7 +25,6 @@ use crate::fiber::network::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::signer_actor::{SignerActor, SignerNotification};
 use crate::fiber::types::{
     AddTlc, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256, Init,
     PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
@@ -9876,17 +9876,13 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
     state_a.private_key = Some(node_a.private_key.clone());
     node_a.store.insert_channel_actor_state(state_a.clone());
 
-    let (signer_a, signer_a_handle) = Actor::spawn(None, SignerActor, ())
-        .await
-        .expect("spawn A signer actor");
-    let mut channel_a = ChannelActor::new(
+    let channel_a = ChannelActor::new(
         node_a.pubkey,
         node_b.pubkey,
         FiberActorRef::from_network(&network_a),
         node_a.store.clone(),
         None,
     );
-    channel_a.set_signer_actor(signer_a);
     let (channel_a_ref, channel_a_handle) = Actor::spawn(
         None,
         channel_a,
@@ -10047,7 +10043,6 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
     channel_b_handle.abort();
     network_a_handle.abort();
     network_b_handle.abort();
-    signer_a_handle.abort();
 }
 
 #[tokio::test]
@@ -10831,11 +10826,11 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
         .await;
 }
 
-/// POC end-to-end: with a signer actor attached, the revoke-owing side
-/// delegates MuSig2 signing via messages and only sends the peer message once
-/// the signature notification arrives.
+/// With a local ChannelSigner, revoke-owing signing is delegated via
+/// SignerNotification (send-to-self) and only sends the peer message once the
+/// signature notification is applied.
 #[tokio::test]
-async fn test_signer_actor_signs_revocation_via_messages() {
+async fn test_channel_signer_signs_revocation_via_messages() {
     init_tracing();
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
@@ -10881,7 +10876,7 @@ async fn test_signer_actor_signs_revocation_via_messages() {
     );
     let remote_commitment_number_before = state_a.get_remote_commitment_number();
 
-    // Manual harness: capturing network + signer actor + hand-driven channel.
+    // Manual harness: capturing network + hand-driven channel.
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (network_a, _network_handle) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
         .await
@@ -10890,21 +10885,14 @@ async fn test_signer_actor_signs_revocation_via_messages() {
     state_a.private_key = Some(node_a.private_key.clone());
 
     let signer_notifications = Arc::new(Mutex::new(Vec::new()));
-    let (signer_actor_ref, _signer_handle) = Actor::spawn(None, SignerActor, ())
-        .await
-        .expect("spawn signer actor");
 
-    let mut channel = ChannelActor::new(
+    let channel = ChannelActor::new(
         node_a.pubkey,
         node_b.pubkey,
         FiberActorRef::from_network(&network_a),
         node_a.store.clone(),
         None,
     );
-    channel.set_signer_actor(signer_actor_ref.clone());
-    // In production the channel actor copies its handle into the state during
-    // pre_start; this manual harness skips pre_start, so set it directly.
-    state_a.signer_actor = Some(signer_actor_ref);
     // The probe doubles as the channel actor ref: it is passed as `myself` to
     // the signing call and notifications routed there land in its buffer.
     let (channel_actor_ref, _channel_actor_handle) =
@@ -10912,12 +10900,12 @@ async fn test_signer_actor_signs_revocation_via_messages() {
             .await
             .expect("spawn notification probe");
 
-    // Sending the revoke now goes through the signer actor: nothing may be
+    // Sending the revoke now goes through ChannelSigner: nothing may be
     // put on the wire yet.
     state_a
         .send_revoke_and_ack_message(&channel_actor_ref, false)
         .await
-        .expect("revoke delegated to signer actor");
+        .expect("revoke delegated to channel signer");
     assert!(
         take_captured_actor_messages(&network_a, &captured)
             .await
@@ -10940,10 +10928,7 @@ async fn test_signer_actor_signs_revocation_via_messages() {
     let SignerNotification::ChannelSignatureReady {
         channel_id: notified_channel_id,
         ..
-    } = &notification
-    else {
-        panic!("expected ChannelSignatureReady");
-    };
+    } = &notification;
     assert_eq!(*notified_channel_id, channel_id);
 
     channel
@@ -13246,7 +13231,6 @@ mod udt_funding_cell_capacity {
             funding_abort_detail: None,
             needs_backup: false,
             signer_buffers: Default::default(),
-            signer_actor: None,
         }
     }
 

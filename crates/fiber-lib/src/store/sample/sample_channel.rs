@@ -41,7 +41,6 @@ impl ChannelActorState {
             private_key: None,
             needs_backup: false,
             signer_buffers: Default::default(),
-            signer_actor: None,
         }
     }
 
@@ -68,7 +67,6 @@ impl ChannelActorState {
             private_key: None,
             needs_backup: false,
             signer_buffers: Default::default(),
-            signer_actor: None,
         }
     }
 }

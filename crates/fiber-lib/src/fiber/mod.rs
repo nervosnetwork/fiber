@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod channel_signer;
 pub mod config;
 pub mod gossip;
 pub mod graph;
@@ -7,7 +8,6 @@ pub mod network;
 pub mod payment;
 #[cfg(all(feature = "pprof", not(target_arch = "wasm32")))]
 pub mod profiling;
-pub mod signer_actor;
 pub mod types;
 
 mod fee;
