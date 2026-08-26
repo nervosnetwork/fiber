@@ -50,6 +50,7 @@ const LOOP_OUT_PAYMENT_RECONCILE_INTERVAL: Duration = Duration::from_millis(10);
 const LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS: u32 = 60;
 #[cfg(test)]
 const LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS: u32 = 2;
+const PROVIDER_LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS: u32 = 60;
 
 /// Messages accepted by the liquidity actor boundary.
 #[derive(Debug)]
@@ -1737,7 +1738,7 @@ async fn observe_provider_loop_out_payment<P>(
     P: LoopOutPaymentAdapter + Send + 'static,
     P::Error: Display,
 {
-    for attempt in 0..LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS {
+    for attempt in 0..PROVIDER_LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS {
         tokio::time::sleep(LOOP_OUT_PAYMENT_RECONCILE_INTERVAL).await;
         match payment.reload_provider_loop_out_payment(payment_hash).await {
             Ok(LoopOutPaymentStatus::Settled(_)) => {
@@ -1762,7 +1763,7 @@ async fn observe_provider_loop_out_payment<P>(
             }
         }
 
-        if attempt + 1 == LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS {
+        if attempt + 1 == PROVIDER_LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS {
             persist_loop_out_payment_failure_context(
                 &store,
                 swap_id,
@@ -7391,6 +7392,31 @@ mod tests {
         ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
             .unwrap()
             .unwrap();
+
+        assert_eq!(
+            harness.swap_state(quote.quote_id),
+            LiquiditySwapState::PaymentSettled
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_payment_observation_survives_initial_in_flight_polls() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+        harness.payment.reload_statuses.borrow_mut().extend([
+            LoopOutPaymentStatus::InFlight,
+            LoopOutPaymentStatus::InFlight,
+            LoopOutPaymentStatus::Settled(quote.payment_hash),
+        ]);
+        harness.call_provider_accept(quote.quote_id).await.unwrap();
+
+        harness
+            .confirm_payout(quote.quote_id)
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_event_count(&harness.events, "reload_provider_payment", 3).await;
 
         assert_eq!(
             harness.swap_state(quote.quote_id),
