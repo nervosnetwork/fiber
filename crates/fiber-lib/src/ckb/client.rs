@@ -149,6 +149,50 @@ fn has_required_confirmations(tip: u64, block_number: u64, confirmations: u64) -
         .is_some_and(|depth| depth >= confirmations.max(1))
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn find_spend_in_loaded_candidates(
+    candidates: impl IntoIterator<Item = (H256, ckb_jsonrpc_types::TransactionWithStatusResponse)>,
+    watched_outpoint: &packed::OutPoint,
+    tip: u64,
+    confirmations: u64,
+) -> Result<Option<CommittedOutPointSpend>, anyhow::Error> {
+    for (tx_hash, response) in candidates {
+        let TxStatus::Committed(block_number, _, _) = tx_status_from_json(response.tx_status)
+        else {
+            continue;
+        };
+        if !has_required_confirmations(tip, block_number, confirmations) {
+            continue;
+        }
+        let Some(transaction) = response.transaction else {
+            continue;
+        };
+        let transaction = match transaction.inner {
+            ckb_jsonrpc_types::Either::Left(json) => transaction_view_from_json(json),
+            ckb_jsonrpc_types::Either::Right(bytes) => {
+                packed::Transaction::from_slice(bytes.as_bytes())
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to parse packed transaction for candidate {tx_hash}: {error}"
+                        )
+                    })?
+                    .into_view()
+            }
+        };
+        let Some(input_index) = find_watched_input_index(&transaction, watched_outpoint) else {
+            continue;
+        };
+
+        return Ok(Some(CommittedOutPointSpend {
+            transaction,
+            input_index,
+            block_number,
+        }));
+    }
+
+    Ok(None)
+}
+
 #[async_trait::async_trait]
 pub trait CkbChainClient: Send + Sync {
     async fn get_transaction(&self, hash: H256) -> Result<GetTxResponse, anyhow::Error>;
@@ -290,27 +334,16 @@ pub(crate) async fn find_committed_outpoint_spend(
                 continue;
             };
             let response = client
-                .get_only_committed_packed_transaction(tx_hash)
+                .get_only_committed_packed_transaction(tx_hash.clone())
                 .await?;
-            let response = GetTxResponse::from(Some(response));
-            let TxStatus::Committed(block_number, _, _) = response.tx_status else {
-                continue;
-            };
-            if !has_required_confirmations(tip, block_number, confirmations) {
-                continue;
+            if let Some(spend) = find_spend_in_loaded_candidates(
+                std::iter::once((tx_hash, response)),
+                watched_outpoint,
+                tip,
+                confirmations,
+            )? {
+                return Ok(Some(spend));
             }
-            let Some(transaction) = response.transaction else {
-                continue;
-            };
-            let Some(input_index) = find_watched_input_index(&transaction, watched_outpoint) else {
-                continue;
-            };
-
-            return Ok(Some(CommittedOutPointSpend {
-                transaction,
-                input_index,
-                block_number,
-            }));
         }
 
         after_cursor = Some(txs.last_cursor);
@@ -440,13 +473,20 @@ impl CkbChainClient for CkbRpcClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_watched_input_index, first_input_tx_hash, has_required_confirmations, input_tx_hash,
+        find_spend_in_loaded_candidates, find_watched_input_index, first_input_tx_hash,
+        has_required_confirmations, input_tx_hash,
     };
-    use ckb_jsonrpc_types::{BlockNumber, Uint32};
+    use ckb_jsonrpc_types::{
+        BlockNumber, ResponseFormat, TransactionWithStatusResponse, TxStatus as JsonTxStatus,
+        Uint32,
+    };
     use ckb_sdk::rpc::ckb_indexer::{CellType, Tx, TxWithCell, TxWithCells};
     use ckb_types::{
+        bytes::Bytes,
         core::{TransactionBuilder, TransactionView},
-        packed, H256,
+        packed,
+        prelude::Entity,
+        H256,
     };
 
     fn build_tx(io_type: CellType, tx_hash: u8) -> Tx {
@@ -472,6 +512,28 @@ mod tests {
                     .collect::<Vec<_>>(),
             )
             .build()
+    }
+
+    fn build_candidate_response(
+        transaction: TransactionView,
+        status: JsonTxStatus,
+    ) -> TransactionWithStatusResponse {
+        TransactionWithStatusResponse {
+            transaction: Some(ResponseFormat::hex(transaction.data().as_bytes())),
+            tx_status: status,
+            cycles: None,
+            time_added_to_pool: None,
+            fee: None,
+            min_replace_fee: None,
+        }
+    }
+
+    fn committed_status(block_number: u64) -> JsonTxStatus {
+        JsonTxStatus::committed(
+            block_number.into(),
+            H256::from([block_number as u8; 32]),
+            0_u32.into(),
+        )
     }
 
     #[test]
@@ -541,5 +603,142 @@ mod tests {
         assert!(has_required_confirmations(12, 10, 3));
         assert!(!has_required_confirmations(11, 10, 3));
         assert!(!has_required_confirmations(9, 10, 1));
+    }
+
+    #[test]
+    fn test_unrelated_candidate_does_not_prevent_later_match_on_same_page() {
+        let watched_outpoint = build_outpoint(8, 1);
+        let candidates = vec![
+            (
+                H256::from([1; 32]),
+                build_candidate_response(
+                    build_transaction(vec![build_outpoint(7, 1)]),
+                    committed_status(10),
+                ),
+            ),
+            (
+                H256::from([2; 32]),
+                build_candidate_response(
+                    build_transaction(vec![watched_outpoint.clone()]),
+                    committed_status(10),
+                ),
+            ),
+        ];
+
+        let spend = find_spend_in_loaded_candidates(candidates, &watched_outpoint, 10, 1)
+            .expect("candidate processing succeeds")
+            .expect("later candidate matches");
+
+        assert_eq!(spend.input_index, 0);
+        assert_eq!(spend.block_number, 10);
+    }
+
+    #[test]
+    fn test_uncommitted_candidate_does_not_prevent_later_committed_match() {
+        let watched_outpoint = build_outpoint(8, 1);
+        let candidates = vec![
+            (
+                H256::from([1; 32]),
+                build_candidate_response(
+                    build_transaction(vec![watched_outpoint.clone()]),
+                    JsonTxStatus::pending(),
+                ),
+            ),
+            (
+                H256::from([2; 32]),
+                build_candidate_response(
+                    build_transaction(vec![watched_outpoint.clone()]),
+                    committed_status(10),
+                ),
+            ),
+        ];
+
+        let spend = find_spend_in_loaded_candidates(candidates, &watched_outpoint, 10, 1)
+            .expect("candidate processing succeeds")
+            .expect("committed candidate matches");
+
+        assert_eq!(spend.block_number, 10);
+    }
+
+    #[test]
+    fn test_under_confirmed_candidate_does_not_prevent_later_confirmed_match() {
+        let watched_outpoint = build_outpoint(8, 1);
+        let candidates = vec![
+            (
+                H256::from([1; 32]),
+                build_candidate_response(
+                    build_transaction(vec![watched_outpoint.clone()]),
+                    committed_status(10),
+                ),
+            ),
+            (
+                H256::from([2; 32]),
+                build_candidate_response(
+                    build_transaction(vec![watched_outpoint.clone()]),
+                    committed_status(9),
+                ),
+            ),
+        ];
+
+        let spend = find_spend_in_loaded_candidates(candidates, &watched_outpoint, 10, 2)
+            .expect("candidate processing succeeds")
+            .expect("confirmed candidate matches");
+
+        assert_eq!(spend.block_number, 9);
+    }
+
+    #[test]
+    fn test_exhausted_page_allows_next_page_to_match() {
+        let watched_outpoint = build_outpoint(8, 1);
+        let first_page = vec![(
+            H256::from([1; 32]),
+            build_candidate_response(
+                build_transaction(vec![build_outpoint(7, 1)]),
+                committed_status(10),
+            ),
+        )];
+        let second_page = vec![(
+            H256::from([2; 32]),
+            build_candidate_response(
+                build_transaction(vec![watched_outpoint.clone()]),
+                committed_status(10),
+            ),
+        )];
+
+        assert!(
+            find_spend_in_loaded_candidates(first_page, &watched_outpoint, 10, 1)
+                .expect("first page processing succeeds")
+                .is_none()
+        );
+        assert!(
+            find_spend_in_loaded_candidates(second_page, &watched_outpoint, 10, 1)
+                .expect("second page processing succeeds")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_malformed_candidate_transaction_returns_error() {
+        let candidate_hash = H256::from([9; 32]);
+        let response = TransactionWithStatusResponse {
+            transaction: Some(ResponseFormat::hex(Bytes::from_static(&[0xff]))),
+            tx_status: committed_status(10),
+            cycles: None,
+            time_added_to_pool: None,
+            fee: None,
+            min_replace_fee: None,
+        };
+
+        let error = find_spend_in_loaded_candidates(
+            vec![(candidate_hash.clone(), response)],
+            &build_outpoint(8, 1),
+            10,
+            1,
+        )
+        .expect_err("malformed packed transaction must fail");
+        let message = error.to_string();
+
+        assert!(message.contains("failed to parse packed transaction"));
+        assert!(message.contains(&candidate_hash.to_string()));
     }
 }
