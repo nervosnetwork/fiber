@@ -132,6 +132,14 @@ fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
     txs.iter().find_map(input_tx_hash)
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn unique_input_tx_hashes(txs: &[Tx], seen: &mut std::collections::HashSet<H256>) -> Vec<H256> {
+    txs.iter()
+        .filter_map(input_tx_hash)
+        .filter(|tx_hash| seen.insert(tx_hash.clone()))
+        .collect()
+}
+
 #[allow(dead_code)]
 pub(crate) fn find_watched_input_index(
     transaction: &TransactionView,
@@ -157,13 +165,19 @@ fn find_spend_in_loaded_candidates(
     confirmations: u64,
 ) -> Result<Option<CommittedOutPointSpend>, anyhow::Error> {
     for (tx_hash, response) in candidates {
-        let TxStatus::Committed(block_number, _, _) = tx_status_from_json(response.tx_status)
-        else {
-            continue;
-        };
-        if !has_required_confirmations(tip, block_number, confirmations) {
+        if !matches!(
+            response.tx_status.status,
+            ckb_jsonrpc_types::Status::Committed
+        ) {
             continue;
         }
+        let block_number: u64 = response
+            .tx_status
+            .block_number
+            .ok_or_else(|| {
+                anyhow::anyhow!("committed candidate {tx_hash} is missing block number")
+            })?
+            .into();
         let Some(transaction) = response.transaction else {
             continue;
         };
@@ -179,6 +193,15 @@ fn find_spend_in_loaded_candidates(
                     .into_view()
             }
         };
+        let actual_hash: H256 = transaction.hash().into();
+        if actual_hash != tx_hash {
+            return Err(anyhow::anyhow!(
+                "candidate transaction hash mismatch: expected {tx_hash}, actual {actual_hash}"
+            ));
+        }
+        if !has_required_confirmations(tip, block_number, confirmations) {
+            continue;
+        }
         let Some(input_index) = find_watched_input_index(&transaction, watched_outpoint) else {
             continue;
         };
@@ -313,6 +336,7 @@ pub(crate) async fn find_committed_outpoint_spend(
     let search_key = new_exact_lock_script_search_key(lock_script);
     let tip: u64 = client.get_tip_block_number().await?.into();
     let mut after_cursor: Option<JsonBytes> = None;
+    let mut seen_tx_hashes = std::collections::HashSet::new();
 
     loop {
         let txs = client
@@ -329,10 +353,7 @@ pub(crate) async fn find_committed_outpoint_spend(
             return Ok(None);
         }
 
-        for tx_item in &txs.objects {
-            let Some(tx_hash) = input_tx_hash(tx_item) else {
-                continue;
-            };
+        for tx_hash in unique_input_tx_hashes(&txs.objects, &mut seen_tx_hashes) {
             let response = client
                 .get_only_committed_packed_transaction(tx_hash.clone())
                 .await?;
@@ -472,9 +493,11 @@ impl CkbChainClient for CkbRpcClient {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{
         find_spend_in_loaded_candidates, find_watched_input_index, first_input_tx_hash,
-        has_required_confirmations, input_tx_hash,
+        has_required_confirmations, input_tx_hash, unique_input_tx_hashes,
     };
     use ckb_jsonrpc_types::{
         BlockNumber, ResponseFormat, TransactionWithStatusResponse, TxStatus as JsonTxStatus,
@@ -534,6 +557,15 @@ mod tests {
             H256::from([block_number as u8; 32]),
             0_u32.into(),
         )
+    }
+
+    fn build_loaded_candidate(
+        inputs: Vec<packed::OutPoint>,
+        status: JsonTxStatus,
+    ) -> (H256, TransactionWithStatusResponse) {
+        let transaction = build_transaction(inputs);
+        let tx_hash = transaction.hash().into();
+        (tx_hash, build_candidate_response(transaction, status))
     }
 
     #[test]
@@ -609,20 +641,8 @@ mod tests {
     fn test_unrelated_candidate_does_not_prevent_later_match_on_same_page() {
         let watched_outpoint = build_outpoint(8, 1);
         let candidates = vec![
-            (
-                H256::from([1; 32]),
-                build_candidate_response(
-                    build_transaction(vec![build_outpoint(7, 1)]),
-                    committed_status(10),
-                ),
-            ),
-            (
-                H256::from([2; 32]),
-                build_candidate_response(
-                    build_transaction(vec![watched_outpoint.clone()]),
-                    committed_status(10),
-                ),
-            ),
+            build_loaded_candidate(vec![build_outpoint(7, 1)], committed_status(10)),
+            build_loaded_candidate(vec![watched_outpoint.clone()], committed_status(10)),
         ];
 
         let spend = find_spend_in_loaded_candidates(candidates, &watched_outpoint, 10, 1)
@@ -637,20 +657,8 @@ mod tests {
     fn test_uncommitted_candidate_does_not_prevent_later_committed_match() {
         let watched_outpoint = build_outpoint(8, 1);
         let candidates = vec![
-            (
-                H256::from([1; 32]),
-                build_candidate_response(
-                    build_transaction(vec![watched_outpoint.clone()]),
-                    JsonTxStatus::pending(),
-                ),
-            ),
-            (
-                H256::from([2; 32]),
-                build_candidate_response(
-                    build_transaction(vec![watched_outpoint.clone()]),
-                    committed_status(10),
-                ),
-            ),
+            build_loaded_candidate(vec![watched_outpoint.clone()], JsonTxStatus::pending()),
+            build_loaded_candidate(vec![watched_outpoint.clone()], committed_status(10)),
         ];
 
         let spend = find_spend_in_loaded_candidates(candidates, &watched_outpoint, 10, 1)
@@ -664,20 +672,8 @@ mod tests {
     fn test_under_confirmed_candidate_does_not_prevent_later_confirmed_match() {
         let watched_outpoint = build_outpoint(8, 1);
         let candidates = vec![
-            (
-                H256::from([1; 32]),
-                build_candidate_response(
-                    build_transaction(vec![watched_outpoint.clone()]),
-                    committed_status(10),
-                ),
-            ),
-            (
-                H256::from([2; 32]),
-                build_candidate_response(
-                    build_transaction(vec![watched_outpoint.clone()]),
-                    committed_status(9),
-                ),
-            ),
+            build_loaded_candidate(vec![watched_outpoint.clone()], committed_status(10)),
+            build_loaded_candidate(vec![watched_outpoint.clone()], committed_status(9)),
         ];
 
         let spend = find_spend_in_loaded_candidates(candidates, &watched_outpoint, 10, 2)
@@ -690,19 +686,13 @@ mod tests {
     #[test]
     fn test_exhausted_page_allows_next_page_to_match() {
         let watched_outpoint = build_outpoint(8, 1);
-        let first_page = vec![(
-            H256::from([1; 32]),
-            build_candidate_response(
-                build_transaction(vec![build_outpoint(7, 1)]),
-                committed_status(10),
-            ),
+        let first_page = vec![build_loaded_candidate(
+            vec![build_outpoint(7, 1)],
+            committed_status(10),
         )];
-        let second_page = vec![(
-            H256::from([2; 32]),
-            build_candidate_response(
-                build_transaction(vec![watched_outpoint.clone()]),
-                committed_status(10),
-            ),
+        let second_page = vec![build_loaded_candidate(
+            vec![watched_outpoint.clone()],
+            committed_status(10),
         )];
 
         assert!(
@@ -740,5 +730,82 @@ mod tests {
 
         assert!(message.contains("failed to parse packed transaction"));
         assert!(message.contains(&candidate_hash.to_string()));
+    }
+
+    #[test]
+    fn test_committed_candidate_without_block_number_returns_error() {
+        let watched_outpoint = build_outpoint(8, 1);
+        let mut status = committed_status(10);
+        status.block_number = None;
+        let candidate = build_loaded_candidate(vec![watched_outpoint.clone()], status);
+        let candidate_hash = candidate.0.clone();
+
+        let error = find_spend_in_loaded_candidates(vec![candidate], &watched_outpoint, 10, 1)
+            .expect_err("committed candidate must include block number");
+
+        let message = error.to_string();
+        assert!(message.contains("missing block number"));
+        assert!(message.contains(&candidate_hash.to_string()));
+    }
+
+    #[test]
+    fn test_candidate_transaction_hash_mismatch_returns_error() {
+        let watched_outpoint = build_outpoint(8, 1);
+        let transaction = build_transaction(vec![watched_outpoint.clone()]);
+        let actual_hash: H256 = transaction.hash().into();
+        let expected_hash = H256::from([9; 32]);
+        let response = build_candidate_response(transaction, committed_status(10));
+
+        let error = find_spend_in_loaded_candidates(
+            vec![(expected_hash.clone(), response)],
+            &watched_outpoint,
+            10,
+            2,
+        )
+        .expect_err("candidate transaction hash must match response");
+        let message = error.to_string();
+
+        assert!(message.contains("transaction hash mismatch"));
+        assert!(message.contains(&expected_hash.to_string()));
+        assert!(message.contains(&actual_hash.to_string()));
+    }
+
+    #[test]
+    fn test_duplicate_input_hashes_within_page_are_evaluated_once() {
+        let duplicate_hash = H256::from([7; 32]);
+        let grouped_duplicate = Tx::Grouped(TxWithCells {
+            tx_hash: duplicate_hash.clone(),
+            block_number: BlockNumber::from(10_u64),
+            tx_index: Uint32::from(0_u32),
+            cells: vec![(CellType::Input, Uint32::from(1_u32))],
+        });
+        let page = vec![
+            build_tx(CellType::Input, 7),
+            grouped_duplicate,
+            build_tx(CellType::Input, 8),
+        ];
+        let mut seen = HashSet::new();
+
+        let evaluations = unique_input_tx_hashes(&page, &mut seen);
+
+        assert_eq!(evaluations, vec![duplicate_hash, H256::from([8; 32])]);
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn test_duplicate_input_hashes_across_pages_are_evaluated_once() {
+        let mut seen = HashSet::new();
+        let first_page = vec![build_tx(CellType::Input, 7), build_tx(CellType::Input, 8)];
+        let second_page = vec![build_tx(CellType::Input, 7), build_tx(CellType::Input, 9)];
+
+        let first_evaluations = unique_input_tx_hashes(&first_page, &mut seen);
+        let second_evaluations = unique_input_tx_hashes(&second_page, &mut seen);
+
+        assert_eq!(
+            first_evaluations,
+            vec![H256::from([7; 32]), H256::from([8; 32])]
+        );
+        assert_eq!(second_evaluations, vec![H256::from([9; 32])]);
+        assert_eq!(seen.len(), 3);
     }
 }
