@@ -893,12 +893,14 @@ Execute a Loop Out swap after quote acceptance.
 * `quote_id` - <em>[Hash256](#type-hash256)</em>, Provider-generated quote identifier.
 * `max_provider_fee` - <em>`u128`</em>, Maximum provider fee accepted at execution time.
 * `max_routing_fee` - <em>`u128`</em>, Maximum Fiber routing fee accepted at execution time.
+* `payout_outpoint` - <em>`Option<ckb_jsonrpc_types::OutPoint>`</em>, Payout lock outpoint returned by `provider_accept_loop_out`.
 
 ##### Returns
 
 * `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
 * `state` - <em>`String`</em>, Initial persisted state name.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `payout_outpoint` - <em>`Option<ckb_jsonrpc_types::OutPoint>`</em>, Payout lock outpoint produced by the provider accept (Loop Out provider only).
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
 
 ---
@@ -959,6 +961,7 @@ Execute a Loop In swap after quote acceptance.
 * `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
 * `state` - <em>`String`</em>, Initial persisted state name.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `payout_outpoint` - <em>`Option<ckb_jsonrpc_types::OutPoint>`</em>, Payout lock outpoint produced by the provider accept (Loop Out provider only).
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
 
 ---
@@ -1054,6 +1057,7 @@ Provider-side accept endpoint for a Loop Out quote.
 * `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
 * `state` - <em>`String`</em>, Initial persisted state name.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `payout_outpoint` - <em>`Option<ckb_jsonrpc_types::OutPoint>`</em>, Payout lock outpoint produced by the provider accept (Loop Out provider only).
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
 
 ---
@@ -1076,6 +1080,7 @@ Provider-side accept endpoint for an observed Loop In lock.
 * `swap_id` - <em>[Hash256](#type-hash256)</em>, Local swap identifier.
 * `state` - <em>`String`</em>, Initial persisted state name.
 * `payment_hash` - <em>[Hash256](#type-hash256)</em>, CKB-hash of the 32-byte preimage.
+* `payout_outpoint` - <em>`Option<ckb_jsonrpc_types::OutPoint>`</em>, Payout lock outpoint produced by the provider accept (Loop Out provider only).
 * `created_at` - <em>`u64`</em>, Creation timestamp in milliseconds.
 
 ---

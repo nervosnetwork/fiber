@@ -297,6 +297,9 @@ pub struct LoopOutParams {
     #[serde_as(as = "U128Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub max_routing_fee: u128,
+    /// Payout lock outpoint returned by `provider_accept_loop_out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payout_outpoint: Option<ckb_jsonrpc_types::OutPoint>,
 }
 
 /// Parameters for executing Loop In after quote acceptance.
@@ -329,6 +332,9 @@ pub struct LiquiditySwapResponse {
     pub state: String,
     /// CKB-hash of the 32-byte preimage.
     pub payment_hash: Hash256,
+    /// Payout lock outpoint produced by the provider accept (Loop Out provider only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payout_outpoint: Option<ckb_jsonrpc_types::OutPoint>,
     /// Creation timestamp in milliseconds.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
@@ -700,6 +706,7 @@ mod tests {
             swap_id: Hash256([1u8; 32]),
             state: "created".to_string(),
             payment_hash: Hash256([2u8; 32]),
+            payout_outpoint: None,
             created_at: 42,
         };
         let list_params = ListSwapsParams {
