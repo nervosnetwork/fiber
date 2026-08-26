@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use ckb_types::{core::TransactionView, packed};
+use futures::FutureExt;
 use ractor::{
     concurrency::{Duration, JoinHandle},
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
@@ -283,7 +284,14 @@ struct PollTask {
 impl PollTask {
     fn spawn(self) -> JoinHandle<()> {
         ractor::concurrency::spawn(async move {
-            let result = self.discover().await;
+            // A panic in the discovery future must not leave the task handle in
+            // the `Some` state forever, otherwise the group is never re-polled.
+            // Catch it and convert it into a descriptive error that clears the
+            // task handle so the next poll retries.
+            let result = std::panic::AssertUnwindSafe(self.discover())
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| Err(panic_message(&payload)));
             let _ = self
                 .actor
                 .send_message(CkbOutPointSpendTracingMessage::ReportTracingResult {
@@ -331,6 +339,16 @@ impl PollTask {
             let _ = (&self.rpc_url, &self.lock_script, self.confirmations);
             Err("CKB outpoint spend discovery is unavailable on WASM".to_string())
         }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 
@@ -860,6 +878,80 @@ mod tests {
             .expect("callback dropped")
             .expect("tracer failed");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        actor.stop(None);
+        handle.await.expect("stop outpoint tracing actor");
+    }
+
+    #[tokio::test]
+    async fn panicking_discovery_clears_task_handle_and_retries_on_next_run() {
+        let watched_outpoint = outpoint(8);
+        let expected = spend_result(watched_outpoint.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let discovery_calls = calls.clone();
+        let discovered = expected.clone();
+        let actor_impl = CkbOutPointSpendTracingActor::with_discovery(
+            move |_rpc_url, _lock_script, _outpoint, _confirmations| {
+                let call = discovery_calls.fetch_add(1, Ordering::SeqCst);
+                let discovered = discovered.clone();
+                Box::pin(async move {
+                    if call == 0 {
+                        panic!("injected discovery panic");
+                    }
+                    Ok(Some(discovered))
+                })
+            },
+        );
+        let (actor, handle) = Actor::spawn(
+            None,
+            actor_impl,
+            CkbOutPointSpendTracingArguments {
+                rpc_url: "unused".to_string(),
+                polling_interval: Duration::from_secs(3600),
+            },
+        )
+        .await
+        .expect("spawn outpoint tracing actor");
+        let (send, recv) = oneshot::channel();
+        actor
+            .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
+                CkbOutPointSpendTracer {
+                    outpoint: watched_outpoint,
+                    lock_script: lock_script(),
+                    confirmations: 4,
+                    callback: RpcReplyPort::from(send),
+                },
+            ))
+            .expect("create outpoint tracer");
+
+        timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panicking discovery did not run");
+
+        // A panic must clear the task handle so the next run retries instead of
+        // stalling forever. Keep nudging RunTracers until a retry happens.
+        timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::SeqCst) < 2 {
+                actor
+                    .send_message(CkbOutPointSpendTracingMessage::RunTracers)
+                    .expect("run tracers");
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panicking discovery stalled: task handle was not cleared");
+
+        let actual = timeout(Duration::from_secs(1), recv)
+            .await
+            .expect("retried tracer timed out")
+            .expect("callback dropped")
+            .expect("retried tracer failed");
+        assert_eq!(actual.outpoint, expected.outpoint);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         actor.stop(None);
         handle.await.expect("stop outpoint tracing actor");
