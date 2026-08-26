@@ -15,8 +15,12 @@ use once_cell::sync::{Lazy, OnceCell};
 
 use crate::ckb::client::CkbChainClient;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::sync::{Notify, RwLock as TokioRwLock};
 
+#[cfg(test)]
+use crate::ckb::CkbOutPointSpendTracer;
 use crate::{
     ckb::{
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
@@ -877,6 +881,12 @@ impl Actor for MockChainActor {
                     task.stop(Some(format!("remove tracers for tx {}", tx_hash)));
                 }
             }
+            CreateOutPointSpendTracer(tracer) => {
+                let _ = tracer.callback.send(Err(
+                    "mock outpoint spend tracing is not configured".to_string()
+                ));
+            }
+            RemoveOutPointSpendTracers(_) => {}
 
             BuildUnsignedFundingTx {
                 funding_tx,
@@ -1072,6 +1082,36 @@ async fn test_set_and_get_block_timestamp() {
     set_next_block_timestamp(now).await;
     let timestamp = get_block_timestamp(H256::default()).await;
     assert_eq!(timestamp, now);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+async fn test_mock_outpoint_spend_tracing_reports_not_configured() {
+    let shared_state = Arc::new(RwLock::new(MockChainState::new()));
+    let (actor, handle) = Actor::spawn(None, MockChainActor::new(), (None, shared_state))
+        .await
+        .expect("start mock chain actor");
+    let (send, recv) = oneshot::channel();
+
+    actor
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(
+            CkbOutPointSpendTracer {
+                outpoint: packed::OutPoint::default(),
+                lock_script: packed::Script::default(),
+                confirmations: 1,
+                callback: RpcReplyPort::from(send),
+            },
+        ))
+        .expect("create mock outpoint spend tracer");
+
+    let error = recv
+        .await
+        .expect("mock callback dropped")
+        .expect_err("mock unexpectedly traced outpoint spend");
+    assert_eq!(error, "mock outpoint spend tracing is not configured");
+
+    actor.stop(None);
+    handle.await.expect("stop mock chain actor");
 }
 
 #[derive(Clone, Debug)]
