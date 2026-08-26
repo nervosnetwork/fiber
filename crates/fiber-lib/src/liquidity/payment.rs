@@ -8,7 +8,7 @@ use ractor::{call, ActorRef};
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::invoice::{Currency, InvoiceBuilder, InvoiceError};
+use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::liquidity::actor::{LoopOutPaymentAdapter, LoopOutPaymentStatus};
 use crate::liquidity::types::{loop_out_gross_payment_amount, LiquidityLoopOutError};
 
@@ -264,6 +264,28 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
         match result {
             Ok(()) => Ok(()),
             Err(InvoiceError::InvoiceAlreadyExists) => Ok(()),
+            Err(error) => Err(LiquidityLoopOutError::PaymentFailed(error.to_string())),
+        }
+    }
+
+    async fn reload_provider_loop_out_payment(
+        &mut self,
+        payment_hash: Hash256,
+    ) -> Result<LoopOutPaymentStatus, Self::Error> {
+        let result = call!(self.network_actor, |reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::GetInvoice(payment_hash, reply))
+        })
+        .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
+        match result {
+            Ok((_, status)) => match status {
+                CkbInvoiceStatus::Paid => Ok(LoopOutPaymentStatus::Settled(payment_hash)),
+                CkbInvoiceStatus::Open | CkbInvoiceStatus::Received => {
+                    Ok(LoopOutPaymentStatus::InFlight)
+                }
+                CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired => {
+                    Ok(LoopOutPaymentStatus::Failed(format!("invoice {status:?}")))
+                }
+            },
             Err(error) => Err(LiquidityLoopOutError::PaymentFailed(error.to_string())),
         }
     }
@@ -528,6 +550,60 @@ mod tests {
         assert_eq!(network.take_invoices().len(), 1);
     }
 
+    #[tokio::test]
+    async fn network_loop_out_payment_adapter_reloads_provider_invoice_as_in_flight() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::ReloadInvoiceStatus(
+            CkbInvoiceStatus::Open,
+        ))
+        .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let status = adapter
+            .reload_provider_loop_out_payment([3u8; 32].into())
+            .await
+            .unwrap();
+
+        assert_eq!(status, LoopOutPaymentStatus::InFlight);
+        assert_eq!(network.take_events(), vec!["get_invoice"]);
+    }
+
+    #[tokio::test]
+    async fn network_loop_out_payment_adapter_reloads_provider_invoice_as_settled() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::ReloadInvoiceStatus(
+            CkbInvoiceStatus::Paid,
+        ))
+        .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let status = adapter
+            .reload_provider_loop_out_payment([3u8; 32].into())
+            .await
+            .unwrap();
+
+        assert_eq!(status, LoopOutPaymentStatus::Settled([3u8; 32].into()));
+        assert_eq!(network.take_events(), vec!["get_invoice"]);
+    }
+
+    #[tokio::test]
+    async fn network_loop_out_payment_adapter_reloads_provider_invoice_as_failed() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::ReloadInvoiceStatus(
+            CkbInvoiceStatus::Cancelled,
+        ))
+        .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let status = adapter
+            .reload_provider_loop_out_payment([3u8; 32].into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            status,
+            LoopOutPaymentStatus::Failed("invoice Cancelled".to_string())
+        );
+        assert_eq!(network.take_events(), vec!["get_invoice"]);
+    }
+
     type MockInvoice = (CkbInvoice, Option<Hash256>);
     type MockInvoiceStore = Arc<Mutex<HashMap<Hash256, MockInvoice>>>;
 
@@ -564,6 +640,7 @@ mod tests {
         ReloadInflight,
         ReloadFailed,
         SettleWithoutPreimage,
+        ReloadInvoiceStatus(CkbInvoiceStatus),
     }
 
     struct NetworkPaymentMockActor;
@@ -666,14 +743,23 @@ mod tests {
                     }
                     NetworkActorCommand::GetInvoice(payment_hash, reply) => {
                         state.events.lock().unwrap().push("get_invoice");
-                        let result = state
-                            .invoices
-                            .lock()
-                            .unwrap()
-                            .get(&payment_hash)
-                            .cloned()
-                            .map(|(invoice, _)| (invoice, CkbInvoiceStatus::Open))
-                            .ok_or(InvoiceError::InvoiceNotFound);
+                        let result = match state.mode {
+                            NetworkPaymentMockMode::ReloadInvoiceStatus(status) => {
+                                let invoice = InvoiceBuilder::new(Currency::Fibd)
+                                    .payment_preimage([9u8; 32].into())
+                                    .build()
+                                    .expect("mock invoice");
+                                Ok((invoice, status))
+                            }
+                            _ => state
+                                .invoices
+                                .lock()
+                                .unwrap()
+                                .get(&payment_hash)
+                                .cloned()
+                                .map(|(invoice, _)| (invoice, CkbInvoiceStatus::Open))
+                                .ok_or(InvoiceError::InvoiceNotFound),
+                        };
                         let _ = reply.send(result);
                     }
                     _ => unreachable!("unexpected network command"),
