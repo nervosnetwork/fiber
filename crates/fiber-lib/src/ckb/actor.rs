@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use serde_with::serde_as;
 
+#[cfg(not(test))]
+use super::outpoint_tracing_actor::{
+    CkbOutPointSpendTracer, CkbOutPointSpendTracingActor, CkbOutPointSpendTracingArguments,
+    CkbOutPointSpendTracingMessage,
+};
 use super::{
     funding::{FundingContext, LiveCellsExclusionMap},
     signer::LocalSigner,
@@ -53,6 +58,8 @@ const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 #[derive(Clone, Debug)]
 pub struct CkbChainState {
     config: CkbConfig,
+    #[cfg(not(test))]
+    ckb_outpoint_tracing_actor: ActorRef<CkbOutPointSpendTracingMessage>,
     ckb_tx_tracing_actor: ActorRef<CkbTxTracingMessage>,
     signer: LocalSigner,
     funding_source_lock_script: packed::Script,
@@ -97,6 +104,10 @@ pub enum CkbChainMessage {
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
+    #[cfg(not(test))]
+    CreateOutPointSpendTracer(CkbOutPointSpendTracer),
+    #[cfg(not(test))]
+    RemoveOutPointSpendTracers(packed::OutPoint),
     ReportSendTxError(Hash256, RpcError),
     GetLiveCell(
         packed::OutPoint,
@@ -130,6 +141,21 @@ impl Actor for CkbChainActor {
                 rpc_url: config.rpc_url.clone(),
                 polling_interval: Duration::from_millis(config.tx_tracing_polling_interval_ms),
             },
+            myself.clone().into(),
+        )
+        .await?
+        .0;
+        #[cfg(not(test))]
+        let ckb_outpoint_tracing_actor = Actor::spawn_linked(
+            Some(format!(
+                "{}/ckb-outpoint-tracing",
+                myself.get_name().as_deref().unwrap_or_default()
+            )),
+            CkbOutPointSpendTracingActor::new(),
+            CkbOutPointSpendTracingArguments {
+                rpc_url: config.rpc_url.clone(),
+                polling_interval: Duration::from_millis(config.tx_tracing_polling_interval_ms),
+            },
             myself.into(),
         )
         .await?
@@ -138,6 +164,8 @@ impl Actor for CkbChainActor {
             config,
             signer,
             funding_source_lock_script,
+            #[cfg(not(test))]
+            ckb_outpoint_tracing_actor,
             ckb_tx_tracing_actor,
             live_cells_exclusion_map: Default::default(),
         })
@@ -381,6 +409,24 @@ impl Actor for CkbChainActor {
                 state
                     .ckb_tx_tracing_actor
                     .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
+            }
+            #[cfg(not(test))]
+            CkbChainMessage::CreateOutPointSpendTracer(tracer) => {
+                debug!(
+                    "[{}] trace spending transaction for outpoint {} with {} confs",
+                    myself.get_name().unwrap_or_default(),
+                    tracer.outpoint,
+                    tracer.confirmations
+                );
+                state
+                    .ckb_outpoint_tracing_actor
+                    .send_message(CkbOutPointSpendTracingMessage::CreateTracer(tracer))?;
+            }
+            #[cfg(not(test))]
+            CkbChainMessage::RemoveOutPointSpendTracers(outpoint) => {
+                state
+                    .ckb_outpoint_tracing_actor
+                    .send_message(CkbOutPointSpendTracingMessage::RemoveTracers(outpoint))?;
             }
             CkbChainMessage::ReportSendTxError(tx_hash, err) => {
                 state
