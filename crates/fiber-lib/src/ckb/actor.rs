@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use serde_with::serde_as;
 
-#[cfg(not(test))]
 use super::outpoint_tracing_actor::{
     CkbOutPointSpendTracer, CkbOutPointSpendTracingActor, CkbOutPointSpendTracingArguments,
     CkbOutPointSpendTracingMessage,
@@ -58,7 +57,6 @@ const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 #[derive(Clone, Debug)]
 pub struct CkbChainState {
     config: CkbConfig,
-    #[cfg(not(test))]
     ckb_outpoint_tracing_actor: ActorRef<CkbOutPointSpendTracingMessage>,
     ckb_tx_tracing_actor: ActorRef<CkbTxTracingMessage>,
     signer: LocalSigner,
@@ -104,9 +102,7 @@ pub enum CkbChainMessage {
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     CreateTxTracer(CkbTxTracer),
     RemoveTxTracers(Hash256),
-    #[cfg(not(test))]
     CreateOutPointSpendTracer(CkbOutPointSpendTracer),
-    #[cfg(not(test))]
     RemoveOutPointSpendTracers(packed::OutPoint),
     ReportSendTxError(Hash256, RpcError),
     GetLiveCell(
@@ -145,7 +141,6 @@ impl Actor for CkbChainActor {
         )
         .await?
         .0;
-        #[cfg(not(test))]
         let ckb_outpoint_tracing_actor = Actor::spawn_linked(
             Some(format!(
                 "{}/ckb-outpoint-tracing",
@@ -164,7 +159,6 @@ impl Actor for CkbChainActor {
             config,
             signer,
             funding_source_lock_script,
-            #[cfg(not(test))]
             ckb_outpoint_tracing_actor,
             ckb_tx_tracing_actor,
             live_cells_exclusion_map: Default::default(),
@@ -410,7 +404,6 @@ impl Actor for CkbChainActor {
                     .ckb_tx_tracing_actor
                     .send_message(CkbTxTracingMessage::RemoveTracers(tx_hash))?;
             }
-            #[cfg(not(test))]
             CkbChainMessage::CreateOutPointSpendTracer(tracer) => {
                 debug!(
                     "[{}] trace spending transaction for outpoint {} with {} confs",
@@ -422,7 +415,6 @@ impl Actor for CkbChainActor {
                     .ckb_outpoint_tracing_actor
                     .send_message(CkbOutPointSpendTracingMessage::CreateTracer(tracer))?;
             }
-            #[cfg(not(test))]
             CkbChainMessage::RemoveOutPointSpendTracers(outpoint) => {
                 state
                     .ckb_outpoint_tracing_actor
