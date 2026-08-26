@@ -8,7 +8,7 @@ use ckb_types::{prelude::Entity, prelude::IntoTransactionView, H256};
 
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
-    packed::Script,
+    packed::{self, Script},
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,17 @@ pub struct GetTxResponse {
     /// The transaction.
     pub transaction: Option<TransactionView>,
     pub tx_status: TxStatus,
+}
+
+/// A committed transaction that spends an exact watched outpoint.
+#[derive(Clone, Debug)]
+pub struct CommittedOutPointSpend {
+    /// The transaction spending the watched outpoint.
+    pub transaction: TransactionView,
+    /// The position of the watched outpoint in the transaction inputs.
+    pub input_index: usize,
+    /// The block number that committed the transaction.
+    pub block_number: u64,
 }
 
 impl Default for GetTxResponse {
@@ -102,11 +113,40 @@ impl From<Pagination<Cell>> for GetCellsResponse {
     }
 }
 
-fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
-    txs.iter().find_map(|tx_item| match tx_item {
+fn input_tx_hash(tx_item: &Tx) -> Option<H256> {
+    match tx_item {
         Tx::Ungrouped(tx) if matches!(tx.io_type, CellType::Input) => Some(tx.tx_hash.clone()),
+        Tx::Grouped(tx)
+            if tx
+                .cells
+                .iter()
+                .any(|(io_type, _)| matches!(io_type, CellType::Input)) =>
+        {
+            Some(tx.tx_hash.clone())
+        }
         _ => None,
-    })
+    }
+}
+
+fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
+    txs.iter().find_map(input_tx_hash)
+}
+
+#[allow(dead_code)]
+pub(crate) fn find_watched_input_index(
+    transaction: &TransactionView,
+    watched_outpoint: &packed::OutPoint,
+) -> Option<usize> {
+    transaction
+        .input_pts_iter()
+        .position(|outpoint| outpoint == *watched_outpoint)
+}
+
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn has_required_confirmations(tip: u64, block_number: u64, confirmations: u64) -> bool {
+    tip.checked_sub(block_number)
+        .and_then(|depth| depth.checked_add(1))
+        .is_some_and(|depth| depth >= confirmations.max(1))
 }
 
 #[async_trait::async_trait]
@@ -139,9 +179,9 @@ impl CkbRpcClient {
     }
 }
 
-fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
+fn new_exact_lock_script_search_key(lock_script: &Script) -> SearchKey {
     SearchKey {
-        script: funding_lock_script.clone().into(),
+        script: lock_script.clone().into(),
         script_type: ScriptType::Lock,
         script_search_mode: Some(ckb_sdk::rpc::ckb_indexer::SearchMode::Exact),
         with_data: None,
@@ -158,7 +198,7 @@ pub(crate) fn find_first_input_tx_hash(
     client: &ckb_sdk::CkbRpcClient,
     funding_lock_script: &Script,
 ) -> Result<Option<H256>, anyhow::Error> {
-    let search_key = new_shutdown_tx_search_key(funding_lock_script);
+    let search_key = new_exact_lock_script_search_key(funding_lock_script);
 
     const PAGE_SIZE: u32 = 100;
     let mut after_cursor: Option<JsonBytes> = None;
@@ -188,7 +228,7 @@ async fn find_first_input_tx_hash_async(
     client: &ckb_sdk::CkbRpcAsyncClient,
     funding_lock_script: &Script,
 ) -> Result<Option<H256>, anyhow::Error> {
-    let search_key = new_shutdown_tx_search_key(funding_lock_script);
+    let search_key = new_exact_lock_script_search_key(funding_lock_script);
 
     const PAGE_SIZE: u32 = 100;
     let mut after_cursor: Option<JsonBytes> = None;
@@ -212,6 +252,68 @@ async fn find_first_input_tx_hash_async(
         }
 
         after_cursor = Some(txs.last_cursor.clone());
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+pub(crate) async fn find_committed_outpoint_spend(
+    rpc_url: &str,
+    lock_script: &packed::Script,
+    watched_outpoint: &packed::OutPoint,
+    confirmations: u64,
+) -> Result<Option<CommittedOutPointSpend>, anyhow::Error> {
+    const PAGE_SIZE: u32 = 100;
+
+    let client = new_ckb_rpc_async_client(rpc_url);
+    let search_key = new_exact_lock_script_search_key(lock_script);
+    let tip: u64 = client.get_tip_block_number().await?.into();
+    let mut after_cursor: Option<JsonBytes> = None;
+
+    loop {
+        let txs = client
+            .get_transactions(
+                search_key.clone(),
+                Order::Desc,
+                PAGE_SIZE.into(),
+                after_cursor,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+
+        if txs.objects.is_empty() {
+            return Ok(None);
+        }
+
+        for tx_item in &txs.objects {
+            let Some(tx_hash) = input_tx_hash(tx_item) else {
+                continue;
+            };
+            let response = client
+                .get_only_committed_packed_transaction(tx_hash)
+                .await?;
+            let response = GetTxResponse::from(Some(response));
+            let TxStatus::Committed(block_number, _, _) = response.tx_status else {
+                continue;
+            };
+            if !has_required_confirmations(tip, block_number, confirmations) {
+                continue;
+            }
+            let Some(transaction) = response.transaction else {
+                continue;
+            };
+            let Some(input_index) = find_watched_input_index(&transaction, watched_outpoint) else {
+                continue;
+            };
+
+            return Ok(Some(CommittedOutPointSpend {
+                transaction,
+                input_index,
+                block_number,
+            }));
+        }
+
+        after_cursor = Some(txs.last_cursor);
     }
 }
 
@@ -337,10 +439,15 @@ impl CkbChainClient for CkbRpcClient {
 
 #[cfg(test)]
 mod tests {
-    use super::first_input_tx_hash;
+    use super::{
+        find_watched_input_index, first_input_tx_hash, has_required_confirmations, input_tx_hash,
+    };
     use ckb_jsonrpc_types::{BlockNumber, Uint32};
-    use ckb_sdk::rpc::ckb_indexer::{CellType, Tx, TxWithCell};
-    use ckb_types::H256;
+    use ckb_sdk::rpc::ckb_indexer::{CellType, Tx, TxWithCell, TxWithCells};
+    use ckb_types::{
+        core::{TransactionBuilder, TransactionView},
+        packed, H256,
+    };
 
     fn build_tx(io_type: CellType, tx_hash: u8) -> Tx {
         Tx::Ungrouped(TxWithCell {
@@ -350,6 +457,21 @@ mod tests {
             io_index: Uint32::from(0_u32),
             io_type,
         })
+    }
+
+    fn build_outpoint(tx_hash: u8, index: u32) -> packed::OutPoint {
+        packed::OutPoint::new(packed::Byte32::new([tx_hash; 32]), index)
+    }
+
+    fn build_transaction(inputs: Vec<packed::OutPoint>) -> TransactionView {
+        TransactionBuilder::default()
+            .inputs(
+                inputs
+                    .into_iter()
+                    .map(|outpoint| packed::CellInput::new(outpoint, 0))
+                    .collect::<Vec<_>>(),
+            )
+            .build()
     }
 
     #[test]
@@ -363,5 +485,61 @@ mod tests {
 
         assert_eq!(first_input_tx_hash(&output_only_page), None);
         assert_eq!(first_input_tx_hash(&input_page), Some(H256::from([4; 32])));
+    }
+
+    #[test]
+    fn test_find_watched_input_index_returns_nonzero_exact_match() {
+        let watched_outpoint = build_outpoint(2, 3);
+        let transaction = build_transaction(vec![build_outpoint(1, 0), watched_outpoint.clone()]);
+
+        assert_eq!(
+            find_watched_input_index(&transaction, &watched_outpoint),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_find_watched_input_index_rejects_different_output_index() {
+        let transaction = build_transaction(vec![build_outpoint(2, 4)]);
+
+        assert_eq!(
+            find_watched_input_index(&transaction, &build_outpoint(2, 3)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_find_watched_input_index_rejects_unrelated_inputs() {
+        let transaction = build_transaction(vec![build_outpoint(1, 0), build_outpoint(3, 3)]);
+
+        assert_eq!(
+            find_watched_input_index(&transaction, &build_outpoint(2, 3)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_grouped_transaction_with_input_is_candidate() {
+        let tx_hash = H256::from([7; 32]);
+        let grouped = Tx::Grouped(TxWithCells {
+            tx_hash: tx_hash.clone(),
+            block_number: BlockNumber::from(10_u64),
+            tx_index: Uint32::from(0_u32),
+            cells: vec![
+                (CellType::Output, Uint32::from(0_u32)),
+                (CellType::Input, Uint32::from(1_u32)),
+            ],
+        });
+
+        assert_eq!(input_tx_hash(&grouped), Some(tx_hash));
+    }
+
+    #[test]
+    fn test_required_confirmations_are_inclusive_and_zero_means_one() {
+        assert!(has_required_confirmations(10, 10, 0));
+        assert!(has_required_confirmations(10, 10, 1));
+        assert!(has_required_confirmations(12, 10, 3));
+        assert!(!has_required_confirmations(11, 10, 3));
+        assert!(!has_required_confirmations(9, 10, 1));
     }
 }
