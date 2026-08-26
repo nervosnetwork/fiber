@@ -462,7 +462,8 @@ where
         let quote = self.quote_terms(&quote_id)?;
         ensure_loop_out_quote_terms(&quote)?;
         let now_ms = now_ms();
-        let swap_id = create_client_loop_out(&self.store, quote.clone(), now_ms)?;
+        let payout_outpoint = params.payout_outpoint.map(Into::into);
+        let swap_id = create_client_loop_out(&self.store, quote.clone(), now_ms, payout_outpoint)?;
         self.chain
             .watch_payout_lock(swap_id, myself.clone())
             .await
@@ -1604,6 +1605,7 @@ where
             swap_id: swap.swap_id.into(),
             state: format!("{:?}", swap.state),
             payment_hash: swap.payment_hash.into(),
+            payout_outpoint: swap.onchain_outpoint.map(Into::into),
             created_at: swap.created_at,
         })
     }
@@ -1819,6 +1821,7 @@ pub fn create_client_loop_out<S>(
     store: &S,
     quote: LoopOutQuoteTerms,
     now_ms: u64,
+    payout_outpoint: Option<ckb_types::packed::OutPoint>,
 ) -> Result<Hash256, LiquidityLoopOutError>
 where
     S: LiquidityStore,
@@ -1833,6 +1836,19 @@ where
         .map_err(map_store_error)?;
     transition_swap(store, &swap_id, LiquiditySwapState::Quoted, now_ms)?;
     transition_swap(store, &swap_id, LiquiditySwapState::PayoutPending, now_ms)?;
+
+    if let Some(outpoint) = payout_outpoint {
+        store
+            .update_liquidity_swap(
+                &swap_id,
+                LiquiditySwapUpdate {
+                    onchain_outpoint: Some(outpoint),
+                    updated_at: now_ms,
+                    ..Default::default()
+                },
+            )
+            .map_err(map_store_error)?;
+    }
 
     Ok(swap_id)
 }
@@ -3764,6 +3780,25 @@ mod tests {
                     quote_id: quote_id.into(),
                     max_provider_fee: 1,
                     max_routing_fee: 1,
+                    payout_outpoint: None,
+                },
+                reply
+            ))
+            .unwrap()
+        }
+
+        async fn call_loop_out_with_outpoint(
+            &self,
+            quote_id: Hash256,
+            payout_outpoint: ckb_jsonrpc_types::OutPoint,
+        ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+            let actor = self.spawn_actor().await;
+            ractor::call!(actor, |reply| LiquidityActorMessage::LoopOut(
+                LoopOutParams {
+                    quote_id: quote_id.into(),
+                    max_provider_fee: 1,
+                    max_routing_fee: 1,
+                    payout_outpoint: Some(payout_outpoint),
                 },
                 reply
             ))
@@ -4959,7 +4994,7 @@ mod tests {
             let now_ms = 1_000;
             let quote = test_loop_out_quote(now_ms + 60_000);
 
-            create_client_loop_out(&self.client_store, quote.clone(), now_ms).unwrap();
+            create_client_loop_out(&self.client_store, quote.clone(), now_ms, None).unwrap();
             let actor = spawn_test_liquidity_actor(
                 self.provider_store.clone(),
                 self.payment.clone(),
@@ -6182,6 +6217,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_accept_loop_out_returns_payout_outpoint() {
+        let harness = RuntimeActorHarness::new_provider();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        let response = harness.call_provider_accept(quote.quote_id).await.unwrap();
+
+        let persisted = harness
+            .store
+            .get_liquidity_swap(&quote.quote_id)
+            .unwrap()
+            .unwrap();
+        let expected: ckb_jsonrpc_types::OutPoint = persisted
+            .onchain_outpoint
+            .expect("provider swap persists payout outpoint")
+            .into();
+        assert_eq!(response.payout_outpoint, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn client_loop_out_persists_payout_outpoint_before_watching() {
+        let harness = RuntimeActorHarness::new_client();
+        let quote = harness.loop_out_quote_terms();
+        harness.store_quote(quote.clone());
+
+        let packed_outpoint = OutPoint::new(Byte32::from_slice(&[42u8; 32]).unwrap(), 1);
+        let json_outpoint: ckb_jsonrpc_types::OutPoint = packed_outpoint.clone().into();
+
+        let response = harness
+            .call_loop_out_with_outpoint(quote.quote_id, json_outpoint)
+            .await
+            .unwrap();
+
+        assert_eq!(response.swap_id, quote.quote_id.into());
+        assert_eq!(
+            harness
+                .store
+                .get_liquidity_swap(&quote.quote_id)
+                .unwrap()
+                .unwrap()
+                .onchain_outpoint,
+            Some(packed_outpoint)
+        );
+        assert_eq!(
+            harness.events(),
+            vec![
+                "client_insert_created",
+                "client_transition_quoted",
+                "client_transition_payout_pending",
+                "persist_outpoint",
+                "watch_payout",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn provider_payout_persists_tx_identity_before_send_tx() {
         let harness = RuntimeActorHarness::new_provider_with_realistic_ckb_watcher();
         let quote = harness.loop_out_quote_terms();
@@ -7217,6 +7308,7 @@ mod tests {
                 quote_id: quote.quote_id.into(),
                 max_provider_fee: 1,
                 max_routing_fee: 1,
+                payout_outpoint: None,
             },
             reply
         ))
@@ -7308,6 +7400,7 @@ mod tests {
                 quote_id: quote.quote_id.into(),
                 max_provider_fee: 1,
                 max_routing_fee: 1,
+                payout_outpoint: None,
             },
             reply
         ))
@@ -7363,6 +7456,7 @@ mod tests {
                 quote_id: quote.quote_id.into(),
                 max_provider_fee: 1,
                 max_routing_fee: 1,
+                payout_outpoint: None,
             },
             reply
         ))
@@ -7405,6 +7499,7 @@ mod tests {
                 quote_id: quote.quote_id.into(),
                 max_provider_fee: 1,
                 max_routing_fee: 1,
+                payout_outpoint: None,
             },
             reply
         ))
@@ -7455,6 +7550,7 @@ mod tests {
                 quote_id: quote.quote_id.into(),
                 max_provider_fee: 1,
                 max_routing_fee: 1,
+                payout_outpoint: None,
             },
             reply
         ))
@@ -7497,7 +7593,7 @@ mod tests {
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
             .unwrap();
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms()).unwrap();
         transition_swap(
             &store,
@@ -7539,7 +7635,7 @@ mod tests {
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
             .unwrap();
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms()).unwrap();
         transition_swap(
             &store,
@@ -7575,7 +7671,7 @@ mod tests {
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
             .unwrap();
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms()).unwrap();
         transition_swap(
             &store,
@@ -7702,7 +7798,7 @@ mod tests {
         let store = TestLiquidityStore::new(events, "client");
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
 
         let request = prepare_client_loop_out_payment(&store, quote.clone()).unwrap();
@@ -7776,7 +7872,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         events.borrow_mut().clear();
 
@@ -7808,7 +7904,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         events.borrow_mut().clear();
 
@@ -7919,7 +8015,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         transition_swap(
             &store,
@@ -8047,7 +8143,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         transition_swap(
             &store,
@@ -8098,7 +8194,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         transition_swap(
             &store,
@@ -8157,7 +8253,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         transition_swap(
             &store,
@@ -8216,7 +8312,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         transition_swap(
             &store,
@@ -8320,7 +8416,7 @@ mod tests {
             ..test_loop_out_quote(now_ms + 60_000)
         };
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
         events.borrow_mut().clear();
 
@@ -8345,7 +8441,7 @@ mod tests {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let quote = test_loop_out_quote(now_ms() + 60_000);
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms() + 1).unwrap();
         store
             .update_liquidity_swap_state(
@@ -8427,7 +8523,7 @@ mod tests {
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
             .unwrap();
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         store
             .insert_liquidity_chain_tx(LiquidityChainTxRecord {
                 swap_id: quote.quote_id,
@@ -8470,7 +8566,7 @@ mod tests {
         store
             .insert_loop_out_quote(quote.clone(), now_ms())
             .unwrap();
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         store
             .insert_liquidity_chain_tx(LiquidityChainTxRecord {
                 swap_id: quote.quote_id,
@@ -8518,7 +8614,7 @@ mod tests {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let quote = test_loop_out_quote(now_ms() + 60_000);
-        create_client_loop_out(&store, quote.clone(), now_ms()).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms() + 1).unwrap();
         store
             .update_liquidity_swap_state(
@@ -8602,7 +8698,7 @@ mod tests {
         let now_ms = 1_000;
         let quote = test_loop_out_quote(now_ms + 60_000);
 
-        create_client_loop_out(&store, quote.clone(), now_ms).unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms, None).unwrap();
         mark_client_payout_locked(&store, quote.quote_id, now_ms + 1).unwrap();
 
         send_client_loop_out_payment(&store, &mut payment, quote.clone(), now_ms + 2)

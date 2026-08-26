@@ -1169,6 +1169,7 @@ mod tests {
             quote_id: JsonHash256([1u8; 32]),
             max_provider_fee: 10,
             max_routing_fee: 5,
+            payout_outpoint: None,
         }
     }
 
@@ -1251,6 +1252,7 @@ mod tests {
             swap_id: JsonHash256([1u8; 32]),
             state: "payment_settled".to_string(),
             payment_hash: JsonHash256([3u8; 32]),
+            payout_outpoint: None,
             created_at: 11,
         }
     }
