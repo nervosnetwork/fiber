@@ -1605,7 +1605,10 @@ where
             swap_id: swap.swap_id.into(),
             state: format!("{:?}", swap.state),
             payment_hash: swap.payment_hash.into(),
-            payout_outpoint: swap.onchain_outpoint.map(Into::into),
+            payout_outpoint: match swap.swap_kind {
+                LiquiditySwapKind::LoopOut => swap.onchain_outpoint.map(Into::into),
+                LiquiditySwapKind::LoopIn => None,
+            },
             created_at: swap.created_at,
         })
     }
@@ -6885,6 +6888,46 @@ mod tests {
             1
         );
         assert_eq!(event_count(&harness.events, "watch_loop_in_lock"), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_accept_loop_in_response_hides_client_lock_outpoint() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let quote = harness
+            .call_quote_loop_in(QuoteLoopInParams {
+                provider: "local".to_string(),
+                asset_id: "ckb".to_string(),
+                amount: 100,
+                client_invoice: valid_client_invoice(100, [55u8; 32].into()),
+                refund_lock: script_hex(&script("loop-in-hidden-outpoint-client-refund")),
+                max_provider_fee: 100,
+                max_routing_fee: 17,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+        let quote_id: Hash256 = quote.quote_id.into();
+        let lock_tx_hash: Hash256 = [56u8; 32].into();
+
+        let response = harness
+            .call_provider_accept_loop_in(quote_id, lock_tx_hash, 2)
+            .await
+            .unwrap();
+
+        let swap = harness
+            .store
+            .get_liquidity_swap(&quote_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.swap_kind, LiquiditySwapKind::LoopIn);
+        assert!(
+            swap.onchain_outpoint.is_some(),
+            "provider loop in persists the observed client lock outpoint"
+        );
+        assert_eq!(
+            response.payout_outpoint, None,
+            "loop in responses must not leak the client lock outpoint as a payout outpoint"
+        );
     }
 
     #[tokio::test]
