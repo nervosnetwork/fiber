@@ -15,16 +15,13 @@ use once_cell::sync::{Lazy, OnceCell};
 
 use crate::ckb::client::CkbChainClient;
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
-#[cfg(test)]
-use tokio::sync::oneshot;
 use tokio::sync::{Notify, RwLock as TokioRwLock};
 
-#[cfg(test)]
-use crate::ckb::CkbOutPointSpendTracer;
 use crate::{
     ckb::{
         contracts::{get_cell_deps, Contract, ContractsContext, ContractsInfo, ScriptCellDep},
-        CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingError, GetTxResponse,
+        CkbOutPointSpendTracingResult, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
+        FundingError, GetTxResponse,
     },
     now_timestamp_as_millis_u64,
 };
@@ -275,6 +272,60 @@ impl Actor for TraceTxReplier {
     }
 }
 
+// A simple actor to wait for the outpoint spend notifications from the mock
+// chain actor. Similar to `TraceTxReplier`, it waits until a committed spender
+// for the watched outpoint is observed and replies exactly once. It never
+// replies with an "unknown" result, matching production outpoint-spend-tracing
+// semantics where the callback is only invoked once a spender is confirmed.
+struct OutPointSpendReplier {
+    outpoint: packed::OutPoint,
+}
+
+impl OutPointSpendReplier {
+    pub fn new(outpoint: packed::OutPoint) -> Self {
+        Self { outpoint }
+    }
+}
+
+#[async_trait::async_trait]
+impl Actor for OutPointSpendReplier {
+    type Msg = CkbOutPointSpendTracingResult;
+    type Arguments = (
+        Arc<OutputPort<CkbOutPointSpendTracingResult>>,
+        RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>,
+    );
+    type State = Option<RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>>;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        (notifier, reply_port): Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        let outpoint = self.outpoint.clone();
+        notifier.subscribe(myself, move |notification| {
+            if notification.outpoint == outpoint {
+                Some(notification)
+            } else {
+                None
+            }
+        });
+        Ok(Some(reply_port))
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        reply_port: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(reply_port) = reply_port.take() {
+            let _ = reply_port.send(Ok(message));
+        }
+        myself.stop(Some("handled outpoint spend result".to_string()));
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     /// Returns Ok(None) if the message is handled by the middleware, otherwise the message
@@ -294,6 +345,10 @@ pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
     pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
+    pub committed_outpoint_spends: HashMap<packed::OutPoint, CkbOutPointSpendTracingResult>,
+    pub outpoint_spend_notifications: Arc<OutputPort<CkbOutPointSpendTracingResult>>,
+    pub outpoint_spend_tasks:
+        HashMap<packed::OutPoint, Vec<ActorRef<CkbOutPointSpendTracingResult>>>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
     pub context: Context,
     controlled: bool,
@@ -327,6 +382,9 @@ impl MockChainState {
             txs: HashMap::new(),
             tx_tracing_tasks: HashMap::new(),
             tx_notifications: Arc::new(OutputPort::default()),
+            committed_outpoint_spends: HashMap::new(),
+            outpoint_spend_notifications: Arc::new(OutputPort::default()),
+            outpoint_spend_tasks: HashMap::new(),
             cell_status: HashMap::new(),
             context: MockContext::new().context,
             controlled: false,
@@ -455,6 +513,21 @@ impl MockChainController {
         for input in tx.input_pts_iter() {
             state.cell_status.insert(input, CellStatus::Consumed);
         }
+        let outpoint_spends: Vec<CkbOutPointSpendTracingResult> = tx
+            .input_pts_iter()
+            .enumerate()
+            .map(|(input_index, input)| CkbOutPointSpendTracingResult {
+                outpoint: input.clone(),
+                spending_transaction: tx.clone(),
+                input_index,
+                block_number: 0,
+            })
+            .collect();
+        for result in &outpoint_spends {
+            state
+                .committed_outpoint_spends
+                .insert(result.outpoint.clone(), result.clone());
+        }
         for outpoint in tx.output_pts_iter() {
             let index: u32 = outpoint.index().unpack();
             let output = tx.outputs().get(index as usize).expect("output exists");
@@ -478,6 +551,9 @@ impl MockChainController {
         state
             .tx_notifications
             .send(CkbTxTracingResult { tx_hash, tx_status });
+        for result in outpoint_spends {
+            state.outpoint_spend_notifications.send(result);
+        }
         Ok(())
     }
 
@@ -570,6 +646,24 @@ impl MockChainActor {
         )
         .await
         .expect("start trace tx replier")
+        .0
+    }
+
+    pub async fn start_outpoint_spend_replier(
+        &self,
+        myself: ActorRef<CkbChainMessage>,
+        outpoint: packed::OutPoint,
+        notifier: Arc<OutputPort<CkbOutPointSpendTracingResult>>,
+        reply_port: RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>,
+    ) -> ActorRef<CkbOutPointSpendTracingResult> {
+        Actor::spawn_linked(
+            None,
+            OutPointSpendReplier::new(outpoint),
+            (notifier, reply_port),
+            myself.get_cell(),
+        )
+        .await
+        .expect("start outpoint spend replier")
         .0
     }
 }
@@ -882,11 +976,72 @@ impl Actor for MockChainActor {
                 }
             }
             CreateOutPointSpendTracer(tracer) => {
-                let _ = tracer.callback.send(Err(
-                    "mock outpoint spend tracing is not configured".to_string()
-                ));
+                debug!("Tracing outpoint spend: {:?}", &tracer);
+                let outpoint = tracer.outpoint.clone();
+                let (maybe_spend, notifications) = {
+                    let guard = state.shared.read().unwrap();
+                    (
+                        guard.committed_outpoint_spends.get(&outpoint).cloned(),
+                        guard.outpoint_spend_notifications.clone(),
+                    )
+                };
+
+                match maybe_spend {
+                    Some(result) => {
+                        let _ = tracer.callback.send(Ok(result));
+                    }
+                    // The outpoint has not been spent yet, so we wait for the
+                    // spend notification from the mock chain actor.
+                    None => {
+                        let registration_gate = state
+                            .shared
+                            .write()
+                            .unwrap()
+                            .next_tracer_registration_gate
+                            .take();
+                        if let Some(gate) = registration_gate {
+                            gate.pause().await;
+                        }
+                        let replier = self
+                            .start_outpoint_spend_replier(
+                                myself,
+                                outpoint.clone(),
+                                notifications,
+                                tracer.callback,
+                            )
+                            .await;
+                        state
+                            .shared
+                            .write()
+                            .unwrap()
+                            .outpoint_spend_tasks
+                            .entry(outpoint.clone())
+                            .or_default()
+                            .push(replier.clone());
+                        let current_spend = state
+                            .shared
+                            .read()
+                            .unwrap()
+                            .committed_outpoint_spends
+                            .get(&outpoint)
+                            .cloned();
+                        if let Some(result) = current_spend {
+                            let _ = replier.send_message(result);
+                        }
+                    }
+                }
             }
-            RemoveOutPointSpendTracers(_) => {}
+            RemoveOutPointSpendTracers(outpoint) => {
+                let mut state_guard = state.shared.write().unwrap();
+                for task in state_guard
+                    .outpoint_spend_tasks
+                    .remove(&outpoint)
+                    .unwrap_or_default()
+                    .into_iter()
+                {
+                    task.stop(Some(format!("remove tracers for outpoint {}", outpoint)));
+                }
+            }
 
             BuildUnsignedFundingTx {
                 funding_tx,
@@ -1082,36 +1237,6 @@ async fn test_set_and_get_block_timestamp() {
     set_next_block_timestamp(now).await;
     let timestamp = get_block_timestamp(H256::default()).await;
     assert_eq!(timestamp, now);
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-async fn test_mock_outpoint_spend_tracing_reports_not_configured() {
-    let shared_state = Arc::new(RwLock::new(MockChainState::new()));
-    let (actor, handle) = Actor::spawn(None, MockChainActor::new(), (None, shared_state))
-        .await
-        .expect("start mock chain actor");
-    let (send, recv) = oneshot::channel();
-
-    actor
-        .send_message(CkbChainMessage::CreateOutPointSpendTracer(
-            CkbOutPointSpendTracer {
-                outpoint: packed::OutPoint::default(),
-                lock_script: packed::Script::default(),
-                confirmations: 1,
-                callback: RpcReplyPort::from(send),
-            },
-        ))
-        .expect("create mock outpoint spend tracer");
-
-    let error = recv
-        .await
-        .expect("mock callback dropped")
-        .expect_err("mock unexpectedly traced outpoint spend");
-    assert_eq!(error, "mock outpoint spend tracing is not configured");
-
-    actor.stop(None);
-    handle.await.expect("stop mock chain actor");
 }
 
 #[derive(Clone, Debug)]
