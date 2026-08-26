@@ -1845,11 +1845,23 @@ where
             .update_liquidity_swap(
                 &swap_id,
                 LiquiditySwapUpdate {
-                    onchain_outpoint: Some(outpoint),
+                    onchain_outpoint: Some(outpoint.clone()),
                     updated_at: now_ms,
                     ..Default::default()
                 },
             )
+            .map_err(map_store_error)?;
+        store
+            .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+                swap_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: Hash256::from(outpoint.tx_hash()),
+                outpoint: Some(outpoint),
+                status: LiquidityChainTxStatus::Planned,
+                failure_reason: None,
+                created_at: now_ms,
+                updated_at: now_ms,
+            })
             .map_err(map_store_error)?;
     }
 
@@ -6261,8 +6273,15 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .onchain_outpoint,
-            Some(packed_outpoint)
+            Some(packed_outpoint.clone())
         );
+        let record = harness
+            .chain_tx_record(quote.quote_id, LiquidityChainTxRole::Payout)
+            .expect("client persists a payout chain tx record before watching");
+        assert_eq!(record.role, LiquidityChainTxRole::Payout);
+        assert_eq!(record.status, LiquidityChainTxStatus::Planned);
+        assert_eq!(record.tx_hash, Hash256::from(packed_outpoint.tx_hash()));
+        assert_eq!(record.outpoint, Some(packed_outpoint));
         assert_eq!(
             harness.events(),
             vec![
@@ -6270,6 +6289,7 @@ mod tests {
                 "client_transition_quoted",
                 "client_transition_payout_pending",
                 "persist_outpoint",
+                "persist_payout_tx",
                 "watch_payout",
             ]
         );
