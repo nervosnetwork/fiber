@@ -18,7 +18,8 @@ use ractor::{ActorRef, RpcReplyPort};
 
 use crate::ckb::contracts::get_udt_cell_deps;
 use crate::ckb::{
-    CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult, FundingRequest, FundingTx,
+    CkbChainMessage, CkbOutPointSpendTracer, CkbOutPointSpendTracingResult, CkbTxTracer,
+    CkbTxTracingMask, CkbTxTracingResult, FundingRequest, FundingTx,
 };
 use crate::liquidity::actor::LiquidityActorMessage;
 use crate::liquidity::quote::loop_in_gross_onchain_amount;
@@ -27,8 +28,9 @@ use crate::liquidity::store::{
 };
 use crate::liquidity::tx::{
     build_liquidity_lock_claim_witness, build_liquidity_lock_output,
-    build_liquidity_lock_refund_witness, build_liquidity_lock_script, LiquidityLockBuildError,
-    LiquidityLockOutputParams, LiquidityLockScriptArtifact,
+    build_liquidity_lock_refund_witness, build_liquidity_lock_script,
+    parse_liquidity_lock_claim_witness, LiquidityLockBuildError, LiquidityLockOutputParams,
+    LiquidityLockScriptArtifact,
 };
 use crate::liquidity::types::{LiquidityLoopOutError, LoopOutQuoteTerms};
 use crate::now_timestamp_as_millis_u64;
@@ -332,6 +334,13 @@ pub trait LiquidityChainWatcher {
         myself: ActorRef<LiquidityActorMessage>,
     ) -> Result<(), Self::Error>;
 
+    /// Watch the exact provider Loop Out payout for a committed valid client claim.
+    async fn watch_provider_claim(
+        &mut self,
+        swap_id: Hash256,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), Self::Error>;
+
     /// Broadcast the provider refund transaction for an expired payout lock.
     async fn broadcast_refund(&mut self, record: &LiquiditySwapRecord) -> Result<(), Self::Error>;
 
@@ -563,6 +572,85 @@ impl<S> CkbLiquidityChainWatcher<S> {
                     ));
                 }
                 _ => {}
+            }
+        });
+        RpcReplyPort::from(sender)
+    }
+
+    fn provider_claim_tracer_callback_for(
+        swap_id: Hash256,
+        watched_outpoint: packed::OutPoint,
+        payment_hash: Hash256,
+        liquidity_actor: ActorRef<LiquidityActorMessage>,
+    ) -> RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>> {
+        let (sender, receiver) =
+            tokio::sync::oneshot::channel::<Result<CkbOutPointSpendTracingResult, String>>();
+        tokio::spawn(async move {
+            let Ok(result) = receiver.await else {
+                tracing::warn!(?swap_id, "provider claim tracer callback was dropped");
+                return;
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(?swap_id, %error, "provider claim tracing failed");
+                    return;
+                }
+            };
+            if result.outpoint != watched_outpoint {
+                tracing::warn!(
+                    ?swap_id,
+                    "provider claim tracer returned a different outpoint"
+                );
+                return;
+            }
+            let Some(input) = result.spending_transaction.inputs().get(result.input_index) else {
+                tracing::warn!(
+                    ?swap_id,
+                    input_index = result.input_index,
+                    "provider claim tracer returned an invalid input index"
+                );
+                return;
+            };
+            if input.previous_output() != watched_outpoint {
+                tracing::warn!(
+                    ?swap_id,
+                    input_index = result.input_index,
+                    "provider claim input does not spend the watched outpoint"
+                );
+                return;
+            }
+            let Some(witness) = result
+                .spending_transaction
+                .witnesses()
+                .get(result.input_index)
+            else {
+                tracing::warn!(
+                    ?swap_id,
+                    input_index = result.input_index,
+                    "provider claim transaction is missing its indexed witness"
+                );
+                return;
+            };
+            let preimage = match parse_liquidity_lock_claim_witness(&witness) {
+                Ok(preimage) => preimage,
+                Err(error) => {
+                    tracing::warn!(?swap_id, %error, "provider claim witness is invalid");
+                    return;
+                }
+            };
+            let observed_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
+            if observed_hash != payment_hash {
+                tracing::warn!(
+                    ?swap_id,
+                    "provider claim preimage does not match the payment hash"
+                );
+                return;
+            }
+            if let Err(error) =
+                liquidity_actor.send_message(LiquidityActorMessage::ProviderClaimObserved(swap_id))
+            {
+                tracing::warn!(?swap_id, %error, "failed to deliver provider claim observation");
             }
         });
         RpcReplyPort::from(sender)
@@ -1605,6 +1693,76 @@ where
         Ok(())
     }
 
+    async fn watch_provider_claim(
+        &mut self,
+        swap_id: Hash256,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), Self::Error> {
+        let swap = self
+            .store
+            .get_liquidity_swap(&swap_id)
+            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        if swap.role != LiquiditySwapRole::Provider || swap.swap_kind != LiquiditySwapKind::LoopOut
+        {
+            return Err(LiquidityLoopOutError::Chain(
+                "cannot watch provider claim for non-provider loop out swap".to_string(),
+            ));
+        }
+        if !matches!(
+            swap.state,
+            LiquiditySwapState::PaymentSettled | LiquiditySwapState::ClaimPending
+        ) {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "cannot watch provider claim in state {:?}",
+                swap.state
+            )));
+        }
+        let quote = self
+            .store
+            .get_loop_out_quote(&swap.quote_id)
+            .map_err(|error| LiquidityLoopOutError::Store(error.to_string()))?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!(
+                    "loop out quote not found: {:?}",
+                    swap.quote_id
+                ))
+            })?;
+        let outpoint = swap.onchain_outpoint.clone().ok_or_else(|| {
+            LiquidityLoopOutError::Chain(
+                "cannot watch provider claim without payout outpoint".to_string(),
+            )
+        })?;
+        let artifact = self
+            .liquidity_lock_artifact
+            .as_ref()
+            .ok_or_else(Self::missing_payout_builder)?;
+        let lock_script =
+            build_liquidity_lock_script(artifact, &Self::payout_output_params(&quote));
+        self.ckb_chain_actor
+            .send_message(CkbChainMessage::CreateOutPointSpendTracer(
+                CkbOutPointSpendTracer {
+                    outpoint: outpoint.clone(),
+                    lock_script,
+                    confirmations: 1,
+                    callback: Self::provider_claim_tracer_callback_for(
+                        swap_id,
+                        outpoint,
+                        swap.payment_hash,
+                        myself,
+                    ),
+                },
+            ))
+            .map_err(|error| {
+                LiquidityLoopOutError::Chain(format!(
+                    "create provider claim outpoint tracer failed: {error}"
+                ))
+            })?;
+        Ok(())
+    }
+
     async fn broadcast_refund(&mut self, record: &LiquiditySwapRecord) -> Result<(), Self::Error> {
         let quote = self
             .store
@@ -2091,6 +2249,14 @@ mod tests {
             Err(LiquidityLoopOutError::Chain("unused".to_string()))
         }
 
+        async fn watch_provider_claim(
+            &mut self,
+            _swap_id: Hash256,
+            _myself: ActorRef<LiquidityActorMessage>,
+        ) -> Result<(), Self::Error> {
+            Err(LiquidityLoopOutError::Chain("unused".to_string()))
+        }
+
         async fn broadcast_refund(
             &mut self,
             _record: &LiquiditySwapRecord,
@@ -2331,6 +2497,11 @@ mod tests {
         AddFundingTx(Hash256),
         SendTx,
         CreateTxTracer(CkbTxTracingMask),
+        CreateOutPointSpendTracer {
+            outpoint: packed::OutPoint,
+            lock_script: packed::Script,
+            confirmations: u64,
+        },
         CommitFundingTx(Hash256),
     }
 
@@ -2468,6 +2639,16 @@ mod tests {
                         .lock()
                         .unwrap()
                         .push(MockCkbEvent::CreateTxTracer(mask));
+                }
+                CkbChainMessage::CreateOutPointSpendTracer(tracer) => {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(MockCkbEvent::CreateOutPointSpendTracer {
+                            outpoint: tracer.outpoint,
+                            lock_script: tracer.lock_script,
+                            confirmations: tracer.confirmations,
+                        });
                 }
                 _ => {}
             }
@@ -4738,6 +4919,141 @@ mod tests {
         let error = LoopOutClaimTxPlan::from_record(&record).unwrap_err();
 
         assert!(error.to_string().contains("outpoint"));
+    }
+
+    fn provider_claim_spending_tx(
+        watched_outpoint: &packed::OutPoint,
+        input_index: usize,
+        witness: packed::Bytes,
+    ) -> TransactionView {
+        let other_outpoint = test_outpoint(99);
+        let inputs = if input_index == 0 {
+            vec![watched_outpoint.clone(), other_outpoint]
+        } else {
+            vec![other_outpoint, watched_outpoint.clone()]
+        };
+        ckb_types::core::TransactionBuilder::default()
+            .set_inputs(
+                inputs
+                    .into_iter()
+                    .map(|outpoint| packed::CellInput::new(outpoint, 0))
+                    .collect(),
+            )
+            .set_witnesses(vec![packed::Bytes::default(), witness])
+            .build()
+    }
+
+    #[tokio::test]
+    async fn provider_claim_callback_uses_reported_input_index_and_sends_once() {
+        let swap_id = [81u8; 32].into();
+        let preimage: Hash256 = [82u8; 32].into();
+        let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+        let outpoint = test_outpoint(81);
+        let tx = provider_claim_spending_tx(
+            &outpoint,
+            1,
+            build_liquidity_lock_claim_witness(preimage.into()),
+        );
+        let (actor, mut messages) = spawn_mock_liquidity_actor().await;
+
+        CkbLiquidityChainWatcher::<NoopLiquidityStore>::provider_claim_tracer_callback_for(
+            swap_id,
+            outpoint.clone(),
+            payment_hash,
+            actor,
+        )
+        .send(Ok(crate::ckb::CkbOutPointSpendTracingResult {
+            outpoint,
+            spending_transaction: tx,
+            input_index: 1,
+            block_number: 1,
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), messages.recv())
+                .await
+                .unwrap(),
+            Some(LiquidityActorMessage::ProviderClaimObserved(id)) if id == swap_id
+        ));
+        assert!(messages.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_claim_callback_rejects_refund_wrong_preimage_and_malformed_witnesses() {
+        let swap_id = [83u8; 32].into();
+        let expected_preimage: Hash256 = [84u8; 32].into();
+        let payment_hash = HashAlgorithm::CkbHash.hash(expected_preimage).into();
+        let outpoint = test_outpoint(83);
+        let witnesses = [
+            build_liquidity_lock_refund_witness(),
+            build_liquidity_lock_claim_witness([85u8; 32]),
+            Bytes::from(vec![1, 2, 3]).pack(),
+        ];
+
+        for witness in witnesses {
+            let tx = provider_claim_spending_tx(&outpoint, 1, witness);
+            let (actor, mut messages) = spawn_mock_liquidity_actor().await;
+            CkbLiquidityChainWatcher::<NoopLiquidityStore>::provider_claim_tracer_callback_for(
+                swap_id,
+                outpoint.clone(),
+                payment_hash,
+                actor,
+            )
+            .send(Ok(crate::ckb::CkbOutPointSpendTracingResult {
+                outpoint: outpoint.clone(),
+                spending_transaction: tx,
+                input_index: 1,
+                block_number: 1,
+            }))
+            .unwrap();
+
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), messages.recv())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_claim_watch_uses_persisted_outpoint_and_quote_derived_script() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, MockCkbActor, events.clone())
+            .await
+            .unwrap();
+        let store = NoopLiquidityStore::default();
+        let mut quote = test_loop_out_quote_terms();
+        let outpoint = test_outpoint(86);
+        let mut swap = test_swap_record_with_outpoint(outpoint.clone());
+        swap.role = LiquiditySwapRole::Provider;
+        swap.state = LiquiditySwapState::PaymentSettled;
+        swap.payment_hash = quote.payment_hash;
+        quote.quote_id = swap.quote_id;
+        store
+            .insert_loop_out_quote(quote.clone(), 1)
+            .expect("persist quote");
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store,
+            liquidity_lock_artifact(),
+        );
+
+        watcher
+            .watch_provider_claim(swap.swap_id, spawn_mock_liquidity_actor().await.0)
+            .await
+            .unwrap();
+
+        wait_for_mock_events(&events, 1).await;
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            [MockCkbEvent::CreateOutPointSpendTracer {
+                outpoint,
+                lock_script: liquidity_lock_script_for_quote(&quote),
+                confirmations: 1,
+            }]
+        );
     }
 
     #[test]

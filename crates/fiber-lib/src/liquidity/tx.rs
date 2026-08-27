@@ -4,6 +4,7 @@ use ckb_types::{bytes::Bytes, packed, prelude::*};
 use thiserror::Error;
 
 use super::build_liquidity_lock_args;
+use super::types::LiquidityLoopOutError;
 
 /// Error returned when liquidity-lock output parameters are inconsistent.
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -101,6 +102,42 @@ pub fn build_liquidity_lock_claim_witness(payment_preimage: [u8; 32]) -> packed:
     Bytes::from(witness).pack()
 }
 
+/// Parse a liquidity-lock claim witness and return its payment preimage.
+pub fn parse_liquidity_lock_claim_witness(
+    witness: &packed::Bytes,
+) -> Result<[u8; 32], LiquidityLoopOutError> {
+    let prefix = packed::WitnessArgs::default().as_bytes();
+    let bytes = witness.raw_data();
+    let expected_len = prefix.len() + 1 + 32;
+    if bytes.len() < prefix.len() + 1 {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "invalid liquidity-lock claim witness length: expected {expected_len}, got {}",
+            bytes.len()
+        )));
+    }
+    if &bytes[..prefix.len()] != prefix.as_ref() {
+        return Err(LiquidityLoopOutError::Chain(
+            "invalid liquidity-lock claim witness prefix".to_string(),
+        ));
+    }
+    if bytes[prefix.len()] != 1 {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "invalid liquidity-lock claim branch: expected 1, got {}",
+            bytes[prefix.len()]
+        )));
+    }
+    if bytes.len() != expected_len {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "invalid liquidity-lock claim witness length: expected {expected_len}, got {}",
+            bytes.len()
+        )));
+    }
+
+    Ok(bytes[prefix.len() + 1..]
+        .try_into()
+        .expect("length checked"))
+}
+
 /// Build the witness bytes accepted by the liquidity-lock refund path.
 pub fn build_liquidity_lock_refund_witness() -> packed::Bytes {
     let mut witness = packed::WitnessArgs::default().as_bytes().to_vec();
@@ -139,5 +176,36 @@ mod tests {
         );
         assert_eq!(witness.raw_data()[expected_prefix.len()], 2);
         assert_eq!(witness.raw_data().len(), expected_prefix.len() + 1);
+    }
+
+    #[test]
+    fn parse_claim_witness_roundtrips_built_claim() {
+        let preimage = [7u8; 32];
+
+        assert_eq!(
+            parse_liquidity_lock_claim_witness(&build_liquidity_lock_claim_witness(preimage)),
+            Ok(preimage)
+        );
+    }
+
+    #[test]
+    fn parse_claim_witness_rejects_refund_branch() {
+        let error =
+            parse_liquidity_lock_claim_witness(&build_liquidity_lock_refund_witness()).unwrap_err();
+
+        assert!(error.to_string().contains("claim branch"));
+    }
+
+    #[test]
+    fn parse_claim_witness_rejects_malformed_and_extra_bytes() {
+        let prefix = packed::WitnessArgs::default().as_bytes();
+        let malformed = Bytes::from(prefix[..prefix.len() - 1].to_vec()).pack();
+        let mut extra = build_liquidity_lock_claim_witness([7u8; 32])
+            .raw_data()
+            .to_vec();
+        extra.push(0);
+
+        assert!(parse_liquidity_lock_claim_witness(&malformed).is_err());
+        assert!(parse_liquidity_lock_claim_witness(&Bytes::from(extra).pack()).is_err());
     }
 }
