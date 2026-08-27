@@ -923,6 +923,13 @@ where
             if swap.role == LiquiditySwapRole::Provider {
                 LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
                 mark_provider_payment_settled(&self.store, swap_id, now_ms())?;
+                if !self.watched_claim_swaps.contains(&swap_id) {
+                    self.chain
+                        .watch_provider_claim(swap_id, myself)
+                        .await
+                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+                    self.watched_claim_swaps.insert(swap_id);
+                }
                 return Ok(());
             }
             LoopOutClaimPlan::validate_payment_preimage(swap.payment_hash, preimage)?;
@@ -1329,6 +1336,15 @@ where
                             .await
                             .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
                     }
+                    self.watched_claim_swaps.insert(swap.swap_id);
+                } else if swap.swap_kind == LiquiditySwapKind::LoopOut {
+                    if self.watched_claim_swaps.contains(&swap.swap_id) {
+                        return Ok(false);
+                    }
+                    self.chain
+                        .watch_provider_claim(swap.swap_id, myself.clone())
+                        .await
+                        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
                     self.watched_claim_swaps.insert(swap.swap_id);
                 } else {
                     if self.watched_claim_swaps.contains(&swap.swap_id) {
@@ -2680,6 +2696,14 @@ where
         .ok_or_else(|| {
             LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
         })?;
+    if swap.role != LiquiditySwapRole::Provider || swap.swap_kind != LiquiditySwapKind::LoopOut {
+        return Err(LiquidityLoopOutError::Chain(
+            "cannot observe provider claim for non-provider loop out swap".to_string(),
+        ));
+    }
+    if swap.state == LiquiditySwapState::Success {
+        return Ok(());
+    }
     if !matches!(
         swap.state,
         LiquiditySwapState::PaymentSettled | LiquiditySwapState::ClaimPending
@@ -3655,6 +3679,15 @@ mod tests {
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
             self.events.borrow_mut().push("watch_claim");
+            Ok(())
+        }
+
+        async fn watch_provider_claim(
+            &mut self,
+            _swap_id: Hash256,
+            _myself: ActorRef<LiquidityActorMessage>,
+        ) -> Result<(), Self::Error> {
+            self.events.borrow_mut().push("watch_provider_claim");
             Ok(())
         }
 
@@ -4935,7 +4968,28 @@ mod tests {
 
         assert_eq!(first, 1);
         assert_eq!(second, 0);
-        assert_eq!(event_count(&events, "watch_claim"), 1);
+        assert_eq!(event_count(&events, "watch_provider_claim"), 1);
+        assert_eq!(event_count(&events, "watch_claim"), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_claim_pending_recovery_uses_provider_claim_watch_only() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut claim_pending = recovery_swap(43, LiquiditySwapState::ClaimPending);
+        claim_pending.role = LiquiditySwapRole::Provider;
+        store.insert_liquidity_swap(claim_pending).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store,
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+
+        assert_eq!(call_resume_non_terminal(actor).await, 1);
+        assert_eq!(event_count(&events, "watch_provider_claim"), 1);
+        assert_eq!(event_count(&events, "watch_claim"), 0);
+        assert_eq!(event_count(&events, "broadcast_claim"), 0);
     }
 
     #[tokio::test]
@@ -7389,6 +7443,7 @@ mod tests {
                 [4u8; 32].into(),
             ))
             .unwrap();
+        wait_for_event(&harness.events, "watch_provider_claim").await;
         ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
             .unwrap()
             .unwrap();
@@ -7397,6 +7452,8 @@ mod tests {
             harness.swap_state(quote.quote_id),
             LiquiditySwapState::PaymentSettled
         );
+        assert_eq!(event_count(&harness.events, "watch_provider_claim"), 1);
+        assert_eq!(event_count(&harness.events, "watch_claim"), 0);
     }
 
     #[tokio::test]
@@ -8437,6 +8494,21 @@ mod tests {
                 .unwrap()
                 .state,
             LiquiditySwapState::PayoutPending
+        );
+    }
+
+    #[test]
+    fn provider_loop_out_duplicate_claim_observed_at_success_is_harmless() {
+        let store = TestLiquidityStore::default();
+        let mut swap = recovery_swap(42, LiquiditySwapState::Success);
+        swap.role = LiquiditySwapRole::Provider;
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+
+        mark_provider_claim_observed(&store, swap.swap_id, now_ms()).unwrap();
+
+        assert_eq!(
+            store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap(),
+            swap
         );
     }
 
