@@ -11,9 +11,7 @@
     "declarationDir": "dist",
     "rootDir": "src",
     "declarationMap": true,
-    "typeRoots": [
-      "/src"
-    ],
+    "types": [],
     "allowSyntheticDefaultImports": true,
     "lib": [
       "ES2024",
@@ -24,6 +22,9 @@
     "allowImportingTsExtensions": true,
     "emitDeclarationOnly": true
   },
+  "include": [
+    "src/**/*"
+  ],
   "exclude": [
     "webpack.config.js",
     "dist/**",
