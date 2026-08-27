@@ -482,6 +482,7 @@ async fn shared_mock_chain_outpoint_spend_notifies_only_after_commit() {
     assert_eq!(result.outpoint, outpoint);
     assert_eq!(result.spending_transaction, spend_tx);
     assert_eq!(result.input_index, 0);
+    assert_eq!(result.script_group_input_index, 0);
     assert_eq!(result.block_number, 0);
 }
 
@@ -539,6 +540,7 @@ async fn shared_mock_chain_outpoint_spend_registration_after_commit_finds_histor
     assert_eq!(result.outpoint, outpoint);
     assert_eq!(result.spending_transaction, spend_tx);
     assert_eq!(result.input_index, 0);
+    assert_eq!(result.script_group_input_index, 0);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
@@ -571,6 +573,7 @@ async fn shared_mock_chain_outpoint_spend_registration_commit_race_cannot_lose_o
     let result = expect_spend_result(tracer_rx).await;
     assert_eq!(result.outpoint, outpoint);
     assert_eq!(result.input_index, 0);
+    assert_eq!(result.script_group_input_index, 0);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
@@ -638,4 +641,5 @@ async fn shared_mock_chain_outpoint_spend_burst_does_not_lose_watched_input() {
     assert_eq!(result.outpoint, watched_outpoint);
     assert_eq!(result.spending_transaction, spend_tx);
     assert_eq!(result.input_index, WATCHED_INPUT_INDEX);
+    assert_eq!(result.script_group_input_index, 0);
 }
