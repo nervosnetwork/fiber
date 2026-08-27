@@ -346,6 +346,63 @@ async fn build_spending_tx(outpoint: OutPoint) -> TransactionView {
         .build()
 }
 
+async fn submit_funded_cells(
+    controller: &MockChainController,
+    actor: &ActorRef<CkbChainMessage>,
+    count: usize,
+) -> Vec<OutPoint> {
+    let output = CellOutput::new_builder()
+        .capacity(100u64)
+        .lock(get_script_by_contract(
+            Contract::Secp256k1Lock,
+            &b"fund"[..],
+        ))
+        .build();
+    let tx = (0..count)
+        .fold(TransactionView::new_advanced_builder(), |builder, _| {
+            builder
+                .output(output.clone())
+                .output_data(ckb_types::packed::Bytes::default())
+        })
+        .build();
+    let tx_hash: Hash256 = tx.hash().into();
+    let outpoints = tx.output_pts_iter().collect();
+    call_t!(actor.clone(), CkbChainMessage::SendTx, 1000, tx)
+        .expect("chain actor alive")
+        .expect("funding tx accepted");
+    controller.commit(tx_hash).expect("commit funding tx");
+    outpoints
+}
+
+async fn build_multi_input_spending_tx(outpoints: &[OutPoint]) -> TransactionView {
+    let cell_deps = get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock])
+        .await
+        .expect("get cell deps");
+    outpoints
+        .iter()
+        .fold(
+            TransactionView::new_advanced_builder().cell_deps(cell_deps),
+            |builder, outpoint| {
+                builder.input(
+                    CellInput::new_builder()
+                        .previous_output(outpoint.clone())
+                        .build(),
+                )
+            },
+        )
+        .output(
+            CellOutput::new_builder()
+                .capacity(50u64)
+                .lock(get_script_by_contract(
+                    Contract::Secp256k1Lock,
+                    &b"spend"[..],
+                ))
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default())
+        .build()
+}
+
 async fn submit_pending_tx(actor: &ActorRef<CkbChainMessage>, tx: TransactionView) -> Hash256 {
     let tx_hash: Hash256 = tx.hash().into();
     call_t!(actor.clone(), CkbChainMessage::SendTx, 1000, tx)
@@ -377,10 +434,12 @@ async fn expect_spend_result(
 }
 
 async fn assert_no_spend_delivery(
-    tracer_rx: oneshot::Receiver<Result<CkbOutPointSpendTracingResult, String>>,
+    tracer_rx: &mut oneshot::Receiver<Result<CkbOutPointSpendTracingResult, String>>,
 ) {
-    if let Ok(Ok(Ok(result))) = tokio::time::timeout(Duration::from_millis(200), tracer_rx).await {
-        panic!("tracer unexpectedly delivered a spend result: {:?}", result);
+    match tokio::time::timeout(Duration::from_millis(200), tracer_rx).await {
+        Err(_) => {}
+        Ok(Ok(result)) => panic!("tracer unexpectedly delivered a result: {:?}", result),
+        Ok(Err(_)) => panic!("tracer callback closed before explicit removal"),
     }
 }
 
@@ -436,7 +495,7 @@ async fn shared_mock_chain_outpoint_spend_reject_does_not_notify_and_leaves_inpu
     let spend_tx = build_spending_tx(outpoint.clone()).await;
     let spend_hash = submit_pending_tx(&actor, spend_tx).await;
 
-    let (tracer_tx, tracer_rx) = oneshot::channel();
+    let (tracer_tx, mut tracer_rx) = oneshot::channel();
     actor
         .send_message(CkbChainMessage::CreateOutPointSpendTracer(spend_tracer(
             outpoint.clone(),
@@ -448,7 +507,12 @@ async fn shared_mock_chain_outpoint_spend_reject_does_not_notify_and_leaves_inpu
         .reject(spend_hash, "controlled rejection")
         .expect("reject pending transaction");
 
-    assert_no_spend_delivery(tracer_rx).await;
+    assert_no_spend_delivery(&mut tracer_rx).await;
+    actor
+        .send_message(CkbChainMessage::RemoveOutPointSpendTracers(
+            outpoint.clone(),
+        ))
+        .expect("remove outpoint spend tracer");
     assert!(get_live_cell(&actor, outpoint).await.unwrap().is_some());
 }
 
@@ -537,5 +601,41 @@ async fn shared_mock_chain_outpoint_spend_removal_prevents_late_delivery() {
 
     controller.commit(spend_hash).expect("commit spending tx");
 
-    assert_no_spend_delivery(tracer_rx).await;
+    match tokio::time::timeout(Duration::from_millis(200), tracer_rx).await {
+        Ok(Ok(result)) => panic!("tracer unexpectedly delivered after removal: {:?}", result),
+        Ok(Err(_)) | Err(_) => {}
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test(flavor = "current_thread"))]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+async fn shared_mock_chain_outpoint_spend_burst_does_not_lose_watched_input() {
+    const INPUT_COUNT: usize = 32;
+    const WATCHED_INPUT_INDEX: usize = 20;
+
+    let controller = MockChainController::new();
+    let actor = spawn_controlled_mock_chain_actor(&controller).await;
+    let outpoints = submit_funded_cells(&controller, &actor, INPUT_COUNT).await;
+    let watched_outpoint = outpoints[WATCHED_INPUT_INDEX].clone();
+    let spend_tx = build_multi_input_spending_tx(&outpoints).await;
+    let spend_hash = submit_pending_tx(&actor, spend_tx.clone()).await;
+
+    let (tracer_tx, tracer_rx) = oneshot::channel();
+    actor
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(spend_tracer(
+            watched_outpoint.clone(),
+            tracer_tx,
+        )))
+        .expect("create outpoint spend tracer");
+    // FIFO barrier: the tracer is registered before the synchronous burst commit.
+    let _ = get_live_cell(&actor, watched_outpoint.clone())
+        .await
+        .unwrap();
+
+    controller.commit(spend_hash).expect("commit burst spend");
+
+    let result = expect_spend_result(tracer_rx).await;
+    assert_eq!(result.outpoint, watched_outpoint);
+    assert_eq!(result.spending_transaction, spend_tx);
+    assert_eq!(result.input_index, WATCHED_INPUT_INDEX);
 }
