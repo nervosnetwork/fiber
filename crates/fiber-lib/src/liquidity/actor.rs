@@ -9033,6 +9033,7 @@ mod tests {
     #[tokio::test]
     async fn every_client_payout_validation_error_stays_pending_without_payment() {
         let validation_errors = [
+            "observed loop out payout cell not found or already spent",
             "liquidity-lock contract mismatch",
             "lock args length mismatch",
             "payment_hash mismatch",
