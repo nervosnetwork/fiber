@@ -171,14 +171,25 @@ impl LiquidityNetworkNode {
         self.request("get_swap", GetSwapParams { swap_id }).await
     }
 
-    #[allow(dead_code)]
-    async fn list_chain_transactions(
+    pub(crate) async fn list_chain_transactions(
         &self,
         swap_id: fiber_json_types::Hash256,
     ) -> ListLiquidityChainTransactionsResponse {
         self.request(
             "list_liquidity_chain_transactions",
             ListLiquidityChainTransactionsParams { swap_id },
+        )
+        .await
+    }
+
+    pub(crate) async fn list_channels(&self) -> ListChannelsResult {
+        self.request(
+            "list_channels",
+            ListChannelsParams {
+                pubkey: None,
+                include_closed: None,
+                only_pending: None,
+            },
         )
         .await
     }
@@ -355,9 +366,44 @@ impl LiquidityNetworkFixture {
             node < self.nodes.len(),
             "invalid liquidity node index {node}"
         );
+        self.nodes[node].restart().await;
+        self.wait_for_node_ready(node, channel_id, timeout).await;
+    }
+
+    pub(crate) async fn stop_node(&mut self, node: usize) {
+        assert!(
+            node < self.nodes.len(),
+            "invalid liquidity node index {node}"
+        );
+        self.nodes[node].stop().await;
+    }
+
+    pub(crate) async fn start_node_and_wait_ready(
+        &mut self,
+        node: usize,
+        channel_id: Hash256,
+        timeout: Duration,
+    ) {
+        assert!(
+            node < self.nodes.len(),
+            "invalid liquidity node index {node}"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.nodes[node].node.start().await;
+        let (_, address) = self.nodes[node]
+            .node
+            .rpc_server
+            .as_ref()
+            .expect("restarted liquidity RPC server");
+        self.nodes[node].rpc = HttpClientBuilder::default()
+            .build(format!("http://{address}"))
+            .expect("rebuild liquidity RPC client");
+        self.wait_for_node_ready(node, channel_id, timeout).await;
+    }
+
+    async fn wait_for_node_ready(&mut self, node: usize, channel_id: Hash256, timeout: Duration) {
         let peer = 1 - node;
         let peer_pubkey: fiber_json_types::Pubkey = self.nodes[peer].pubkey().into();
-        self.nodes[node].restart().await;
 
         let deadline = Instant::now() + timeout;
         let mut saw_channel_ready_event = false;
