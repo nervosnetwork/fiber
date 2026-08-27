@@ -16,6 +16,8 @@ pub struct CkbOutPointSpendTracingResult {
     pub outpoint: packed::OutPoint,
     pub spending_transaction: TransactionView,
     pub input_index: usize,
+    /// First transaction input in the exact lock-script group.
+    pub script_group_input_index: usize,
     pub block_number: u64,
 }
 
@@ -328,6 +330,7 @@ impl PollTask {
                     outpoint: self.outpoint.clone(),
                     spending_transaction: spend.transaction,
                     input_index: spend.input_index,
+                    script_group_input_index: spend.script_group_input_index,
                     block_number: spend.block_number,
                 })
             })
@@ -397,6 +400,7 @@ mod tests {
             outpoint: watched_outpoint,
             spending_transaction: TransactionBuilder::default().build(),
             input_index: 2,
+            script_group_input_index: 1,
             block_number: 42,
         }
     }
@@ -446,6 +450,10 @@ mod tests {
         assert_eq!(actual.outpoint, expected.outpoint);
         assert_eq!(actual.spending_transaction, expected.spending_transaction);
         assert_eq!(actual.input_index, expected.input_index);
+        assert_eq!(
+            actual.script_group_input_index,
+            expected.script_group_input_index
+        );
         assert_eq!(actual.block_number, expected.block_number);
 
         actor

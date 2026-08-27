@@ -29,6 +29,8 @@ pub struct CommittedOutPointSpend {
     pub transaction: TransactionView,
     /// The position of the watched outpoint in the transaction inputs.
     pub input_index: usize,
+    /// The first input selected by the exact lock script search.
+    pub script_group_input_index: usize,
     /// The block number that committed the transaction.
     pub block_number: u64,
 }
@@ -133,6 +135,31 @@ fn first_input_tx_hash(txs: &[Tx]) -> Option<H256> {
 }
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
+fn grouped_script_input_candidates(txs: &[Tx]) -> Result<Vec<(H256, Vec<usize>)>, anyhow::Error> {
+    let mut candidates = Vec::new();
+    for tx in txs {
+        let Tx::Grouped(tx) = tx else {
+            return Err(anyhow::anyhow!(
+                "CKB indexer returned an ungrouped transaction for grouped script search"
+            ));
+        };
+        let mut input_indexes: Vec<_> = tx
+            .cells
+            .iter()
+            .filter(|(cell_type, _)| matches!(cell_type, CellType::Input))
+            .map(|(_, index)| u32::from(*index) as usize)
+            .collect();
+        input_indexes.sort_unstable();
+        input_indexes.dedup();
+        if !input_indexes.is_empty() {
+            candidates.push((tx.tx_hash.clone(), input_indexes));
+        }
+    }
+    Ok(candidates)
+}
+
+#[cfg(any(not(target_arch = "wasm32"), test))]
+#[allow(dead_code)]
 fn unique_input_tx_hashes(txs: &[Tx], seen: &mut std::collections::HashSet<H256>) -> Vec<H256> {
     txs.iter()
         .filter_map(input_tx_hash)
@@ -159,12 +186,18 @@ fn has_required_confirmations(tip: u64, block_number: u64, confirmations: u64) -
 
 #[cfg(any(not(target_arch = "wasm32"), test))]
 fn find_spend_in_loaded_candidates(
-    candidates: impl IntoIterator<Item = (H256, ckb_jsonrpc_types::TransactionWithStatusResponse)>,
+    candidates: impl IntoIterator<
+        Item = (
+            H256,
+            Vec<usize>,
+            ckb_jsonrpc_types::TransactionWithStatusResponse,
+        ),
+    >,
     watched_outpoint: &packed::OutPoint,
     tip: u64,
     confirmations: u64,
 ) -> Result<Option<CommittedOutPointSpend>, anyhow::Error> {
-    for (tx_hash, response) in candidates {
+    for (tx_hash, script_group_input_indexes, response) in candidates {
         if !matches!(
             response.tx_status.status,
             ckb_jsonrpc_types::Status::Committed
@@ -205,10 +238,26 @@ fn find_spend_in_loaded_candidates(
         let Some(input_index) = find_watched_input_index(&transaction, watched_outpoint) else {
             continue;
         };
+        if let Some(script_group_input_index) = script_group_input_indexes
+            .iter()
+            .find(|index| **index >= transaction.inputs().len())
+        {
+            return Err(anyhow::anyhow!(
+                "script-group input index {script_group_input_index} is out of range for candidate {tx_hash} with {} inputs",
+                transaction.inputs().len()
+            ));
+        }
+        if !script_group_input_indexes.contains(&input_index) {
+            continue;
+        }
+        let script_group_input_index = *script_group_input_indexes
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("candidate {tx_hash} has an empty script group"))?;
 
         return Ok(Some(CommittedOutPointSpend {
             transaction,
             input_index,
+            script_group_input_index,
             block_number,
         }));
     }
@@ -333,7 +382,8 @@ pub(crate) async fn find_committed_outpoint_spend(
     const PAGE_SIZE: u32 = 100;
 
     let client = new_ckb_rpc_async_client(rpc_url);
-    let search_key = new_exact_lock_script_search_key(lock_script);
+    let mut search_key = new_exact_lock_script_search_key(lock_script);
+    search_key.group_by_transaction = Some(true);
     let tip: u64 = client.get_tip_block_number().await?.into();
     let mut after_cursor: Option<JsonBytes> = None;
     let mut seen_tx_hashes = std::collections::HashSet::new();
@@ -353,12 +403,16 @@ pub(crate) async fn find_committed_outpoint_spend(
             return Ok(None);
         }
 
-        for tx_hash in unique_input_tx_hashes(&txs.objects, &mut seen_tx_hashes) {
+        for (tx_hash, script_group_input_indexes) in grouped_script_input_candidates(&txs.objects)?
+        {
+            if !seen_tx_hashes.insert(tx_hash.clone()) {
+                continue;
+            }
             let response = client
                 .get_only_committed_packed_transaction(tx_hash.clone())
                 .await?;
             if let Some(spend) = find_spend_in_loaded_candidates(
-                std::iter::once((tx_hash, response)),
+                std::iter::once((tx_hash, script_group_input_indexes, response)),
                 watched_outpoint,
                 tip,
                 confirmations,
@@ -497,7 +551,8 @@ mod tests {
 
     use super::{
         find_spend_in_loaded_candidates, find_watched_input_index, first_input_tx_hash,
-        has_required_confirmations, input_tx_hash, unique_input_tx_hashes,
+        grouped_script_input_candidates, has_required_confirmations, input_tx_hash,
+        unique_input_tx_hashes,
     };
     use ckb_jsonrpc_types::{
         BlockNumber, ResponseFormat, TransactionWithStatusResponse, TxStatus as JsonTxStatus,
@@ -562,10 +617,14 @@ mod tests {
     fn build_loaded_candidate(
         inputs: Vec<packed::OutPoint>,
         status: JsonTxStatus,
-    ) -> (H256, TransactionWithStatusResponse) {
+    ) -> (H256, Vec<usize>, TransactionWithStatusResponse) {
         let transaction = build_transaction(inputs);
         let tx_hash = transaction.hash().into();
-        (tx_hash, build_candidate_response(transaction, status))
+        (
+            tx_hash,
+            vec![0],
+            build_candidate_response(transaction, status),
+        )
     }
 
     #[test]
@@ -629,6 +688,34 @@ mod tests {
     }
 
     #[test]
+    fn test_grouped_script_input_candidates_select_first_matching_input() {
+        let tx_hash = H256::from([10; 32]);
+        let grouped = Tx::Grouped(TxWithCells {
+            tx_hash: tx_hash.clone(),
+            block_number: BlockNumber::from(10_u64),
+            tx_index: Uint32::from(0_u32),
+            cells: vec![
+                (CellType::Output, Uint32::from(0_u32)),
+                (CellType::Input, Uint32::from(3_u32)),
+                (CellType::Input, Uint32::from(1_u32)),
+            ],
+        });
+
+        assert_eq!(
+            grouped_script_input_candidates(&[grouped]).unwrap(),
+            vec![(tx_hash, vec![1, 3])]
+        );
+    }
+
+    #[test]
+    fn test_grouped_script_input_candidates_reject_ungrouped_response() {
+        let error = grouped_script_input_candidates(&[build_tx(CellType::Input, 11)])
+            .expect_err("ungrouped response cannot prove the first script-group input");
+
+        assert!(error.to_string().contains("ungrouped"));
+    }
+
+    #[test]
     fn test_required_confirmations_are_inclusive_and_zero_means_one() {
         assert!(has_required_confirmations(10, 10, 0));
         assert!(has_required_confirmations(10, 10, 1));
@@ -651,6 +738,24 @@ mod tests {
 
         assert_eq!(spend.input_index, 0);
         assert_eq!(spend.block_number, 10);
+    }
+
+    #[test]
+    fn test_watched_input_must_belong_to_indexer_script_group() {
+        let watched_outpoint = build_outpoint(12, 1);
+        let transaction = build_transaction(vec![build_outpoint(11, 0), watched_outpoint.clone()]);
+        let tx_hash = transaction.hash().into();
+        let candidate = (
+            tx_hash,
+            vec![0],
+            build_candidate_response(transaction, committed_status(10)),
+        );
+
+        assert!(
+            find_spend_in_loaded_candidates(vec![candidate], &watched_outpoint, 10, 1)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -720,7 +825,7 @@ mod tests {
         };
 
         let error = find_spend_in_loaded_candidates(
-            vec![(candidate_hash.clone(), response)],
+            vec![(candidate_hash.clone(), vec![0], response)],
             &build_outpoint(8, 1),
             10,
             1,
@@ -757,7 +862,7 @@ mod tests {
         let response = build_candidate_response(transaction, committed_status(10));
 
         let error = find_spend_in_loaded_candidates(
-            vec![(expected_hash.clone(), response)],
+            vec![(expected_hash.clone(), vec![0], response)],
             &watched_outpoint,
             10,
             2,

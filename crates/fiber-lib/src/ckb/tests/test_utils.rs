@@ -278,7 +278,7 @@ struct OutPointSpendReplier;
 
 #[async_trait::async_trait]
 impl Actor for OutPointSpendReplier {
-    type Msg = CkbOutPointSpendTracingResult;
+    type Msg = Result<CkbOutPointSpendTracingResult, String>;
     type Arguments = RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>;
     type State = Option<RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>>;
 
@@ -297,11 +297,71 @@ impl Actor for OutPointSpendReplier {
         reply_port: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         if let Some(reply_port) = reply_port.take() {
-            let _ = reply_port.send(Ok(message));
+            let _ = reply_port.send(message);
         }
         myself.stop(Some("handled outpoint spend result".to_string()));
         Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+struct MockCommittedOutPointSpend {
+    outpoint: packed::OutPoint,
+    spending_transaction: TransactionView,
+    input_index: usize,
+    block_number: u64,
+}
+
+#[derive(Debug)]
+struct MockOutPointSpendRegistration {
+    lock_script: packed::Script,
+    replier: ActorRef<Result<CkbOutPointSpendTracingResult, String>>,
+}
+
+fn mock_outpoint_spend_result(
+    spend: &MockCommittedOutPointSpend,
+    lock_script: &packed::Script,
+    context: &Context,
+) -> Result<CkbOutPointSpendTracingResult, String> {
+    let watched_input = spend
+        .spending_transaction
+        .inputs()
+        .get(spend.input_index)
+        .ok_or_else(|| {
+            format!(
+                "watched input index {} is out of range for committed mock spend",
+                spend.input_index
+            )
+        })?;
+    if watched_input.previous_output() != spend.outpoint {
+        return Err("watched input does not match committed mock spend outpoint".to_string());
+    }
+    let watched_lock = context
+        .get_cell(&spend.outpoint)
+        .map(|(output, _)| output.lock())
+        .ok_or_else(|| format!("watched mock cell {:?} is unavailable", spend.outpoint))?;
+    if watched_lock != *lock_script {
+        return Err("watched mock cell lock does not match tracer lock script".to_string());
+    }
+    let script_group_input_index = spend
+        .spending_transaction
+        .input_pts_iter()
+        .enumerate()
+        .find_map(|(index, outpoint)| {
+            context
+                .get_cell(&outpoint)
+                .is_some_and(|(output, _)| output.lock() == *lock_script)
+                .then_some(index)
+        })
+        .ok_or_else(|| "committed mock spend has no input in tracer script group".to_string())?;
+
+    Ok(CkbOutPointSpendTracingResult {
+        outpoint: spend.outpoint.clone(),
+        spending_transaction: spend.spending_transaction.clone(),
+        input_index: spend.input_index,
+        script_group_input_index,
+        block_number: spend.block_number,
+    })
 }
 
 #[async_trait::async_trait]
@@ -323,9 +383,8 @@ pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
     pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
-    pub committed_outpoint_spends: HashMap<packed::OutPoint, CkbOutPointSpendTracingResult>,
-    pub outpoint_spend_tasks:
-        HashMap<packed::OutPoint, Vec<ActorRef<CkbOutPointSpendTracingResult>>>,
+    committed_outpoint_spends: HashMap<packed::OutPoint, MockCommittedOutPointSpend>,
+    outpoint_spend_tasks: HashMap<packed::OutPoint, Vec<MockOutPointSpendRegistration>>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
     pub context: Context,
     controlled: bool,
@@ -486,13 +545,10 @@ impl MockChainController {
                 .map_err(|error| format!("failed to verify transaction {tx_hash}: {error:?}"))?;
         }
 
-        for input in tx.input_pts_iter() {
-            state.cell_status.insert(input, CellStatus::Consumed);
-        }
-        let outpoint_spends: Vec<CkbOutPointSpendTracingResult> = tx
+        let outpoint_spends: Vec<MockCommittedOutPointSpend> = tx
             .input_pts_iter()
             .enumerate()
-            .map(|(input_index, input)| CkbOutPointSpendTracingResult {
+            .map(|(input_index, input)| MockCommittedOutPointSpend {
                 outpoint: input.clone(),
                 spending_transaction: tx.clone(),
                 input_index,
@@ -503,6 +559,31 @@ impl MockChainController {
             state
                 .committed_outpoint_spends
                 .insert(result.outpoint.clone(), result.clone());
+        }
+        let outpoint_spend_deliveries: Vec<_> = outpoint_spends
+            .into_iter()
+            .flat_map(|spend| {
+                let registrations = state
+                    .outpoint_spend_tasks
+                    .remove(&spend.outpoint)
+                    .unwrap_or_default();
+                registrations
+                    .into_iter()
+                    .map(|registration| {
+                        (
+                            mock_outpoint_spend_result(
+                                &spend,
+                                &registration.lock_script,
+                                &state.context,
+                            ),
+                            registration.replier,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for input in tx.input_pts_iter() {
+            state.cell_status.insert(input, CellStatus::Consumed);
         }
         for outpoint in tx.output_pts_iter() {
             let index: u32 = outpoint.index().unpack();
@@ -527,21 +608,9 @@ impl MockChainController {
         state
             .tx_notifications
             .send(CkbTxTracingResult { tx_hash, tx_status });
-        let outpoint_spend_deliveries: Vec<_> = outpoint_spends
-            .into_iter()
-            .map(|result| {
-                let repliers = state
-                    .outpoint_spend_tasks
-                    .remove(&result.outpoint)
-                    .unwrap_or_default();
-                (result, repliers)
-            })
-            .collect();
         drop(state);
-        for (result, repliers) in outpoint_spend_deliveries {
-            for replier in repliers {
-                let _ = replier.send_message(result.clone());
-            }
+        for (result, replier) in outpoint_spend_deliveries {
+            let _ = replier.send_message(result);
         }
         Ok(())
     }
@@ -642,7 +711,7 @@ impl MockChainActor {
         &self,
         myself: ActorRef<CkbChainMessage>,
         reply_port: RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>,
-    ) -> ActorRef<CkbOutPointSpendTracingResult> {
+    ) -> ActorRef<Result<CkbOutPointSpendTracingResult, String>> {
         Actor::spawn_linked(None, OutPointSpendReplier, reply_port, myself.get_cell())
             .await
             .expect("start outpoint spend replier")
@@ -962,12 +1031,14 @@ impl Actor for MockChainActor {
                 let outpoint = tracer.outpoint.clone();
                 let maybe_spend = {
                     let guard = state.shared.read().unwrap();
-                    guard.committed_outpoint_spends.get(&outpoint).cloned()
+                    guard.committed_outpoint_spends.get(&outpoint).map(|spend| {
+                        mock_outpoint_spend_result(spend, &tracer.lock_script, &guard.context)
+                    })
                 };
 
                 match maybe_spend {
                     Some(result) => {
-                        let _ = tracer.callback.send(Ok(result));
+                        let _ = tracer.callback.send(result);
                     }
                     // The outpoint has not been spent yet, so we wait for the
                     // spend notification from the mock chain actor.
@@ -984,29 +1055,40 @@ impl Actor for MockChainActor {
                         let replier = self
                             .start_outpoint_spend_replier(myself, tracer.callback)
                             .await;
-                        let (current_spend, repliers) = {
+                        let deliveries = {
                             let mut guard = state.shared.write().unwrap();
                             guard
                                 .outpoint_spend_tasks
                                 .entry(outpoint.clone())
                                 .or_default()
-                                .push(replier);
-                            let current_spend =
-                                guard.committed_outpoint_spends.get(&outpoint).cloned();
-                            let repliers = if current_spend.is_some() {
+                                .push(MockOutPointSpendRegistration {
+                                    lock_script: tracer.lock_script.clone(),
+                                    replier,
+                                });
+                            let spend = guard.committed_outpoint_spends.get(&outpoint).cloned();
+                            if let Some(spend) = spend {
                                 guard
                                     .outpoint_spend_tasks
                                     .remove(&outpoint)
                                     .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|registration| {
+                                        (
+                                            mock_outpoint_spend_result(
+                                                &spend,
+                                                &registration.lock_script,
+                                                &guard.context,
+                                            ),
+                                            registration.replier,
+                                        )
+                                    })
+                                    .collect()
                             } else {
                                 Vec::new()
-                            };
-                            (current_spend, repliers)
-                        };
-                        if let Some(result) = current_spend {
-                            for replier in repliers {
-                                let _ = replier.send_message(result.clone());
                             }
+                        };
+                        for (result, replier) in deliveries {
+                            let _ = replier.send_message(result);
                         }
                     }
                 }
@@ -1019,7 +1101,8 @@ impl Actor for MockChainActor {
                     .unwrap_or_default()
                     .into_iter()
                 {
-                    task.stop(Some(format!("remove tracers for outpoint {}", outpoint)));
+                    task.replier
+                        .stop(Some(format!("remove tracers for outpoint {}", outpoint)));
                 }
             }
 
