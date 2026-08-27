@@ -65,27 +65,93 @@ async fn channel_snapshot(
         .unwrap_or_else(|| panic!("channel {channel_id_json} not found on node {node}"))
 }
 
+async fn channel_snapshot_before_deadline(
+    fixture: &LiquidityNetworkFixture,
+    node: usize,
+    channel_id: Hash256,
+    deadline: Instant,
+    operation: &str,
+) -> Result<Channel, String> {
+    let channel_id_json: fiber_json_types::Hash256 = channel_id.into();
+    fixture.nodes[node]
+        .list_channels_before_deadline(deadline, operation)
+        .await?
+        .channels
+        .into_iter()
+        .find(|channel| channel.channel_id == channel_id_json)
+        .ok_or_else(|| format!("{operation} returned no channel {channel_id_json}"))
+}
+
+fn channel_has_no_pending_tlcs(channel: &Channel) -> bool {
+    channel.offered_tlc_balance == 0
+        && channel.received_tlc_balance == 0
+        && channel.pending_tlcs.is_empty()
+}
+
 async fn wait_for_channel_balances(
     fixture: &LiquidityNetworkFixture,
     channel_id: Hash256,
-    expected_client: u128,
-    expected_provider: u128,
+    expected_client: (u128, u128),
+    expected_provider: (u128, u128),
     timeout: Duration,
 ) -> [Channel; 2] {
     let deadline = Instant::now() + timeout;
+    let mut latest_client: Option<Channel> = None;
+    let mut latest_provider: Option<Channel> = None;
+    let expected = format!(
+        "channel {channel_id:?} local/remote balances client {expected_client:?}, provider \
+         {expected_provider:?}, with no pending TLCs"
+    );
     loop {
-        let client = channel_snapshot(fixture, CLIENT, channel_id).await;
-        let provider = channel_snapshot(fixture, PROVIDER, channel_id).await;
-        if client.local_balance == expected_client && provider.local_balance == expected_provider {
-            return [client, provider];
+        latest_client = Some(
+            channel_snapshot_before_deadline(
+                fixture,
+                CLIENT,
+                channel_id,
+                deadline,
+                &format!("list_channels request for client node {CLIENT}, expected {expected}"),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}; latest client channel: {latest_client:?}; latest provider channel: \
+                     {latest_provider:?}"
+                )
+            }),
+        );
+        latest_provider = Some(
+            channel_snapshot_before_deadline(
+                fixture,
+                PROVIDER,
+                channel_id,
+                deadline,
+                &format!("list_channels request for provider node {PROVIDER}, expected {expected}"),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}; latest client channel: {latest_client:?}; latest provider channel: \
+                     {latest_provider:?}"
+                )
+            }),
+        );
+        let client = latest_client.as_ref().expect("client channel fetched");
+        let provider = latest_provider.as_ref().expect("provider channel fetched");
+        if (client.local_balance, client.remote_balance) == expected_client
+            && (provider.local_balance, provider.remote_balance) == expected_provider
+            && channel_has_no_pending_tlcs(client)
+            && channel_has_no_pending_tlcs(provider)
+        {
+            return [client.clone(), provider.clone()];
         }
         if Instant::now() >= deadline {
             panic!(
-                "timed out waiting for channel {channel_id:?} balances; expected client/provider \
-                 {expected_client}/{expected_provider}, latest {}/{}, client TLCs: {:?}, provider \
-                 TLCs: {:?}",
+                "timed out waiting for {expected}; latest client local/remote {}/{}, provider \
+                 local/remote {}/{}, client TLCs: {:?}, provider TLCs: {:?}",
                 client.local_balance,
+                client.remote_balance,
                 provider.local_balance,
+                provider.remote_balance,
                 client.pending_tlcs,
                 provider.pending_tlcs,
             );
@@ -214,35 +280,32 @@ async fn liquidity_ckb_loop_out_e2e() {
         )
         .await;
 
-    let settled_channels = wait_for_channel_balances(
+    wait_for_channel_balances(
         &fixture,
         channel_id,
-        client_channel_before
-            .local_balance
-            .checked_sub(expected_gross_payment)
-            .expect("client channel must fund gross payment"),
-        provider_channel_before
-            .local_balance
-            .checked_add(expected_gross_payment)
-            .expect("provider channel balance must fit u128"),
+        (
+            client_channel_before
+                .local_balance
+                .checked_sub(expected_gross_payment)
+                .expect("client channel must fund gross payment"),
+            client_channel_before
+                .remote_balance
+                .checked_add(expected_gross_payment)
+                .expect("client remote balance must fit u128"),
+        ),
+        (
+            provider_channel_before
+                .local_balance
+                .checked_add(expected_gross_payment)
+                .expect("provider channel balance must fit u128"),
+            provider_channel_before
+                .remote_balance
+                .checked_sub(expected_gross_payment)
+                .expect("provider remote balance must fund gross payment"),
+        ),
         SWAP_TIMEOUT,
     )
     .await;
-    for (side, channel) in [
-        ("client", &settled_channels[0]),
-        ("provider", &settled_channels[1]),
-    ] {
-        assert_eq!(channel.offered_tlc_balance, 0, "{side} offered TLC settled");
-        assert_eq!(
-            channel.received_tlc_balance, 0,
-            "{side} received TLC settled"
-        );
-        assert!(
-            channel.pending_tlcs.is_empty(),
-            "{side} must have no pending TLC after payment settlement: {:?}",
-            channel.pending_tlcs
-        );
-    }
 
     fixture
         .commit(claim_record.tx_hash.into())
@@ -292,6 +355,11 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
         })
         .await;
     let quote_id = quote.quote_id;
+    let expected_gross_payment = quote
+        .amount
+        .checked_add(quote.provider_fee)
+        .and_then(|amount| amount.checked_add(quote.routing_fee_limit))
+        .expect("quoted gross payment amount must fit u128");
     fixture.nodes[CLIENT]
         .import_quote(quote, MAX_PROVIDER_FEE, MAX_ROUTING_FEE)
         .await;
@@ -305,6 +373,8 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
     let payout_transactions = fixture.pending_transactions();
     assert_eq!(payout_transactions.len(), 1);
     let payout_tx_hash = Hash256::from(payout_transactions[0].hash());
+    let client_channel_before = channel_snapshot(&fixture, CLIENT, channel_id).await;
+    let provider_channel_before = channel_snapshot(&fixture, PROVIDER, channel_id).await;
 
     fixture.nodes[CLIENT]
         .loop_out(LoopOutParams {
@@ -328,9 +398,33 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
     fixture
         .wait_for_swap_state(PROVIDER, quote_id, "payment_settled", SWAP_TIMEOUT)
         .await;
-    let settled_balance = channel_snapshot(&fixture, CLIENT, channel_id)
-        .await
-        .local_balance;
+    let settled_channels = wait_for_channel_balances(
+        &fixture,
+        channel_id,
+        (
+            client_channel_before
+                .local_balance
+                .checked_sub(expected_gross_payment)
+                .expect("client channel must fund gross payment"),
+            client_channel_before
+                .remote_balance
+                .checked_add(expected_gross_payment)
+                .expect("client remote balance must fit u128"),
+        ),
+        (
+            provider_channel_before
+                .local_balance
+                .checked_add(expected_gross_payment)
+                .expect("provider channel balance must fit u128"),
+            provider_channel_before
+                .remote_balance
+                .checked_sub(expected_gross_payment)
+                .expect("provider remote balance must fund gross payment"),
+        ),
+        SWAP_TIMEOUT,
+    )
+    .await;
+    let [settled_client, settled_provider] = settled_channels;
     let pending_claims = fixture.pending_transactions();
     assert_eq!(
         pending_claims.len(),
@@ -358,13 +452,17 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
     fixture
         .wait_for_swap_state(CLIENT, quote_id, "success", SWAP_TIMEOUT)
         .await;
-    assert_eq!(
-        channel_snapshot(&fixture, CLIENT, channel_id)
-            .await
-            .local_balance,
-        settled_balance,
-        "provider recovery must not dispatch a duplicate payment"
-    );
+    wait_for_channel_balances(
+        &fixture,
+        channel_id,
+        (settled_client.local_balance, settled_client.remote_balance),
+        (
+            settled_provider.local_balance,
+            settled_provider.remote_balance,
+        ),
+        SWAP_TIMEOUT,
+    )
+    .await;
     assert!(fixture.pending_transactions().is_empty());
 
     let client_chain_transactions = fixture.nodes[CLIENT]
