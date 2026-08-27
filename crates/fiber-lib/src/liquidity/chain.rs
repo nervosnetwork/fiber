@@ -19,7 +19,7 @@ use ractor::{ActorRef, RpcReplyPort};
 use crate::ckb::contracts::get_udt_cell_deps;
 use crate::ckb::{
     CkbChainMessage, CkbOutPointSpendTracer, CkbOutPointSpendTracingResult, CkbTxTracer,
-    CkbTxTracingMask, CkbTxTracingResult, FundingRequest, FundingTx,
+    CkbTxTracingMask, CkbTxTracingResult, FundingRequest, FundingTx, LiveCell,
 };
 use crate::liquidity::actor::LiquidityActorMessage;
 use crate::liquidity::quote::loop_in_gross_onchain_amount;
@@ -306,6 +306,13 @@ pub trait LiquidityChainWatcher {
         outpoint: &packed::OutPoint,
     ) -> Result<(), Self::Error>;
 
+    /// Validate that an observed Loop Out payout cell matches the accepted quote.
+    async fn validate_observed_loop_out_payout(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+        outpoint: &packed::OutPoint,
+    ) -> Result<(), Self::Error>;
+
     /// Schedule payout lock watching and report completion back to `myself`.
     async fn watch_payout_lock(
         &mut self,
@@ -355,6 +362,7 @@ pub trait LiquidityChainWatcher {
 fn validate_liquidity_lock_args(
     args: &[u8],
     quote: &LoopOutQuoteTerms,
+    expected_onchain_amount: u128,
     liquidity_lock_code_hash: &packed::Byte32,
     liquidity_lock_hash_type: u8,
     cell_code_hash: &packed::Byte32,
@@ -396,10 +404,9 @@ fn validate_liquidity_lock_args(
         ));
     }
     let onchain_amount: u128 = u128::from_le_bytes(args[104..120].try_into().unwrap());
-    let expected_gross = loop_in_gross_onchain_amount(quote)?;
-    if onchain_amount != expected_gross {
+    if onchain_amount != expected_onchain_amount {
         return Err(LiquidityLoopOutError::Chain(format!(
-            "observed lock amount mismatch: expected {expected_gross}, got {onchain_amount}"
+            "observed lock amount mismatch: expected {expected_onchain_amount}, got {onchain_amount}"
         )));
     }
     let asset_type_hash = &args[120..152];
@@ -427,6 +434,74 @@ fn validate_liquidity_lock_args(
             }
         }
     }
+    Ok(())
+}
+
+fn validate_liquidity_live_cell(
+    cell: &LiveCell,
+    quote: &LoopOutQuoteTerms,
+    expected_onchain_amount: u128,
+    artifact: &LiquidityLockScriptArtifact,
+    context: &str,
+) -> Result<(), LiquidityLoopOutError> {
+    let lock_script = cell.output.lock();
+    validate_liquidity_lock_args(
+        &lock_script.args().raw_data(),
+        quote,
+        expected_onchain_amount,
+        &artifact.code_hash,
+        artifact.hash_type.into(),
+        &lock_script.code_hash(),
+        lock_script.hash_type().into(),
+    )?;
+
+    if quote.asset.kind == LiquidityAssetKind::Udt {
+        let cell_type_script = cell.output.type_().to_opt();
+        let expected_type: Option<packed::Script> =
+            quote.asset.udt_type_script.clone().map(Into::into);
+        if cell_type_script != expected_type {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "{context} UDT type script mismatch"
+            )));
+        }
+
+        let cell_data = cell.data.raw_data();
+        if cell_data.len() != 16 {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "{context} UDT data length {} does not match expected 16",
+                cell_data.len()
+            )));
+        }
+        let udt_amount = u128::from_le_bytes(cell_data[..16].try_into().unwrap());
+        if udt_amount != expected_onchain_amount {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "{context} UDT amount mismatch: expected {expected_onchain_amount}, got {udt_amount}"
+            )));
+        }
+    } else if cell.output.type_().to_opt().is_some() {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "{context} CKB cell has unexpected type script"
+        )));
+    } else {
+        let expected_ckb = u64::try_from(expected_onchain_amount).map_err(|_| {
+            LiquidityLoopOutError::Chain(format!("{context} CKB amount does not fit u64"))
+        })?;
+        if u64::from(cell.output.capacity()) < expected_ckb {
+            return Err(LiquidityLoopOutError::Chain(format!(
+                "{context} CKB capacity {} below amount {expected_ckb}",
+                u64::from(cell.output.capacity())
+            )));
+        }
+    }
+
+    if u64::from(cell.output.capacity()) < quote.capacity_requirement_ckb {
+        return Err(LiquidityLoopOutError::Chain(format!(
+            "{context} capacity {} below requirement {}",
+            u64::from(cell.output.capacity()),
+            quote.capacity_requirement_ckb
+        )));
+    }
+
     Ok(())
 }
 
@@ -484,6 +559,38 @@ impl<S> CkbLiquidityChainWatcher<S> {
             liquidity_lock_cell_deps,
             pending_payout_txs: HashMap::new(),
         }
+    }
+
+    async fn validate_observed_liquidity_cell(
+        &self,
+        quote: &LoopOutQuoteTerms,
+        outpoint: &packed::OutPoint,
+        expected_onchain_amount: u128,
+        context: &str,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let artifact = self.liquidity_lock_artifact.as_ref().ok_or_else(|| {
+            LiquidityLoopOutError::Chain(
+                "liquidity-lock script artifact is not configured".to_string(),
+            )
+        })?;
+        let cell = ractor::call!(self.ckb_chain_actor, |reply| {
+            CkbChainMessage::GetLiveCell(outpoint.clone(), reply)
+        })
+        .map_err(|error| {
+            LiquidityLoopOutError::Chain(format!(
+                "failed to query live cell for {context}: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            LiquidityLoopOutError::Chain(format!(
+                "ckb rpc error querying live cell for {context}: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            LiquidityLoopOutError::Chain(format!("{context} cell not found or already spent"))
+        })?;
+
+        validate_liquidity_live_cell(&cell, quote, expected_onchain_amount, artifact, context)
     }
 
     #[allow(dead_code)]
@@ -1371,102 +1478,28 @@ where
         quote: &LoopOutQuoteTerms,
         outpoint: &packed::OutPoint,
     ) -> Result<(), Self::Error> {
-        let artifact = self
-            .liquidity_lock_artifact
-            .as_ref()
-            .ok_or_else(Self::missing_payout_builder)?;
-        let cell = ractor::call!(self.ckb_chain_actor, |reply| {
-            CkbChainMessage::GetLiveCell(outpoint.clone(), reply)
-        })
-        .map_err(|error| {
-            LiquidityLoopOutError::Chain(format!(
-                "failed to query live cell for observed loop in lock: {error}"
-            ))
-        })?
-        .map_err(|error| {
-            LiquidityLoopOutError::Chain(format!(
-                "ckb rpc error querying live cell for observed loop in lock: {error}"
-            ))
-        })?
-        .ok_or_else(|| {
-            LiquidityLoopOutError::Chain(
-                "observed loop in lock cell not found or already spent".to_string(),
-            )
-        })?;
-
-        let lock_script = cell.output.lock();
-        let args = lock_script.args().raw_data();
-        validate_liquidity_lock_args(
-            &args,
-            quote,
-            &artifact.code_hash,
-            artifact.hash_type.into(),
-            &lock_script.code_hash(),
-            lock_script.hash_type().into(),
-        )?;
-
         let gross_amount = loop_in_gross_onchain_amount(quote)?;
+        self.validate_observed_liquidity_cell(
+            quote,
+            outpoint,
+            gross_amount,
+            "observed loop in lock",
+        )
+        .await
+    }
 
-        if quote.asset.kind == LiquidityAssetKind::Udt {
-            let cell_type_script = cell.output.type_().to_opt();
-            let expected_type = quote.asset.udt_type_script.as_ref();
-            match (cell_type_script, expected_type) {
-                (Some(cell_type), Some(expected)) => {
-                    let expected_packed: packed::Script = expected.clone().into();
-                    if cell_type != expected_packed {
-                        return Err(LiquidityLoopOutError::Chain(
-                            "observed loop in lock UDT type script mismatch".to_string(),
-                        ));
-                    }
-                }
-                (None, None) => {}
-                _ => {
-                    return Err(LiquidityLoopOutError::Chain(
-                        "observed loop in lock UDT type script mismatch".to_string(),
-                    ));
-                }
-            }
-
-            let cell_data = cell.data.raw_data();
-            if cell_data.len() != 16 {
-                return Err(LiquidityLoopOutError::Chain(format!(
-                    "observed loop in lock UDT data length {} does not match expected 16",
-                    cell_data.len()
-                )));
-            }
-            let udt_amount: u128 = u128::from_le_bytes(cell_data[..16].try_into().unwrap());
-            if udt_amount != gross_amount {
-                return Err(LiquidityLoopOutError::Chain(format!(
-                    "observed loop in lock UDT amount mismatch: expected {gross_amount}, got {udt_amount}"
-                )));
-            }
-        } else if cell.output.type_().to_opt().is_some() {
-            return Err(LiquidityLoopOutError::Chain(
-                "observed loop in lock CKB cell has unexpected type script".to_string(),
-            ));
-        } else {
-            let gross_ckb = u64::try_from(gross_amount).map_err(|_| {
-                LiquidityLoopOutError::Chain(
-                    "observed loop in lock CKB gross amount does not fit u64".to_string(),
-                )
-            })?;
-            if u64::from(cell.output.capacity()) < gross_ckb {
-                return Err(LiquidityLoopOutError::Chain(format!(
-                    "observed loop in lock CKB capacity {} below gross amount {gross_ckb}",
-                    u64::from(cell.output.capacity())
-                )));
-            }
-        }
-
-        if u64::from(cell.output.capacity()) < quote.capacity_requirement_ckb {
-            return Err(LiquidityLoopOutError::Chain(format!(
-                "observed loop in lock capacity {} below requirement {}",
-                u64::from(cell.output.capacity()),
-                quote.capacity_requirement_ckb
-            )));
-        }
-
-        Ok(())
+    async fn validate_observed_loop_out_payout(
+        &mut self,
+        quote: &LoopOutQuoteTerms,
+        outpoint: &packed::OutPoint,
+    ) -> Result<(), Self::Error> {
+        self.validate_observed_liquidity_cell(
+            quote,
+            outpoint,
+            quote.amount,
+            "observed loop out payout",
+        )
+        .await
     }
 
     async fn watch_loop_in_lock(
@@ -2248,6 +2281,14 @@ mod tests {
         }
 
         async fn validate_observed_loop_in_lock(
+            &mut self,
+            _quote: &LoopOutQuoteTerms,
+            _outpoint: &packed::OutPoint,
+        ) -> Result<(), Self::Error> {
+            Err(LiquidityLoopOutError::Chain("unused".to_string()))
+        }
+
+        async fn validate_observed_loop_out_payout(
             &mut self,
             _quote: &LoopOutQuoteTerms,
             _outpoint: &packed::OutPoint,
@@ -5261,15 +5302,31 @@ mod tests {
             loop_in_gross_onchain_amount(&quote).unwrap(),
             None,
         );
-        assert!(validate_liquidity_lock_args(&args, &quote, &code_hash, 0, &code_hash, 0,).is_ok());
+        assert!(validate_liquidity_lock_args(
+            &args,
+            &quote,
+            loop_in_gross_onchain_amount(&quote).unwrap(),
+            &code_hash,
+            0,
+            &code_hash,
+            0,
+        )
+        .is_ok());
     }
 
     #[test]
     fn validate_liquidity_lock_args_rejects_wrong_code_hash() {
         let quote = test_loop_in_quote(1_000_000);
         let args = vec![0u8; 152];
-        let result =
-            validate_liquidity_lock_args(&args, &quote, &[9u8; 32].pack(), 0, &[8u8; 32].pack(), 0);
+        let result = validate_liquidity_lock_args(
+            &args,
+            &quote,
+            loop_in_gross_onchain_amount(&quote).unwrap(),
+            &[9u8; 32].pack(),
+            0,
+            &[8u8; 32].pack(),
+            0,
+        );
         assert!(result
             .unwrap_err()
             .to_string()
@@ -5281,8 +5338,15 @@ mod tests {
         let quote = test_loop_in_quote(1_000_000);
         let mut args = vec![0u8; 152];
         args[0..32].copy_from_slice(&[99u8; 32]);
-        let result =
-            validate_liquidity_lock_args(&args, &quote, &[9u8; 32].pack(), 0, &[9u8; 32].pack(), 0);
+        let result = validate_liquidity_lock_args(
+            &args,
+            &quote,
+            loop_in_gross_onchain_amount(&quote).unwrap(),
+            &[9u8; 32].pack(),
+            0,
+            &[9u8; 32].pack(),
+            0,
+        );
         assert!(result.unwrap_err().to_string().contains("payment_hash"));
     }
 
@@ -5300,8 +5364,99 @@ mod tests {
             999,
             None,
         );
-        let result = validate_liquidity_lock_args(&args, &quote, &code_hash, 0, &code_hash, 0);
+        let result = validate_liquidity_lock_args(
+            &args,
+            &quote,
+            loop_in_gross_onchain_amount(&quote).unwrap(),
+            &code_hash,
+            0,
+            &code_hash,
+            0,
+        );
         assert!(result.unwrap_err().to_string().contains("amount"));
+    }
+
+    #[test]
+    fn validate_liquidity_lock_args_uses_direction_specific_expected_amount() {
+        use crate::liquidity::build_liquidity_lock_args;
+
+        let quote = test_loop_out_quote_terms();
+        let code_hash = [9u8; 32].pack();
+        let args = build_liquidity_lock_args(
+            quote.payment_hash.as_ref().try_into().unwrap(),
+            &quote.claimant_lock,
+            &quote.refund_lock,
+            quote.refund_after_lock_time,
+            quote.amount,
+            None,
+        );
+
+        validate_liquidity_lock_args(&args, &quote, quote.amount, &code_hash, 0, &code_hash, 0)
+            .unwrap();
+        assert!(validate_liquidity_lock_args(
+            &args,
+            &quote,
+            quote.amount + quote.provider_fee,
+            &code_hash,
+            0,
+            &code_hash,
+            0,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("amount"));
+    }
+
+    #[test]
+    fn validate_liquidity_lock_args_rejects_each_exact_field_mismatch() {
+        use crate::liquidity::build_liquidity_lock_args;
+
+        let quote = test_loop_out_quote_terms();
+        let code_hash = [9u8; 32].pack();
+        let args = build_liquidity_lock_args(
+            quote.payment_hash.as_ref().try_into().unwrap(),
+            &quote.claimant_lock,
+            &quote.refund_lock,
+            quote.refund_after_lock_time,
+            quote.amount,
+            None,
+        );
+        let validate = |args: &[u8], cell_hash_type| {
+            validate_liquidity_lock_args(
+                args,
+                &quote,
+                quote.amount,
+                &code_hash,
+                0,
+                &code_hash,
+                cell_hash_type,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+
+        assert!(validate(&args, 1).contains("liquidity-lock contract"));
+
+        let mut wrong = args.clone();
+        wrong.pop();
+        assert!(validate(&wrong, 0).contains("length"));
+
+        let fields = [
+            (0, "payment_hash"),
+            (32, "claimant_lock_hash"),
+            (64, "refund_lock_hash"),
+            (96, "refund_after_lock_time"),
+            (104, "amount"),
+            (120, "asset_type_hash"),
+        ];
+        for (offset, expected_error) in fields {
+            let mut wrong = args.clone();
+            wrong[offset] ^= 1;
+            assert!(
+                validate(&wrong, 0).contains(expected_error),
+                "offset {offset} did not report {expected_error}"
+            );
+        }
     }
 
     struct LiveCellMockCkbActor;
@@ -5360,9 +5515,10 @@ mod tests {
 
     async fn validate_observed_cell(
         quote: &LoopOutQuoteTerms,
-        cell: LiveCell,
+        cell: Option<LiveCell>,
+        loop_out: bool,
     ) -> Result<(), LiquidityLoopOutError> {
-        let (ckb_actor, handle) = ractor::Actor::spawn(None, LiveCellMockCkbActor, Some(cell))
+        let (ckb_actor, handle) = ractor::Actor::spawn(None, LiveCellMockCkbActor, cell)
             .await
             .unwrap();
         let stop_ref = ckb_actor.clone();
@@ -5371,9 +5527,15 @@ mod tests {
             NoopLiquidityStore::default(),
             liquidity_lock_artifact(),
         );
-        let result = watcher
-            .validate_observed_loop_in_lock(quote, &test_outpoint(0))
-            .await;
+        let result = if loop_out {
+            watcher
+                .validate_observed_loop_out_payout(quote, &test_outpoint(0))
+                .await
+        } else {
+            watcher
+                .validate_observed_loop_in_lock(quote, &test_outpoint(0))
+                .await
+        };
         stop_ref.stop(Some("test done".to_string()));
         let _ = handle.await;
         result
@@ -5386,7 +5548,9 @@ mod tests {
             output: observed_loop_in_lock_output(&quote),
             data: observed_loop_in_lock_data(&quote),
         };
-        validate_observed_cell(&quote, cell).await.unwrap();
+        validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -5400,7 +5564,9 @@ mod tests {
             output,
             data: observed_loop_in_lock_data(&quote),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("capacity"));
     }
 
@@ -5411,7 +5577,9 @@ mod tests {
             output: observed_loop_in_lock_output(&quote),
             data: observed_loop_in_lock_data(&quote),
         };
-        validate_observed_cell(&quote, cell).await.unwrap();
+        validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -5421,7 +5589,9 @@ mod tests {
             output: observed_loop_in_lock_output(&quote),
             data: Bytes::new().pack(),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("UDT data length"));
     }
 
@@ -5432,7 +5602,9 @@ mod tests {
             output: observed_loop_in_lock_output(&quote),
             data: Bytes::from(vec![0u8; 15]).pack(),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("UDT data length"));
     }
 
@@ -5443,7 +5615,9 @@ mod tests {
             output: observed_loop_in_lock_output(&quote),
             data: Bytes::from(vec![0u8; 17]).pack(),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("UDT data length"));
     }
 
@@ -5455,7 +5629,9 @@ mod tests {
             output: observed_loop_in_lock_output(&quote),
             data: Bytes::from(wrong.to_le_bytes().to_vec()).pack(),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("UDT amount mismatch"));
     }
 
@@ -5470,7 +5646,9 @@ mod tests {
             output,
             data: observed_loop_in_lock_data(&quote),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("UDT type script mismatch"));
     }
 
@@ -5485,7 +5663,9 @@ mod tests {
             output,
             data: observed_loop_in_lock_data(&quote),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("type script"));
     }
 
@@ -5500,7 +5680,64 @@ mod tests {
             output,
             data: observed_loop_in_lock_data(&quote),
         };
-        let error = validate_observed_cell(&quote, cell).await.unwrap_err();
+        let error = validate_observed_cell(&quote, Some(cell), false)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("capacity"));
+    }
+
+    fn observed_loop_out_payout(quote: &LoopOutQuoteTerms) -> LiveCell {
+        LiveCell {
+            output: packed::CellOutput::new_builder()
+                .capacity(quote.capacity_requirement_ckb)
+                .lock(liquidity_lock_script_for_quote(quote))
+                .build(),
+            data: Bytes::new().pack(),
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_out_payout_accepts_exact_live_ckb_cell() {
+        let quote = test_loop_out_quote_terms();
+
+        validate_observed_cell(&quote, Some(observed_loop_out_payout(&quote)), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_out_payout_rejects_missing_or_spent_cell() {
+        let quote = test_loop_out_quote_terms();
+
+        let error = validate_observed_cell(&quote, None, true)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not found or already spent"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_out_payout_rejects_loop_in_gross_amount() {
+        let quote = test_loop_out_quote_terms();
+        let wrong_lock = crate::liquidity::tx::build_liquidity_lock_script(
+            &liquidity_lock_artifact(),
+            &LiquidityLockOutputParams {
+                payment_hash: quote.payment_hash.into(),
+                claimant_lock: quote.claimant_lock.clone(),
+                refund_lock: quote.refund_lock.clone(),
+                refund_after_lock_time: quote.refund_after_lock_time,
+                amount: quote.amount + quote.provider_fee,
+                asset_type_script: None,
+                capacity: quote.capacity_requirement_ckb,
+            },
+        );
+        let mut cell = observed_loop_out_payout(&quote);
+        cell.output = cell.output.as_builder().lock(wrong_lock).build();
+
+        let error = validate_observed_cell(&quote, Some(cell), true)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("amount"));
     }
 }
