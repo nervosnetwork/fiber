@@ -5,7 +5,7 @@
 //! RPC. The mock chain is only touched to resolve pending transactions (commit /
 //! reject) and observe VM effects; peer liquidity stores are never read or mutated.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ckb_types::{
     bytes::Bytes,
@@ -13,8 +13,8 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack},
 };
 use fiber_json_types::{
-    LiquidityAssetInfo, LiquidityAssetKind, LiquidityChainTransactionRole, LoopOutParams,
-    ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
+    channel::Channel, LiquidityAssetInfo, LiquidityAssetKind, LiquidityChainTransactionRole,
+    LoopOutParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
 };
 
 use crate::fiber::Hash256;
@@ -51,15 +51,47 @@ fn claimant_lock_hex() -> String {
     format!("0x{}", hex::encode(script.as_slice()))
 }
 
-async fn client_local_balance(fixture: &LiquidityNetworkFixture, channel_id: Hash256) -> u128 {
+async fn channel_snapshot(
+    fixture: &LiquidityNetworkFixture,
+    node: usize,
+    channel_id: Hash256,
+) -> Channel {
     let channel_id_json: fiber_json_types::Hash256 = channel_id.into();
-    let channels = fixture.nodes[CLIENT].list_channels().await;
+    let channels = fixture.nodes[node].list_channels().await;
     channels
         .channels
-        .iter()
+        .into_iter()
         .find(|channel| channel.channel_id == channel_id_json)
-        .unwrap_or_else(|| panic!("client channel {channel_id_json} not found"))
-        .local_balance
+        .unwrap_or_else(|| panic!("channel {channel_id_json} not found on node {node}"))
+}
+
+async fn wait_for_channel_balances(
+    fixture: &LiquidityNetworkFixture,
+    channel_id: Hash256,
+    expected_client: u128,
+    expected_provider: u128,
+    timeout: Duration,
+) -> [Channel; 2] {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let client = channel_snapshot(fixture, CLIENT, channel_id).await;
+        let provider = channel_snapshot(fixture, PROVIDER, channel_id).await;
+        if client.local_balance == expected_client && provider.local_balance == expected_provider {
+            return [client, provider];
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for channel {channel_id:?} balances; expected client/provider \
+                 {expected_client}/{expected_provider}, latest {}/{}, client TLCs: {:?}, provider \
+                 TLCs: {:?}",
+                client.local_balance,
+                provider.local_balance,
+                client.pending_tlcs,
+                provider.pending_tlcs,
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]
@@ -85,6 +117,11 @@ async fn liquidity_ckb_loop_out_e2e() {
         })
         .await;
     let quote_id = quote.quote_id;
+    let expected_gross_payment = quote
+        .amount
+        .checked_add(quote.provider_fee)
+        .and_then(|amount| amount.checked_add(quote.routing_fee_limit))
+        .expect("quoted gross payment amount must fit u128");
 
     fixture.nodes[CLIENT]
         .import_quote(quote.clone(), MAX_PROVIDER_FEE, MAX_ROUTING_FEE)
@@ -106,7 +143,8 @@ async fn liquidity_ckb_loop_out_e2e() {
     );
     let payout_tx_hash: Hash256 = Hash256::from(pending[0].hash());
 
-    let balance_before = client_local_balance(&fixture, channel_id).await;
+    let client_channel_before = channel_snapshot(&fixture, CLIENT, channel_id).await;
+    let provider_channel_before = channel_snapshot(&fixture, PROVIDER, channel_id).await;
 
     let client_execute = fixture.nodes[CLIENT]
         .loop_out(LoopOutParams {
@@ -135,11 +173,34 @@ async fn liquidity_ckb_loop_out_e2e() {
             .all(|transaction| transaction.role != LiquidityChainTransactionRole::Claim),
         "no claim record may exist before payout confirmation: {chain_txs:?}"
     );
+    let client_channel_pending = channel_snapshot(&fixture, CLIENT, channel_id).await;
+    let provider_channel_pending = channel_snapshot(&fixture, PROVIDER, channel_id).await;
     assert_eq!(
-        client_local_balance(&fixture, channel_id).await,
-        balance_before,
-        "channel balance must not change before payout confirmation"
+        client_channel_pending.local_balance,
+        client_channel_before.local_balance
     );
+    assert_eq!(
+        provider_channel_pending.local_balance,
+        provider_channel_before.local_balance
+    );
+    for (side, channel) in [
+        ("client", &client_channel_pending),
+        ("provider", &provider_channel_pending),
+    ] {
+        assert_eq!(
+            channel.offered_tlc_balance, 0,
+            "{side} must not offer payment before payout confirmation"
+        );
+        assert_eq!(
+            channel.received_tlc_balance, 0,
+            "{side} must not receive payment before payout confirmation"
+        );
+        assert!(
+            channel.pending_tlcs.is_empty(),
+            "{side} must have no pending TLC before payout confirmation: {:?}",
+            channel.pending_tlcs
+        );
+    }
 
     fixture.commit(payout_tx_hash).expect("commit payout");
 
@@ -152,6 +213,36 @@ async fn liquidity_ckb_loop_out_e2e() {
             SWAP_TIMEOUT,
         )
         .await;
+
+    let settled_channels = wait_for_channel_balances(
+        &fixture,
+        channel_id,
+        client_channel_before
+            .local_balance
+            .checked_sub(expected_gross_payment)
+            .expect("client channel must fund gross payment"),
+        provider_channel_before
+            .local_balance
+            .checked_add(expected_gross_payment)
+            .expect("provider channel balance must fit u128"),
+        SWAP_TIMEOUT,
+    )
+    .await;
+    for (side, channel) in [
+        ("client", &settled_channels[0]),
+        ("provider", &settled_channels[1]),
+    ] {
+        assert_eq!(channel.offered_tlc_balance, 0, "{side} offered TLC settled");
+        assert_eq!(
+            channel.received_tlc_balance, 0,
+            "{side} received TLC settled"
+        );
+        assert!(
+            channel.pending_tlcs.is_empty(),
+            "{side} must have no pending TLC after payment settlement: {:?}",
+            channel.pending_tlcs
+        );
+    }
 
     fixture
         .commit(claim_record.tx_hash.into())
@@ -237,7 +328,9 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
     fixture
         .wait_for_swap_state(PROVIDER, quote_id, "payment_settled", SWAP_TIMEOUT)
         .await;
-    let settled_balance = client_local_balance(&fixture, channel_id).await;
+    let settled_balance = channel_snapshot(&fixture, CLIENT, channel_id)
+        .await
+        .local_balance;
     let pending_claims = fixture.pending_transactions();
     assert_eq!(
         pending_claims.len(),
@@ -266,7 +359,9 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
         .wait_for_swap_state(CLIENT, quote_id, "success", SWAP_TIMEOUT)
         .await;
     assert_eq!(
-        client_local_balance(&fixture, channel_id).await,
+        channel_snapshot(&fixture, CLIENT, channel_id)
+            .await
+            .local_balance,
         settled_balance,
         "provider recovery must not dispatch a duplicate payment"
     );
