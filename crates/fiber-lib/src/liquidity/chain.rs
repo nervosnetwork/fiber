@@ -620,14 +620,36 @@ impl<S> CkbLiquidityChainWatcher<S> {
                 );
                 return;
             }
-            let Some(witness) = result
-                .spending_transaction
-                .witnesses()
-                .get(result.input_index)
-            else {
+            if result.script_group_input_index > result.input_index {
                 tracing::warn!(
                     ?swap_id,
                     input_index = result.input_index,
+                    script_group_input_index = result.script_group_input_index,
+                    "provider claim script-group input follows watched input"
+                );
+                return;
+            }
+            if result
+                .spending_transaction
+                .inputs()
+                .get(result.script_group_input_index)
+                .is_none()
+            {
+                tracing::warn!(
+                    ?swap_id,
+                    script_group_input_index = result.script_group_input_index,
+                    "provider claim script-group input index is invalid"
+                );
+                return;
+            }
+            let Some(witness) = result
+                .spending_transaction
+                .witnesses()
+                .get(result.script_group_input_index)
+            else {
+                tracing::warn!(
+                    ?swap_id,
+                    script_group_input_index = result.script_group_input_index,
                     "provider claim transaction is missing its indexed witness"
                 );
                 return;
@@ -4966,6 +4988,7 @@ mod tests {
             outpoint,
             spending_transaction: tx,
             input_index: 1,
+            script_group_input_index: 1,
             block_number: 1,
         }))
         .unwrap();
@@ -4977,6 +5000,87 @@ mod tests {
             Some(LiquidityActorMessage::ProviderClaimObserved(id)) if id == swap_id
         ));
         assert!(messages.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_refund_group_does_not_scan_unrelated_claim_like_witness() {
+        let swap_id = [89u8; 32].into();
+        let preimage = [90u8; 32];
+        let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+        let outpoint = test_outpoint(89);
+        let tx = ckb_types::core::TransactionBuilder::default()
+            .set_inputs(vec![
+                packed::CellInput::new(test_outpoint(97), 0),
+                packed::CellInput::new(outpoint.clone(), 0),
+            ])
+            .set_witnesses(vec![
+                build_liquidity_lock_claim_witness(preimage),
+                build_liquidity_lock_refund_witness(),
+            ])
+            .build();
+        let (actor, mut messages) = spawn_mock_liquidity_actor().await;
+
+        CkbLiquidityChainWatcher::<NoopLiquidityStore>::provider_claim_tracer_callback_for(
+            swap_id,
+            outpoint.clone(),
+            payment_hash,
+            actor,
+        )
+        .send(Ok(crate::ckb::CkbOutPointSpendTracingResult {
+            outpoint,
+            spending_transaction: tx,
+            input_index: 1,
+            script_group_input_index: 1,
+            block_number: 1,
+        }))
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), messages.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_claim_callback_uses_first_same_script_group_witness() {
+        let swap_id = [87u8; 32].into();
+        let preimage = [88u8; 32];
+        let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+        let outpoint = test_outpoint(87);
+        let tx = ckb_types::core::TransactionBuilder::default()
+            .set_inputs(vec![
+                packed::CellInput::new(test_outpoint(98), 0),
+                packed::CellInput::new(outpoint.clone(), 0),
+            ])
+            .set_witnesses(vec![
+                build_liquidity_lock_claim_witness(preimage),
+                packed::Bytes::default(),
+            ])
+            .build();
+        let (actor, mut messages) = spawn_mock_liquidity_actor().await;
+
+        CkbLiquidityChainWatcher::<NoopLiquidityStore>::provider_claim_tracer_callback_for(
+            swap_id,
+            outpoint.clone(),
+            payment_hash,
+            actor,
+        )
+        .send(Ok(crate::ckb::CkbOutPointSpendTracingResult {
+            outpoint,
+            spending_transaction: tx,
+            input_index: 1,
+            script_group_input_index: 0,
+            block_number: 1,
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), messages.recv())
+                .await
+                .expect("valid grouped claim continuation timed out"),
+            Some(LiquidityActorMessage::ProviderClaimObserved(id)) if id == swap_id
+        ));
     }
 
     #[tokio::test]
@@ -5004,6 +5108,7 @@ mod tests {
                 outpoint: outpoint.clone(),
                 spending_transaction: tx,
                 input_index: 1,
+                script_group_input_index: 1,
                 block_number: 1,
             }))
             .unwrap();
