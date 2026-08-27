@@ -3442,7 +3442,7 @@ mod tests {
         fail_next_loop_in_broadcast: bool,
         persist_loop_in_lock_before_failure: bool,
         reject_observed_loop_in_lock: bool,
-        reject_observed_loop_out_payout: bool,
+        observed_loop_out_payout_error: Option<String>,
         claim_preimages: Vec<Hash256>,
         payout_locks: Shared<Vec<(ckb_types::packed::Script, ckb_types::packed::Script)>>,
         loop_in_funding_txs: Shared<Vec<String>>,
@@ -3460,7 +3460,7 @@ mod tests {
                 fail_next_loop_in_broadcast: false,
                 persist_loop_in_lock_before_failure: false,
                 reject_observed_loop_in_lock: false,
-                reject_observed_loop_out_payout: false,
+                observed_loop_out_payout_error: None,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -3478,7 +3478,7 @@ mod tests {
                 fail_next_loop_in_broadcast: false,
                 persist_loop_in_lock_before_failure: false,
                 reject_observed_loop_in_lock: false,
-                reject_observed_loop_out_payout: false,
+                observed_loop_out_payout_error: None,
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -3511,8 +3511,8 @@ mod tests {
             self.reject_observed_loop_in_lock = true;
         }
 
-        fn reject_observed_loop_out_payout(&mut self) {
-            self.reject_observed_loop_out_payout = true;
+        fn reject_observed_loop_out_payout_with(&mut self, error: impl Into<String>) {
+            self.observed_loop_out_payout_error = Some(error.into());
         }
 
         fn loop_in_funding_txs(&self) -> Vec<String> {
@@ -3715,9 +3715,8 @@ mod tests {
             self.events
                 .borrow_mut()
                 .push("validate_observed_loop_out_payout");
-            if self.reject_observed_loop_out_payout {
-                self.reject_observed_loop_out_payout = false;
-                return Err("observed loop out payout does not match quote".to_string());
+            if let Some(error) = self.observed_loop_out_payout_error.take() {
+                return Err(error);
             }
             if outpoint.tx_hash() == Byte32::default() {
                 return Err("observed loop out payout does not match quote".to_string());
@@ -9032,54 +9031,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_client_payout_stays_pending_and_does_not_send_payment() {
-        let events = Shared::new(Vec::new());
-        let store = TestLiquidityStore::new(events.clone(), "client");
-        let quote = test_loop_out_quote(now_ms() + 60_000);
-        let outpoint = OutPoint::new(Byte32::from_slice(&[13u8; 32]).unwrap(), 13);
-        store
-            .insert_loop_out_quote(quote.clone(), now_ms())
-            .unwrap();
-        create_client_loop_out(&store, quote.clone(), now_ms(), Some(outpoint.clone())).unwrap();
-        store
-            .update_liquidity_chain_tx_status(
-                &quote.quote_id,
-                LiquidityChainTxRole::Payout,
-                LiquidityChainTxStatus::Broadcast,
-                None,
-                now_ms(),
+    async fn every_client_payout_validation_error_stays_pending_without_payment() {
+        let validation_errors = [
+            "liquidity-lock contract mismatch",
+            "lock args length mismatch",
+            "payment_hash mismatch",
+            "claimant_lock_hash mismatch",
+            "refund_lock_hash mismatch",
+            "refund_after_lock_time mismatch",
+            "amount mismatch",
+            "asset_type_hash mismatch",
+            "capacity below amount",
+            "capacity below requirement",
+            "unexpected type script",
+            "UDT type script mismatch",
+            "UDT data length mismatch",
+            "UDT amount mismatch",
+            "UDT capacity below requirement",
+        ];
+
+        // The chain matrix exercises the concrete cells producing these errors. This boundary
+        // table proves every adapter error takes the same persistence and no-payment path.
+        for validation_error in validation_errors {
+            let events = Shared::new(Vec::new());
+            let store = TestLiquidityStore::new(events.clone(), "client");
+            let quote = test_loop_out_quote(now_ms() + 60_000);
+            let outpoint = OutPoint::new(Byte32::from_slice(&[13u8; 32]).unwrap(), 13);
+            store
+                .insert_loop_out_quote(quote.clone(), now_ms())
+                .unwrap();
+            create_client_loop_out(&store, quote.clone(), now_ms(), Some(outpoint.clone()))
+                .unwrap();
+            store
+                .update_liquidity_chain_tx_status(
+                    &quote.quote_id,
+                    LiquidityChainTxRole::Payout,
+                    LiquidityChainTxStatus::Broadcast,
+                    None,
+                    now_ms(),
+                )
+                .unwrap();
+            let mut chain = TestLiquidityChain::new(events.clone());
+            chain.reject_observed_loop_out_payout_with(validation_error);
+            let actor = spawn_test_liquidity_actor(
+                store.clone(),
+                TestLoopOutPayment::new(events.clone()),
+                chain,
             )
-            .unwrap();
-        let mut chain = TestLiquidityChain::new(events.clone());
-        chain.reject_observed_loop_out_payout();
-        let actor = spawn_test_liquidity_actor(
-            store.clone(),
-            TestLoopOutPayment::new(events.clone()),
-            chain,
-        )
-        .await;
+            .await;
 
-        actor
-            .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
-            .unwrap();
-        wait_for_event(&events, "validate_observed_loop_out_payout").await;
-        ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
-            .unwrap()
-            .unwrap();
+            actor
+                .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
+                .unwrap();
+            wait_for_event(&events, "validate_observed_loop_out_payout").await;
+            ractor::call!(actor, LiquidityActorMessage::ResumeNonTerminal)
+                .unwrap()
+                .unwrap();
 
-        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
-        let payout_tx = store
-            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
-            .unwrap()
-            .unwrap();
-        assert_eq!(swap.state, LiquiditySwapState::PayoutPending);
-        assert!(swap
-            .failure_reason
-            .unwrap()
-            .contains("observed loop out payout does not match quote"));
-        assert_eq!(payout_tx.status, LiquidityChainTxStatus::Confirmed);
-        assert!(!events.borrow().contains(&"client_transition_payout_locked"));
-        assert!(!events.borrow().contains(&"send_payment"));
+            let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+            let payout_tx = store
+                .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+                .unwrap()
+                .unwrap();
+            assert_eq!(swap.state, LiquiditySwapState::PayoutPending);
+            assert!(swap.failure_reason.unwrap().contains(validation_error));
+            assert_eq!(payout_tx.status, LiquidityChainTxStatus::Confirmed);
+            assert!(!events.borrow().contains(&"client_transition_payout_locked"));
+            assert!(!events.borrow().contains(&"send_payment"));
+        }
     }
 
     #[tokio::test]

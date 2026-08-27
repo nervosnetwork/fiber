@@ -5687,13 +5687,180 @@ mod tests {
     }
 
     fn observed_loop_out_payout(quote: &LoopOutQuoteTerms) -> LiveCell {
+        let type_script: Option<packed::Script> =
+            quote.asset.udt_type_script.clone().map(Into::into);
+        let data = if quote.asset.kind == LiquidityAssetKind::Udt {
+            Bytes::from(quote.amount.to_le_bytes().to_vec()).pack()
+        } else {
+            Bytes::new().pack()
+        };
         LiveCell {
             output: packed::CellOutput::new_builder()
                 .capacity(quote.capacity_requirement_ckb)
                 .lock(liquidity_lock_script_for_quote(quote))
+                .type_(type_script.pack())
                 .build(),
-            data: Bytes::new().pack(),
+            data,
         }
+    }
+
+    fn mutate_live_cell_lock_args(
+        mut cell: LiveCell,
+        mutate: impl FnOnce(&mut Vec<u8>),
+    ) -> LiveCell {
+        let lock = cell.output.lock();
+        let mut args = lock.args().raw_data().to_vec();
+        mutate(&mut args);
+        let lock = lock.as_builder().args(Bytes::from(args).pack()).build();
+        cell.output = cell.output.as_builder().lock(lock).build();
+        cell
+    }
+
+    #[derive(Debug, Copy, Clone)]
+    enum InvalidLoopOutPayoutCase {
+        WrongCodeHash,
+        WrongHashType,
+        WrongArgsLength,
+        WrongPaymentHash,
+        WrongClaimantHash,
+        WrongRefundHash,
+        WrongRefundTime,
+        WrongAmount,
+        WrongAssetTypeHash,
+        CkbCapacityBelowAmount,
+        CapacityBelowRequirement,
+        UnexpectedCkbTypeScript,
+        WrongUdtTypeScript,
+        WrongUdtDataLength,
+        WrongUdtAmount,
+        UdtCapacityBelowRequirement,
+    }
+
+    fn invalid_loop_out_payout(
+        case: InvalidLoopOutPayoutCase,
+    ) -> (LoopOutQuoteTerms, LiveCell, &'static str) {
+        let udt_case = matches!(
+            case,
+            InvalidLoopOutPayoutCase::WrongUdtTypeScript
+                | InvalidLoopOutPayoutCase::WrongUdtDataLength
+                | InvalidLoopOutPayoutCase::WrongUdtAmount
+                | InvalidLoopOutPayoutCase::UdtCapacityBelowRequirement
+        );
+        let mut quote = if udt_case {
+            let (mut quote, _) = test_loop_in_udt_quote_terms();
+            quote.swap_kind = LiquiditySwapKind::LoopOut;
+            quote.client_invoice = None;
+            quote
+        } else {
+            test_loop_out_quote_terms()
+        };
+        if matches!(case, InvalidLoopOutPayoutCase::CkbCapacityBelowAmount) {
+            quote.capacity_requirement_ckb = 1;
+        }
+        let mut cell = observed_loop_out_payout(&quote);
+
+        let expected_error = match case {
+            InvalidLoopOutPayoutCase::WrongCodeHash => {
+                let lock = cell
+                    .output
+                    .lock()
+                    .as_builder()
+                    .code_hash([8u8; 32].pack())
+                    .build();
+                cell.output = cell.output.as_builder().lock(lock).build();
+                "liquidity-lock contract"
+            }
+            InvalidLoopOutPayoutCase::WrongHashType => {
+                let lock = cell
+                    .output
+                    .lock()
+                    .as_builder()
+                    .hash_type(packed::Byte::new(1))
+                    .build();
+                cell.output = cell.output.as_builder().lock(lock).build();
+                "liquidity-lock contract"
+            }
+            InvalidLoopOutPayoutCase::WrongArgsLength => {
+                cell = mutate_live_cell_lock_args(cell, |args| {
+                    args.pop();
+                });
+                "args length"
+            }
+            InvalidLoopOutPayoutCase::WrongPaymentHash => {
+                cell = mutate_live_cell_lock_args(cell, |args| args[0] ^= 1);
+                "payment_hash"
+            }
+            InvalidLoopOutPayoutCase::WrongClaimantHash => {
+                cell = mutate_live_cell_lock_args(cell, |args| args[32] ^= 1);
+                "claimant_lock_hash"
+            }
+            InvalidLoopOutPayoutCase::WrongRefundHash => {
+                cell = mutate_live_cell_lock_args(cell, |args| args[64] ^= 1);
+                "refund_lock_hash"
+            }
+            InvalidLoopOutPayoutCase::WrongRefundTime => {
+                cell = mutate_live_cell_lock_args(cell, |args| args[96] ^= 1);
+                "refund_after_lock_time"
+            }
+            InvalidLoopOutPayoutCase::WrongAmount => {
+                cell = mutate_live_cell_lock_args(cell, |args| args[104] ^= 1);
+                "amount mismatch"
+            }
+            InvalidLoopOutPayoutCase::WrongAssetTypeHash => {
+                cell = mutate_live_cell_lock_args(cell, |args| args[120] ^= 1);
+                "asset_type_hash"
+            }
+            InvalidLoopOutPayoutCase::CkbCapacityBelowAmount => {
+                cell.output = cell
+                    .output
+                    .as_builder()
+                    .capacity(u64::try_from(quote.amount).unwrap() - 1)
+                    .build();
+                "below amount"
+            }
+            InvalidLoopOutPayoutCase::CapacityBelowRequirement => {
+                cell.output = cell
+                    .output
+                    .as_builder()
+                    .capacity(quote.capacity_requirement_ckb - 1)
+                    .build();
+                "below requirement"
+            }
+            InvalidLoopOutPayoutCase::UnexpectedCkbTypeScript => {
+                cell.output = cell
+                    .output
+                    .as_builder()
+                    .type_(Some(script("unexpected-udt")).pack())
+                    .build();
+                "unexpected type script"
+            }
+            InvalidLoopOutPayoutCase::WrongUdtTypeScript => {
+                cell.output = cell
+                    .output
+                    .as_builder()
+                    .type_(Some(script("wrong-udt")).pack())
+                    .build();
+                "UDT type script mismatch"
+            }
+            InvalidLoopOutPayoutCase::WrongUdtDataLength => {
+                cell.data = Bytes::from(vec![0u8; 15]).pack();
+                "UDT data length"
+            }
+            InvalidLoopOutPayoutCase::WrongUdtAmount => {
+                cell.data = Bytes::from((quote.amount + 1).to_le_bytes().to_vec()).pack();
+                "UDT amount mismatch"
+            }
+            InvalidLoopOutPayoutCase::UdtCapacityBelowRequirement => {
+                cell.output = cell
+                    .output
+                    .as_builder()
+                    .capacity(quote.capacity_requirement_ckb - 1)
+                    .build();
+                "below requirement"
+            }
+        };
+
+        (quote, cell, expected_error)
     }
 
     #[tokio::test]
@@ -5717,27 +5884,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_observed_loop_out_payout_rejects_loop_in_gross_amount() {
-        let quote = test_loop_out_quote_terms();
-        let wrong_lock = crate::liquidity::tx::build_liquidity_lock_script(
-            &liquidity_lock_artifact(),
-            &LiquidityLockOutputParams {
-                payment_hash: quote.payment_hash.into(),
-                claimant_lock: quote.claimant_lock.clone(),
-                refund_lock: quote.refund_lock.clone(),
-                refund_after_lock_time: quote.refund_after_lock_time,
-                amount: quote.amount + quote.provider_fee,
-                asset_type_script: None,
-                capacity: quote.capacity_requirement_ckb,
-            },
-        );
-        let mut cell = observed_loop_out_payout(&quote);
-        cell.output = cell.output.as_builder().lock(wrong_lock).build();
+    async fn validate_observed_loop_out_payout_rejects_invalid_live_cell_matrix() {
+        let cases = [
+            InvalidLoopOutPayoutCase::WrongCodeHash,
+            InvalidLoopOutPayoutCase::WrongHashType,
+            InvalidLoopOutPayoutCase::WrongArgsLength,
+            InvalidLoopOutPayoutCase::WrongPaymentHash,
+            InvalidLoopOutPayoutCase::WrongClaimantHash,
+            InvalidLoopOutPayoutCase::WrongRefundHash,
+            InvalidLoopOutPayoutCase::WrongRefundTime,
+            InvalidLoopOutPayoutCase::WrongAmount,
+            InvalidLoopOutPayoutCase::WrongAssetTypeHash,
+            InvalidLoopOutPayoutCase::CkbCapacityBelowAmount,
+            InvalidLoopOutPayoutCase::CapacityBelowRequirement,
+            InvalidLoopOutPayoutCase::UnexpectedCkbTypeScript,
+            InvalidLoopOutPayoutCase::WrongUdtTypeScript,
+            InvalidLoopOutPayoutCase::WrongUdtDataLength,
+            InvalidLoopOutPayoutCase::WrongUdtAmount,
+            InvalidLoopOutPayoutCase::UdtCapacityBelowRequirement,
+        ];
 
-        let error = validate_observed_cell(&quote, Some(cell), true)
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("amount"));
+        for case in cases {
+            let (quote, cell, expected_error) = invalid_loop_out_payout(case);
+            let error = validate_observed_cell(&quote, Some(cell), true)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains(expected_error),
+                "{case:?} returned unexpected error: {error}"
+            );
+        }
     }
 }
