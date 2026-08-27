@@ -73,6 +73,26 @@ impl LiquidityNetworkNode {
             .unwrap_or_else(|error| panic!("liquidity RPC {method} failed: {error}"))
     }
 
+    async fn request_before_deadline<P, R>(
+        &self,
+        deadline: Instant,
+        operation: &str,
+        method: &str,
+        params: P,
+    ) -> Result<R, String>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        await_before_deadline(
+            deadline,
+            operation,
+            self.rpc.request(method, rpc_params![params]),
+        )
+        .await?
+        .map_err(|error| format!("{operation} failed: {error}"))
+    }
+
     pub(crate) fn pubkey(&self) -> crate::fiber::Pubkey {
         self.node.pubkey
     }
@@ -171,6 +191,16 @@ impl LiquidityNetworkNode {
         self.request("get_swap", GetSwapParams { swap_id }).await
     }
 
+    async fn get_swap_before_deadline(
+        &self,
+        deadline: Instant,
+        operation: &str,
+        swap_id: fiber_json_types::Hash256,
+    ) -> Result<Option<LiquiditySwapRecord>, String> {
+        self.request_before_deadline(deadline, operation, "get_swap", GetSwapParams { swap_id })
+            .await
+    }
+
     pub(crate) async fn list_chain_transactions(
         &self,
         swap_id: fiber_json_types::Hash256,
@@ -182,8 +212,41 @@ impl LiquidityNetworkNode {
         .await
     }
 
+    async fn list_chain_transactions_before_deadline(
+        &self,
+        deadline: Instant,
+        operation: &str,
+        swap_id: fiber_json_types::Hash256,
+    ) -> Result<ListLiquidityChainTransactionsResponse, String> {
+        self.request_before_deadline(
+            deadline,
+            operation,
+            "list_liquidity_chain_transactions",
+            ListLiquidityChainTransactionsParams { swap_id },
+        )
+        .await
+    }
+
     pub(crate) async fn list_channels(&self) -> ListChannelsResult {
         self.request(
+            "list_channels",
+            ListChannelsParams {
+                pubkey: None,
+                include_closed: None,
+                only_pending: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn list_channels_before_deadline(
+        &self,
+        deadline: Instant,
+        operation: &str,
+    ) -> Result<ListChannelsResult, String> {
+        self.request_before_deadline(
+            deadline,
+            operation,
             "list_channels",
             ListChannelsParams {
                 pubkey: None,
@@ -479,8 +542,16 @@ impl LiquidityNetworkFixture {
         timeout: Duration,
     ) -> LiquiditySwapRecord {
         let deadline = Instant::now() + timeout;
+        let mut latest = None;
         loop {
-            let latest = self.nodes[node].get_swap(swap_id).await;
+            let operation = format!(
+                "get_swap request for node {node}, swap {swap_id:?}, expected state \
+                 {expected_state}"
+            );
+            latest = self.nodes[node]
+                .get_swap_before_deadline(deadline, &operation, swap_id)
+                .await
+                .unwrap_or_else(|error| panic!("{error}; latest swap record: {latest:?}"));
             if let Some(record) = latest.as_ref() {
                 if record.state == expected_state {
                     return record.clone();
@@ -506,10 +577,16 @@ impl LiquidityNetworkFixture {
         timeout: Duration,
     ) -> LiquidityChainTransaction {
         let deadline = Instant::now() + timeout;
+        let mut latest = Vec::new();
         loop {
-            let latest = self.nodes[node]
-                .list_chain_transactions(swap_id)
+            let operation = format!(
+                "list chain transactions request for node {node}, swap {swap_id:?}, expected role \
+                 {role:?} and status {status}"
+            );
+            latest = self.nodes[node]
+                .list_chain_transactions_before_deadline(deadline, &operation, swap_id)
                 .await
+                .unwrap_or_else(|error| panic!("{error}; latest chain records: {latest:?}"))
                 .transactions;
             if let Some(transaction) = latest
                 .iter()
