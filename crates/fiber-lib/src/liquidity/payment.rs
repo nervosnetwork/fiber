@@ -598,6 +598,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_provider_invoice_rejects_mismatched_preimage_before_network_command() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([0u8; 32].into())).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+        let preimage: Hash256 = [9u8; 32].into();
+
+        let error = adapter
+            .register_provider_loop_out_invoice([7u8; 32].into(), preimage, 100, None)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("provider invoice payment hash mismatch"));
+        assert!(network.take_events().is_empty());
+        assert!(network.take_send_commands().is_empty());
+        assert!(network.take_invoices().is_empty());
+    }
+
+    #[tokio::test]
     async fn register_provider_invoice_accepts_equivalent_existing_usable_invoice() {
         let preimage: Hash256 = [9u8; 32].into();
         let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
@@ -638,6 +657,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_provider_invoice_accepts_explicit_existing_ckb_hash() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let existing = provider_invoice(
+            payment_hash,
+            102,
+            Currency::Fibd,
+            None,
+            Some(HashAlgorithm::CkbHash),
+        );
+        let network = spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoice(Some((
+            existing,
+            CkbInvoiceStatus::Open,
+        ))))
+        .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 102, None)
+            .await
+            .unwrap();
+
+        assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+        assert!(network.take_send_commands().is_empty());
+        assert!(network.take_invoices().is_empty());
+    }
+
+    #[tokio::test]
     async fn register_provider_invoice_rejects_existing_invoice_term_mismatches() {
         let preimage: Hash256 = [9u8; 32].into();
         let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
@@ -674,16 +721,6 @@ mod tests {
                 ),
             ),
             (
-                "UDT type script",
-                provider_invoice(
-                    payment_hash,
-                    102,
-                    Currency::Fibd,
-                    Some(test_script(2)),
-                    None,
-                ),
-            ),
-            (
                 "hash algorithm",
                 provider_invoice(
                     payment_hash,
@@ -714,6 +751,39 @@ mod tests {
                 .unwrap_err();
 
             assert!(error.to_string().contains(term));
+            assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+            assert!(network.take_send_commands().is_empty());
+            assert!(network.take_invoices().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_rejects_existing_udt_script_mismatches() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let script = test_script(1);
+        let mismatches = [
+            (Some(script.clone()), None),
+            (None, Some(script)),
+            (Some(test_script(1)), Some(test_script(2))),
+        ];
+
+        for (expected_script, existing_script) in mismatches {
+            let existing =
+                provider_invoice(payment_hash, 102, Currency::Fibd, existing_script, None);
+            let network = spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoice(Some((
+                existing,
+                CkbInvoiceStatus::Open,
+            ))))
+            .await;
+            let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+            let error = adapter
+                .register_provider_loop_out_invoice(payment_hash, preimage, 102, expected_script)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains("UDT type script"));
             assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
             assert!(network.take_send_commands().is_empty());
             assert!(network.take_invoices().is_empty());
@@ -760,6 +830,27 @@ mod tests {
         assert!(error
             .to_string()
             .contains("failed to look up existing provider invoice: Invoice not found"));
+        assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+        assert!(network.take_send_commands().is_empty());
+        assert!(network.take_invoices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_rejects_dropped_duplicate_lookup_reply() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let network =
+            spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoiceDropsLookupReply).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let error = adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 102, None)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to call network actor while looking up existing provider invoice"));
         assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
         assert!(network.take_send_commands().is_empty());
         assert!(network.take_invoices().is_empty());
@@ -857,6 +948,7 @@ mod tests {
         SettleWithoutPreimage,
         ReloadInvoiceStatus(CkbInvoiceStatus),
         DuplicateInvoice(Option<(CkbInvoice, CkbInvoiceStatus)>),
+        DuplicateInvoiceDropsLookupReply,
     }
 
     struct NetworkPaymentMockActor;
@@ -947,7 +1039,8 @@ mod tests {
                         let payment_hash = *invoice.payment_hash();
                         let mut invoices = state.invoices.lock().unwrap();
                         let result = match &state.mode {
-                            NetworkPaymentMockMode::DuplicateInvoice(_) => {
+                            NetworkPaymentMockMode::DuplicateInvoice(_)
+                            | NetworkPaymentMockMode::DuplicateInvoiceDropsLookupReply => {
                                 Err(InvoiceError::InvoiceAlreadyExists)
                             }
                             _ => match invoices.entry(payment_hash) {
@@ -974,6 +1067,9 @@ mod tests {
                             }
                             NetworkPaymentMockMode::DuplicateInvoice(ref invoice) => {
                                 invoice.clone().ok_or(InvoiceError::InvoiceNotFound)
+                            }
+                            NetworkPaymentMockMode::DuplicateInvoiceDropsLookupReply => {
+                                return Ok(())
                             }
                             _ => state
                                 .invoices
