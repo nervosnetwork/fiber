@@ -1907,6 +1907,96 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
+    init_tracing();
+
+    let network = create_lsp_test_network(
+        &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
+        2,
+        &[((0, TENANT_ID), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))],
+    )
+    .await;
+    let public_t = &network.nodes[0];
+    let tenant = network.tenant(0, TENANT_ID);
+    let rejected_payment_hash = gen_rand_sha256_hash();
+    let error = tenant
+        .client
+        .request::<fiber_json_types::InvoiceResult, _>(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("hosted incoming MPP rejection".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: Some(rejected_payment_hash.into()),
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: Some(true),
+                allow_trampoline_routing: Some(true),
+                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
+            }],
+        )
+        .await
+        .expect_err("hosted tenant must not create an MPP invoice");
+    assert!(
+        error
+            .to_string()
+            .contains("hosted tenant invoices do not support MPP"),
+        "unexpected hosted MPP invoice error: {error}"
+    );
+    assert_eq!(tenant.node.get_invoice_status(&rejected_payment_hash), None);
+    assert!(public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&rejected_payment_hash)
+        .expect("read rejected hosted invoice registration")
+        .is_none());
+
+    let accepted_payment_hash = gen_rand_sha256_hash();
+    let invoice: fiber_json_types::InvoiceResult = tenant
+        .client
+        .request(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("hosted single-part invoice".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: Some(accepted_payment_hash.into()),
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: Some(false),
+                allow_trampoline_routing: Some(true),
+                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
+            }],
+        )
+        .await
+        .expect("create hosted single-part invoice");
+    assert_eq!(
+        invoice.accepted_lsp_buffer_duration_ms,
+        Some(BUFFER_DURATION_MS)
+    );
+    assert_eq!(
+        tenant.node.get_invoice_status(&accepted_payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    assert!(public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .get_lsp_invoice(&accepted_payment_hash)
+        .expect("read accepted hosted invoice registration")
+        .is_some());
+
+    network.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hosted_tenant_pays_ordinary_node_through_lsp_with_mpp() {
     init_tracing();
 

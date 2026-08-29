@@ -182,6 +182,9 @@ where
         mut params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            if params.allow_mpp == Some(true) {
+                return Err(rpc_error("hosted tenant invoices do not support MPP"));
+            }
             let tenant_id = context.tenant_id.clone();
             let requested_buffer_duration_ms = params.lsp_buffer_duration_ms;
             if requested_buffer_duration_ms
