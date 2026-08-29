@@ -30,24 +30,6 @@ pub enum LiquidityLoopOutError {
     /// The routing fee exceeds the client's accepted maximum.
     #[error("routing fee exceeds client cap")]
     RoutingFeeTooHigh,
-    /// The quoted provider fee exceeds the client's execution-time maximum.
-    #[error("quoted provider fee {provider_fee} exceeds execution cap {max_provider_fee}")]
-    ProviderFeeCapExceeded {
-        /// Provider fee in the accepted quote.
-        provider_fee: u128,
-        /// Maximum provider fee accepted at execution time.
-        max_provider_fee: u128,
-    },
-    /// The quoted routing fee limit exceeds the client's execution-time maximum.
-    #[error(
-        "quoted routing fee limit {routing_fee_limit} exceeds execution cap {max_routing_fee}"
-    )]
-    RoutingFeeCapExceeded {
-        /// Routing fee limit in the accepted quote.
-        routing_fee_limit: u128,
-        /// Maximum routing fee accepted at execution time.
-        max_routing_fee: u128,
-    },
     /// The asset does not have enough available capacity for the swap.
     #[error("liquidity asset capacity too low: available {available}, required {required}")]
     CapacityTooLow {
