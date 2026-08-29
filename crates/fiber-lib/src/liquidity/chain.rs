@@ -15,6 +15,7 @@ use fiber_types::{
     Hash256, HashAlgorithm, LiquidityAssetKind, LiquidityChainTxRole, LiquiditySwapState,
 };
 use ractor::{ActorRef, RpcReplyPort};
+use thiserror::Error;
 
 use crate::ckb::contracts::get_udt_cell_deps;
 use crate::ckb::{
@@ -268,6 +269,17 @@ impl LoopOutRefundTxPlan {
     }
 }
 
+/// Error returned while validating a confirmed Loop Out payout cell.
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum PayoutValidationError {
+    /// A live-cell query failed temporarily and may succeed when retried.
+    #[error("transient live-cell query failure: {0}")]
+    Transient(String),
+    /// The payout is missing, spent, or does not match the accepted quote.
+    #[error("{0}")]
+    Definitive(String),
+}
+
 /// Chain boundary required by Loop Out liquidity workflows.
 #[async_trait]
 pub trait LiquidityChainWatcher {
@@ -311,7 +323,7 @@ pub trait LiquidityChainWatcher {
         &mut self,
         quote: &LoopOutQuoteTerms,
         outpoint: &packed::OutPoint,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), PayoutValidationError>;
 
     /// Schedule payout lock watching and report completion back to `myself`.
     async fn watch_payout_lock(
@@ -567,9 +579,9 @@ impl<S> CkbLiquidityChainWatcher<S> {
         outpoint: &packed::OutPoint,
         expected_onchain_amount: u128,
         context: &str,
-    ) -> Result<(), LiquidityLoopOutError> {
+    ) -> Result<(), PayoutValidationError> {
         let artifact = self.liquidity_lock_artifact.as_ref().ok_or_else(|| {
-            LiquidityLoopOutError::Chain(
+            PayoutValidationError::Definitive(
                 "liquidity-lock script artifact is not configured".to_string(),
             )
         })?;
@@ -577,20 +589,21 @@ impl<S> CkbLiquidityChainWatcher<S> {
             CkbChainMessage::GetLiveCell(outpoint.clone(), reply)
         })
         .map_err(|error| {
-            LiquidityLoopOutError::Chain(format!(
+            PayoutValidationError::Transient(format!(
                 "failed to query live cell for {context}: {error}"
             ))
         })?
         .map_err(|error| {
-            LiquidityLoopOutError::Chain(format!(
+            PayoutValidationError::Transient(format!(
                 "ckb rpc error querying live cell for {context}: {error}"
             ))
         })?
         .ok_or_else(|| {
-            LiquidityLoopOutError::Chain(format!("{context} cell not found or already spent"))
+            PayoutValidationError::Definitive(format!("{context} cell not found or already spent"))
         })?;
 
         validate_liquidity_live_cell(&cell, quote, expected_onchain_amount, artifact, context)
+            .map_err(|error| PayoutValidationError::Definitive(error.to_string()))
     }
 
     #[allow(dead_code)]
@@ -1486,13 +1499,14 @@ where
             "observed loop in lock",
         )
         .await
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))
     }
 
     async fn validate_observed_loop_out_payout(
         &mut self,
         quote: &LoopOutQuoteTerms,
         outpoint: &packed::OutPoint,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), PayoutValidationError> {
         self.validate_observed_liquidity_cell(
             quote,
             outpoint,
@@ -2292,8 +2306,8 @@ mod tests {
             &mut self,
             _quote: &LoopOutQuoteTerms,
             _outpoint: &packed::OutPoint,
-        ) -> Result<(), Self::Error> {
-            Err(LiquidityLoopOutError::Chain("unused".to_string()))
+        ) -> Result<(), PayoutValidationError> {
+            Err(PayoutValidationError::Definitive("unused".to_string()))
         }
 
         async fn broadcast_claim(
@@ -5531,6 +5545,7 @@ mod tests {
             watcher
                 .validate_observed_loop_out_payout(quote, &test_outpoint(0))
                 .await
+                .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))
         } else {
             watcher
                 .validate_observed_loop_in_lock(quote, &test_outpoint(0))
@@ -5539,6 +5554,56 @@ mod tests {
         stop_ref.stop(Some("test done".to_string()));
         let _ = handle.await;
         result
+    }
+
+    async fn validate_observed_loop_out_cell(
+        quote: &LoopOutQuoteTerms,
+        cell: Option<LiveCell>,
+    ) -> Result<(), PayoutValidationError> {
+        let (ckb_actor, handle) = ractor::Actor::spawn(None, LiveCellMockCkbActor, cell)
+            .await
+            .unwrap();
+        let stop_ref = ckb_actor.clone();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            NoopLiquidityStore::default(),
+            liquidity_lock_artifact(),
+        );
+        let result = watcher
+            .validate_observed_loop_out_payout(quote, &test_outpoint(0))
+            .await;
+        stop_ref.stop(Some("test done".to_string()));
+        let _ = handle.await;
+        result
+    }
+
+    struct LiveCellErrorMockCkbActor;
+
+    #[async_trait::async_trait]
+    impl Actor for LiveCellErrorMockCkbActor {
+        type Msg = CkbChainMessage;
+        type State = Option<ckb_sdk::RpcError>;
+        type Arguments = ckb_sdk::RpcError;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            error: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(Some(error))
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let CkbChainMessage::GetLiveCell(_outpoint, reply) = message {
+                let _ = reply.send(Err(state.take().unwrap()));
+            }
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -5876,11 +5941,40 @@ mod tests {
     async fn validate_observed_loop_out_payout_rejects_missing_or_spent_cell() {
         let quote = test_loop_out_quote_terms();
 
-        let error = validate_observed_cell(&quote, None, true)
+        let error = validate_observed_loop_out_cell(&quote, None)
             .await
             .unwrap_err();
 
+        assert!(matches!(error, PayoutValidationError::Definitive(_)));
         assert!(error.to_string().contains("not found or already spent"));
+    }
+
+    #[tokio::test]
+    async fn validate_observed_loop_out_payout_classifies_rpc_error_as_transient() {
+        let quote = test_loop_out_quote_terms();
+        let (ckb_actor, handle) = ractor::Actor::spawn(
+            None,
+            LiveCellErrorMockCkbActor,
+            ckb_sdk::RpcError::Other(anyhow::anyhow!("temporary rpc failure")),
+        )
+        .await
+        .unwrap();
+        let stop_ref = ckb_actor.clone();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            NoopLiquidityStore::default(),
+            liquidity_lock_artifact(),
+        );
+
+        let error = watcher
+            .validate_observed_loop_out_payout(&quote, &test_outpoint(0))
+            .await
+            .unwrap_err();
+
+        stop_ref.stop(Some("test done".to_string()));
+        let _ = handle.await;
+        assert!(matches!(error, PayoutValidationError::Transient(_)));
+        assert!(error.to_string().contains("temporary rpc failure"));
     }
 
     #[tokio::test]
