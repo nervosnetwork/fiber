@@ -366,6 +366,15 @@ mod tests {
         assert_eq!(request.invoice, None);
     }
 
+    #[test]
+    fn payment_request_rejects_total_budget_overflow_after_principal_fits() {
+        let error =
+            LoopOutPaymentRequest::new([1u8; 32].into(), test_pubkey(), u128::MAX - 1, 1, 1)
+                .unwrap_err();
+
+        assert_eq!(error, LiquidityLoopOutError::GrossAmountOverflow);
+    }
+
     #[tokio::test]
     async fn network_loop_out_payment_adapter_sends_existing_network_payment_command() {
         let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([7u8; 32].into())).await;
