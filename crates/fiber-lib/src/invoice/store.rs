@@ -51,9 +51,6 @@ pub enum EnsureInvoicePreimageError {
     /// The invoice has reached a terminal status that cannot be repaired.
     #[error("Invoice status does not allow preimage recovery: {0}")]
     InvoiceNotUsable(CkbInvoiceStatus),
-    /// A paid invoice has no persisted preimage and must not be modified retroactively.
-    #[error("Paid invoice is missing its stored preimage")]
-    PaidInvoiceMissingPreimage,
 }
 
 #[derive(Error, Debug)]

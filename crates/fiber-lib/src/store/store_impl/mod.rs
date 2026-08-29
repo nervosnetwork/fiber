@@ -2078,7 +2078,8 @@ impl InvoiceStore for Store {
             (CkbInvoiceStatus::Open | CkbInvoiceStatus::Received, Some(_))
             | (CkbInvoiceStatus::Paid, Some(_)) => {}
             (CkbInvoiceStatus::Paid, None) => {
-                return Err(EnsureInvoicePreimageError::PaidInvoiceMissingPreimage);
+                drop(_guard);
+                return Ok(status);
             }
             (CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired, _) => {
                 return Err(EnsureInvoicePreimageError::InvoiceNotUsable(status));
