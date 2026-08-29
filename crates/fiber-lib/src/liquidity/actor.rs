@@ -40,7 +40,7 @@ use crate::liquidity::store::{
     LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
 };
 use crate::liquidity::types::{
-    loop_out_gross_payment_amount, LiquidityLoopOutError, LoopOutQuoteTerms,
+    loop_out_payment_principal, LiquidityLoopOutError, LoopOutQuoteTerms,
 };
 
 #[cfg(not(test))]
@@ -490,6 +490,18 @@ where
         let quote_id: Hash256 = params.quote_id.into();
         let quote = self.quote_terms(&quote_id)?;
         ensure_loop_out_quote_terms(&quote)?;
+        if quote.provider_fee > params.max_provider_fee {
+            return Err(LiquidityLoopOutError::ProviderFeeCapExceeded {
+                provider_fee: quote.provider_fee,
+                max_provider_fee: params.max_provider_fee,
+            });
+        }
+        if quote.routing_fee_limit > params.max_routing_fee {
+            return Err(LiquidityLoopOutError::RoutingFeeCapExceeded {
+                routing_fee_limit: quote.routing_fee_limit,
+                max_routing_fee: params.max_routing_fee,
+            });
+        }
         let now_ms = now_ms();
         let payout_outpoint = params.payout_outpoint.map(Into::into);
         let swap_id = create_client_loop_out(&self.store, quote.clone(), now_ms, payout_outpoint)?;
@@ -1157,17 +1169,13 @@ where
                 quote.quote_id
             ))
         })?;
-        let gross_amount = loop_out_gross_payment_amount(
-            quote.amount,
-            quote.provider_fee,
-            quote.routing_fee_limit,
-        )?;
+        let principal = loop_out_payment_principal(quote.amount, quote.provider_fee)?;
         let udt_type_script = quote.asset.udt_type_script.clone().map(Into::into);
         self.payment
             .register_provider_loop_out_invoice(
                 quote.payment_hash,
                 preimage,
-                gross_amount,
+                principal,
                 udt_type_script,
             )
             .await
@@ -3846,6 +3854,7 @@ mod tests {
         pending_result: Shared<Option<oneshot::Receiver<Result<Hash256, String>>>>,
         reload_statuses: Shared<Vec<LoopOutPaymentStatus>>,
         registered_invoices: Shared<Vec<Hash256>>,
+        registered_invoice_amounts: Shared<Vec<u128>>,
         fail_registration: Shared<bool>,
     }
 
@@ -3859,6 +3868,7 @@ mod tests {
                 pending_result: Shared::new(None),
                 reload_statuses: Shared::new(Vec::new()),
                 registered_invoices: Shared::new(Vec::new()),
+                registered_invoice_amounts: Shared::new(Vec::new()),
                 fail_registration: Shared::new(false),
             }
         }
@@ -3872,6 +3882,7 @@ mod tests {
                 pending_result: Shared::new(None),
                 reload_statuses: Shared::new(Vec::new()),
                 registered_invoices: Shared::new(Vec::new()),
+                registered_invoice_amounts: Shared::new(Vec::new()),
                 fail_registration: Shared::new(false),
             }
         }
@@ -3889,6 +3900,7 @@ mod tests {
                 pending_result: Shared::new(Some(recv)),
                 reload_statuses: Shared::new(reload_statuses),
                 registered_invoices: Shared::new(Vec::new()),
+                registered_invoice_amounts: Shared::new(Vec::new()),
                 fail_registration: Shared::new(false),
             };
             (payment, send)
@@ -3900,6 +3912,10 @@ mod tests {
 
         fn registered_invoices(&self) -> Vec<Hash256> {
             self.registered_invoices.borrow().clone()
+        }
+
+        fn registered_invoice_amounts(&self) -> Vec<u128> {
+            self.registered_invoice_amounts.borrow().clone()
         }
 
         fn fail_next_registration(&self) {
@@ -3947,7 +3963,7 @@ mod tests {
             &mut self,
             payment_hash: Hash256,
             _preimage: Hash256,
-            _amount: u128,
+            amount: u128,
             _udt_type_script: Option<ckb_types::packed::Script>,
         ) -> Result<(), Self::Error> {
             let fail = {
@@ -3961,6 +3977,7 @@ mod tests {
             }
             self.events.borrow_mut().push("register_invoice");
             self.registered_invoices.borrow_mut().push(payment_hash);
+            self.registered_invoice_amounts.borrow_mut().push(amount);
             Ok(())
         }
 
@@ -4100,12 +4117,21 @@ mod tests {
             &self,
             quote_id: Hash256,
         ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
+            self.call_loop_out_with_caps(quote_id, 1, 1).await
+        }
+
+        async fn call_loop_out_with_caps(
+            &self,
+            quote_id: Hash256,
+            max_provider_fee: u128,
+            max_routing_fee: u128,
+        ) -> Result<LiquiditySwapResponse, LiquidityLoopOutError> {
             let actor = self.spawn_actor().await;
             ractor::call!(actor, |reply| LiquidityActorMessage::LoopOut(
                 LoopOutParams {
                     quote_id: quote_id.into(),
-                    max_provider_fee: 1,
-                    max_routing_fee: 1,
+                    max_provider_fee,
+                    max_routing_fee,
                     payout_outpoint: None,
                 },
                 reply
@@ -7650,6 +7676,9 @@ mod tests {
         let preimage: Hash256 = [7u8; 32].into();
         let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
         let mut quote = harness.loop_out_quote_terms();
+        quote.amount = 1_000;
+        quote.provider_fee = 1;
+        quote.routing_fee_limit = 100;
         quote.payment_hash = payment_hash;
         quote.payment_preimage = Some(preimage);
         harness.store_quote(quote.clone());
@@ -7660,6 +7689,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(harness.payment.registered_invoices(), vec![payment_hash]);
+        assert_eq!(harness.payment.registered_invoice_amounts(), vec![1_001]);
         stop_liquidity_actor(actor, handle).await;
     }
 
@@ -7786,6 +7816,62 @@ mod tests {
 
         assert!(error.to_string().contains("quote"));
         assert!(harness.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn loop_out_rejects_provider_fee_above_execution_cap_before_side_effects() {
+        let harness = RuntimeActorHarness::new_client();
+        let mut quote = harness.loop_out_quote_terms();
+        quote.provider_fee = 2;
+        harness.store_quote(quote.clone());
+
+        let error = harness
+            .call_loop_out_with_caps(quote.quote_id, 1, quote.routing_fee_limit)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            LiquidityLoopOutError::ProviderFeeCapExceeded {
+                provider_fee: 2,
+                max_provider_fee: 1,
+            }
+        );
+        assert!(harness.events().is_empty());
+        assert!(harness.store.swaps.borrow().is_empty());
+        assert!(harness.store.chain_txs.borrow().is_empty());
+        assert!(harness.store.signed_txs.borrow().is_empty());
+        assert!(harness.chain.payout_locks.borrow().is_empty());
+        assert!(harness.payment.requests().is_empty());
+        assert!(harness.payment.registered_invoices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn loop_out_rejects_routing_fee_above_execution_cap_before_side_effects() {
+        let harness = RuntimeActorHarness::new_client();
+        let mut quote = harness.loop_out_quote_terms();
+        quote.routing_fee_limit = 2;
+        harness.store_quote(quote.clone());
+
+        let error = harness
+            .call_loop_out_with_caps(quote.quote_id, quote.provider_fee, 1)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            LiquidityLoopOutError::RoutingFeeCapExceeded {
+                routing_fee_limit: 2,
+                max_routing_fee: 1,
+            }
+        );
+        assert!(harness.events().is_empty());
+        assert!(harness.store.swaps.borrow().is_empty());
+        assert!(harness.store.chain_txs.borrow().is_empty());
+        assert!(harness.store.signed_txs.borrow().is_empty());
+        assert!(harness.chain.payout_locks.borrow().is_empty());
+        assert!(harness.payment.requests().is_empty());
+        assert!(harness.payment.registered_invoices().is_empty());
     }
 
     #[tokio::test]

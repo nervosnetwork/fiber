@@ -10,7 +10,9 @@ use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::liquidity::actor::{LoopOutPaymentAdapter, LoopOutPaymentStatus};
-use crate::liquidity::types::{loop_out_gross_payment_amount, LiquidityLoopOutError};
+use crate::liquidity::types::{
+    loop_out_gross_payment_amount, loop_out_payment_principal, LiquidityLoopOutError,
+};
 
 /// Fiber payment request derived from accepted Loop Out terms.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -21,7 +23,7 @@ pub struct LoopOutPaymentRequest {
     pub target_pubkey: Option<Pubkey>,
     /// Invoice to pay when the receiver is encoded by the invoice.
     pub invoice: Option<String>,
-    /// Gross Fiber payment amount including provider and routing fee budgets.
+    /// Fiber payment principal including the provider fee but excluding routing fees.
     pub amount: u128,
     /// Maximum Fiber routing fee the client accepts for this payment.
     pub max_fee_amount: u128,
@@ -36,11 +38,12 @@ impl LoopOutPaymentRequest {
         provider_fee: u128,
         routing_fee_limit: u128,
     ) -> Result<Self, LiquidityLoopOutError> {
+        loop_out_gross_payment_amount(amount, provider_fee, routing_fee_limit)?;
         Ok(Self {
             payment_hash,
             target_pubkey: Some(target_pubkey),
             invoice: None,
-            amount: loop_out_gross_payment_amount(amount, provider_fee, routing_fee_limit)?,
+            amount: loop_out_payment_principal(amount, provider_fee)?,
             max_fee_amount: routing_fee_limit,
         })
     }
@@ -353,12 +356,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payment_request_uses_gross_amount_and_fee_cap() {
+    fn payment_request_uses_principal_and_fee_cap() {
         let request =
-            LoopOutPaymentRequest::new([1u8; 32].into(), test_pubkey(), 100, 2, 3).unwrap();
+            LoopOutPaymentRequest::new([1u8; 32].into(), test_pubkey(), 1_000, 1, 100).unwrap();
 
-        assert_eq!(request.amount, 105);
-        assert_eq!(request.max_fee_amount, 3);
+        assert_eq!(request.amount, 1_001);
+        assert_eq!(request.max_fee_amount, 100);
         assert_eq!(request.target_pubkey, Some(test_pubkey()));
         assert_eq!(request.invoice, None);
     }
@@ -379,7 +382,7 @@ mod tests {
         assert_eq!(network.take_events(), vec!["send_payment"]);
         let command = network.take_send_commands().pop().unwrap();
         assert_eq!(command.payment_hash, Some([3u8; 32].into()));
-        assert_eq!(command.amount, Some(107));
+        assert_eq!(command.amount, Some(102));
         assert_eq!(command.max_fee_amount, Some(5));
         assert_eq!(command.target_pubkey, Some(test_pubkey()));
         assert_eq!(command.invoice, None);

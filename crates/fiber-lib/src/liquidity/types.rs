@@ -30,6 +30,24 @@ pub enum LiquidityLoopOutError {
     /// The routing fee exceeds the client's accepted maximum.
     #[error("routing fee exceeds client cap")]
     RoutingFeeTooHigh,
+    /// The quoted provider fee exceeds the client's execution-time maximum.
+    #[error("quoted provider fee {provider_fee} exceeds execution cap {max_provider_fee}")]
+    ProviderFeeCapExceeded {
+        /// Provider fee in the accepted quote.
+        provider_fee: u128,
+        /// Maximum provider fee accepted at execution time.
+        max_provider_fee: u128,
+    },
+    /// The quoted routing fee limit exceeds the client's execution-time maximum.
+    #[error(
+        "quoted routing fee limit {routing_fee_limit} exceeds execution cap {max_routing_fee}"
+    )]
+    RoutingFeeCapExceeded {
+        /// Routing fee limit in the accepted quote.
+        routing_fee_limit: u128,
+        /// Maximum routing fee accepted at execution time.
+        max_routing_fee: u128,
+    },
     /// The asset does not have enough available capacity for the swap.
     #[error("liquidity asset capacity too low: available {available}, required {required}")]
     CapacityTooLow {
@@ -115,6 +133,16 @@ pub fn loop_out_gross_payment_amount(
     amount
         .checked_add(provider_fee)
         .and_then(|v| v.checked_add(routing_fee))
+        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
+}
+
+/// Compute the Fiber payment principal for a Loop Out swap.
+pub fn loop_out_payment_principal(
+    amount: u128,
+    provider_fee: u128,
+) -> Result<u128, LiquidityLoopOutError> {
+    amount
+        .checked_add(provider_fee)
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
 }
 
@@ -216,5 +244,14 @@ mod tests {
     fn loop_out_gross_payment_amount_checks_overflow() {
         assert_eq!(loop_out_gross_payment_amount(100, 2, 3).unwrap(), 105);
         assert!(loop_out_gross_payment_amount(u128::MAX, 1, 0).is_err());
+    }
+
+    #[test]
+    fn loop_out_payment_principal_excludes_routing_budget_and_checks_overflow() {
+        assert_eq!(loop_out_payment_principal(1_000, 1).unwrap(), 1_001);
+        assert_eq!(
+            loop_out_payment_principal(u128::MAX, 1),
+            Err(LiquidityLoopOutError::GrossAmountOverflow)
+        );
     }
 }
