@@ -5,8 +5,8 @@ use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxRespon
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse, ChannelActor,
     ChannelActorMessage, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
-    ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    ProcessingChannelResult, ReloadParams, ReplayOrderHint, TestChannelSignerBuffers,
+    UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     XUDT_COMPATIBLE_WITNESS,
 };
@@ -27,7 +27,7 @@ use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
     AddTlc, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256, Init,
-    PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
+    PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures, UpdateTlcInfo,
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::fiber::{FiberActorMessage, FiberActorRef};
@@ -69,11 +69,11 @@ use ckb_types::{
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
-    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
-    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
-    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
-    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    ChannelOpeningStatus, ChannelState, ChannelUpdateChannelFlags, CollaboratingFundingTxFlags,
+    HashAlgorithm, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus,
+    PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevokeAndAck, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
+    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1697,7 +1697,7 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
 
     let sdk = ExternalSignerHttpClient {
         node: &node_a,
-        signer: channel_signer,
+        signer: &channel_signer,
     };
 
     wait_until_async_timeout(|| async {
@@ -1804,11 +1804,10 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
     else {
         panic!("payment must persist a pending signing request");
     };
-    let ExternalSignerHttpClient { signer, .. } = sdk;
     node_a.restart().await;
     let sdk = ExternalSignerHttpClient {
         node: &node_a,
-        signer,
+        signer: &channel_signer,
     };
     let pending_after_restart = sdk.get_signing_status(channel_id).await.status;
     assert!(matches!(
@@ -1940,7 +1939,7 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
 
     let sdk = ExternalSignerHttpClient {
         node: &node_a,
-        signer: channel_signer,
+        signer: &channel_signer,
     };
 
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -2000,7 +1999,7 @@ async fn bind_external_signer(
 #[cfg(not(target_arch = "wasm32"))]
 struct ExternalSignerHttpClient<'a> {
     node: &'a NetworkNode,
-    signer: ChannelSigner<MemoryStore>,
+    signer: &'a ChannelSigner<MemoryStore>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2083,6 +2082,239 @@ impl ExternalSignerHttpClient<'_> {
             .send_rpc_request("submit_channel_signature", params)
             .await
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSigner<MemoryStore>) {
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("sdk-restart-node-{index}")))
+            .base_dir_prefix(&format!("sdk-restart-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+    let created = RootSigner::in_memory()
+        .await
+        .expect("create in-memory root signer");
+    let signer = created
+        .root_signer
+        .create_channel()
+        .await
+        .expect("create external channel signer");
+    let material = signer
+        .channel_open_material(false)
+        .await
+        .expect("external channel open material");
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: HUGE_CKB_AMOUNT,
+                public: Some(false),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .expect("open external-signer channel");
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    bind_external_signer(&signer, &unsigned_tx, Script::default()).await;
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: mock_sign_external_funding_tx(&unsigned_tx).into(),
+            },
+        )
+        .await
+        .expect("submit external funding transaction");
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: &signer,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a_ready = matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            );
+            let b_ready = node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady));
+            if a_ready && b_ready {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("external-signer channel becomes ready");
+    let seed_payment = node_a
+        .send_payment_keysend(&node_b, 1_000_000, false)
+        .await
+        .expect("seed acceptor outbound liquidity");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            sdk.try_sign_pending(channel_id).await;
+            let state_a = node_a.get_channel_actor_state(channel_id);
+            let state_b = node_b.get_channel_actor_state(channel_id);
+            if node_a.get_payment_status(seed_payment.payment_hash).await == PaymentStatus::Success
+                && state_a.tlc_state.all_tlcs().count() == 0
+                && state_b.tlc_state.all_tlcs().count() == 0
+                && !state_a.tlc_state.waiting_ack
+                && !state_b.tlc_state.waiting_ack
+                && !state_a.signer_state.is_awaiting_signature()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("seed payment settles");
+    ([node_a, node_b], channel_id, signer)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_external_signer_recovery(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    signer: &ChannelSigner<MemoryStore>,
+    channel_id: Hash256,
+    payments: &[(&NetworkNode, Hash256)],
+) -> bool {
+    let sdk = ExternalSignerHttpClient {
+        node: node_a,
+        signer,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            sdk.try_sign_pending(channel_id).await;
+            let state_a = node_a.get_channel_actor_state(channel_id);
+            let state_b = node_b.get_channel_actor_state(channel_id);
+            let mut payments_settled = true;
+            for (node, payment_hash) in payments {
+                if node.get_payment_status(*payment_hash).await != PaymentStatus::Success {
+                    payments_settled = false;
+                    break;
+                }
+            }
+            if payments_settled
+                && matches!(state_a.state, ChannelState::ChannelReady)
+                && matches!(state_b.state, ChannelState::ChannelReady)
+                && !state_a.reestablishing
+                && !state_b.reestablishing
+                && state_a.tlc_state.all_tlcs().count() == 0
+                && state_b.tlc_state.all_tlcs().count() == 0
+                && !state_a.tlc_state.waiting_ack
+                && !state_b.tlc_state.waiting_ack
+                && !state_a.signer_state.is_awaiting_signature()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn live_external_signer_buffers(
+    node: &NetworkNode,
+    channel_id: Hash256,
+) -> TestChannelSignerBuffers {
+    let actor = node
+        .get_channel_actor(channel_id)
+        .await
+        .expect("channel actor is running");
+    call!(actor, ChannelActorMessage::TestGetSignerBuffers).expect("channel actor is alive")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_pending_update_tlc_info_after_peer_restart() {
+    init_tracing();
+
+    // A peer message received while the tenant waits for its own commitment
+    // signature remains queued across its public peer's reestablishment.
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+    wait_until_async_timeout(|| async {
+        matches!(
+            ExternalSignerHttpClient {
+                node: &tenant,
+                signer: &signer,
+            }
+            .get_signing_status(channel_id)
+            .await
+            .status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    let public_state = public_node.get_channel_actor_state(channel_id);
+    let public_tlc_info = public_state.local_tlc_info.clone();
+    tenant
+        .get_channel_actor(channel_id)
+        .await
+        .expect("tenant channel actor")
+        .send_message(ChannelActorMessage::PeerMessage(
+            FiberChannelMessage::UpdateTlcInfo(UpdateTlcInfo {
+                channel_id,
+                timestamp: public_tlc_info.timestamp.saturating_add(1),
+                channel_flags: ChannelUpdateChannelFlags::empty(),
+                tlc_expiry_delta: public_tlc_info.tlc_expiry_delta,
+                tlc_minimum_value: public_tlc_info.tlc_minimum_value,
+                tlc_fee_proportional_millionths: public_tlc_info.tlc_fee_proportional_millionths,
+            }),
+        ))
+        .expect("queue peer update behind external signature");
+    wait_until_async_timeout(|| async {
+        live_external_signer_buffers(&tenant, channel_id)
+            .await
+            .pending_peer_message_count
+            > 0
+    })
+    .await;
+    public_node.restart().await;
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(recovered, "external-signer channel and TLC state recover");
 }
 
 #[tokio::test]

@@ -159,6 +159,15 @@ pub const REESTABLISH_TIMEOUT: u64 = 5 * 60 * 1000;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub struct TestChannelSignerBuffers {
+    pub pending_peer_message_count: usize,
+    pub has_pending_peer_commitment: bool,
+    pub pending_received_commitment_tail: bool,
+    pub pending_received_revoke_tail: bool,
+}
+
 pub(crate) fn funding_timeout_check_delay(
     elapsed: Duration,
     timeout_seconds: u64,
@@ -180,6 +189,8 @@ pub enum ChannelActorMessage {
     /// Signature results delivered asynchronously by the channel signer
     /// (local immediate send-to-self, or external submit via network/RPC).
     SignerNotification(SignerNotification),
+    #[cfg(test)]
+    TestGetSignerBuffers(RpcReplyPort<TestChannelSignerBuffers>),
 }
 
 impl Display for ChannelActorMessage {
@@ -191,6 +202,8 @@ impl Display for ChannelActorMessage {
             Self::SignerNotification(notification) => {
                 write!(f, "SignerNotification.{notification:?}")
             }
+            #[cfg(test)]
+            Self::TestGetSignerBuffers(_) => write!(f, "TestGetSignerBuffers"),
         }
     }
 }
@@ -4916,6 +4929,21 @@ where
                         );
                     }
                 }
+            }
+            #[cfg(test)]
+            ChannelActorMessage::TestGetSignerBuffers(reply) => {
+                let _ = reply.send(TestChannelSignerBuffers {
+                    pending_peer_message_count: state.signer_buffers.pending_peer_messages.len(),
+                    has_pending_peer_commitment: state
+                        .signer_buffers
+                        .pending_peer_messages
+                        .iter()
+                        .any(|message| matches!(message, FiberChannelMessage::CommitmentSigned(_))),
+                    pending_received_commitment_tail: state
+                        .signer_buffers
+                        .pending_received_commitment_tail,
+                    pending_received_revoke_tail: state.signer_buffers.pending_received_revoke_tail,
+                });
             }
         }
 
