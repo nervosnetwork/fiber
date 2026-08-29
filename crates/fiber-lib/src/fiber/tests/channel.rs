@@ -2366,7 +2366,7 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
     )
     .await;
 
-    // NOTE(jjy-review): This can recover in isolation, but fails under the
+    // NOTE(lsp-review): This can recover in isolation, but fails under the
     // combined signer-restart test run with a replayed TLC id followed by a
     // BadSignature force-close. Keep the scenario active while the replay
     // semantics are reviewed, then re-enable the expected recovery assertion.
@@ -2433,7 +2433,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
     )
     .await;
 
-    // NOTE(jjy-review): Without the proposed replay/idempotency changes, the
+    // NOTE(lsp-review): Without the proposed replay/idempotency changes, the
     // replayed CommitmentSigned fails with BadSignature and the channel closes.
     // Keep the scenario and its expected outcome visible while protocol behavior
     // is reviewed; re-enable these assertions together with the production fix.
