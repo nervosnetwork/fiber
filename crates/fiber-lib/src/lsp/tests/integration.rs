@@ -40,13 +40,14 @@ use crate::{
         },
         payment::SendPaymentCommand,
     },
-    fiber_types::{HashAlgorithm, Privkey},
+    fiber_types::{HashAlgorithm, PaymentStatus, Privkey, RemoveTlcReason, TLCId, TlcErrorCode},
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
         tenant_watchtower_node_id, BiscuitTokenIssuer, FiberTenantRuntimeFactory,
         HostedTenantRecord, HostedTenantRpcContext, HostedTenantRuntime, LspInvoiceStore,
-        LspService, LspServiceArgs, LspServiceMessage, TenantId, TenantRuntimeFactory,
+        LspPaymentDeliveryStore, LspService, LspServiceArgs, LspServiceMessage, TenantId,
+        TenantRuntimeFactory,
     },
     rpc::{
         channel::{
@@ -1992,6 +1993,159 @@ async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
         .get_lsp_invoice(&accepted_payment_hash)
         .expect("read accepted hosted invoice registration")
         .is_some());
+
+    network.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hosted_invoice_rejects_second_payer_without_settling_first() {
+    init_tracing();
+
+    // P1 --\
+    //        Public T -private- Hosted U
+    // P2 --/
+    //
+    // Both payers use the same single-part invoice. Public T must reject the
+    // second execution without changing the first buffered upstream TLC.
+    let network = create_lsp_test_network(
+        &[
+            ((1, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true),
+            ((2, 0), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+        &[((0, TENANT_ID), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))],
+    )
+    .await;
+    let public_t = &network.nodes[0];
+    let payer_1 = &network.nodes[1];
+    let payer_2 = &network.nodes[2];
+    let tenant = network.tenant(0, TENANT_ID);
+    wait_until_node_supports_trampoline_routing(payer_1, public_t).await;
+    wait_until_node_supports_trampoline_routing(payer_2, public_t).await;
+
+    let payment_preimage = gen_rand_sha256_hash();
+    let invoice: fiber_json_types::InvoiceResult = tenant
+        .client
+        .request(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("hosted duplicate payment rejection".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: Some(payment_preimage.into()),
+                payment_hash: None,
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: Some(false),
+                allow_trampoline_routing: Some(true),
+                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
+            }],
+        )
+        .await
+        .expect("create hosted single-part invoice");
+    let invoice = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
+        .expect("decode hosted single-part invoice");
+    let payment_hash = *invoice.payment_hash();
+
+    disconnect_in_process(public_t, &tenant.node);
+    wait_for_tenant_channel(&network.lsp(0).client, &tenant.tenant_id, false).await;
+
+    let payment = SendPaymentCommand {
+        invoice: Some(invoice.to_string()),
+        max_fee_amount: Some(100_000),
+        trampoline_hops: Some(vec![public_t.pubkey]),
+        ..Default::default()
+    };
+    payer_1
+        .send_payment(payment.clone())
+        .await
+        .expect("start first hosted payment");
+    let first = wait_for_delivery_status(
+        &network.lsp(0).client,
+        payment_hash,
+        LspPaymentDeliveryStatus::Deferred,
+    )
+    .await;
+    let first_channel_id: crate::fiber_types::Hash256 = first.incoming_channel_id.into();
+    let first_tlc_id = first.incoming_tlc_id;
+    let first_upstream = public_t
+        .get_channel_actor_state(first_channel_id)
+        .tlc_state
+        .get(&TLCId::Received(first_tlc_id))
+        .cloned()
+        .expect("first upstream TLC remains on Public T");
+    assert!(first_upstream.removed_reason.is_none());
+    assert_eq!(
+        payer_1.get_payment_status(payment_hash).await,
+        PaymentStatus::Inflight
+    );
+
+    payer_2
+        .send_payment(payment)
+        .await
+        .expect("start duplicate hosted payment");
+    payer_2.wait_until_failed(payment_hash).await;
+    let second = payer_2
+        .get_payment_session(payment_hash)
+        .expect("second payer payment session");
+    let second_attempt = second
+        .attempts()
+        .next()
+        .cloned()
+        .expect("second payer attempted the hosted payment");
+    let second_upstream = payer_2
+        .get_channel_actor_state(network.channel_ids[1])
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .cloned()
+        .expect("second upstream TLC remains in channel history");
+    let RemoveTlcReason::RemoveTlcFail(packet) = second_upstream
+        .removed_reason
+        .expect("second upstream TLC is deterministically failed")
+    else {
+        panic!("second upstream TLC must not be fulfilled");
+    };
+    let failure = packet
+        .decode(
+            &second_attempt.session_key,
+            second_attempt.hops_public_keys(),
+        )
+        .expect("decode second upstream TLC failure");
+    assert_eq!(failure.error.error_code, TlcErrorCode::TemporaryNodeFailure);
+
+    let deliveries = public_t
+        .store
+        .namespaced(NodeNamespace::lsp_metadata())
+        .list_lsp_payment_deliveries_by_payment_hash(&payment_hash)
+        .expect("list hosted payment deliveries");
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "the rejected duplicate must not be persisted"
+    );
+    assert_eq!(deliveries[0].key().incoming_channel_id, first_channel_id);
+    assert_eq!(deliveries[0].key().incoming_tlc_id, first_tlc_id);
+    assert!(matches!(
+        deliveries[0].status,
+        crate::lsp::LspPaymentDeliveryStatus::Deferred
+    ));
+    let first_upstream = public_t
+        .get_channel_actor_state(first_channel_id)
+        .tlc_state
+        .get(&TLCId::Received(first_tlc_id))
+        .cloned()
+        .expect("first upstream TLC survives duplicate rejection");
+    assert!(first_upstream.removed_reason.is_none());
+    assert_eq!(
+        payer_1.get_payment_status(payment_hash).await,
+        PaymentStatus::Inflight
+    );
 
     network.stop().await;
 }
