@@ -4,8 +4,8 @@ This note describes the first implementation of a hosted Lightning Service
 Provider (LSP) in Fiber. It focuses on trampoline routing and receiving payments
 for mobile tenants that may be offline.
 
-The proposed remote channel signer architecture and its integration with tenant
-identity, storage, runtime readiness, and payment delivery are described in
+The implemented remote channel signer architecture, its current RPC polling
+transport, and the remaining production-safety boundaries are described in
 [Hosted LSP remote signer integration](hosted-lsp-remote-signer.md).
 
 ## Scope
@@ -33,9 +33,9 @@ endpoint.
 
 ```mermaid
 flowchart TB
-    S1["Mobile signer 1"] -. "remote signing (future)" .-> U1
-    S2["Mobile signer 2"] -. "remote signing (future)" .-> U2
-    S3["Mobile signer 3"] -. "remote signing (future)" .-> U3
+    S1["Mobile signer 1"] -. "typed requests and signatures<br/>JSON-RPC polling" .-> U1
+    S2["Mobile signer 2"] -. "typed requests and signatures<br/>JSON-RPC polling" .-> U2
+    S3["Mobile signer 3"] -. "typed requests and signatures<br/>JSON-RPC polling" .-> U3
 
     subgraph LSP["Multi-tenant Fiber LSP service"]
         direction TB
@@ -72,27 +72,32 @@ but middleware and the watchtower RPC bind every call to the token's
 
 ## Invoice registration and payer hint
 
-When an operator creates a hosted invoice with `lsp_new_invoice` (or a future
-data-plane token is allowed to call `new_invoice`), the hosted runtime creates
-a normal finite-expiry Fiber invoice, signs it with the tenant invoice key, and
-embeds Public T in the signed trampoline route hint. Before the RPC returns,
-the LSP also registers the invoice payment hash and creates an internal signed
-`LspInvoiceHint` delivery-policy record. The record binds:
+When an authenticated tenant creates an invoice with the standard
+`new_invoice` RPC, the hosted runtime creates a normal finite-expiry Fiber
+invoice, signs it with the tenant invoice key, and embeds Public T in the signed
+trampoline route hint. Tenant identity comes from the Biscuit token rather than
+the request body. Before the RPC returns, the LSP also registers the invoice
+payment hash and creates an internal signed `LspInvoiceHint` delivery-policy
+record. The record binds:
 
 - Public T's public trampoline identity;
 - payment hash;
 - a digest of the complete signed invoice, including amount, asset and terms;
 - requested buffer duration and absolute invoice expiry.
 
-The default requested buffer duration is 24 hours and the protocol maximum is
-seven days. An operator may configure a shorter service-wide cap; the signed
-hint records the duration actually accepted by the service. The actual deadline
-is still bounded by invoice and TLC expiry, so these values do not promise that
-every payment can wait that long. The `LspInvoiceHint` record is intentionally
-not embedded in the invoice encoding or trampoline onion payload. A payer only
-needs the tenant-signed invoice and uses its trampoline route hint to select
-Public T. Public T resolves the tenant, delivery policy, and private channel
-from its durable invoice registry; no tenant node id is exposed to the payer.
+`NewInvoiceParams.lsp_buffer_duration_ms` optionally requests the buffer
+duration. `None` uses the 24-hour default, zero disables buffering, and values
+above the seven-day protocol maximum are rejected. An operator may configure a
+shorter service-wide cap; `InvoiceResult.accepted_lsp_buffer_duration_ms`
+returns the duration actually accepted by the service. The field is rejected
+outside an authenticated hosted-tenant context rather than silently ignored.
+The actual deadline is still bounded by invoice and TLC expiry, so the accepted
+duration does not promise that every payment can wait that long. The
+`LspInvoiceHint` record is intentionally not embedded in the invoice encoding
+or trampoline onion payload. A payer only needs the tenant-signed invoice and
+uses its trampoline route hint to select Public T. Public T resolves the tenant,
+delivery policy, and private channel from its durable invoice registry; no
+tenant node id is exposed to the payer.
 
 An invoice without a registered hint keeps existing Fiber behavior: Public T
 forwards it immediately as an ordinary trampoline payment. Absence of a hint is
@@ -232,24 +237,32 @@ methods are:
 - `lsp_get_status`
 - `lsp_register_tenant`, `lsp_ensure_tenant`, `lsp_evict_tenant`, and
   `lsp_list_tenants`
-- `lsp_new_invoice`, `lsp_get_invoice`, `lsp_send_payment`, and
-  `lsp_get_payment`
+- `lsp_get_invoice` and `lsp_get_payment`
 - `lsp_get_payment_delivery`
 
 With Biscuit authentication enabled, reads require `read("lsp")` and mutations
 require `write("lsp")`. These are operator/SDK APIs and should not be exposed to
 untrusted clients without authentication.
 
-Hosted tenant data-plane requests reuse the standard Fiber RPC method names.
+Hosted tenant data-plane requests reuse a restricted subset of the standard
+Fiber RPC method names.
 The authority block of the Biscuit token contains `tenant("<tenant_id>")` plus
 the capabilities needed for the tenant allowlist (`read`/`write("channels")`,
-`read("invoices")`, `read("payments")`, and `read`/`write("watchtower")`).
+`read`/`write("invoices")`, `read`/`write("payments")`, and
+`read`/`write("watchtower")`).
 After Biscuit capability checks, the authentication middleware rejects tenant
 tokens that call any method outside that allowlist:
 
+- external channel funding and lifecycle: `open_channel_with_external_funding`,
+  `submit_signed_funding_tx`, `submit_commitment_transaction`,
+  `shutdown_channel`, `check_channel_shutdown`, and `update_channel`
 - signing: `get_channel_signing_status`, `submit_channel_signature`,
-  `get_watchtower_signing_status`, `submit_watchtower_signature`
-- isolated reads: `list_channels`, `get_invoice`, `get_payment`, `list_payments`
+  `get_watchtower_signing_status`, and `submit_watchtower_signature`
+- watchtower preimages and watches: `create_preimage`, `remove_preimage`,
+  `create_watch_channel`, and `remove_watch_channel`
+- tenant invoice and payment data plane: `new_invoice`, `get_invoice`,
+  `send_payment`, `get_payment`, and `list_payments`
+- isolated channel reads: `list_channels`
 
 The middleware puts the verified tenant identity in the request extensions; it
 is not accepted as a JSON-RPC parameter. Allowlisted channel, invoice, and
@@ -257,34 +270,35 @@ payment handlers then resolve that tenant's active actor and Store namespace
 through `TenantSupervisor`. Tokens without a tenant fact continue to address
 Public T and are not constrained by the tenant method allowlist.
 
-Node-operating methods such as `open_channel`, `new_invoice`, and
-`send_payment` require an operator token. The operator-oriented
-`lsp_new_invoice` composite remains available for callers that explicitly
-select a tenant and buffer duration and need the full registration record.
+Tenant wallets use the standard `new_invoice` and `send_payment` methods. The
+authenticated Biscuit selects the tenant actor and Store namespace, so neither
+method accepts a `tenant_id` parameter. The standard
+`open_channel` method remains denied to tenant tokens; tenant-funded
+external-signer channels use the restricted
+`open_channel_with_external_funding` workflow.
 
 ## Current boundaries
 
-- This phase covers hosted receiving through Public T and U-T private channels;
-  it does not add LSP-assisted outbound payments.
+- Hosted receiving and LSP-assisted outbound payment are both implemented.
+  Tenant-authenticated `send_payment` runs a normal payment session in the
+  selected tenant namespace and may use the existing MPP implementation.
 - Tenant runtime count is bounded, but eviction is explicit rather than an LRU
   policy. Eviction is rejected while that tenant has a non-final hosted
   delivery, an in-flight payment, active TLCs, or pending channel operations.
   A stopped runtime is removed from the active set and rehydrated by the next
   explicit ensure operation.
-- Tenant runtimes currently reuse the existing Fiber network coordinator as an
-  internal channel/payment dispatcher. They open no P2P listener and perform
-  no gossip synchronization. The LSP layer no longer depends directly on that
-  full coordinator: `HostedTenantRuntimeMessage` exposes only tenant Fiber
-  delivery and activity inspection, with a temporary network-backed adapter
-  behind it. A later refactor can replace that adapter with a smaller dedicated
-  tenant coordinator without changing the supervisor or in-process transport
-  contract. The runtime actor itself is no longer registered directly as an
-  in-process peer: a tenant-scoped endpoint observes the unchanged Fiber
-  message's channel id and routes it through `TenantMessageDispatcher`.
-  Runtime and endpoint registration are single-owner and refuse replacement by
-  another live actor.
-- Tenant channel opening and funding still use existing Fiber RPC/channel
-  workflows.
-- Remote Channel Signer transport, authorization, replay protection, and signer
-  recovery remain a separate protocol phase.
+- Tenant runtimes use `HostedTenantActor` with the shared `FiberActorCore` and
+  `FiberActorState` channel/payment data plane. They do not start another
+  public `NetworkActor`, P2P listener, or gossip synchronizer. A tenant-scoped
+  in-process endpoint preserves the existing Fiber message structures and
+  routes them by tenant/channel ownership. Runtime and endpoint registration
+  are single-owner and refuse replacement by another live actor.
+- Private channels may use the existing internal signer path or the external
+  funding/signer workflow. External channel and watchtower requests are
+  persisted, polled through tenant-authenticated RPCs, verified by the Node,
+  and resumed idempotently after submission.
+- The current remote signer transport is polling rather than a durable push
+  gateway. Production readiness still requires strict fail-closed nonce reuse,
+  stronger signer-readiness/session fencing, and crash/race coverage around
+  persisted signature receipts and channel continuation.
 - Trampoline/LSP metrics are intentionally outside this implementation.

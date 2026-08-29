@@ -1534,7 +1534,8 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     assert!(auth
         .check_permission("lsp_register_tenant", &token)
         .is_err());
-    assert!(auth.check_permission("new_invoice", &token).is_err());
+    auth.check_permission("new_invoice", &token).unwrap();
+    auth.check_permission("send_payment", &token).unwrap();
     let expected_node = tenant_watchtower_node_id(&issued.status.record.tenant_pubkey);
     let (biscuit, _) = auth.check_permission("get_invoice", &token).unwrap();
     assert_eq!(

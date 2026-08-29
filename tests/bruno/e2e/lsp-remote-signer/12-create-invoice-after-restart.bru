@@ -12,36 +12,28 @@ post {
 
 headers {
   Content-Type: application/json
-  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
 }
 
 body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "lsp_new_invoice",
+    "method": "new_invoice",
     "params": [
       {
-        "tenant_id": "placeholder",
-        "invoice": {
-          "amount": "0x186a0",
-          "currency": "Fibd",
-          "description": "remote signer restart E2E",
-          "expiry": "0xe10",
-          "payment_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
-        }
+        "amount": "0x186a0",
+        "currency": "Fibd",
+        "description": "remote signer restart E2E",
+        "expiry": "0xe10",
+        "payment_hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
       }
     ]
   }
 }
 
-script:pre-request {
-  const body = req.getBody();
-  body.params[0].tenant_id = bru.getVar("REMOTE_TENANT_ID");
-  req.setBody(body);
-}
-
 assert {
   res.body.error: isUndefined
-  res.body.result.invoice: isDefined
+  res.body.result.invoice_address: isDefined
+  res.body.result.accepted_lsp_buffer_duration_ms: isDefined
 }

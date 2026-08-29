@@ -1,19 +1,18 @@
 # Hosted LSP remote signer integration
 
-Status: discussion draft
+Status: implemented polling prototype; production hardening in progress
 
-This note describes how to integrate the remote channel signer prototype with
-the hosted, multi-tenant LSP implementation. It records the current
-architecture, proposes integration boundaries, and identifies decisions that
-must be resolved before the combined system can be described as a
-non-custodial mobile LSP.
+This note describes the remote channel and watchtower signer implementation in
+the hosted, multi-tenant LSP. It records the current architecture, the
+implemented integration boundaries, and the remaining work before the system
+can be described as a production non-custodial mobile LSP.
 
-The hosted LSP implementation and the remote signer prototype were developed
-on separate branches from a common Fiber baseline. Both are substantial
-changes to channel state, actor routing, RPC dispatch, and storage. The
-integration should therefore preserve the hosted LSP actor and namespace model
-and port the signer state machines into it deliberately. A textual merge of the
-two branches is not an architecture.
+The hosted LSP and remote signer were originally developed on separate
+branches. They are now integrated around the hosted `FiberActorCore`, tenant
+Store namespaces, tenant-authenticated RPC dispatch, and persistent channel and
+watchtower signer state. Public Fiber peer messages remain unchanged; the
+client-side signer boundary currently uses JSON-RPC polling rather than a new
+Fiber wire protocol.
 
 ## Goals
 
@@ -70,12 +69,15 @@ tenant RPC asks `LspService` for a tenant RPC context; the service hydrates the
 tenant when required and returns the tenant actor, configuration, and
 namespaced store.
 
-The current implementation generates the tenant Fiber private key under the
-LSP tenant directory. That key supplies both the tenant protocol identity and
-the existing in-process channel/invoice signing behavior. This is intentionally
-custodial and is the boundary the remote signer integration changes.
+The current implementation generates the tenant Fiber protocol identity under
+the LSP tenant directory. That key identifies the in-process tenant peer and
+signs tenant invoices. For an external-signer channel, funding, commitment,
+revocation, TLC, and MuSig2 nonce secrets instead remain in the mobile SDK; the
+Node persists only their public material and the signer state needed to pause
+and resume the channel state machine. Internal-signer channels retain the
+existing Node-held channel signer path.
 
-## Remote signer prototype baseline
+## Current remote signer implementation
 
 The signer prototype provides two related but separate mechanisms:
 
@@ -97,11 +99,13 @@ signing content through `fiber-lsp-sdk`, and calls
 `submit_channel_signature`. A repeated identical submission returns
 `AlreadyApplied`; a conflicting result is rejected.
 
-The prototype proves that channel keys and signing can cross an asynchronous
-boundary. It does not yet implement the hosted tenant registry, tenant
-namespaces, a durable mobile mailbox, signer sessions, or delivery readiness.
+The implementation is connected to the hosted tenant registry, tenant
+namespaces, external funding workflow, ChannelActor continuation, watchtower,
+and the SDK agent E2E. It does not yet provide a durable push mailbox,
+long-lived signer sessions with fencing, or an explicit signer-readiness gate
+for buffered delivery. The current agent polls the persisted status RPCs.
 
-## Target architecture
+## Current integrated architecture
 
 The target separates four identities that must not be collapsed:
 
@@ -148,9 +152,12 @@ flowchart TB
     G --> API
 ```
 
-The gateway is a service-level component. It must remain available when a
-tenant runtime is cold. Evicting `HostedTenantActor U` must not invalidate the
-tenant credential, close a mobile signer session, or lose a pending request.
+The diagram's gateway is currently the shared JSON-RPC service plus a polling
+SDK agent, not a separate durable gateway. Tenant credentials and pending
+channel/watchtower requests survive `HostedTenantActor U` eviction through the
+registry and Store. A future push gateway or long-lived signer session must
+remain service-scoped and must not make those durable states depend on one
+tenant runtime's liveness.
 
 ### SDK ownership
 
@@ -215,15 +222,20 @@ An external channel must persist public signer material and the complete typed
 request required to resume a paused transition. It must not persist channel
 private keys or silently fall back to the local `InMemorySigner`.
 
-The remote signer logic must be ported into the hosted branch's
-`FiberActorCore` and `FiberActorCommand` model. Hosted actors accept the
-restricted Fiber mailbox; signer integration must not reintroduce unrestricted
-`NetworkActorMessage` routing into a tenant runtime.
+The remote signer logic is implemented in the hosted `FiberActorCore` and
+`FiberActorCommand` model. `ChannelSigner::Local | External` creates one typed
+notification path for local and submitted signatures, while
+`WatchtowerSigner::Local | External` implements the corresponding on-chain
+path. Hosted actors accept the restricted Fiber mailbox and do not require an
+additional public `NetworkActor`.
 
 ### RPC dispatch
 
-The following RPCs must be tenant-aware:
+The following RPCs are tenant-aware and are present in the tenant-token
+allowlist:
 
+- `new_invoice`
+- `send_payment`
 - `open_channel_with_external_funding`
 - `submit_signed_funding_tx`
 - `get_channel_signing_status`
@@ -233,35 +245,34 @@ The following RPCs must be tenant-aware:
 
 Tenant identity comes exclusively from the authenticated request extension.
 The server then resolves a namespaced store and verifies that the channel is in
-that namespace.
+that namespace. Tenant tokens cannot select another tenant through a request
+parameter.
 
-Read and mutation paths have different runtime requirements:
+`new_invoice` accepts the optional `lsp_buffer_duration_ms` delivery policy,
+automatically adds Public T's trampoline route hint, and registers the invoice
+before returning the accepted duration. `send_payment` starts the normal
+tenant-owned payment session.
 
-- signing-status queries should read the tenant namespace while the runtime is
-  cold;
-- signature submission should persist or validate the submission, hydrate the
-  tenant if needed, resume the channel actor, and return only after the result
-  is `Applied` or known to be `AlreadyApplied`;
-- ordinary channel operations may continue to require an active runtime.
-
-The existing `GetTenantRpcContext` always hydrates a runtime, so the integration
-should introduce a store-only tenant context rather than using runtime
-activation for read-only signer polling.
+Both reads and mutations currently resolve `GetTenantRpcContext`, which ensures
+the tenant runtime before returning its actor and namespaced Store. A signature
+submission verifies the persisted request, resumes the channel actor, and
+returns `Applied` or `AlreadyApplied`. A store-only context for signer-status
+polling remains an optimization: today even a read-only poll can hydrate a cold
+tenant.
 
 ### Store and migrations
 
-The hosted branch already adds an invoice trampoline-hint migration and store
-namespaces. The signer branch adds channel and watchtower signer-state
-migrations. The combined migration chain must preserve this order:
+The integrated migration chain preserves this order:
 
 1. existing upstream migrations;
 2. hosted invoice/trampoline migration;
 3. channel signer-state migration;
 4. watchtower signer-state migration.
 
-Schema fingerprints must be regenerated from the combined data types. The
-`.schema.json` file from either source branch is incomplete for the integrated
-tree.
+The current tree contains the channel and watchtower migrations and its
+regenerated schema fingerprint. Existing channels migrate to the internal
+signer state; existing watch rows derive and persist the public signer material
+needed by the new representation.
 
 ## Tenant Registry integration
 
@@ -300,13 +311,12 @@ The target record answers four questions:
 Runtime liveness is deliberately absent and remains owned by
 `TenantSupervisor`.
 
-The current persistence interface provides only `get`, `put`, and `list` for
-tenant records. Registration enforces `tenant_pubkey` uniqueness by scanning
-the tenant list. `bind_private_channel` prevents one tenant from being rebound
-to a different channel, but there is no durable reverse channel index, no
-cross-tenant channel uniqueness check, and no compare-and-swap or batch
-boundary covering a record and its indexes. These are current implementation
-constraints, not properties to preserve.
+Authenticated registration atomically writes the tenant record, consumes its
+one-time nonce, and writes reverse RootSigner and tenant-public-key indexes in
+one Store batch. Registry lookup still scans records in some paths, and
+`bind_private_channel` prevents one tenant from being rebound to a different
+channel but does not maintain a durable reverse channel index. Multi-channel
+tenants and a complete atomic channel-binding index remain outside the MVP.
 
 ### Decided identity model
 
@@ -557,15 +567,15 @@ same change as the behavior they cover; a later end-to-end test does not
 replace unit tests for cryptographic encodings, state transitions, namespace
 checks, or crash recovery.
 
-| Phase | Implementation | Required test gate |
+| Phase | Status | Implementation and remaining test gate |
 | --- | --- | --- |
-| 1. Shared types and SDK signer core | Add `fiber-lsp-sdk`; move and adapt the prototype signer core; add canonical `TenantRegistryPayload` encoding and TenantId derivation to shared types | Fixed payload/digest and TenantId vectors; RootSigner create/open/restore; channel-key isolation; signer-store persistence; native tests and relevant WASM compile checks |
-| 2. Tenant registration | Add nonce storage and registration RPCs; verify the RootSigner proof; derive TenantId server-side; issue the tenant Biscuit; persist `root_signer_pubkey` | Nonce replacement, consumption, and replay rejection; wrong signature, public key, nonce, and LSP node rejection; derived TenantId cannot be client-controlled; persistence/restart test; nonce-to-registration RPC integration test |
-| 3. Channel signer state | Port the deferred external `ChannelActor` signer state machine into `FiberActorCore`; combine migrations; retain the internal signer path | Request transition tests; wrong request, signature, and next material rejection; `AlreadyApplied` idempotency; migration defaults existing channels to `Internal`; existing internal-signer regression tests |
-| 4. Tenant-scoped signer RPC | Add cold store-only status reads and hydrated signature submission; enforce namespace and private-channel ownership | Tenant A cannot query or submit for Tenant B; cold status query; submission hydrates and resumes the tenant; pending request survives restart |
-| 5. Hosted U-T external signer E2E | Connect SDK registration, Biscuit RPC client, external channel open, polling/signing loop, and payment flow | Registration through channel readiness; outbound and inbound payment; runtime eviction/rehydration; Node and SDK restart; repeated submission remains idempotent |
-| 6. Gateway and readiness | Add durable mailbox/cursors, signer sessions and fencing; gate delivery on `TenantSignReady` | Disconnect/reconnect and old-session fencing; mailbox recovery and cursor tests; delivery remains `Deferred` while signer is not ready; no duplicate downstream dispatch |
-| 7. Remaining signer policy | Integrate watchtower signing; define invoice authorization, preimage release, and strict nonce behavior | Watchtower recovery E2E; invoice/preimage policy tests; nonce reuse fails closed; restart and on-chain recovery tests |
+| 1. Shared types and SDK signer core | Implemented | `fiber-lsp-sdk`, canonical registration payloads, RootSigner restore, channel-key isolation, signer persistence, native tests, and WASM compilation are present. |
+| 2. Tenant registration | Implemented prototype | Nonce issuance/consumption, RootSigner proof, server-derived TenantId, and tenant Biscuit issuance are implemented. Production credential recovery and rotation remain open. |
+| 3. Channel signer state | Implemented prototype | Persistent internal/external channel signer states, migrations, signature verification, and idempotent receipts are present. Missing/partial next material and fail-closed nonce-reuse tests remain release gates. |
+| 4. Tenant-scoped signer RPC | Partially implemented | Namespace authorization and hydrated submission are implemented. Status polling currently hydrates a cold runtime; store-only reads and stronger cross-tenant concurrency coverage remain. |
+| 5. Hosted U-T external signer E2E | Implemented prototype | Registration, external funding, polling/signing, SDK restart, cooperative close, hosted incoming payments, and watchtower scenarios are covered. Production `Auto` policy and a complete external-signer outbound payment E2E remain. |
+| 6. Gateway and readiness | Not implemented | There is no durable push mailbox, session fencing, or `TenantSignReady` delivery gate; the SDK agent polls RPC state. |
+| 7. Remaining signer policy | Partially implemented | External watchtower signing, tenant eviction recovery, preimage claim, and revocation E2Es are present. Strict nonce behavior, invoice authorization policy, and crash/race coverage remain. |
 
 Each phase also runs formatting and targeted clippy checks. A change to shared
 types or persistence additionally runs the applicable native/WASM checks,

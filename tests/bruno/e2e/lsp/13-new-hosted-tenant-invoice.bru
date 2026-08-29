@@ -13,46 +13,42 @@ post {
 headers {
   Content-Type: application/json
   Accept: application/json
-  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
 }
 
 body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "lsp_new_invoice",
+    "method": "new_invoice",
     "params": [
       {
-        "tenant_id": "placeholder",
-        "invoice": {
-          "amount": "0xf4240",
-          "currency": "Fibd",
-          "description": "hosted tenant incoming payment",
-          "expiry": "0xe10",
-          "allow_trampoline_routing": true,
-          "payment_preimage": "0x2222222222222222222222222222222222222222222222222222222222222222"
-        }
+        "amount": "0xf4240",
+        "currency": "Fibd",
+        "description": "hosted tenant incoming payment",
+        "expiry": "0xe10",
+        "allow_trampoline_routing": true,
+        "payment_preimage": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "lsp_buffer_duration_ms": "0x1d4c0"
       }
     ]
   }
 }
 
-script:pre-request {
-  const body = req.getBody();
-  body.params[0].tenant_id = bru.getVar("LSP_TENANT_ID");
-  req.setBody(body);
-}
-
 assert {
   res.body.error: isUndefined
-  res.body.result.invoice: isDefined
-  res.body.result.hint.payment_hash: isDefined
+  res.body.result.invoice_address: isDefined
+  res.body.result.invoice.data.payment_hash: isDefined
+  res.body.result.accepted_lsp_buffer_duration_ms: eq "0x1d4c0"
 }
 
 script:post-response {
-  if (res.body.result.hint.lsp_node_id !== bru.getEnvVar("NODE2_PUBKEY")) {
+  const routeHint = res.body.result.invoice.data.attrs
+    .map(attr => attr.trampoline_route_hint)
+    .find(value => value !== undefined);
+  if (routeHint !== bru.getEnvVar("NODE2_PUBKEY")) {
     throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
   }
-  bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice);
-  bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.hint.payment_hash);
+  bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice_address);
+  bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
 }

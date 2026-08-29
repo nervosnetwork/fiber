@@ -1,14 +1,10 @@
 //! JSON-RPC administration for the multi-tenant hosted LSP service.
 
-use std::str::FromStr;
-
 use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::{call, ActorRef};
 
-use crate::invoice::CkbInvoice;
 use crate::lsp::{
     HostedTenantRpcContext, HostedTenantStatus as InternalTenantStatus,
-    LspInvoiceHint as InternalInvoiceHint, LspInvoiceRegistration as InternalInvoiceRegistration,
     LspPaymentDelivery as InternalPaymentDelivery,
     LspPaymentDeliveryStatus as InternalPaymentDeliveryStatus, LspServiceMessage,
     LspServiceStatus as InternalServiceStatus, TenantId,
@@ -20,10 +16,10 @@ use crate::rpc::utils::{rpc_error, RpcResultExt};
 
 pub use fiber_json_types::{
     GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetLspTenantRegistryNonceParams,
-    GetLspTenantRegistryNonceResult, GetPaymentCommandResult, ListLspTenantsResult, LspInvoiceHint,
-    LspInvoiceRegistration, LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams,
-    LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus,
-    NewLspInvoiceParams, RegisterLspTenantParams, RegisterLspTenantResult, SendLspPaymentParams,
+    GetLspTenantRegistryNonceResult, GetPaymentCommandResult, ListLspTenantsResult,
+    LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus,
+    LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams,
+    RegisterLspTenantResult,
 };
 
 /// RPC module for hosted LSP tenant and payment-delivery administration.
@@ -65,26 +61,12 @@ trait LspRpc {
     #[method(name = "lsp_list_tenants")]
     async fn lsp_list_tenants(&self) -> Result<ListLspTenantsResult, ErrorObjectOwned>;
 
-    /// Creates a tenant-signed invoice, stores it in the tenant runtime and registers its LSP hint.
-    #[method(name = "lsp_new_invoice")]
-    async fn lsp_new_invoice(
-        &self,
-        params: NewLspInvoiceParams,
-    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned>;
-
     /// Retrieves an invoice from a hosted tenant's scoped store.
     #[method(name = "lsp_get_invoice")]
     async fn lsp_get_invoice(
         &self,
         params: GetLspInvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
-
-    /// Starts an outgoing payment in a hosted tenant runtime.
-    #[method(name = "lsp_send_payment")]
-    async fn lsp_send_payment(
-        &self,
-        params: SendLspPaymentParams,
-    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     /// Retrieves an outgoing payment owned by a hosted tenant runtime.
     #[method(name = "lsp_get_payment")]
@@ -181,34 +163,6 @@ impl LspRpcServerImpl {
             .map(Into::into)
     }
 
-    async fn new_invoice(
-        &self,
-        params: NewLspInvoiceParams,
-    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
-        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
-        let context = self.tenant_rpc_context(tenant_id.clone()).await?;
-        let result = InvoiceRpcServerImpl::new_fiber(
-            context.store,
-            Some(context.fiber_actor),
-            Some(context.config),
-        )
-        .with_trampoline_route_hint(context.public_node_id.into())
-        .with_require_client_payment_lock(true)
-        .new_invoice(params.invoice)
-        .await?;
-        let invoice = CkbInvoice::from_str(&result.invoice_address)
-            .map_err(|error| rpc_error(format!("failed to parse hosted invoice: {error}")))?;
-        call!(self.actor, |reply| LspServiceMessage::RegisterInvoice {
-            tenant_id,
-            invoice,
-            buffer_duration_ms: params.buffer_duration_ms,
-            reply,
-        })
-        .rpc_err()?
-        .rpc_err()
-        .map(Into::into)
-    }
-
     async fn get_invoice(
         &self,
         params: GetLspInvoiceParams,
@@ -224,17 +178,6 @@ impl LspRpcServerImpl {
             payment_hash: params.payment_hash,
         })
         .await
-    }
-
-    async fn send_payment(
-        &self,
-        params: SendLspPaymentParams,
-    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
-        let context = self.tenant_rpc_context(tenant_id).await?;
-        PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-            .send_payment(params.payment)
-            .await
     }
 
     async fn get_payment(
@@ -324,25 +267,11 @@ impl LspRpcServer for LspRpcServerImpl {
             })
     }
 
-    async fn lsp_new_invoice(
-        &self,
-        params: NewLspInvoiceParams,
-    ) -> Result<LspInvoiceRegistration, ErrorObjectOwned> {
-        self.new_invoice(params).await
-    }
-
     async fn lsp_get_invoice(
         &self,
         params: GetLspInvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         self.get_invoice(params).await
-    }
-
-    async fn lsp_send_payment(
-        &self,
-        params: SendLspPaymentParams,
-    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.send_payment(params).await
     }
 
     async fn lsp_get_payment(
@@ -385,31 +314,6 @@ impl From<InternalTenantStatus> for LspTenantStatus {
             created_at: status.record.created_at,
             runtime_status,
             channel_online: status.channel_online,
-        }
-    }
-}
-
-impl From<InternalInvoiceHint> for LspInvoiceHint {
-    fn from(hint: InternalInvoiceHint) -> Self {
-        let payload = hint.payload;
-        Self {
-            version: payload.version,
-            lsp_node_id: payload.lsp_node_id.into(),
-            payment_hash: payload.payment_hash.into(),
-            invoice_digest: payload.invoice_digest.into(),
-            buffer_duration_ms: payload.buffer_duration_ms,
-            expires_at: payload.expires_at,
-            signature: format!("0x{}", hex::encode(hint.signature.0.serialize_compact())),
-        }
-    }
-}
-
-impl From<InternalInvoiceRegistration> for LspInvoiceRegistration {
-    fn from(registration: InternalInvoiceRegistration) -> Self {
-        Self {
-            tenant_id: registration.tenant_id.to_string(),
-            invoice: registration.invoice.to_string(),
-            hint: registration.hint.into(),
         }
     }
 }

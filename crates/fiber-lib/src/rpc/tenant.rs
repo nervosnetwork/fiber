@@ -29,9 +29,11 @@ pub(crate) const TENANT_ALLOWED_METHODS: &[&str] = &[
     "get_watchtower_signing_status",
     "list_channels",
     "list_payments",
+    "new_invoice",
     "open_channel_with_external_funding",
     "remove_preimage",
     "remove_watch_channel",
+    "send_payment",
     "shutdown_channel",
     "submit_channel_signature",
     "submit_commitment_transaction",
@@ -119,15 +121,11 @@ mod tests {
 
         for method in [
             "open_channel",
-            "new_invoice",
-            "send_payment",
             "node_info",
             "lsp_register_tenant",
             "lsp_ensure_tenant",
             "lsp_evict_tenant",
             "lsp_list_tenants",
-            "lsp_new_invoice",
-            "lsp_send_payment",
         ] {
             assert!(!is_tenant_allowed_method(method));
             assert!(enforce_tenant_method_allowlist(method, &tenant)

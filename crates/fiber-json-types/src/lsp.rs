@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 use crate::{
-    schema_helpers::{schema_as_uint_hex, schema_as_uint_hex_optional},
-    serde_utils::U64Hex,
-    GetPaymentCommandParams, Hash256, NewInvoiceParams, Pubkey, SendPaymentCommandParams,
+    schema_helpers::schema_as_uint_hex, serde_utils::U64Hex, GetPaymentCommandParams, Hash256,
+    Pubkey,
 };
 
 /// Parameters that identify a hosted tenant.
@@ -44,29 +43,6 @@ pub struct RegisterLspTenantParams {
     pub nonce: Hash256,
     /// Compact ECDSA signature over the canonical `TenantRegistryPayload`, as hex.
     pub signature: String,
-}
-
-/// Parameters for creating and registering an invoice owned by a hosted tenant.
-#[serde_as]
-#[derive(Clone, Deserialize, JsonSchema, Serialize)]
-pub struct NewLspInvoiceParams {
-    /// Hosted tenant that owns and signs the invoice.
-    pub tenant_id: String,
-    /// Standard Fiber invoice parameters evaluated in the tenant runtime.
-    pub invoice: NewInvoiceParams,
-    /// Maximum time Public T may buffer the incoming payment while the tenant is offline.
-    #[serde_as(as = "Option<U64Hex>")]
-    #[schemars(schema_with = "schema_as_uint_hex_optional")]
-    pub buffer_duration_ms: Option<u64>,
-}
-
-/// Parameters for sending a payment from a hosted tenant runtime.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct SendLspPaymentParams {
-    /// Hosted tenant that owns the outgoing payment session.
-    pub tenant_id: String,
-    /// Standard Fiber payment parameters evaluated in the tenant runtime.
-    pub payment: SendPaymentCommandParams,
 }
 
 /// Parameters for retrieving a hosted tenant's outgoing payment session.
@@ -160,41 +136,6 @@ pub struct LspServiceStatus {
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub active_tenants: u64,
-}
-
-/// Signed sidecar that tells a payer to use Public T and permits bounded buffering.
-#[serde_as]
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct LspInvoiceHint {
-    /// Hint wire format version.
-    pub version: u8,
-    /// Public trampoline node selected for this invoice.
-    pub lsp_node_id: Pubkey,
-    /// Payment hash bound to this hint.
-    pub payment_hash: Hash256,
-    /// Digest of the complete signed invoice.
-    pub invoice_digest: Hash256,
-    /// Maximum offline buffering duration requested by the invoice owner.
-    #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
-    pub buffer_duration_ms: u64,
-    /// Absolute invoice expiry in milliseconds since Unix epoch.
-    #[serde_as(as = "U64Hex")]
-    #[schemars(schema_with = "schema_as_uint_hex")]
-    pub expires_at: u64,
-    /// Compact ECDSA signature by Public T, encoded as `0x`-prefixed hex.
-    pub signature: String,
-}
-
-/// Registered hosted invoice and the authenticated LSP routing sidecar.
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct LspInvoiceRegistration {
-    /// Tenant that owns the invoice.
-    pub tenant_id: String,
-    /// Canonical encoded Fiber invoice.
-    pub invoice: String,
-    /// Authenticated routing and buffering hint to distribute with the invoice.
-    pub hint: LspInvoiceHint,
 }
 
 /// Durable hosted-payment delivery state.

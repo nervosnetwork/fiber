@@ -46,6 +46,22 @@ RPC result in, inspect [`ProcessOutcome`], and POST the returned submit
 params. The session performs no HTTP. Auto-approving poll loops stay in
 `tests/fiber-lsp-sdk-agent` and must not be copied into production.
 
+The wallet's RPC transport uses the tenant Biscuit returned by
+`HostedSession::finish_registration` with the standard Fiber data-plane
+methods. It calls `new_invoice` with an optional `lsp_buffer_duration_ms` and
+reads `accepted_lsp_buffer_duration_ms` from `InvoiceResult`; the Node adds
+Public T's trampoline hint and registers the hosted invoice. It calls the
+standard `send_payment` method for outbound payments.
+
+After a successful `new_invoice`, record `InvoiceResult.invoice.data.payment_hash`
+with `HostedSession::registry_mut().record_issued_invoice`. After starting an
+outbound payment, record `GetPaymentCommandResult.payment_hash` with
+`record_outbound_payment`. `SigningPolicy::Auto` uses this client-owned registry
+to reject commitment snapshots containing unknown inbound or outbound TLCs.
+The application must persist this wallet payment registry alongside its
+`HostedSessionState`; the signer store intentionally contains signing-safety
+material rather than wallet invoice and payment history.
+
 [`HostedSession::new`] defaults to [`SigningPolicy::Auto`]. Call
 [`SigningPolicy::decide`] yourself only if you are not using `HostedSession`.
 `Always` exists only under `test-apis`. Production clients use `Auto`

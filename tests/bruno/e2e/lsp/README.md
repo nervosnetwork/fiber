@@ -1,16 +1,20 @@
 # Hosted LSP lifecycle and payments
 
 This workflow starts Node2 as a Public Trampoline node with the hosted LSP service and Biscuit
-authentication enabled. Operator requests use an LSP administration token. Hosted wallet
-requests use the tenant token issued on first `lsp_register_tenant` and call the standard Fiber
-channel, invoice, and payment RPC methods without a `tenant_id` parameter.
+authentication enabled. The SDK agent uses the LSP operator token for the nonce/registration
+bootstrap and exposes the RootSigner-derived tenant id and issued tenant token to Bruno.
+Operator requests manage tenant runtime lifecycle through the LSP administration RPCs. Invoice
+creation and outgoing payment use the standard Fiber `new_invoice` and `send_payment` methods;
+the tenant Biscuit selects the actor and Store namespace without a `tenant_id` request parameter.
 
-The workflow registers and activates a tenant, then the tenant calls `open_channel` against
-Public T with an explicit tenant-side `funding_amount`. It evicts and reactivates the tenant to
-verify that the same private in-process channel is reestablished. It also exercises both payment
-directions: the tenant creates a standard invoice which Public T registers with an LSP hint,
-Node1 pays the offline hosted tenant while Public T buffers and later completes the delivery,
-then the hosted tenant uses `send_payment` to pay Node1 through Public T.
+The workflow registers and activates a tenant, then Public T calls the standard `open_channel`
+RPC to create a private in-process U-T channel with outbound liquidity toward the tenant. It
+evicts and reactivates the tenant to verify that the same channel is reestablished. It also
+exercises both payment directions: the tenant calls `new_invoice` with
+`lsp_buffer_duration_ms`, which automatically registers the invoice and Public T trampoline hint;
+Node1 pays the offline hosted tenant while Public T buffers and later completes the delivery;
+then the tenant calls `send_payment` to pay Node1 through Public T. Tenant-token RPCs verify the
+resulting channel, invoice, and payment state in the tenant namespace.
 
 The Biscuit key pair and operator bearer token are test-only fixtures. The workflow does not
 carry a fixed tenant token: `lsp_register_tenant` issues it on first registration, and Bruno

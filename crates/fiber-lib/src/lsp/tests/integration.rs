@@ -41,17 +41,16 @@ use crate::{
     gen_rand_sha256_hash,
     invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder},
     lsp::{
-        tenant_watchtower_node_id, FiberTenantRuntimeFactory, HostedTenantRecord,
-        HostedTenantRpcContext, HostedTenantRuntime, LspInvoiceStore, LspService, LspServiceArgs,
-        LspServiceMessage, TenantId, TenantRuntimeFactory,
+        tenant_watchtower_node_id, BiscuitTokenIssuer, FiberTenantRuntimeFactory,
+        HostedTenantRecord, HostedTenantRpcContext, HostedTenantRuntime, LspInvoiceStore,
+        LspService, LspServiceArgs, LspServiceMessage, TenantId, TenantRuntimeFactory,
     },
     rpc::{
         lsp::{
             GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, ListLspTenantsResult,
-            LspInvoiceRegistration, LspPaymentDelivery, LspPaymentDeliveryStatus,
-            LspPaymentHashParams, LspServiceStatus, LspTenantParams, LspTenantRuntimeStatus,
-            NewLspInvoiceParams, RegisterLspTenantParams, RegisterLspTenantResult,
-            SendLspPaymentParams,
+            LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus,
+            LspTenantParams, LspTenantRuntimeStatus, RegisterLspTenantParams,
+            RegisterLspTenantResult,
         },
         payment::{GetPaymentCommandResult, SendPaymentCommandParams},
         server::start_rpc,
@@ -122,7 +121,7 @@ async fn register_authenticated_network_tenant(
     actor: &ActorRef<LspServiceMessage>,
     lsp_node_id: crate::fiber_types::Pubkey,
     root_signer_key: &Privkey,
-) -> TenantId {
+) -> (TenantId, String) {
     let root_signer_pubkey = root_signer_key.pubkey();
     let nonce = ractor::call!(
         actor,
@@ -150,7 +149,10 @@ async fn register_authenticated_network_tenant(
     })
     .expect("register tenant actor reply")
     .expect("register authenticated tenant");
-    registration.status.record.tenant_id
+    (
+        registration.status.record.tenant_id,
+        registration.access_token,
+    )
 }
 
 fn test_root_signer_for_name(name: &str) -> Privkey {
@@ -334,6 +336,7 @@ struct HostedTenantTestNode {
     lsp_node_index: usize,
     node: NetworkNode,
     private_channel_id: crate::fiber_types::Hash256,
+    client: HttpClient,
 }
 
 struct LspTestService {
@@ -341,6 +344,7 @@ struct LspTestService {
     client: HttpClient,
     rpc_handle: ServerHandle,
     actor: ActorRef<LspServiceMessage>,
+    rpc_addr: std::net::SocketAddr,
 }
 
 struct LspTestNetwork {
@@ -407,19 +411,9 @@ impl LspTestNetwork {
             }),
             dry_run: command.dry_run.then_some(true),
         };
-        self.tenant_lsp(lsp_node_index, tenant_id)
+        self.tenant(lsp_node_index, tenant_id)
             .client
-            .request(
-                "lsp_send_payment",
-                rpc_params![SendLspPaymentParams {
-                    tenant_id: self
-                        .tenant(lsp_node_index, tenant_id)
-                        .tenant_id
-                        .as_str()
-                        .to_string(),
-                    payment,
-                }],
-            )
+            .request("send_payment", rpc_params![payment])
             .await
     }
 
@@ -516,6 +510,12 @@ async fn create_lsp_test_network(
                 .expect("runtime group for LSP"),
             starts: Arc::new(AtomicUsize::new(0)),
         });
+        let biscuit_root = KeyPair::new();
+        let token_issuer = BiscuitTokenIssuer::from_private_key(
+            &biscuit_root.private().to_prefixed_string(),
+            &biscuit_root.public().to_string(),
+        )
+        .expect("build LSP test token issuer");
         let lsp_actor = Actor::spawn_linked(
             None,
             LspService,
@@ -528,7 +528,7 @@ async fn create_lsp_test_network(
                     .namespaced(NodeNamespace::lsp_metadata()),
                 runtime_factory,
                 signing_key: nodes[lsp_node_index].private_key.clone(),
-                token_issuer: super::test_token_issuer(),
+                token_issuer,
                 watchtower_store: nodes[lsp_node_index].store.clone(),
             },
             root_actor.get_cell(),
@@ -544,12 +544,17 @@ async fn create_lsp_test_network(
             .expect("attach LSP service to public node");
 
         let mut rpc_config = gen_rpc_config();
-        rpc_config.enabled_modules = vec!["lsp".to_string()];
+        rpc_config.biscuit_public_key = Some(biscuit_root.public().to_string());
+        rpc_config.enabled_modules = vec![
+            "invoice".to_string(),
+            "lsp".to_string(),
+            "payment".to_string(),
+        ];
         let (rpc_handle, rpc_addr) = start_rpc(
             rpc_config,
             None,
-            None,
-            None,
+            Some(nodes[lsp_node_index].fiber_config.clone()),
+            Some(nodes[lsp_node_index].network_actor.clone()),
             None,
             Some(lsp_actor.clone()),
             nodes[lsp_node_index].store.clone(),
@@ -564,29 +569,40 @@ async fn create_lsp_test_network(
         )
         .await
         .expect("start LSP RPC server");
-        let client = HttpClientBuilder::default()
-            .build(format!("http://{rpc_addr}"))
-            .expect("build LSP RPC client");
+        let admin_token = biscuit!(
+            r#"
+                read("lsp");
+                write("lsp");
+            "#
+        )
+        .build(&biscuit_root)
+        .expect("build LSP admin token")
+        .to_base64()
+        .expect("encode LSP admin token");
+        let client = authenticated_client(rpc_addr, &admin_token);
         lsp_services.push(LspTestService {
             node_index: lsp_node_index,
             client,
             rpc_handle,
             actor: lsp_actor,
+            rpc_addr,
         });
     }
 
+    let mut tenant_tokens = HashMap::new();
     for (tenant_id, lsp_node_index, _, _, root_signer) in &tenants {
         let service = lsp_services
             .iter()
             .find(|lsp| lsp.node_index == *lsp_node_index)
             .expect("LSP service for tenant");
-        let registered = register_authenticated_network_tenant(
+        let (registered, access_token) = register_authenticated_network_tenant(
             &service.actor,
             nodes[*lsp_node_index].pubkey,
             root_signer,
         )
         .await;
         assert_eq!(&registered, tenant_id);
+        tenant_tokens.insert((*lsp_node_index, tenant_id.clone()), access_token);
     }
 
     let mut hosted_tenants = Vec::with_capacity(tenants.len());
@@ -611,12 +627,24 @@ async fn create_lsp_test_network(
             .expect("LSP service for tenant")
             .client;
         wait_for_tenant_channel(client, &tenant_id, true).await;
+        let tenant_token = tenant_tokens
+            .remove(&(lsp_node_index, tenant_id.clone()))
+            .expect("registered tenant token");
+        let tenant_client = authenticated_client(
+            lsp_services
+                .iter()
+                .find(|lsp| lsp.node_index == lsp_node_index)
+                .expect("LSP service for tenant")
+                .rpc_addr,
+            &tenant_token,
+        );
         hosted_tenants.push(HostedTenantTestNode {
             name,
             tenant_id,
             lsp_node_index,
             node: tenant,
             private_channel_id,
+            client: tenant_client,
         });
     }
 
@@ -749,7 +777,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         .build(format!("http://{rpc_addr}"))
         .expect("build LSP RPC client");
 
-    let registered_id =
+    let (registered_id, _) =
         register_authenticated_network_tenant(&lsp_actor, public_t.pubkey, &root_signer).await;
     assert_eq!(registered_id, tenant_id);
     let registered = ractor::call!(lsp_actor, LspServiceMessage::ListTenants)
@@ -903,7 +931,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
 
     let public_t = NetworkNode::new_with_node_name("lsp-auth-public-t").await;
     let root = tempdir().expect("temporary LSP directory");
-    let config = lsp_config(root.path().join("lsp"));
+    let mut config = lsp_config(root.path().join("lsp"));
+    config.max_buffer_duration_ms = BUFFER_DURATION_MS / 2;
     let ckb_config = CkbConfig {
         base_dir: Some(root.path().join("ckb")),
         rpc_url: "http://127.0.0.1:8114".to_string(),
@@ -961,11 +990,16 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     .unwrap()
     .to_base64()
     .unwrap();
-    let public_invoice_token = biscuit!(r#"read("invoices");"#)
-        .build(&biscuit_root)
-        .unwrap()
-        .to_base64()
-        .unwrap();
+    let public_invoice_token = biscuit!(
+        r#"
+            read("invoices");
+            write("invoices");
+        "#
+    )
+    .build(&biscuit_root)
+    .unwrap()
+    .to_base64()
+    .unwrap();
 
     let mut rpc_config = gen_rpc_config();
     rpc_config.biscuit_public_key = Some(biscuit_root.public().to_string());
@@ -1095,8 +1129,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         "open_channel should be unauthorized for tenant tokens, got {open_channel_error}"
     );
 
-    let new_invoice_error = match tenant_client
-        .request::<fiber_json_types::InvoiceResult, _>(
+    let invoice: fiber_json_types::InvoiceResult = tenant_client
+        .request(
             "new_invoice",
             rpc_params![fiber_json_types::NewInvoiceParams {
                 amount: 1_000,
@@ -1111,16 +1145,14 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
                 hash_algorithm: None,
                 allow_mpp: None,
                 allow_trampoline_routing: Some(true),
+                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
             }],
         )
         .await
-    {
-        Ok(_) => panic!("tenant token must not call new_invoice"),
-        Err(error) => error,
-    };
-    assert!(
-        new_invoice_error.to_string().contains("Unauthorized"),
-        "new_invoice should be unauthorized for tenant tokens, got {new_invoice_error}"
+        .expect("create hosted invoice through tenant-scoped new_invoice");
+    assert_eq!(
+        invoice.accepted_lsp_buffer_duration_ms,
+        Some(BUFFER_DURATION_MS / 2)
     );
 
     let missing_channel = crate::fiber_types::Hash256::from([0x11; 32]);
@@ -1141,32 +1173,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         "allowlisted signing RPC should reach the tenant handler, got {signing_status_error}"
     );
 
-    let invoice: LspInvoiceRegistration = admin_client
-        .request(
-            "lsp_new_invoice",
-            rpc_params![NewLspInvoiceParams {
-                tenant_id: tenant_id.as_str().to_string(),
-                invoice: fiber_json_types::NewInvoiceParams {
-                    amount: 1_000,
-                    description: Some("operator-created hosted invoice".to_string()),
-                    currency: fiber_json_types::Currency::Fibd,
-                    payment_preimage: None,
-                    payment_hash: Some(crate::fiber_types::Hash256::from([0x42; 32]).into()),
-                    expiry: Some(60 * 60),
-                    fallback_address: None,
-                    final_expiry_delta: None,
-                    udt_type_script: None,
-                    hash_algorithm: None,
-                    allow_mpp: None,
-                    allow_trampoline_routing: Some(true),
-                },
-                buffer_duration_ms: None,
-            }],
-        )
-        .await
-        .expect("create hosted invoice through the operator LSP RPC");
-    let decoded =
-        crate::invoice::CkbInvoice::from_str(&invoice.invoice).expect("decode hosted invoice");
+    let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
+        .expect("decode hosted invoice");
     let expected_tenant_pubkey: secp256k1::PublicKey = expected_tenant.tenant_pubkey.into();
     assert_eq!(decoded.payee_pub_key(), Some(&expected_tenant_pubkey));
     assert_eq!(
@@ -1179,14 +1187,14 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         .namespaced(NodeNamespace::lsp_metadata())
         .get_lsp_invoice(payment_hash)
         .expect("read hosted invoice registration")
-        .expect("lsp_new_invoice should register the hosted invoice");
+        .expect("tenant new_invoice should register the hosted invoice");
     assert_eq!(registration.tenant_id, tenant_id);
-    assert_eq!(registration.invoice.to_string(), invoice.invoice);
+    assert_eq!(registration.invoice.to_string(), invoice.invoice_address);
     assert_eq!(registration.hint.payload.lsp_node_id, public_t.pubkey);
     assert_eq!(registration.hint.payload.payment_hash, *payment_hash);
     assert_eq!(
         registration.hint.payload.buffer_duration_ms,
-        crate::lsp::DEFAULT_LSP_BUFFER_DURATION_MS
+        BUFFER_DURATION_MS / 2
     );
 
     let tenant_invoice: fiber_json_types::GetInvoiceResult = tenant_client
@@ -1198,7 +1206,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         )
         .await
         .expect("read tenant invoice from its namespace");
-    assert_eq!(tenant_invoice.invoice_address, invoice.invoice);
+    assert_eq!(tenant_invoice.invoice_address, invoice.invoice_address);
     if public_client
         .request::<fiber_json_types::GetInvoiceResult, _>(
             "get_invoice",
@@ -1211,6 +1219,31 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     {
         panic!("public node must not see a tenant invoice");
     }
+
+    let public_buffer_error = public_client
+        .request::<fiber_json_types::InvoiceResult, _>(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000,
+                description: Some("invalid public LSP buffer".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: Some(crate::fiber_types::Hash256::from([0x43; 32]).into(),),
+                payment_hash: None,
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
+            }],
+        )
+        .await
+        .expect_err("public new_invoice must reject LSP-only buffer policy");
+    assert!(public_buffer_error
+        .to_string()
+        .contains("lsp_buffer_duration_ms is only valid for a hosted tenant"));
 
     rpc_handle
         .stop()
@@ -1619,38 +1652,40 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
     wait_until_node_supports_trampoline_routing(&network.nodes[0], &network.nodes[3]).await;
     wait_until_node_supports_trampoline_routing(&network.nodes[3], &network.nodes[0]).await;
 
-    let invoice: LspInvoiceRegistration = network
-        .tenant_lsp(3, "u2")
+    let invoice: fiber_json_types::InvoiceResult = network
+        .tenant(3, "u2")
         .client
         .request(
-            "lsp_new_invoice",
-            rpc_params![NewLspInvoiceParams {
-                tenant_id: network.tenant(3, "u2").tenant_id.as_str().to_string(),
-                invoice: fiber_json_types::NewInvoiceParams {
-                    amount: 1_000_000,
-                    description: Some("cross LSP hosted payment".to_string()),
-                    currency: fiber_json_types::Currency::Fibd,
-                    payment_preimage: None,
-                    payment_hash: Some(expected_payment_hash.into()),
-                    expiry: Some(60 * 60),
-                    fallback_address: None,
-                    final_expiry_delta: None,
-                    udt_type_script: None,
-                    hash_algorithm: None,
-                    allow_mpp: None,
-                    allow_trampoline_routing: Some(true),
-                },
-                buffer_duration_ms: None,
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000_000,
+                description: Some("cross LSP hosted payment".to_string()),
+                currency: fiber_json_types::Currency::Fibd,
+                payment_preimage: None,
+                payment_hash: Some(expected_payment_hash.into()),
+                expiry: Some(60 * 60),
+                fallback_address: None,
+                final_expiry_delta: None,
+                udt_type_script: None,
+                hash_algorithm: None,
+                allow_mpp: None,
+                allow_trampoline_routing: Some(true),
+                lsp_buffer_duration_ms: None,
             }],
         )
         .await
-        .expect("create U2 hosted invoice through LSP2");
+        .expect("create U2 hosted invoice with its tenant token");
     assert_eq!(
-        invoice.tenant_id,
-        network.tenant(3, "u2").tenant_id.as_str()
+        invoice.accepted_lsp_buffer_duration_ms,
+        Some(crate::lsp::DEFAULT_LSP_BUFFER_DURATION_MS)
     );
-    assert_eq!(invoice.hint.lsp_node_id, network.nodes[3].pubkey.into());
-    let payment_hash: crate::fiber_types::Hash256 = invoice.hint.payment_hash.into();
+    let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
+        .expect("decode U2 hosted invoice");
+    assert_eq!(
+        decoded.trampoline_route_hint(),
+        Some(&secp256k1::PublicKey::from(network.nodes[3].pubkey))
+    );
+    let payment_hash = *decoded.payment_hash();
     assert_eq!(payment_hash, expected_payment_hash);
     assert_eq!(
         network
@@ -1666,7 +1701,7 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
             0,
             "u1",
             SendPaymentCommand {
-                invoice: Some(invoice.invoice),
+                invoice: Some(invoice.invoice_address),
                 max_fee_amount: Some(100_000),
                 max_fee_rate: Some(1_000),
                 trampoline_hops: Some(vec![network.nodes[0].pubkey, network.nodes[3].pubkey]),

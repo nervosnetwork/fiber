@@ -10,13 +10,15 @@ use super::TenantId;
 use fiber_types::NodeId;
 
 /// Capabilities issued to tenant tokens. Middleware still denies methods
-/// outside the tenant RPC allowlist; these facts are defense in depth so a
-/// missing allowlist entry cannot grant invoice or payment writes.
-const TENANT_CAPABILITIES: [(&str, &str); 6] = [
+/// outside the tenant RPC allowlist, so these resource capabilities cannot be
+/// used to reach public-node or LSP-administration methods.
+const TENANT_CAPABILITIES: [(&str, &str); 8] = [
     ("read", "channels"),
     ("write", "channels"),
     ("read", "invoices"),
+    ("write", "invoices"),
     ("read", "payments"),
+    ("write", "payments"),
     ("read", "watchtower"),
     ("write", "watchtower"),
 ];

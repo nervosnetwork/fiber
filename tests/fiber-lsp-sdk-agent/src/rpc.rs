@@ -10,7 +10,10 @@ use fiber_json_types::{
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
-/// RPC boundary used by the independent SDK agent.
+/// Signer control-plane RPC boundary used by the independent SDK agent.
+///
+/// The Bruno driver uses the tenant token emitted by this agent to exercise
+/// standard `new_invoice` and `send_payment` data-plane RPCs directly.
 #[async_trait]
 pub trait FiberRpc: Clone + Send + Sync + 'static {
     async fn get_tenant_registry_nonce(

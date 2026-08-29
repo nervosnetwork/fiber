@@ -147,9 +147,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
-    b.rule("lsp_new_invoice", r#"allow if write("lsp");"#);
     b.rule("lsp_get_invoice", r#"allow if read("lsp");"#);
-    b.rule("lsp_send_payment", r#"allow if write("lsp");"#);
     b.rule("lsp_get_payment", r#"allow if read("lsp");"#);
     b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
 
@@ -395,6 +393,8 @@ mod tests {
         auth.check_permission("submit_channel_signature", &token)
             .unwrap();
         auth.check_permission("list_channels", &token).unwrap();
+        auth.check_permission("new_invoice", &token).unwrap();
+        auth.check_permission("send_payment", &token).unwrap();
         auth.check_permission("get_invoice", &token).unwrap();
         auth.check_permission("get_payment", &token).unwrap();
         auth.check_permission("list_payments", &token).unwrap();
@@ -410,13 +410,10 @@ mod tests {
         // write("channels") still exists so biscuit allows node-operation
         // methods; middleware is the tenant method gate.
         auth.check_permission("open_channel", &token).unwrap();
-        assert!(auth.check_permission("new_invoice", &token).is_err());
-        assert!(auth.check_permission("send_payment", &token).is_err());
         auth.check_permission("create_preimage", &token).unwrap();
         crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit).unwrap();
-        assert!(
-            crate::rpc::tenant::enforce_tenant_method_allowlist("new_invoice", &biscuit).is_err()
-        );
+        crate::rpc::tenant::enforce_tenant_method_allowlist("new_invoice", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("send_payment", &biscuit).unwrap();
         assert!(auth
             .check_permission("lsp_register_tenant", &token)
             .is_err());
@@ -655,8 +652,6 @@ mod tests {
             "lsp_register_tenant",
             "lsp_ensure_tenant",
             "lsp_evict_tenant",
-            "lsp_new_invoice",
-            "lsp_send_payment",
         ];
 
         for method in read_methods {

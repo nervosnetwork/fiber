@@ -179,11 +179,24 @@ where
     async fn new_invoice(
         &self,
         extensions: &Extensions,
-        params: NewInvoiceParams,
+        mut params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
             let tenant_id = context.tenant_id.clone();
-            let result = InvoiceRpcServerImpl::new_fiber(
+            let requested_buffer_duration_ms = params.lsp_buffer_duration_ms;
+            if requested_buffer_duration_ms
+                .is_some_and(|duration| duration > crate::lsp::MAX_LSP_BUFFER_DURATION_MS)
+            {
+                return Err(rpc_error(format!(
+                    "lsp_buffer_duration_ms exceeds maximum {}ms",
+                    crate::lsp::MAX_LSP_BUFFER_DURATION_MS
+                )));
+            }
+            // The hosted-tenant RPC layer consumes this policy. Do not let the
+            // common invoice builder mistake it for an unsupported public or
+            // WASM request.
+            params.lsp_buffer_duration_ms = None;
+            let mut result = InvoiceRpcServerImpl::new_fiber(
                 context.store,
                 Some(context.fiber_actor),
                 Some(context.config),
@@ -202,16 +215,18 @@ where
                 .lsp_actor
                 .as_ref()
                 .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
-            call!(lsp_actor, |reply| {
+            let registration = call!(lsp_actor, |reply| {
                 crate::lsp::LspServiceMessage::RegisterInvoice {
                     tenant_id,
                     invoice,
-                    buffer_duration_ms: None,
+                    buffer_duration_ms: requested_buffer_duration_ms,
                     reply,
                 }
             })
             .rpc_err()?
             .rpc_err()?;
+            result.accepted_lsp_buffer_duration_ms =
+                Some(registration.hint.payload.buffer_duration_ms);
             return Ok(result);
         }
         self.new_invoice(params).await
@@ -289,6 +304,10 @@ where
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         let error = |msg: &str| Err(rpc_error(msg.to_string()));
+
+        if params.lsp_buffer_duration_ms.is_some() {
+            return error("lsp_buffer_duration_ms is only valid for a hosted tenant");
+        }
 
         let params_currency = params.currency.into();
 
@@ -407,6 +426,7 @@ where
                     Ok(_) => Ok(InvoiceResult {
                         invoice_address: invoice.to_string(),
                         invoice: invoice.clone().into(),
+                        accepted_lsp_buffer_duration_ms: None,
                     }),
                     Err(e) => error(&e.to_string()),
                 }

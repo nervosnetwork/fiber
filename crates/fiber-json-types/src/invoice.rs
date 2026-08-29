@@ -154,15 +154,27 @@ pub struct NewInvoiceParams {
     pub allow_mpp: Option<bool>,
     /// Whether allow payment to use trampoline routing
     pub allow_trampoline_routing: Option<bool>,
+    /// Maximum time a hosted LSP may buffer this invoice's incoming payment
+    /// while the tenant is offline. Only valid for an authenticated hosted
+    /// tenant; `None` uses the LSP service default.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub lsp_buffer_duration_ms: Option<u64>,
 }
 
 /// Result of creating a new invoice.
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct InvoiceResult {
     /// The encoded invoice address.
     pub invoice_address: String,
     /// The invoice.
     pub invoice: CkbInvoice,
+    /// Buffer duration accepted by the hosted LSP after applying its service
+    /// cap. `None` for invoices created outside a hosted tenant context.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    pub accepted_lsp_buffer_duration_ms: Option<u64>,
 }
 
 /// Parameters for parsing an invoice.

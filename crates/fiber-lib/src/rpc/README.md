@@ -56,9 +56,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `lsp_ensure_tenant`](#lsp-lsp_ensure_tenant)
         * [Method `lsp_evict_tenant`](#lsp-lsp_evict_tenant)
         * [Method `lsp_list_tenants`](#lsp-lsp_list_tenants)
-        * [Method `lsp_new_invoice`](#lsp-lsp_new_invoice)
         * [Method `lsp_get_invoice`](#lsp-lsp_get_invoice)
-        * [Method `lsp_send_payment`](#lsp-lsp_send_payment)
         * [Method `lsp_get_payment`](#lsp-lsp_get_payment)
         * [Method `lsp_get_payment_delivery`](#lsp-lsp_get_payment_delivery)
     * [Module Payment](#module-payment)
@@ -106,11 +104,9 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `Htlc`](#type-htlc)
     * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
-    * [Type `LspInvoiceHint`](#type-lspinvoicehint)
     * [Type `LspPaymentDeliveryStatus`](#type-lsppaymentdeliverystatus)
     * [Type `LspTenantRuntimeStatus`](#type-lsptenantruntimestatus)
     * [Type `LspTenantStatus`](#type-lsptenantstatus)
-    * [Type `NewInvoiceParams`](#type-newinvoiceparams)
     * [Type `NextChannelSignerMaterial`](#type-nextchannelsignermaterial)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `OutboundTlcStatus`](#type-outboundtlcstatus)
@@ -777,11 +773,16 @@ Generates a new invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 * `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
+* `lsp_buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time a hosted LSP may buffer this invoice's incoming payment
+ while the tenant is offline. Only valid for an authenticated hosted
+ tenant; `None` uses the LSP service default.
 
 ##### Returns
 
 * `invoice_address` - <em>`String`</em>, The encoded invoice address.
 * `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
+* `accepted_lsp_buffer_duration_ms` - <em>`Option<u64>`</em>, Buffer duration accepted by the hosted LSP after applying its service
+ cap. `None` for invoices created outside a hosted tenant context.
 
 ---
 
@@ -989,27 +990,6 @@ Lists all persistently registered hosted tenants.
 
 
 
-<a id="lsp-lsp_new_invoice"></a>
-#### Method `lsp_new_invoice`
-
-Creates a tenant-signed invoice, stores it in the tenant runtime and registers its LSP hint.
-
-##### Params
-
-* `tenant_id` - <em>`String`</em>, Hosted tenant that owns and signs the invoice.
-* `invoice` - <em>[NewInvoiceParams](#type-newinvoiceparams)</em>, Standard Fiber invoice parameters evaluated in the tenant runtime.
-* `buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time Public T may buffer the incoming payment while the tenant is offline.
-
-##### Returns
-
-* `tenant_id` - <em>`String`</em>, Tenant that owns the invoice.
-* `invoice` - <em>`String`</em>, Canonical encoded Fiber invoice.
-* `hint` - <em>[LspInvoiceHint](#type-lspinvoicehint)</em>, Authenticated routing and buffering hint to distribute with the invoice.
-
----
-
-
-
 <a id="lsp-lsp_get_invoice"></a>
 #### Method `lsp_get_invoice`
 
@@ -1025,37 +1005,6 @@ Retrieves an invoice from a hosted tenant's scoped store.
 * `invoice_address` - <em>`String`</em>, The encoded invoice address.
 * `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
 * `status` - <em>[CkbInvoiceStatus](#type-ckbinvoicestatus)</em>, The invoice status
-
----
-
-
-
-<a id="lsp-lsp_send_payment"></a>
-#### Method `lsp_send_payment`
-
-Starts an outgoing payment in a hosted tenant runtime.
-
-##### Params
-
-* `tenant_id` - <em>`String`</em>, Hosted tenant that owns the outgoing payment session.
-* `payment` - <em>[SendPaymentCommandParams](#type-sendpaymentcommandparams)</em>, Standard Fiber payment parameters evaluated in the tenant runtime.
-
-##### Returns
-
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, The payment hash of the payment
-* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage learned from a successful payment attempt.
-* `status` - <em>[PaymentStatus](#type-paymentstatus)</em>, The status of the payment
-* `created_at` - <em>`u64`</em>, The time the payment was created at, in milliseconds from UNIX epoch
-* `last_updated_at` - <em>`u64`</em>, The time the payment was last updated at, in milliseconds from UNIX epoch
-* `failed_error` - <em>`Option<String>`</em>, The error message if the payment failed
-* `fee` - <em>`u128`</em>, fee paid for the payment
-* `custom_records` - <em>Option<[PaymentCustomRecords](#type-paymentcustomrecords)></em>, The custom records to be included in the payment.
-* `routers` - <em>Vec<[SessionRoute](#type-sessionroute)></em>, The router is a list of nodes that the payment will go through.
- We store in the payment session and then will use it to track the payment history.
- If the payment adapted MPP (multi-part payment), the routers will be a list of nodes.
- For example:
-    `A(amount, channel) -> B -> C -> D`
- means A will send `amount` with `channel` to B.
 
 ---
 
@@ -1996,23 +1945,6 @@ The metadata of the invoice.
 * `attrs` - <em>Vec<[Attribute](#type-attribute)></em>, The attributes of the invoice, e.g. description, expiry time, etc.
 ---
 
-<a id="#type-lspinvoicehint"></a>
-### Type `LspInvoiceHint`
-
-Signed sidecar that tells a payer to use Public T and permits bounded buffering.
-
-
-#### Fields
-
-* `version` - <em>`u8`</em>, Hint wire format version.
-* `lsp_node_id` - <em>[Pubkey](#type-pubkey)</em>, Public trampoline node selected for this invoice.
-* `payment_hash` - <em>[Hash256](#type-hash256)</em>, Payment hash bound to this hint.
-* `invoice_digest` - <em>[Hash256](#type-hash256)</em>, Digest of the complete signed invoice.
-* `buffer_duration_ms` - <em>`u64`</em>, Maximum offline buffering duration requested by the invoice owner.
-* `expires_at` - <em>`u64`</em>, Absolute invoice expiry in milliseconds since Unix epoch.
-* `signature` - <em>`String`</em>, Compact ECDSA signature by Public T, encoded as `0x`-prefixed hex.
----
-
 <a id="#type-lsppaymentdeliverystatus"></a>
 ### Type `LspPaymentDeliveryStatus`
 
@@ -2058,33 +1990,6 @@ Hosted tenant state boundary and liveness information.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
 * `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
----
-
-<a id="#type-newinvoiceparams"></a>
-### Type `NewInvoiceParams`
-
-The parameter struct for generating a new invoice.
-
-
-#### Fields
-
-* `amount` - <em>`u128`</em>, The amount of the invoice.
-* `description` - <em>`Option<String>`</em>, The description of the invoice.
-* `currency` - <em>[Currency](#type-currency)</em>, The currency of the invoice.
-* `payment_preimage` - <em>Option<[Hash256](#type-hash256)></em>, The preimage to settle an incoming TLC payable to this invoice. If preimage is set, hash must be absent.
- If both preimage and hash are absent, a standalone node generates a random preimage.
- Hosted tenant invoices must supply this or `payment_hash`; the LSP will not invent a settle secret.
-* `payment_hash` - <em>Option<[Hash256](#type-hash256)></em>, The hash of the preimage. If hash is set, preimage must be absent. This condition indicates a 'hold invoice'
- for which the tlc must be accepted and held until the preimage becomes known.
- Hosted tenant invoices may supply only this field so the client keeps the preimage.
-* `expiry` - <em>`Option<u64>`</em>, The expiry time of the invoice, in seconds.
-* `fallback_address` - <em>`Option<String>`</em>, The fallback address of the invoice.
-* `final_expiry_delta` - <em>`Option<u64>`</em>, The final HTLC timeout of the invoice, in milliseconds.
- Minimal value is 16 hours, and maximal value is 14 days.
-* `udt_type_script` - <em>`Option<Script>`</em>, The UDT type script of the invoice.
-* `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
-* `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
-* `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
 ---
 
 <a id="#type-nextchannelsignermaterial"></a>
