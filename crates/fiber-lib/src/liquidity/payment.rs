@@ -283,7 +283,24 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
                         "failed to look up existing provider invoice: {error}"
                     ))
                 })?;
-                validate_existing_provider_invoice(&existing_invoice, status, &invoice)
+                validate_existing_provider_invoice(&existing_invoice, status, &invoice)?;
+                call!(self.network_actor, |reply| {
+                    NetworkActorMessage::Command(NetworkActorCommand::EnsureInvoicePreimage(
+                        payment_hash,
+                        preimage,
+                        reply,
+                    ))
+                })
+                .map_err(|error| {
+                    LiquidityLoopOutError::PaymentFailed(format!(
+                        "failed to call network actor while ensuring existing provider invoice preimage: {error}"
+                    ))
+                })?
+                .map_err(|error| {
+                    LiquidityLoopOutError::PaymentFailed(format!(
+                        "failed to ensure existing provider invoice preimage: {error}"
+                    ))
+                })
             }
             Err(error) => Err(LiquidityLoopOutError::PaymentFailed(error.to_string())),
         }
@@ -406,7 +423,7 @@ mod tests {
     use crate::fiber::network::SendPaymentResponse;
     use crate::fiber::payment::SendPaymentCommand;
     use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-    use crate::invoice::{CkbInvoice, CkbInvoiceStatus};
+    use crate::invoice::{CkbInvoice, CkbInvoiceStatus, EnsureInvoicePreimageError};
 
     use super::*;
 
@@ -650,7 +667,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+            assert_eq!(
+                network.take_events(),
+                vec!["add_invoice", "get_invoice", "ensure_invoice_preimage"]
+            );
             assert!(network.take_send_commands().is_empty());
             assert!(network.take_invoices().is_empty());
         }
@@ -679,7 +699,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+        assert_eq!(
+            network.take_events(),
+            vec!["add_invoice", "get_invoice", "ensure_invoice_preimage"]
+        );
         assert!(network.take_send_commands().is_empty());
         assert!(network.take_invoices().is_empty());
     }
@@ -857,6 +880,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_provider_invoice_rejects_ensure_preimage_command_error() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let existing = provider_invoice(payment_hash, 102, Currency::Fibd, None, None);
+        let network =
+            spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoiceEnsurePreimageError(
+                (existing, CkbInvoiceStatus::Open),
+            ))
+            .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let error = adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 102, None)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to ensure existing provider invoice preimage"));
+        assert_eq!(
+            network.take_events(),
+            vec!["add_invoice", "get_invoice", "ensure_invoice_preimage"]
+        );
+        assert!(network.take_send_commands().is_empty());
+        assert!(network.take_invoices().is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_rejects_dropped_ensure_preimage_reply() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let existing = provider_invoice(payment_hash, 102, Currency::Fibd, None, None);
+        let network = spawn_payment_mock(
+            NetworkPaymentMockMode::DuplicateInvoiceDropsEnsurePreimageReply((
+                existing,
+                CkbInvoiceStatus::Open,
+            )),
+        )
+        .await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let error = adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 102, None)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "failed to call network actor while ensuring existing provider invoice preimage"
+        ));
+        assert_eq!(
+            network.take_events(),
+            vec!["add_invoice", "get_invoice", "ensure_invoice_preimage"]
+        );
+        assert!(network.take_send_commands().is_empty());
+        assert!(network.take_invoices().is_empty());
+    }
+
+    #[tokio::test]
     async fn network_loop_out_payment_adapter_reloads_provider_invoice_as_in_flight() {
         let network = spawn_payment_mock(NetworkPaymentMockMode::ReloadInvoiceStatus(
             CkbInvoiceStatus::Open,
@@ -949,6 +1030,8 @@ mod tests {
         ReloadInvoiceStatus(CkbInvoiceStatus),
         DuplicateInvoice(Option<(CkbInvoice, CkbInvoiceStatus)>),
         DuplicateInvoiceDropsLookupReply,
+        DuplicateInvoiceEnsurePreimageError((CkbInvoice, CkbInvoiceStatus)),
+        DuplicateInvoiceDropsEnsurePreimageReply((CkbInvoice, CkbInvoiceStatus)),
     }
 
     struct NetworkPaymentMockActor;
@@ -1040,7 +1123,9 @@ mod tests {
                         let mut invoices = state.invoices.lock().unwrap();
                         let result = match &state.mode {
                             NetworkPaymentMockMode::DuplicateInvoice(_)
-                            | NetworkPaymentMockMode::DuplicateInvoiceDropsLookupReply => {
+                            | NetworkPaymentMockMode::DuplicateInvoiceDropsLookupReply
+                            | NetworkPaymentMockMode::DuplicateInvoiceEnsurePreimageError(_)
+                            | NetworkPaymentMockMode::DuplicateInvoiceDropsEnsurePreimageReply(_) => {
                                 Err(InvoiceError::InvoiceAlreadyExists)
                             }
                             _ => match invoices.entry(payment_hash) {
@@ -1071,6 +1156,12 @@ mod tests {
                             NetworkPaymentMockMode::DuplicateInvoiceDropsLookupReply => {
                                 return Ok(())
                             }
+                            NetworkPaymentMockMode::DuplicateInvoiceEnsurePreimageError(
+                                ref invoice,
+                            )
+                            | NetworkPaymentMockMode::DuplicateInvoiceDropsEnsurePreimageReply(
+                                ref invoice,
+                            ) => Ok(invoice.clone()),
                             _ => state
                                 .invoices
                                 .lock()
@@ -1081,6 +1172,21 @@ mod tests {
                                 .ok_or(InvoiceError::InvoiceNotFound),
                         };
                         let _ = reply.send(result);
+                    }
+                    NetworkActorCommand::EnsureInvoicePreimage(_, _, reply) => {
+                        state.events.lock().unwrap().push("ensure_invoice_preimage");
+                        match state.mode {
+                            NetworkPaymentMockMode::DuplicateInvoiceEnsurePreimageError(_) => {
+                                let _ = reply
+                                    .send(Err(EnsureInvoicePreimageError::ConflictingPreimage));
+                            }
+                            NetworkPaymentMockMode::DuplicateInvoiceDropsEnsurePreimageReply(_) => {
+                            }
+                            NetworkPaymentMockMode::DuplicateInvoice(_) => {
+                                let _ = reply.send(Ok(()));
+                            }
+                            _ => unreachable!("ensure invoice preimage mode must be duplicate"),
+                        }
                     }
                     _ => unreachable!("unexpected network command"),
                 }

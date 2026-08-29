@@ -8,6 +8,8 @@ use crate::invoice::{
     CancelInvoiceError, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, PreimageStore,
     SettleInvoiceError,
 };
+use crate::liquidity::actor::LoopOutPaymentAdapter;
+use crate::liquidity::payment::NetworkLoopOutPaymentAdapter;
 use crate::rpc::invoice::{InvoiceParams, InvoiceRpcServerImpl, NewInvoiceParams};
 use crate::tests::test_utils::{
     create_n_nodes_network, create_n_nodes_network_with_params, establish_channel_between_nodes,
@@ -203,6 +205,155 @@ async fn test_cancel_open_invoice_with_stored_preimage_succeeds() {
         node.store.get_invoice_status(&payment_hash),
         Some(CkbInvoiceStatus::Cancelled)
     );
+}
+
+#[tokio::test]
+async fn test_duplicate_provider_invoice_repairs_missing_preimage() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+    let preimage: Hash256 = [9u8; 32].into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .build()
+        .unwrap();
+    node.store.insert_invoice(invoice, None).unwrap();
+    let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
+
+    adapter
+        .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+        .await
+        .unwrap();
+
+    assert_eq!(node.store.get_preimage(&payment_hash), Some(preimage));
+}
+
+#[tokio::test]
+async fn test_duplicate_provider_invoice_rejects_conflicting_preimage() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+    let preimage: Hash256 = [9u8; 32].into();
+    let conflicting_preimage: Hash256 = [8u8; 32].into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .build()
+        .unwrap();
+    node.store
+        .insert_invoice(invoice, Some(conflicting_preimage))
+        .unwrap();
+    let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
+
+    let error = adapter
+        .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("conflicting stored preimage"));
+    assert_eq!(
+        node.store.get_preimage(&payment_hash),
+        Some(conflicting_preimage)
+    );
+}
+
+#[tokio::test]
+async fn test_duplicate_provider_invoice_accepts_matching_preimage() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+    let preimage: Hash256 = [9u8; 32].into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .build()
+        .unwrap();
+    node.store.insert_invoice(invoice, Some(preimage)).unwrap();
+    let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
+
+    adapter
+        .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+        .await
+        .unwrap();
+
+    assert_eq!(node.store.get_preimage(&payment_hash), Some(preimage));
+}
+
+#[tokio::test]
+async fn test_duplicate_received_provider_invoice_repairs_missing_preimage() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+    let preimage: Hash256 = [9u8; 32].into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .build()
+        .unwrap();
+    node.store.insert_invoice(invoice, None).unwrap();
+    node.store
+        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+        .unwrap();
+    let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
+
+    adapter
+        .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+        .await
+        .unwrap();
+
+    assert_eq!(node.store.get_preimage(&payment_hash), Some(preimage));
+}
+
+#[tokio::test]
+async fn test_duplicate_paid_provider_invoice_rejects_missing_preimage() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+    let preimage: Hash256 = [9u8; 32].into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .build()
+        .unwrap();
+    node.store.insert_invoice(invoice, None).unwrap();
+    node.store
+        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+        .unwrap();
+    let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
+
+    let error = adapter
+        .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("Paid invoice is missing"));
+    assert_eq!(node.store.get_preimage(&payment_hash), None);
+}
+
+#[tokio::test]
+async fn test_duplicate_paid_provider_invoice_accepts_matching_preimage() {
+    init_tracing();
+    let node = NetworkNode::new().await;
+    let preimage: Hash256 = [9u8; 32].into();
+    let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_hash(payment_hash)
+        .build()
+        .unwrap();
+    node.store.insert_invoice(invoice, Some(preimage)).unwrap();
+    node.store
+        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Paid)
+        .unwrap();
+    let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
+
+    adapter
+        .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
+        .await
+        .unwrap();
+
+    assert_eq!(node.store.get_preimage(&payment_hash), Some(preimage));
 }
 
 #[tokio::test]
