@@ -3083,6 +3083,7 @@ mod tests {
                 "set_liquidity_provider_mode",
                 "resume_non_terminal",
                 "payout_confirmed",
+                "retry_payout_validation",
                 "payment_settled",
                 "claim_confirmed",
                 "provider_claim_observed",
