@@ -17,6 +17,12 @@ pub trait InvoiceStore {
         status: CkbInvoiceStatus,
     ) -> Result<(), InvoiceError>;
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus>;
+    /// Ensure the invoice has this preimage without replacing conflicting persisted data.
+    fn ensure_invoice_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<CkbInvoiceStatus, EnsureInvoicePreimageError>;
 }
 
 pub trait PreimageStore {
@@ -28,6 +34,26 @@ pub trait PreimageStore {
 
     /// Get a preimage from the store.
     fn get_preimage(&self, payment_hash: &Hash256) -> Option<Hash256>;
+}
+
+/// Error returned when recovering the separately persisted preimage for an invoice.
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum EnsureInvoicePreimageError {
+    /// The invoice or its status does not exist.
+    #[error("Invoice not found")]
+    InvoiceNotFound,
+    /// The supplied preimage does not produce the invoice payment hash.
+    #[error("Invoice preimage hash mismatch")]
+    HashMismatch,
+    /// A different preimage is already persisted for the invoice.
+    #[error("Invoice has a conflicting stored preimage")]
+    ConflictingPreimage,
+    /// The invoice has reached a terminal status that cannot be repaired.
+    #[error("Invoice status does not allow preimage recovery: {0}")]
+    InvoiceNotUsable(CkbInvoiceStatus),
+    /// A paid invoice has no persisted preimage and must not be modified retroactively.
+    #[error("Paid invoice is missing its stored preimage")]
+    PaidInvoiceMissingPreimage,
 }
 
 #[derive(Error, Debug)]

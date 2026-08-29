@@ -108,8 +108,8 @@ use crate::fiber::{
     SettleTlcSetCommand,
 };
 use crate::invoice::{
-    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
-    SettleInvoiceError,
+    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, EnsureInvoicePreimageError, InvoiceError,
+    InvoiceStore, PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, Error};
@@ -1036,6 +1036,11 @@ pub enum NetworkActorCommand {
     GetInvoice(
         Hash256,
         RpcReplyPort<Result<(CkbInvoice, CkbInvoiceStatus), InvoiceError>>,
+    ),
+    EnsureInvoicePreimage(
+        Hash256,
+        Hash256,
+        RpcReplyPort<Result<(), EnsureInvoicePreimageError>>,
     ),
 
     SettleInvoice(
@@ -3212,6 +3217,9 @@ where
                     });
                 let _ = reply.send(result);
             }
+            NetworkActorCommand::EnsureInvoicePreimage(payment_hash, preimage, reply) => {
+                let _ = reply.send(self.ensure_invoice_preimage(&myself, payment_hash, preimage));
+            }
 
             #[cfg(any(debug_assertions, feature = "bench"))]
             NetworkActorCommand::UpdateFeatures(features) => {
@@ -4071,6 +4079,29 @@ where
             return Err(InvoiceError::InvoiceAlreadyExists);
         }
         self.store.insert_invoice(invoice, preimage)
+    }
+
+    fn ensure_invoice_preimage(
+        &self,
+        myself: &ActorRef<NetworkActorMessage>,
+        payment_hash: Hash256,
+        payment_preimage: Hash256,
+    ) -> Result<(), EnsureInvoicePreimageError> {
+        let status = self
+            .store
+            .ensure_invoice_preimage(payment_hash, payment_preimage)?;
+
+        if status == CkbInvoiceStatus::Received {
+            myself
+                .send_message(NetworkActorMessage::new_notification(
+                    NetworkServiceEvent::PreimageCreated(payment_hash, payment_preimage),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            let _ = myself.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SettleReceivedHoldTlcSet(payment_hash),
+            ));
+        }
+        Ok(())
     }
 
     pub fn settle_invoice(

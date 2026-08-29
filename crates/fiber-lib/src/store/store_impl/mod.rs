@@ -31,7 +31,10 @@ use crate::{
         network::NetworkActorStateStore,
         payment::PaymentSessionExt,
     },
-    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
+    invoice::{
+        CkbInvoice, CkbInvoiceStatus, EnsureInvoicePreimageError, InvoiceError, InvoiceStore,
+        PreimageStore,
+    },
 };
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
@@ -71,6 +74,7 @@ use tracing::warn;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+    invoice_write_lock: Arc<parking_lot::Mutex<()>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
     #[cfg(feature = "watchtower")]
@@ -408,6 +412,7 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
     Ok(Store {
         inner: db,
         watcher: None,
+        invoice_write_lock: Arc::new(parking_lot::Mutex::new(())),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -432,6 +437,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let store = Store {
         inner: db,
         watcher: None,
+        invoice_write_lock: Arc::new(parking_lot::Mutex::new(())),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -1979,6 +1985,7 @@ impl InvoiceStore for Store {
         invoice: CkbInvoice,
         preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
+        let _guard = self.invoice_write_lock.lock();
         let payment_hash = *invoice.payment_hash();
         if self.get_invoice(&payment_hash).is_some() {
             return Err(InvoiceError::DuplicatedInvoice(payment_hash.to_string()));
@@ -1994,6 +2001,7 @@ impl InvoiceStore for Store {
             batch.put(kv.key(), kv.value());
         }
         batch.commit();
+        drop(_guard);
         self.notify(StoreChange::PutCkbInvoiceStatus {
             payment_hash,
             invoice_status: CkbInvoiceStatus::Open,
@@ -2012,11 +2020,13 @@ impl InvoiceStore for Store {
         id: &Hash256,
         status: crate::invoice::CkbInvoiceStatus,
     ) -> Result<(), InvoiceError> {
+        let _guard = self.invoice_write_lock.lock();
         self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
         let mut batch = self.batch();
         let kv = KeyValue::CkbInvoiceStatus(*id, status);
         batch.put(kv.key(), kv.value());
         batch.commit();
+        drop(_guard);
         self.notify(StoreChange::PutCkbInvoiceStatus {
             payment_hash: *id,
             invoice_status: status,
@@ -2029,10 +2039,63 @@ impl InvoiceStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
     }
+
+    fn ensure_invoice_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<CkbInvoiceStatus, EnsureInvoicePreimageError> {
+        let _guard = self.invoice_write_lock.lock();
+        let invoice = self
+            .get_invoice(&payment_hash)
+            .ok_or(EnsureInvoicePreimageError::InvoiceNotFound)?;
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        if hash_algorithm.hash(preimage).as_slice() != payment_hash.as_ref() {
+            return Err(EnsureInvoicePreimageError::HashMismatch);
+        }
+        let status = self
+            .get_invoice_status(&payment_hash)
+            .ok_or(EnsureInvoicePreimageError::InvoiceNotFound)?;
+        let status = match status {
+            CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+            status => status,
+        };
+        let key_value = KeyValue::Preimage(payment_hash, preimage);
+        let key = key_value.key();
+        let existing = self
+            .get(&key)
+            .map(|value| deserialize_from::<Hash256>(value.as_ref(), "Preimage"));
+        if existing.is_some_and(|existing| existing != preimage) {
+            return Err(EnsureInvoicePreimageError::ConflictingPreimage);
+        }
+
+        match (status, existing) {
+            (CkbInvoiceStatus::Open | CkbInvoiceStatus::Received, None) => {
+                let mut batch = self.batch();
+                batch.put(key, key_value.value());
+                batch.commit();
+            }
+            (CkbInvoiceStatus::Open | CkbInvoiceStatus::Received, Some(_))
+            | (CkbInvoiceStatus::Paid, Some(_)) => {}
+            (CkbInvoiceStatus::Paid, None) => {
+                return Err(EnsureInvoicePreimageError::PaidInvoiceMissingPreimage);
+            }
+            (CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired, _) => {
+                return Err(EnsureInvoicePreimageError::InvoiceNotUsable(status));
+            }
+        }
+        drop(_guard);
+        self.notify(StoreChange::PutPreimage {
+            payment_hash,
+            payment_preimage: preimage,
+        });
+        Ok(status)
+    }
 }
 
 impl PreimageStore for Store {
     fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        let _guard = self.invoice_write_lock.lock();
         let kv = KeyValue::Preimage(payment_hash, preimage);
         let key = kv.key();
         if let Some(existing) = self
@@ -2042,6 +2105,7 @@ impl PreimageStore for Store {
             if existing == preimage {
                 // Watchers are in-memory. Replaying the same persisted preimage after restart must
                 // still emit PutPreimage so CCH/payment tracking can recover success events.
+                drop(_guard);
                 self.notify(StoreChange::PutPreimage {
                     payment_hash,
                     payment_preimage: preimage,
@@ -2057,6 +2121,7 @@ impl PreimageStore for Store {
         let mut batch = self.batch();
         batch.put(key, kv.value());
         batch.commit();
+        drop(_guard);
         self.notify(StoreChange::PutPreimage {
             payment_hash,
             payment_preimage: preimage,
@@ -2064,6 +2129,7 @@ impl PreimageStore for Store {
     }
 
     fn remove_preimage(&self, payment_hash: &Hash256) {
+        let _guard = self.invoice_write_lock.lock();
         let mut batch = self.batch();
         batch.delete([&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
         batch.commit();
