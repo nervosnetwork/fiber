@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use fiber_types::{Hash256, PaymentStatus, Pubkey};
+use fiber_types::{Hash256, HashAlgorithm, PaymentStatus, Pubkey};
 use ractor::{call, ActorRef};
 
 use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
-use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
 use crate::liquidity::actor::{LoopOutPaymentAdapter, LoopOutPaymentStatus};
 use crate::liquidity::types::{
     loop_out_gross_payment_amount, loop_out_payment_principal, LiquidityLoopOutError,
@@ -266,7 +266,25 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
         .map_err(|error| LiquidityLoopOutError::PaymentFailed(error.to_string()))?;
         match result {
             Ok(()) => Ok(()),
-            Err(InvoiceError::InvoiceAlreadyExists) => Ok(()),
+            Err(InvoiceError::InvoiceAlreadyExists) => {
+                let (existing_invoice, status) = call!(self.network_actor, |reply| {
+                    NetworkActorMessage::Command(NetworkActorCommand::GetInvoice(
+                        payment_hash,
+                        reply,
+                    ))
+                })
+                .map_err(|error| {
+                    LiquidityLoopOutError::PaymentFailed(format!(
+                        "failed to call network actor while looking up existing provider invoice: {error}"
+                    ))
+                })?
+                .map_err(|error| {
+                    LiquidityLoopOutError::PaymentFailed(format!(
+                        "failed to look up existing provider invoice: {error}"
+                    ))
+                })?;
+                validate_existing_provider_invoice(&existing_invoice, status, &invoice)
+            }
             Err(error) => Err(LiquidityLoopOutError::PaymentFailed(error.to_string())),
         }
     }
@@ -291,6 +309,42 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
             },
             Err(error) => Err(LiquidityLoopOutError::PaymentFailed(error.to_string())),
         }
+    }
+}
+
+fn validate_existing_provider_invoice(
+    existing: &CkbInvoice,
+    status: CkbInvoiceStatus,
+    expected: &CkbInvoice,
+) -> Result<(), LiquidityLoopOutError> {
+    if !matches!(
+        status,
+        CkbInvoiceStatus::Open | CkbInvoiceStatus::Received | CkbInvoiceStatus::Paid
+    ) {
+        return Err(LiquidityLoopOutError::PaymentFailed(format!(
+            "existing provider invoice is not usable: {status}"
+        )));
+    }
+
+    let mismatch = if existing.payment_hash() != expected.payment_hash() {
+        Some("payment hash")
+    } else if existing.amount() != expected.amount() {
+        Some("amount")
+    } else if existing.currency != expected.currency {
+        Some("currency")
+    } else if existing.udt_type_script() != expected.udt_type_script() {
+        Some("UDT type script")
+    } else if existing.hash_algorithm().copied().unwrap_or_default() != HashAlgorithm::CkbHash {
+        Some("hash algorithm")
+    } else {
+        None
+    };
+
+    match mismatch {
+        Some(term) => Err(LiquidityLoopOutError::PaymentFailed(format!(
+            "existing provider invoice {term} does not match expected Loop Out terms"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -344,6 +398,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use ckb_types::prelude::{Builder, Entity, Pack};
     use fiber_types::{HashAlgorithm, PaymentStatus};
     use ractor::{Actor, ActorProcessingErr, ActorRef};
     use secp256k1::{SecretKey, SECP256K1};
@@ -543,23 +598,171 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_provider_invoice_is_idempotent_when_invoice_already_exists() {
-        let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([0u8; 32].into())).await;
-        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+    async fn register_provider_invoice_accepts_equivalent_existing_usable_invoice() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let udt_type_script = test_script(1);
+
+        for status in [
+            CkbInvoiceStatus::Open,
+            CkbInvoiceStatus::Received,
+            CkbInvoiceStatus::Paid,
+        ] {
+            let existing = provider_invoice(
+                payment_hash,
+                102,
+                Currency::Fibd,
+                Some(udt_type_script.clone()),
+                None,
+            );
+            let network = spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoice(Some((
+                existing, status,
+            ))))
+            .await;
+            let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+            adapter
+                .register_provider_loop_out_invoice(
+                    payment_hash,
+                    preimage,
+                    102,
+                    Some(udt_type_script.clone()),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+            assert!(network.take_send_commands().is_empty());
+            assert!(network.take_invoices().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_rejects_existing_invoice_term_mismatches() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let expected_script = test_script(1);
+        let mismatches = [
+            (
+                "payment hash",
+                provider_invoice(
+                    [7u8; 32].into(),
+                    102,
+                    Currency::Fibd,
+                    Some(expected_script.clone()),
+                    None,
+                ),
+            ),
+            (
+                "amount",
+                provider_invoice(
+                    payment_hash,
+                    103,
+                    Currency::Fibd,
+                    Some(expected_script.clone()),
+                    None,
+                ),
+            ),
+            (
+                "currency",
+                provider_invoice(
+                    payment_hash,
+                    102,
+                    Currency::Fibt,
+                    Some(expected_script.clone()),
+                    None,
+                ),
+            ),
+            (
+                "UDT type script",
+                provider_invoice(
+                    payment_hash,
+                    102,
+                    Currency::Fibd,
+                    Some(test_script(2)),
+                    None,
+                ),
+            ),
+            (
+                "hash algorithm",
+                provider_invoice(
+                    payment_hash,
+                    102,
+                    Currency::Fibd,
+                    Some(expected_script.clone()),
+                    Some(HashAlgorithm::Sha256),
+                ),
+            ),
+        ];
+
+        for (term, existing) in mismatches {
+            let network = spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoice(Some((
+                existing,
+                CkbInvoiceStatus::Open,
+            ))))
+            .await;
+            let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+            let error = adapter
+                .register_provider_loop_out_invoice(
+                    payment_hash,
+                    preimage,
+                    102,
+                    Some(expected_script.clone()),
+                )
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains(term));
+            assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+            assert!(network.take_send_commands().is_empty());
+            assert!(network.take_invoices().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_rejects_existing_terminal_invoice() {
         let preimage: Hash256 = [9u8; 32].into();
         let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
 
-        adapter
-            .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
-            .await
-            .unwrap();
-        adapter
-            .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
-            .await
-            .unwrap();
+        for status in [CkbInvoiceStatus::Cancelled, CkbInvoiceStatus::Expired] {
+            let existing = provider_invoice(payment_hash, 102, Currency::Fibd, None, None);
+            let network = spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoice(Some((
+                existing, status,
+            ))))
+            .await;
+            let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
 
-        assert_eq!(network.take_events(), vec!["add_invoice", "add_invoice"]);
-        assert_eq!(network.take_invoices().len(), 1);
+            let error = adapter
+                .register_provider_loop_out_invoice(payment_hash, preimage, 102, None)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains(&status.to_string()));
+            assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+            assert!(network.take_send_commands().is_empty());
+            assert!(network.take_invoices().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn register_provider_invoice_rejects_missing_invoice_after_duplicate() {
+        let preimage: Hash256 = [9u8; 32].into();
+        let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let network = spawn_payment_mock(NetworkPaymentMockMode::DuplicateInvoice(None)).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+
+        let error = adapter
+            .register_provider_loop_out_invoice(payment_hash, preimage, 102, None)
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to look up existing provider invoice: Invoice not found"));
+        assert_eq!(network.take_events(), vec!["add_invoice", "get_invoice"]);
+        assert!(network.take_send_commands().is_empty());
+        assert!(network.take_invoices().is_empty());
     }
 
     #[tokio::test]
@@ -653,6 +856,7 @@ mod tests {
         ReloadFailed,
         SettleWithoutPreimage,
         ReloadInvoiceStatus(CkbInvoiceStatus),
+        DuplicateInvoice(Option<(CkbInvoice, CkbInvoiceStatus)>),
     }
 
     struct NetworkPaymentMockActor;
@@ -742,14 +946,19 @@ mod tests {
                         state.events.lock().unwrap().push("add_invoice");
                         let payment_hash = *invoice.payment_hash();
                         let mut invoices = state.invoices.lock().unwrap();
-                        let result = match invoices.entry(payment_hash) {
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                entry.insert((invoice, preimage));
-                                Ok(())
-                            }
-                            std::collections::hash_map::Entry::Occupied(_) => {
+                        let result = match &state.mode {
+                            NetworkPaymentMockMode::DuplicateInvoice(_) => {
                                 Err(InvoiceError::InvoiceAlreadyExists)
                             }
+                            _ => match invoices.entry(payment_hash) {
+                                std::collections::hash_map::Entry::Vacant(entry) => {
+                                    entry.insert((invoice, preimage));
+                                    Ok(())
+                                }
+                                std::collections::hash_map::Entry::Occupied(_) => {
+                                    Err(InvoiceError::InvoiceAlreadyExists)
+                                }
+                            },
                         };
                         let _ = reply.send(result);
                     }
@@ -762,6 +971,9 @@ mod tests {
                                     .build()
                                     .expect("mock invoice");
                                 Ok((invoice, status))
+                            }
+                            NetworkPaymentMockMode::DuplicateInvoice(ref invoice) => {
+                                invoice.clone().ok_or(InvoiceError::InvoiceNotFound)
                             }
                             _ => state
                                 .invoices
@@ -827,5 +1039,30 @@ mod tests {
     fn test_pubkey() -> Pubkey {
         let sk = SecretKey::from_slice(&[42; 32]).unwrap();
         Pubkey::from(sk.public_key(SECP256K1))
+    }
+
+    fn provider_invoice(
+        payment_hash: Hash256,
+        amount: u128,
+        currency: Currency,
+        udt_type_script: Option<ckb_types::packed::Script>,
+        hash_algorithm: Option<HashAlgorithm>,
+    ) -> CkbInvoice {
+        let mut builder = InvoiceBuilder::new(currency)
+            .amount(Some(amount))
+            .payment_hash(payment_hash);
+        if let Some(script) = udt_type_script {
+            builder = builder.udt_type_script(script);
+        }
+        if let Some(hash_algorithm) = hash_algorithm {
+            builder = builder.hash_algorithm(hash_algorithm);
+        }
+        builder.build().expect("provider invoice")
+    }
+
+    fn test_script(byte: u8) -> ckb_types::packed::Script {
+        ckb_types::packed::Script::new_builder()
+            .args([byte].pack())
+            .build()
     }
 }
