@@ -306,7 +306,7 @@ async fn test_duplicate_received_provider_invoice_repairs_missing_preimage() {
 }
 
 #[tokio::test]
-async fn test_duplicate_paid_provider_invoice_rejects_missing_preimage() {
+async fn test_duplicate_paid_provider_invoice_recovers_after_preimage_removal() {
     init_tracing();
     let node = NetworkNode::new().await;
     let preimage: Hash256 = [9u8; 32].into();
@@ -322,13 +322,19 @@ async fn test_duplicate_paid_provider_invoice_rejects_missing_preimage() {
         .unwrap();
     let mut adapter = NetworkLoopOutPaymentAdapter::new(node.network_actor.clone());
 
-    let error = adapter
+    adapter
         .register_provider_loop_out_invoice(payment_hash, preimage, 100, None)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(error.to_string().contains("Paid invoice is missing"));
     assert_eq!(node.store.get_preimage(&payment_hash), None);
+    assert_eq!(
+        adapter
+            .reload_provider_loop_out_payment(payment_hash)
+            .await
+            .unwrap(),
+        crate::liquidity::actor::LoopOutPaymentStatus::Settled(payment_hash)
+    );
 }
 
 #[tokio::test]
