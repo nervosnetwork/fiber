@@ -10,7 +10,10 @@ use std::{
 
 use async_trait::async_trait;
 use biscuit_auth::{macros::biscuit, KeyPair};
-use ckb_types::packed::Script;
+use ckb_types::{
+    packed::{Bytes, Script, Transaction},
+    prelude::AsTransactionBuilder,
+};
 use hyper::{
     header::{HeaderValue, AUTHORIZATION},
     HeaderMap,
@@ -32,8 +35,8 @@ use crate::{
     ckb::{client::CkbRpcClient, config::CkbConfig},
     fiber::{
         network::{
-            FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
-            PublicNetworkCommand,
+            AcceptChannelCommand, FiberActorCommand, FiberActorMessage, FiberActorRef,
+            NetworkActorMessage, PublicNetworkCommand,
         },
         payment::SendPaymentCommand,
     },
@@ -46,6 +49,12 @@ use crate::{
         LspService, LspServiceArgs, LspServiceMessage, TenantId, TenantRuntimeFactory,
     },
     rpc::{
+        channel::{
+            to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
+            GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
+            OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
+            SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+        },
         lsp::{
             GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, ListLspTenantsResult,
             LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus,
@@ -63,6 +72,10 @@ use crate::{
         HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
     },
     NetworkServiceEvent,
+};
+use fiber_lsp_sdk::{
+    ChannelKeyId, ChannelSignature, ChannelSigner, ChannelSigningContent, MemoryStore, RootKey,
+    RootSigner,
 };
 
 const TENANT_ID: &str = "u1";
@@ -427,6 +440,374 @@ impl LspTestNetwork {
     }
 }
 
+struct RestartableExternalSigner {
+    root_key: [u8; 32],
+    store: MemoryStore,
+    channel_key_id: ChannelKeyId,
+}
+
+impl RestartableExternalSigner {
+    async fn create() -> (Self, ChannelSigner<MemoryStore>) {
+        let store = MemoryStore::default();
+        let created = RootSigner::create_random(store.clone())
+            .await
+            .expect("create external RootSigner");
+        let root_key = created.root_key_backup.expose_secret();
+        let signer = created
+            .root_signer
+            .create_channel()
+            .await
+            .expect("create external channel signer");
+        let channel_key_id = signer.channel_key_id();
+        (
+            Self {
+                root_key,
+                store,
+                channel_key_id,
+            },
+            signer,
+        )
+    }
+
+    async fn restart(&self) -> ChannelSigner<MemoryStore> {
+        let snapshot = self
+            .store
+            .snapshot()
+            .expect("snapshot external signer store");
+        let store = MemoryStore::from_snapshot(&snapshot).expect("restore external signer store");
+        RootSigner::open(
+            RootKey::import(self.root_key).expect("restore external signer root key"),
+            store,
+        )
+        .await
+        .expect("restart external RootSigner")
+        .open_channel(self.channel_key_id)
+        .await
+        .expect("reopen external channel signer")
+    }
+}
+
+async fn open_hosted_external_channel(
+    client: &HttpClient,
+    tenant_node_id: crate::fiber_types::Pubkey,
+    public_node: &mut NetworkNode,
+    signer: &ChannelSigner<MemoryStore>,
+) -> crate::fiber_types::Hash256 {
+    let material = signer
+        .channel_open_material(false)
+        .await
+        .expect("external channel open material");
+    let open_client = client.clone();
+    let public_node_id = public_node.pubkey;
+    let open_task = tokio::spawn(async move {
+        open_client
+            .request::<OpenChannelWithExternalFundingResult, _>(
+                "open_channel_with_external_funding",
+                rpc_params![OpenChannelWithExternalFundingParams {
+                    pubkey: public_node_id.into(),
+                    funding_amount: HUGE_CKB_AMOUNT,
+                    public: Some(false),
+                    funding_udt_type_script: None,
+                    shutdown_script: Script::default().into(),
+                    funding_lock_script: Script::default().into(),
+                    funding_lock_script_cell_deps: None,
+                    commitment_delay_epoch: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
+                    tlc_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_fee_proportional_millionths: None,
+                    max_tlc_value_in_flight: None,
+                    max_tlc_number_in_flight: None,
+                    external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+                }],
+            )
+            .await
+    });
+    let temporary_channel_id = public_node
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(pubkey, channel_id)
+                if pubkey == &tenant_node_id =>
+            {
+                Some(*channel_id)
+            }
+            _ => None,
+        })
+        .await;
+    ractor::call!(public_node.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: temporary_channel_id,
+                funding_amount: HUGE_CKB_AMOUNT,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            reply,
+        ))
+    })
+    .expect("Public T accepts hosted external channel")
+    .expect("accept hosted external channel");
+    let open = open_task
+        .await
+        .expect("join hosted external channel open request")
+        .expect("open hosted external-signer channel");
+    let channel_id: crate::fiber_types::Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    let expected_inputs: Vec<_> = unsigned_tx
+        .raw()
+        .inputs()
+        .into_iter()
+        .map(|input| input.previous_output())
+        .collect();
+    signer
+        .bind_from_approved_funding(&unsigned_tx, 0, Script::default(), &expected_inputs)
+        .await
+        .expect("bind hosted external signer to approved funding");
+    let signed_tx = unsigned_tx
+        .as_advanced_builder()
+        .set_witnesses(vec![Bytes::default()])
+        .build()
+        .data();
+    let _: SubmitSignedFundingTxResult = client
+        .request(
+            "submit_signed_funding_tx",
+            rpc_params![SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: signed_tx.into(),
+            }],
+        )
+        .await
+        .expect("submit hosted external funding transaction");
+    channel_id
+}
+
+async fn get_hosted_signing_status(
+    client: &HttpClient,
+    channel_id: crate::fiber_types::Hash256,
+) -> Result<GetChannelSigningStatusResult, jsonrpsee::core::ClientError> {
+    client
+        .request(
+            "get_channel_signing_status",
+            rpc_params![GetChannelSigningStatusParams {
+                channel_id: channel_id.into(),
+            }],
+        )
+        .await
+}
+
+async fn prepare_hosted_signature(
+    signer: &ChannelSigner<MemoryStore>,
+    channel_id: crate::fiber_types::Hash256,
+    status: fiber_json_types::ChannelSigningStatus,
+) -> SubmitChannelSignatureParams {
+    let fiber_json_types::ChannelSigningStatus::SignatureRequired {
+        request_id,
+        content,
+        ..
+    } = status
+    else {
+        panic!("hosted channel must have a pending signing request");
+    };
+    let content =
+        fiber_lsp_sdk::json::musig2_from_rpc(content).expect("hosted signing content must decode");
+    let slot = content.slot;
+    let prepared = signer
+        .prepare(ChannelSigningContent::Musig2(content))
+        .await
+        .expect("prepare hosted external signature");
+    let ChannelSignature::Musig2(signature) = signer
+        .sign(prepared)
+        .await
+        .expect("sign hosted external request")
+    else {
+        panic!("hosted channel request must use MuSig2");
+    };
+    let next_material = signer
+        .next_material(slot)
+        .await
+        .expect("load next hosted signer material");
+    SubmitChannelSignatureParams {
+        channel_id: channel_id.into(),
+        request_id,
+        partial_signature: signature.partial_signature.serialize(),
+        next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
+    }
+}
+
+async fn submit_hosted_signature(
+    client: &HttpClient,
+    params: SubmitChannelSignatureParams,
+) -> Result<SubmitChannelSignatureResult, jsonrpsee::core::ClientError> {
+    client
+        .request("submit_channel_signature", rpc_params![params])
+        .await
+}
+
+fn persisted_signer_state(node: &NetworkNode, channel_id: crate::fiber_types::Hash256) -> Vec<u8> {
+    bincode::serialize(&node.get_channel_actor_state(channel_id).signer_state)
+        .expect("serialize persisted signer state")
+}
+
+#[tokio::test]
+async fn hosted_signer_requests_are_isolated_across_concurrent_tenants() {
+    init_tracing();
+
+    let mut network = create_lsp_test_network(
+        &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
+        2,
+        &[
+            ((0, "u1"), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((0, "u2"), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+    )
+    .await;
+    let u1_client = network.tenant(0, "u1").client.clone();
+    let u1_node_id = network.tenant(0, "u1").node.pubkey;
+    let u2_client = network.tenant(0, "u2").client.clone();
+    let u2_node_id = network.tenant(0, "u2").node.pubkey;
+    let (u1_restart, u1_signer) = RestartableExternalSigner::create().await;
+    let (u2_restart, u2_signer) = RestartableExternalSigner::create().await;
+    let u1_channel_id =
+        open_hosted_external_channel(&u1_client, u1_node_id, &mut network.nodes[0], &u1_signer)
+            .await;
+    let u2_channel_id =
+        open_hosted_external_channel(&u2_client, u2_node_id, &mut network.nodes[0], &u2_signer)
+            .await;
+    let u1 = network.tenant(0, "u1");
+    let u2 = network.tenant(0, "u2");
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            get_hosted_signing_status(&u1.client, u1_channel_id)
+                .await
+                .map(|result| result.status),
+            Ok(fiber_json_types::ChannelSigningStatus::SignatureRequired { .. })
+        ) && matches!(
+            get_hosted_signing_status(&u2.client, u2_channel_id)
+                .await
+                .map(|result| result.status),
+            Ok(fiber_json_types::ChannelSigningStatus::SignatureRequired { .. })
+        )
+    })
+    .await;
+
+    let u1_status = get_hosted_signing_status(&u1.client, u1_channel_id)
+        .await
+        .expect("U1 reads its pending signer request")
+        .status;
+    let u2_status = get_hosted_signing_status(&u2.client, u2_channel_id)
+        .await
+        .expect("U2 reads its pending signer request")
+        .status;
+    let (u1_submission, u2_submission) = tokio::join!(
+        prepare_hosted_signature(&u1_signer, u1_channel_id, u1_status),
+        prepare_hosted_signature(&u2_signer, u2_channel_id, u2_status),
+    );
+    let u1_before = persisted_signer_state(&u1.node, u1_channel_id);
+    let u2_before = persisted_signer_state(&u2.node, u2_channel_id);
+
+    get_hosted_signing_status(&u1.client, u2_channel_id)
+        .await
+        .expect_err("U1 token must not query U2 channel");
+    submit_hosted_signature(&u1.client, u2_submission.clone())
+        .await
+        .expect_err("U1 token must not submit a signature for U2 channel");
+
+    let mut u2_with_u1_request = u2_submission.clone();
+    u2_with_u1_request.request_id = u1_submission.request_id;
+    submit_hosted_signature(&u2.client, u2_with_u1_request)
+        .await
+        .expect_err("U1 request id must not resume U2 channel");
+
+    assert_eq!(
+        persisted_signer_state(&u1.node, u1_channel_id),
+        u1_before,
+        "cross-tenant attempts must not mutate U1 signer state"
+    );
+    assert_eq!(
+        persisted_signer_state(&u2.node, u2_channel_id),
+        u2_before,
+        "cross-tenant attempts must not mutate U2 signer state"
+    );
+
+    drop(u1_signer);
+    drop(u2_signer);
+    let (u1_signer, u2_signer) = tokio::join!(u1_restart.restart(), u2_restart.restart());
+    let (u1_after_restart, u2_after_restart) = tokio::join!(
+        get_hosted_signing_status(&u1.client, u1_channel_id),
+        get_hosted_signing_status(&u2.client, u2_channel_id),
+    );
+    assert!(matches!(
+        u1_after_restart.expect("U1 signer status after restart").status,
+        fiber_json_types::ChannelSigningStatus::SignatureRequired { request_id, .. }
+            if request_id == u1_submission.request_id
+    ));
+    assert!(matches!(
+        u2_after_restart.expect("U2 signer status after restart").status,
+        fiber_json_types::ChannelSigningStatus::SignatureRequired { request_id, .. }
+            if request_id == u2_submission.request_id
+    ));
+
+    let (u1_applied, u2_applied) = tokio::join!(
+        submit_hosted_signature(&u1.client, u1_submission),
+        submit_hosted_signature(&u2.client, u2_submission),
+    );
+    assert_eq!(
+        u1_applied.expect("apply restored U1 signature"),
+        SubmitChannelSignatureResult::Applied
+    );
+    assert_eq!(
+        u2_applied.expect("apply restored U2 signature"),
+        SubmitChannelSignatureResult::Applied
+    );
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let u1_ready = matches!(
+                u1.node.get_channel_actor_state(u1_channel_id).state,
+                crate::fiber_types::ChannelState::ChannelReady
+            );
+            let u2_ready = matches!(
+                u2.node.get_channel_actor_state(u2_channel_id).state,
+                crate::fiber_types::ChannelState::ChannelReady
+            );
+            if u1_ready && u2_ready {
+                break;
+            }
+            for (client, signer, channel_id) in [
+                (&u1.client, &u1_signer, u1_channel_id),
+                (&u2.client, &u2_signer, u2_channel_id),
+            ] {
+                let status = get_hosted_signing_status(client, channel_id)
+                    .await
+                    .expect("read hosted signer status while resuming")
+                    .status;
+                if matches!(
+                    status,
+                    fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+                ) {
+                    let submission = prepare_hosted_signature(signer, channel_id, status).await;
+                    assert_eq!(
+                        submit_hosted_signature(client, submission)
+                            .await
+                            .expect("submit hosted signature while resuming"),
+                        SubmitChannelSignatureResult::Applied
+                    );
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both hosted external-signer channels recover concurrently");
+
+    network.stop().await;
+}
+
 /// Builds an ordinary Fiber network, starts an LSP service on every network
 /// node referenced by `tenant_channels`, and connects each hosted tenant to
 /// its selected LSP with a private channel.
@@ -546,6 +927,7 @@ async fn create_lsp_test_network(
         let mut rpc_config = gen_rpc_config();
         rpc_config.biscuit_public_key = Some(biscuit_root.public().to_string());
         rpc_config.enabled_modules = vec![
+            "channel".to_string(),
             "invoice".to_string(),
             "lsp".to_string(),
             "payment".to_string(),
