@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use ckb_types::{
     bytes::Bytes,
-    packed::Script,
+    core::TransactionView,
+    packed::{CellOutput, Script},
     prelude::{Builder, Entity, Pack},
 };
 use fiber_json_types::{
@@ -17,7 +18,9 @@ use fiber_json_types::{
     LoopOutParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
 };
 
+use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::Hash256;
+use crate::liquidity::build_liquidity_lock_args;
 use crate::tests::liquidity_test_utils::LiquidityNetworkFixture;
 use crate::tests::MIN_RESERVED_CKB;
 
@@ -160,6 +163,98 @@ async fn wait_for_channel_balances(
     }
 }
 
+async fn assert_invalid_payout_remains_quiescent(
+    fixture: &LiquidityNetworkFixture,
+    channel_id: Hash256,
+    swap_id: fiber_json_types::Hash256,
+    expected_client: (u128, u128),
+    expected_provider: (u128, u128),
+    timeout: Duration,
+) {
+    const OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
+
+    let deadline = Instant::now() + timeout;
+    let observation_ends = Instant::now() + OBSERVATION_WINDOW;
+    loop {
+        let swap = fixture.nodes[CLIENT]
+            .get_swap_before_deadline(
+                deadline,
+                "get_swap request while observing invalid payout",
+                swap_id,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .expect("client swap must remain publicly visible");
+        assert_eq!(
+            swap.state, "payout_pending",
+            "invalid committed payout must not advance the client swap"
+        );
+
+        let chain_transactions = fixture.nodes[CLIENT]
+            .list_chain_transactions_before_deadline(
+                deadline,
+                "list chain transactions request while observing invalid payout",
+                swap_id,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            chain_transactions.transactions.iter().any(|transaction| {
+                transaction.role == LiquidityChainTransactionRole::Payout
+                    && transaction.status == "confirmed"
+            }),
+            "committed adversarial payout must be exposed as confirmed: {chain_transactions:?}"
+        );
+        assert!(
+            chain_transactions
+                .transactions
+                .iter()
+                .all(|transaction| transaction.role != LiquidityChainTransactionRole::Claim),
+            "invalid payout must not produce a client claim: {chain_transactions:?}"
+        );
+
+        let client = channel_snapshot_before_deadline(
+            fixture,
+            CLIENT,
+            channel_id,
+            deadline,
+            "list client channels while observing invalid payout",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        let provider = channel_snapshot_before_deadline(
+            fixture,
+            PROVIDER,
+            channel_id,
+            deadline,
+            "list provider channels while observing invalid payout",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            (client.local_balance, client.remote_balance),
+            expected_client
+        );
+        assert_eq!(
+            (provider.local_balance, provider.remote_balance),
+            expected_provider
+        );
+        assert!(
+            channel_has_no_pending_tlcs(&client),
+            "client must have no offered, received, or pending TLCs: {client:?}"
+        );
+        assert!(
+            channel_has_no_pending_tlcs(&provider),
+            "provider must have no offered, received, or pending TLCs: {provider:?}"
+        );
+
+        if Instant::now() >= observation_ends {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn liquidity_ckb_loop_out_e2e() {
     let mut fixture = LiquidityNetworkFixture::new().await;
@@ -183,11 +278,10 @@ async fn liquidity_ckb_loop_out_e2e() {
         })
         .await;
     let quote_id = quote.quote_id;
-    let expected_gross_payment = quote
+    let expected_payment_principal = quote
         .amount
         .checked_add(quote.provider_fee)
-        .and_then(|amount| amount.checked_add(quote.routing_fee_limit))
-        .expect("quoted gross payment amount must fit u128");
+        .expect("quoted payment principal must fit u128");
 
     fixture.nodes[CLIENT]
         .import_quote(quote.clone(), MAX_PROVIDER_FEE, MAX_ROUTING_FEE)
@@ -286,22 +380,22 @@ async fn liquidity_ckb_loop_out_e2e() {
         (
             client_channel_before
                 .local_balance
-                .checked_sub(expected_gross_payment)
-                .expect("client channel must fund gross payment"),
+                .checked_sub(expected_payment_principal)
+                .expect("client channel must fund payment principal"),
             client_channel_before
                 .remote_balance
-                .checked_add(expected_gross_payment)
+                .checked_add(expected_payment_principal)
                 .expect("client remote balance must fit u128"),
         ),
         (
             provider_channel_before
                 .local_balance
-                .checked_add(expected_gross_payment)
+                .checked_add(expected_payment_principal)
                 .expect("provider channel balance must fit u128"),
             provider_channel_before
                 .remote_balance
-                .checked_sub(expected_gross_payment)
-                .expect("provider remote balance must fund gross payment"),
+                .checked_sub(expected_payment_principal)
+                .expect("provider remote balance must fund payment principal"),
         ),
         SWAP_TIMEOUT,
     )
@@ -355,11 +449,10 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
         })
         .await;
     let quote_id = quote.quote_id;
-    let expected_gross_payment = quote
+    let expected_payment_principal = quote
         .amount
         .checked_add(quote.provider_fee)
-        .and_then(|amount| amount.checked_add(quote.routing_fee_limit))
-        .expect("quoted gross payment amount must fit u128");
+        .expect("quoted payment principal must fit u128");
     fixture.nodes[CLIENT]
         .import_quote(quote, MAX_PROVIDER_FEE, MAX_ROUTING_FEE)
         .await;
@@ -404,22 +497,22 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
         (
             client_channel_before
                 .local_balance
-                .checked_sub(expected_gross_payment)
-                .expect("client channel must fund gross payment"),
+                .checked_sub(expected_payment_principal)
+                .expect("client channel must fund payment principal"),
             client_channel_before
                 .remote_balance
-                .checked_add(expected_gross_payment)
+                .checked_add(expected_payment_principal)
                 .expect("client remote balance must fit u128"),
         ),
         (
             provider_channel_before
                 .local_balance
-                .checked_add(expected_gross_payment)
+                .checked_add(expected_payment_principal)
                 .expect("provider channel balance must fit u128"),
             provider_channel_before
                 .remote_balance
-                .checked_sub(expected_gross_payment)
-                .expect("provider remote balance must fund gross payment"),
+                .checked_sub(expected_payment_principal)
+                .expect("provider remote balance must fund payment principal"),
         ),
         SWAP_TIMEOUT,
     )
@@ -480,6 +573,128 @@ async fn liquidity_ckb_loop_out_provider_restart_discovers_committed_claim() {
     );
     assert_eq!(claims[0].tx_hash, claim_record.tx_hash);
     assert_eq!(claims[0].status, "confirmed");
+
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn liquidity_ckb_loop_out_rejects_committed_payout_with_wrong_payment_hash() {
+    let mut fixture = LiquidityNetworkFixture::new().await;
+    let (channel_id, _) = fixture
+        .establish_funded_channel(MIN_RESERVED_CKB, MIN_RESERVED_CKB + 200_000)
+        .await
+        .expect("establish funded channel");
+
+    fixture.nodes[PROVIDER]
+        .initialize_provider(ckb_asset())
+        .await;
+    let quote = fixture.nodes[PROVIDER]
+        .provider_quote_loop_out(ProviderQuoteLoopOutParams {
+            asset_id: "ckb".to_string(),
+            amount: LOOP_OUT_AMOUNT,
+            claimant_lock: claimant_lock_hex(),
+            max_provider_fee: MAX_PROVIDER_FEE,
+            max_routing_fee: MAX_ROUTING_FEE,
+            expires_after_seconds: 60,
+        })
+        .await;
+    let quote_id = quote.quote_id;
+    fixture.nodes[CLIENT]
+        .import_quote(quote.clone(), MAX_PROVIDER_FEE, MAX_ROUTING_FEE)
+        .await;
+
+    let claimant_lock = Script::from_slice(
+        &hex::decode(
+            quote
+                .claimant_lock
+                .strip_prefix("0x")
+                .expect("claimant lock hex prefix"),
+        )
+        .expect("decode claimant lock"),
+    )
+    .expect("parse claimant lock");
+    let refund_lock = Script::from_slice(
+        &hex::decode(
+            quote
+                .refund_lock
+                .strip_prefix("0x")
+                .expect("refund lock hex prefix"),
+        )
+        .expect("decode refund lock"),
+    )
+    .expect("parse refund lock");
+    let payment_hash: Hash256 = quote.payment_hash.into();
+    let mut wrong_payment_hash = [0u8; 32];
+    wrong_payment_hash.copy_from_slice(payment_hash.as_ref());
+    wrong_payment_hash[0] ^= 1;
+    let lock_args = build_liquidity_lock_args(
+        wrong_payment_hash,
+        &claimant_lock,
+        &refund_lock,
+        quote.refund_after_lock_time,
+        quote.amount,
+        None,
+    );
+    let malicious_payout = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(quote.capacity_requirement_ckb)
+                .lock(get_script_by_contract(Contract::LiquidityLock, &lock_args))
+                .build(),
+        )
+        .output_data(Bytes::new().pack())
+        .build();
+    let malicious_outpoint = malicious_payout
+        .output_pts_iter()
+        .next()
+        .expect("malicious payout output");
+    let malicious_tx_hash = fixture.submit_transaction(PROVIDER, malicious_payout).await;
+
+    let client_channel_before = channel_snapshot(&fixture, CLIENT, channel_id).await;
+    let provider_channel_before = channel_snapshot(&fixture, PROVIDER, channel_id).await;
+    fixture.nodes[CLIENT]
+        .loop_out(LoopOutParams {
+            quote_id,
+            max_provider_fee: MAX_PROVIDER_FEE,
+            max_routing_fee: MAX_ROUTING_FEE,
+            payout_outpoint: Some(malicious_outpoint.into()),
+        })
+        .await;
+    fixture
+        .wait_for_swap_state(CLIENT, quote_id, "payout_pending", SWAP_TIMEOUT)
+        .await;
+
+    fixture
+        .commit(malicious_tx_hash)
+        .expect("commit adversarial payout");
+    fixture
+        .wait_for_chain_tx(
+            CLIENT,
+            quote_id,
+            LiquidityChainTransactionRole::Payout,
+            "confirmed",
+            SWAP_TIMEOUT,
+        )
+        .await;
+    assert_invalid_payout_remains_quiescent(
+        &fixture,
+        channel_id,
+        quote_id,
+        (
+            client_channel_before.local_balance,
+            client_channel_before.remote_balance,
+        ),
+        (
+            provider_channel_before.local_balance,
+            provider_channel_before.remote_balance,
+        ),
+        SWAP_TIMEOUT,
+    )
+    .await;
+    assert!(
+        fixture.pending_transactions().is_empty(),
+        "invalid payout must not create a pending client claim"
+    );
 
     fixture.shutdown().await;
 }
