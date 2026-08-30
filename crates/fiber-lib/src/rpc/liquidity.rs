@@ -806,6 +806,15 @@ mod tests {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))
         }
 
+        fn clear_liquidity_swap_failure_reason(
+            &self,
+            _swap_id: &Hash256,
+            _expected_reason: &str,
+            _updated_at: u64,
+        ) -> Result<bool, LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
         fn insert_liquidity_chain_tx(
             &self,
             _record: fiber_types::LiquidityChainTxRecord,

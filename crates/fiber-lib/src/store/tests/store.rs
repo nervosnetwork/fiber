@@ -878,6 +878,30 @@ fn test_store_liquidity_swap_update_preserves_none_fields() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_clears_only_matching_liquidity_swap_failure_reason() {
+    let (store, _dir) = generate_store();
+    let mut swap = mock_liquidity_swap(6, LiquiditySwapState::PayoutLocked, "ckb");
+    swap.failure_reason = Some("payout validation failed".to_string());
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    assert!(!store
+        .clear_liquidity_swap_failure_reason(&swap.swap_id, "unrelated failure", 124)
+        .unwrap());
+    assert_eq!(
+        store.get_liquidity_swap(&swap.swap_id).unwrap(),
+        Some(swap.clone())
+    );
+
+    assert!(store
+        .clear_liquidity_swap_failure_reason(&swap.swap_id, "payout validation failed", 125)
+        .unwrap());
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.failure_reason, None);
+    assert_eq!(updated.updated_at, 125);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_liquidity_swaps_filter_by_asset_and_state() {
     let (store, _dir) = generate_store();
     let ckb_created = mock_liquidity_swap(6, LiquiditySwapState::Created, "ckb");
