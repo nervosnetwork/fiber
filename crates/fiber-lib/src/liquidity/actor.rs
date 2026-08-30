@@ -1065,22 +1065,22 @@ where
                     )));
                 }
                 self.store
-                    .update_liquidity_swap(
-                        &swap_id,
-                        LiquiditySwapUpdate {
-                            failure_reason: Some(reason.clone()),
-                            updated_at: now_ms,
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(map_store_error)?;
-                self.store
                     .update_liquidity_chain_tx_status(
                         &swap_id,
                         LiquidityChainTxRole::Payout,
                         LiquidityChainTxStatus::Confirmed,
-                        Some(reason),
+                        Some(reason.clone()),
                         now_ms,
+                    )
+                    .map_err(map_store_error)?;
+                self.store
+                    .update_liquidity_swap(
+                        &swap_id,
+                        LiquiditySwapUpdate {
+                            failure_reason: Some(reason),
+                            updated_at: now_ms,
+                            ..Default::default()
+                        },
                     )
                     .map_err(map_store_error)?;
                 self.definitive_payout_validation_failures.insert(swap_id);
@@ -3277,6 +3277,7 @@ mod tests {
         quote_lookup_results: Shared<Vec<Result<(), String>>>,
         swap_failure_write_results: Shared<Vec<Result<(), String>>>,
         chain_failure_write_results: Shared<Vec<Result<(), String>>>,
+        definitive_failure_write_results: Shared<Vec<Result<(), String>>>,
     }
 
     impl TestLiquidityStore {
@@ -3296,6 +3297,7 @@ mod tests {
                 quote_lookup_results: Shared::new(Vec::new()),
                 swap_failure_write_results: Shared::new(Vec::new()),
                 chain_failure_write_results: Shared::new(Vec::new()),
+                definitive_failure_write_results: Shared::new(Vec::new()),
             }
         }
 
@@ -3317,6 +3319,19 @@ mod tests {
 
         fn set_chain_failure_write_results(&self, results: Vec<Result<(), String>>) {
             *self.chain_failure_write_results.borrow_mut() = results;
+        }
+
+        fn set_definitive_failure_write_results(&self, results: Vec<Result<(), String>>) {
+            *self.definitive_failure_write_results.borrow_mut() = results;
+        }
+
+        fn apply_definitive_failure_write_result(&self) -> Result<(), LiquidityStoreError> {
+            let mut results = self.definitive_failure_write_results.borrow_mut();
+            if results.is_empty() {
+                Ok(())
+            } else {
+                results.remove(0).map_err(LiquidityStoreError::Backend)
+            }
         }
 
         fn insert_event(
@@ -3515,6 +3530,7 @@ mod tests {
             update: LiquiditySwapUpdate,
         ) -> Result<(), LiquidityStoreError> {
             if update.failure_reason.is_some() {
+                self.apply_definitive_failure_write_result()?;
                 let mut results = self.swap_failure_write_results.borrow_mut();
                 if !results.is_empty() {
                     results.remove(0).map_err(LiquidityStoreError::Backend)?;
@@ -3611,6 +3627,7 @@ mod tests {
             updated_at: u64,
         ) -> Result<(), LiquidityStoreError> {
             if role == LiquidityChainTxRole::Payout && failure_reason.is_some() {
+                self.apply_definitive_failure_write_result()?;
                 let mut results = self.chain_failure_write_results.borrow_mut();
                 if !results.is_empty() {
                     results.remove(0).map_err(LiquidityStoreError::Backend)?;
@@ -9804,6 +9821,52 @@ mod tests {
             .contains(validation_error));
         assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 2);
         assert!(payment_requests.borrow().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn valid_retry_cleans_chain_first_partial_definitive_persistence_before_payment() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 69);
+        let unrelated_reason = "historical payment recovery warning".to_string();
+        store
+            .update_liquidity_swap(
+                &swap.swap_id,
+                LiquiditySwapUpdate {
+                    failure_reason: Some(unrelated_reason.clone()),
+                    updated_at: now_ms(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store.set_definitive_failure_write_results(vec![
+            Ok(()),
+            Err("temporary second persistence write failure".to_string()),
+        ]);
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.set_observed_loop_out_payout_results(vec![
+            Err(PayoutValidationError::Definitive(
+                "payout amount mismatch".to_string(),
+            )),
+            Ok(()),
+        ]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        assert_eq!(call_resume_non_terminal(actor).await, 1);
+        wait_for_event_count(&events, "validate_observed_loop_out_payout", 2).await;
+        wait_for_event(&events, "payment_send").await;
+
+        let persisted_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+        let payout = store
+            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_swap.failure_reason, Some(unrelated_reason));
+        assert_eq!(payout.failure_reason, None);
+        assert_eq!(payment_requests.borrow().len(), 1);
     }
 
     #[tokio::test]
