@@ -191,7 +191,7 @@ impl LiquidityNetworkNode {
         self.request("get_swap", GetSwapParams { swap_id }).await
     }
 
-    async fn get_swap_before_deadline(
+    pub(crate) async fn get_swap_before_deadline(
         &self,
         deadline: Instant,
         operation: &str,
@@ -212,7 +212,7 @@ impl LiquidityNetworkNode {
         .await
     }
 
-    async fn list_chain_transactions_before_deadline(
+    pub(crate) async fn list_chain_transactions_before_deadline(
         &self,
         deadline: Instant,
         operation: &str,
@@ -304,6 +304,22 @@ impl LiquidityNetworkFixture {
 
     pub(crate) fn pending_transactions(&self) -> Vec<TransactionView> {
         self.chain.pending_transactions()
+    }
+
+    pub(crate) async fn submit_transaction(
+        &self,
+        node: usize,
+        transaction: TransactionView,
+    ) -> Hash256 {
+        let tx_hash = transaction.hash().into();
+        call!(
+            self.nodes[node].node.chain_actor,
+            CkbChainMessage::SendTx,
+            transaction
+        )
+        .expect("chain actor alive")
+        .expect("submit transaction");
+        tx_hash
     }
 
     pub(crate) fn commit(&self, tx_hash: Hash256) -> Result<(), String> {
