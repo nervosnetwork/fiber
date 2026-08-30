@@ -314,8 +314,14 @@ struct MockCommittedOutPointSpend {
 
 #[derive(Debug)]
 struct MockOutPointSpendRegistration {
-    lock_script: packed::Script,
     replier: ActorRef<Result<CkbOutPointSpendTracingResult, String>>,
+}
+
+#[derive(Debug)]
+struct MockOutPointSpendRegistrationGroup {
+    lock_script: packed::Script,
+    confirmations: u64,
+    registrations: Vec<MockOutPointSpendRegistration>,
 }
 
 fn mock_outpoint_spend_result(
@@ -384,7 +390,7 @@ pub struct MockChainState {
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
     pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
     committed_outpoint_spends: HashMap<packed::OutPoint, MockCommittedOutPointSpend>,
-    outpoint_spend_tasks: HashMap<packed::OutPoint, Vec<MockOutPointSpendRegistration>>,
+    outpoint_spend_tasks: HashMap<packed::OutPoint, MockOutPointSpendRegistrationGroup>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
     pub context: Context,
     controlled: bool,
@@ -563,19 +569,15 @@ impl MockChainController {
         let outpoint_spend_deliveries: Vec<_> = outpoint_spends
             .into_iter()
             .flat_map(|spend| {
-                let registrations = state
-                    .outpoint_spend_tasks
-                    .remove(&spend.outpoint)
-                    .unwrap_or_default();
-                registrations
+                let Some(group) = state.outpoint_spend_tasks.remove(&spend.outpoint) else {
+                    return Vec::new();
+                };
+                group
+                    .registrations
                     .into_iter()
                     .map(|registration| {
                         (
-                            mock_outpoint_spend_result(
-                                &spend,
-                                &registration.lock_script,
-                                &state.context,
-                            ),
+                            mock_outpoint_spend_result(&spend, &group.lock_script, &state.context),
                             registration.replier,
                         )
                     })
@@ -1038,6 +1040,7 @@ impl Actor for MockChainActor {
 
                 match maybe_spend {
                     Some(result) => {
+                        let _ = tracer.registration.send(Ok(()));
                         let _ = tracer.callback.send(result);
                     }
                     // The outpoint has not been spent yet, so we wait for the
@@ -1055,38 +1058,67 @@ impl Actor for MockChainActor {
                         let replier = self
                             .start_outpoint_spend_replier(myself, tracer.callback)
                             .await;
-                        let deliveries = {
+                        let (registration_result, deliveries) = {
                             let mut guard = state.shared.write().unwrap();
-                            guard
-                                .outpoint_spend_tasks
-                                .entry(outpoint.clone())
-                                .or_default()
-                                .push(MockOutPointSpendRegistration {
-                                    lock_script: tracer.lock_script.clone(),
-                                    replier,
-                                });
+                            let registration_result = if let Some(group) =
+                                guard.outpoint_spend_tasks.get_mut(&outpoint)
+                            {
+                                if group.lock_script == tracer.lock_script
+                                    && group.confirmations == tracer.confirmations
+                                {
+                                    group
+                                        .registrations
+                                        .push(MockOutPointSpendRegistration { replier });
+                                    Ok(())
+                                } else {
+                                    replier.stop(Some(
+                                        "conflicting mock outpoint spend registration".to_string(),
+                                    ));
+                                    Err("conflicting lock script or confirmation policy for watched outpoint".to_string())
+                                }
+                            } else {
+                                guard.outpoint_spend_tasks.insert(
+                                    outpoint.clone(),
+                                    MockOutPointSpendRegistrationGroup {
+                                        lock_script: tracer.lock_script.clone(),
+                                        confirmations: tracer.confirmations,
+                                        registrations: vec![MockOutPointSpendRegistration {
+                                            replier,
+                                        }],
+                                    },
+                                );
+                                Ok(())
+                            };
                             let spend = guard.committed_outpoint_spends.get(&outpoint).cloned();
-                            if let Some(spend) = spend {
-                                guard
-                                    .outpoint_spend_tasks
-                                    .remove(&outpoint)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|registration| {
-                                        (
-                                            mock_outpoint_spend_result(
-                                                &spend,
-                                                &registration.lock_script,
-                                                &guard.context,
-                                            ),
-                                            registration.replier,
-                                        )
-                                    })
-                                    .collect()
+                            let deliveries = if registration_result.is_ok() {
+                                if let Some(spend) = spend {
+                                    let group = guard
+                                        .outpoint_spend_tasks
+                                        .remove(&outpoint)
+                                        .expect("accepted mock tracer group exists");
+                                    group
+                                        .registrations
+                                        .into_iter()
+                                        .map(|registration| {
+                                            (
+                                                mock_outpoint_spend_result(
+                                                    &spend,
+                                                    &group.lock_script,
+                                                    &guard.context,
+                                                ),
+                                                registration.replier,
+                                            )
+                                        })
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                }
                             } else {
                                 Vec::new()
-                            }
+                            };
+                            (registration_result, deliveries)
                         };
+                        let _ = tracer.registration.send(registration_result);
                         for (result, replier) in deliveries {
                             let _ = replier.send_message(result);
                         }
@@ -1098,8 +1130,8 @@ impl Actor for MockChainActor {
                 for task in state_guard
                     .outpoint_spend_tasks
                     .remove(&outpoint)
+                    .map(|group| group.registrations)
                     .unwrap_or_default()
-                    .into_iter()
                 {
                     task.replier
                         .stop(Some(format!("remove tracers for outpoint {}", outpoint)));

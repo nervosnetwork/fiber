@@ -1810,6 +1810,7 @@ where
             .ok_or_else(Self::missing_payout_builder)?;
         let lock_script =
             build_liquidity_lock_script(artifact, &Self::payout_output_params(&quote));
+        let (registration_sender, registration_receiver) = tokio::sync::oneshot::channel();
         self.ckb_chain_actor
             .send_message(CkbChainMessage::CreateOutPointSpendTracer(
                 CkbOutPointSpendTracer {
@@ -1822,11 +1823,24 @@ where
                         swap.payment_hash,
                         myself,
                     ),
+                    registration: RpcReplyPort::from(registration_sender),
                 },
             ))
             .map_err(|error| {
                 LiquidityLoopOutError::Chain(format!(
                     "create provider claim outpoint tracer failed: {error}"
+                ))
+            })?;
+        registration_receiver
+            .await
+            .map_err(|_| {
+                LiquidityLoopOutError::Chain(
+                    "provider claim outpoint tracer registration reply was dropped".to_string(),
+                )
+            })?
+            .map_err(|error| {
+                LiquidityLoopOutError::Chain(format!(
+                    "provider claim outpoint tracer registration failed: {error}"
                 ))
             })?;
         Ok(())
@@ -2718,6 +2732,7 @@ mod tests {
                         .push(MockCkbEvent::CreateTxTracer(mask));
                 }
                 CkbChainMessage::CreateOutPointSpendTracer(tracer) => {
+                    let _ = tracer.registration.send(Ok(()));
                     events
                         .lock()
                         .unwrap()
@@ -2728,6 +2743,37 @@ mod tests {
                         });
                 }
                 _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    struct RejectingOutPointTracerActor;
+
+    #[async_trait::async_trait]
+    impl Actor for RejectingOutPointTracerActor {
+        type Msg = CkbChainMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let CkbChainMessage::CreateOutPointSpendTracer(tracer) = message {
+                let _ = tracer
+                    .registration
+                    .send(Err("conflicting tracer metadata".to_string()));
             }
             Ok(())
         }
@@ -5214,6 +5260,34 @@ mod tests {
                 confirmations: 1,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_claim_watch_returns_registration_conflict() {
+        let (ckb_actor, _handle) = ractor::Actor::spawn(None, RejectingOutPointTracerActor, ())
+            .await
+            .unwrap();
+        let store = NoopLiquidityStore::default();
+        let mut quote = test_loop_out_quote_terms();
+        let mut swap = test_swap_record_with_outpoint(test_outpoint(87));
+        swap.role = LiquiditySwapRole::Provider;
+        swap.state = LiquiditySwapState::PaymentSettled;
+        swap.payment_hash = quote.payment_hash;
+        quote.quote_id = swap.quote_id;
+        store.insert_loop_out_quote(quote, 1).unwrap();
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let mut watcher = CkbLiquidityChainWatcher::new_with_liquidity_lock_artifact(
+            ckb_actor,
+            store,
+            liquidity_lock_artifact(),
+        );
+
+        let error = watcher
+            .watch_provider_claim(swap.swap_id, spawn_mock_liquidity_actor().await.0)
+            .await
+            .expect_err("conflicting registration must fail");
+
+        assert!(error.to_string().contains("conflicting tracer metadata"));
     }
 
     #[test]

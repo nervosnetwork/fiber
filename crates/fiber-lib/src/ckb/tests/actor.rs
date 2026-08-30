@@ -415,12 +415,25 @@ fn spend_tracer(
     outpoint: OutPoint,
     callback: oneshot::Sender<Result<CkbOutPointSpendTracingResult, String>>,
 ) -> CkbOutPointSpendTracer {
-    CkbOutPointSpendTracer {
+    spend_tracer_with_registration(outpoint, callback).0
+}
+
+fn spend_tracer_with_registration(
+    outpoint: OutPoint,
+    callback: oneshot::Sender<Result<CkbOutPointSpendTracingResult, String>>,
+) -> (
+    CkbOutPointSpendTracer,
+    oneshot::Receiver<Result<(), String>>,
+) {
+    let (registration, registration_rx) = oneshot::channel();
+    let tracer = CkbOutPointSpendTracer {
         outpoint,
         lock_script: get_script_by_contract(Contract::Secp256k1Lock, &b"fund"[..]),
         confirmations: 1,
         callback: callback.into(),
-    }
+        registration: registration.into(),
+    };
+    (tracer, registration_rx)
 }
 
 async fn expect_spend_result(
@@ -431,6 +444,15 @@ async fn expect_spend_result(
         .expect("outpoint spend tracer timed out")
         .expect("outpoint spend tracer callback dropped")
         .expect("outpoint spend tracing failed")
+}
+
+async fn expect_registration(
+    registration_rx: oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(1), registration_rx)
+        .await
+        .expect("outpoint spend registration timed out")
+        .expect("outpoint spend registration reply dropped")
 }
 
 async fn assert_no_spend_delivery(
@@ -454,12 +476,11 @@ async fn shared_mock_chain_outpoint_spend_notifies_only_after_commit() {
     let spend_hash = submit_pending_tx(&actor, spend_tx.clone()).await;
 
     let (tracer_tx, mut tracer_rx) = oneshot::channel();
+    let (tracer, registration_rx) = spend_tracer_with_registration(outpoint.clone(), tracer_tx);
     actor
-        .send_message(CkbChainMessage::CreateOutPointSpendTracer(spend_tracer(
-            outpoint.clone(),
-            tracer_tx,
-        )))
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(tracer))
         .expect("create outpoint spend tracer");
+    expect_registration(registration_rx).await.unwrap();
 
     assert!(matches!(
         controller.transaction_status(spend_hash),
@@ -529,12 +550,12 @@ async fn shared_mock_chain_outpoint_spend_registration_after_commit_finds_histor
     controller.commit(spend_hash).expect("commit spending tx");
 
     let (tracer_tx, tracer_rx) = oneshot::channel();
+    let (tracer, registration_rx) = spend_tracer_with_registration(outpoint.clone(), tracer_tx);
     actor
-        .send_message(CkbChainMessage::CreateOutPointSpendTracer(spend_tracer(
-            outpoint.clone(),
-            tracer_tx,
-        )))
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(tracer))
         .expect("create outpoint spend tracer");
+
+    expect_registration(registration_rx).await.unwrap();
 
     let result = expect_spend_result(tracer_rx).await;
     assert_eq!(result.outpoint, outpoint);
@@ -555,11 +576,9 @@ async fn shared_mock_chain_outpoint_spend_registration_commit_race_cannot_lose_o
 
     let registration = controller.pause_next_tracer_registration();
     let (tracer_tx, tracer_rx) = oneshot::channel();
+    let (tracer, registration_rx) = spend_tracer_with_registration(outpoint.clone(), tracer_tx);
     actor
-        .send_message(CkbChainMessage::CreateOutPointSpendTracer(spend_tracer(
-            outpoint.clone(),
-            tracer_tx,
-        )))
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(tracer))
         .expect("create outpoint spend tracer");
     tokio::time::timeout(Duration::from_secs(1), registration.wait_until_paused())
         .await
@@ -570,10 +589,50 @@ async fn shared_mock_chain_outpoint_spend_registration_commit_race_cannot_lose_o
         .expect("commit while tracer registration is paused");
     registration.resume();
 
+    expect_registration(registration_rx).await.unwrap();
     let result = expect_spend_result(tracer_rx).await;
     assert_eq!(result.outpoint, outpoint);
     assert_eq!(result.input_index, 0);
     assert_eq!(result.script_group_input_index, 0);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+async fn shared_mock_chain_outpoint_spend_duplicate_and_conflict_registration_semantics() {
+    let controller = MockChainController::new();
+    let actor = spawn_controlled_mock_chain_actor(&controller).await;
+
+    let (_fund_hash, outpoint) = submit_funded_cell(&controller, &actor).await;
+    let spend_tx = build_spending_tx(outpoint.clone()).await;
+    let spend_hash = submit_pending_tx(&actor, spend_tx).await;
+
+    let (first_tx, first_rx) = oneshot::channel();
+    let (first, first_registration) = spend_tracer_with_registration(outpoint.clone(), first_tx);
+    actor
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(first))
+        .unwrap();
+    expect_registration(first_registration).await.unwrap();
+
+    let (second_tx, second_rx) = oneshot::channel();
+    let (second, second_registration) = spend_tracer_with_registration(outpoint.clone(), second_tx);
+    actor
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(second))
+        .unwrap();
+    expect_registration(second_registration).await.unwrap();
+
+    let (conflict_tx, conflict_rx) = oneshot::channel();
+    let (mut conflict, conflict_registration) =
+        spend_tracer_with_registration(outpoint.clone(), conflict_tx);
+    conflict.confirmations = 2;
+    actor
+        .send_message(CkbChainMessage::CreateOutPointSpendTracer(conflict))
+        .unwrap();
+    assert!(expect_registration(conflict_registration).await.is_err());
+    assert!(conflict_rx.await.is_err());
+
+    controller.commit(spend_hash).expect("commit spending tx");
+    assert_eq!(expect_spend_result(first_rx).await.outpoint, outpoint);
+    assert_eq!(expect_spend_result(second_rx).await.outpoint, outpoint);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]

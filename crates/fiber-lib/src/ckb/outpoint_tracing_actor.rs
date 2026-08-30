@@ -27,7 +27,10 @@ pub struct CkbOutPointSpendTracer {
     pub outpoint: packed::OutPoint,
     pub lock_script: packed::Script,
     pub confirmations: u64,
+    /// Receives the eventual committed spend discovery result.
     pub callback: RpcReplyPort<Result<CkbOutPointSpendTracingResult, String>>,
+    /// Acknowledges whether this waiter was installed without consuming `callback`.
+    pub registration: RpcReplyPort<Result<(), String>>,
 }
 
 pub struct CkbOutPointSpendTracingArguments {
@@ -190,8 +193,9 @@ impl CkbOutPointSpendTracingState {
                 && group.confirmations == tracer.confirmations
             {
                 group.callbacks.push(tracer.callback);
+                let _ = tracer.registration.send(Ok(()));
             } else {
-                let _ = tracer.callback.send(Err(
+                let _ = tracer.registration.send(Err(
                     "conflicting lock script or confirmation policy for watched outpoint"
                         .to_string(),
                 ));
@@ -200,8 +204,9 @@ impl CkbOutPointSpendTracingState {
         }
 
         self.next_generation = self.next_generation.wrapping_add(1);
+        let outpoint = tracer.outpoint;
         self.tracers.insert(
-            tracer.outpoint,
+            outpoint,
             OutPointTracerGroup {
                 lock_script: tracer.lock_script,
                 confirmations: tracer.confirmations,
@@ -210,6 +215,7 @@ impl CkbOutPointSpendTracingState {
                 task: None,
             },
         );
+        let _ = tracer.registration.send(Ok(()));
         myself.send_message(CkbOutPointSpendTracingMessage::RunTracers)?;
         Ok(())
     }
@@ -430,6 +436,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (send, recv) = oneshot::channel();
+        let (registration_send, registration_recv) = oneshot::channel();
 
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
@@ -438,9 +445,16 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(send),
+                    registration: RpcReplyPort::from(registration_send),
                 },
             ))
             .expect("create outpoint tracer");
+
+        timeout(Duration::from_secs(1), registration_recv)
+            .await
+            .expect("historical registration timed out")
+            .expect("historical registration reply dropped")
+            .expect("historical registration failed");
 
         let actual = timeout(Duration::from_secs(1), recv)
             .await
@@ -497,6 +511,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (send, recv) = oneshot::channel();
+        let (registration_send, _registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -504,6 +519,7 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(send),
+                    registration: RpcReplyPort::from(registration_send),
                 },
             ))
             .expect("create outpoint tracer");
@@ -572,7 +588,12 @@ mod tests {
         .expect("spawn outpoint tracing actor");
         let (first_send, first_recv) = oneshot::channel();
         let (second_send, second_recv) = oneshot::channel();
-        for callback in [first_send, second_send] {
+        let (first_registration_send, first_registration_recv) = oneshot::channel();
+        let (second_registration_send, second_registration_recv) = oneshot::channel();
+        for (callback, registration) in [
+            (first_send, first_registration_send),
+            (second_send, second_registration_send),
+        ] {
             actor
                 .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                     CkbOutPointSpendTracer {
@@ -580,9 +601,18 @@ mod tests {
                         lock_script: lock_script(),
                         confirmations: 4,
                         callback: RpcReplyPort::from(callback),
+                        registration: RpcReplyPort::from(registration),
                     },
                 ))
                 .expect("create identical outpoint tracer");
+        }
+
+        for registration in [first_registration_recv, second_registration_recv] {
+            timeout(Duration::from_secs(1), registration)
+                .await
+                .expect("identical registration timed out")
+                .expect("identical registration reply dropped")
+                .expect("identical registration failed");
         }
 
         timeout(Duration::from_secs(1), async {
@@ -639,6 +669,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (original_send, original_recv) = oneshot::channel();
+        let (original_registration_send, original_registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -646,9 +677,15 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(original_send),
+                    registration: RpcReplyPort::from(original_registration_send),
                 },
             ))
             .expect("create original tracer");
+        timeout(Duration::from_secs(1), original_registration_recv)
+            .await
+            .expect("original registration timed out")
+            .expect("original registration reply dropped")
+            .expect("original registration failed");
         timeout(Duration::from_secs(1), async {
             while calls.load(Ordering::SeqCst) < 1 {
                 tokio::task::yield_now().await;
@@ -658,6 +695,7 @@ mod tests {
         .expect("original discovery did not start");
 
         let (conflict_send, conflict_recv) = oneshot::channel();
+        let (conflict_registration_send, conflict_registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -665,14 +703,23 @@ mod tests {
                     lock_script: conflicting_lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(conflict_send),
+                    registration: RpcReplyPort::from(conflict_registration_send),
                 },
             ))
             .expect("create conflicting tracer");
-        let conflict = timeout(Duration::from_millis(100), conflict_recv)
+        let conflict = timeout(Duration::from_millis(100), conflict_registration_recv)
             .await
             .expect("conflict was not reported immediately")
-            .expect("conflict callback dropped");
+            .expect("conflict registration reply dropped");
         assert!(conflict.is_err());
+
+        assert!(
+            timeout(Duration::from_millis(25), conflict_recv)
+                .await
+                .expect("conflicting callback sender remained open")
+                .is_err(),
+            "registration conflict was reported through the spend callback"
+        );
 
         gate.notify_waiters();
         let original = timeout(Duration::from_secs(1), original_recv)
@@ -717,6 +764,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (send, mut recv) = oneshot::channel();
+        let (registration_send, _registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -724,6 +772,7 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(send),
+                    registration: RpcReplyPort::from(registration_send),
                 },
             ))
             .expect("create outpoint tracer");
@@ -791,6 +840,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (send, _recv) = oneshot::channel();
+        let (registration_send, _registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -798,6 +848,7 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(send),
+                    registration: RpcReplyPort::from(registration_send),
                 },
             ))
             .expect("create outpoint tracer");
@@ -853,6 +904,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (send, recv) = oneshot::channel();
+        let (registration_send, _registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -860,6 +912,7 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(send),
+                    registration: RpcReplyPort::from(registration_send),
                 },
             ))
             .expect("create outpoint tracer");
@@ -921,6 +974,7 @@ mod tests {
         .await
         .expect("spawn outpoint tracing actor");
         let (send, recv) = oneshot::channel();
+        let (registration_send, _registration_recv) = oneshot::channel();
         actor
             .send_message(CkbOutPointSpendTracingMessage::CreateTracer(
                 CkbOutPointSpendTracer {
@@ -928,6 +982,7 @@ mod tests {
                     lock_script: lock_script(),
                     confirmations: 4,
                     callback: RpcReplyPort::from(send),
+                    registration: RpcReplyPort::from(registration_send),
                 },
             ))
             .expect("create outpoint tracer");

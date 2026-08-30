@@ -3513,6 +3513,7 @@ mod tests {
         persist_loop_in_lock_before_failure: bool,
         reject_observed_loop_in_lock: bool,
         observed_loop_out_payout_results: Vec<Result<(), PayoutValidationError>>,
+        provider_claim_watch_results: Vec<Result<(), String>>,
         claim_preimages: Vec<Hash256>,
         payout_locks: Shared<Vec<(ckb_types::packed::Script, ckb_types::packed::Script)>>,
         loop_in_funding_txs: Shared<Vec<String>>,
@@ -3531,6 +3532,7 @@ mod tests {
                 persist_loop_in_lock_before_failure: false,
                 reject_observed_loop_in_lock: false,
                 observed_loop_out_payout_results: Vec::new(),
+                provider_claim_watch_results: Vec::new(),
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -3549,6 +3551,7 @@ mod tests {
                 persist_loop_in_lock_before_failure: false,
                 reject_observed_loop_in_lock: false,
                 observed_loop_out_payout_results: Vec::new(),
+                provider_claim_watch_results: Vec::new(),
                 claim_preimages: Vec::new(),
                 payout_locks: Shared::new(Vec::new()),
                 loop_in_funding_txs: Shared::new(Vec::new()),
@@ -3584,6 +3587,10 @@ mod tests {
         fn reject_observed_loop_out_payout_with(&mut self, error: impl Into<String>) {
             self.observed_loop_out_payout_results =
                 vec![Err(PayoutValidationError::Definitive(error.into()))];
+        }
+
+        fn set_provider_claim_watch_results(&mut self, results: Vec<Result<(), String>>) {
+            self.provider_claim_watch_results = results;
         }
 
         fn set_observed_loop_out_payout_results(
@@ -3819,7 +3826,11 @@ mod tests {
             _myself: ActorRef<LiquidityActorMessage>,
         ) -> Result<(), Self::Error> {
             self.events.borrow_mut().push("watch_provider_claim");
-            Ok(())
+            if self.provider_claim_watch_results.is_empty() {
+                Ok(())
+            } else {
+                self.provider_claim_watch_results.remove(0)
+            }
         }
 
         async fn broadcast_refund(
@@ -5134,6 +5145,51 @@ mod tests {
         assert_eq!(event_count(&events, "watch_provider_claim"), 1);
         assert_eq!(event_count(&events, "watch_claim"), 0);
         assert_eq!(event_count(&events, "broadcast_claim"), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_provider_claim_registration_does_not_poison_retry_guard() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "provider");
+        let mut swap = recovery_swap(44, LiquiditySwapState::ClaimPending);
+        swap.role = LiquiditySwapRole::Provider;
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        let actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            TestLiquidityChain::new_with_label(events.clone(), "runtime_provider"),
+        )
+        .await;
+        let mut chain = TestLiquidityChain::new_with_label(events.clone(), "runtime_provider");
+        chain.set_provider_claim_watch_results(vec![
+            Err("conflicting tracer metadata".to_string()),
+            Ok(()),
+        ]);
+        let mut state = LiquidityActorState {
+            store,
+            payment: TestLoopOutPayment::new_with_label(events.clone(), "runtime"),
+            chain,
+            provider_pubkey: deterministic_provider_pubkey(),
+            provider_funding_lock_script: deterministic_provider_funding_lock_script(),
+            watched_payout_swaps: HashSet::new(),
+            payout_validation_retries: HashSet::new(),
+            active_payment_swaps: HashSet::new(),
+            watched_claim_swaps: HashSet::new(),
+            active_refund_swaps: HashSet::new(),
+            job_cancellation: CancellationToken::new(),
+            jobs: TaskTracker::new(),
+        };
+
+        let error = state
+            .resume_swap(swap.clone(), actor.clone())
+            .await
+            .expect_err("registration conflict must fail recovery");
+        assert!(error.to_string().contains("conflicting tracer metadata"));
+        assert!(!state.watched_claim_swaps.contains(&swap.swap_id));
+
+        assert!(state.resume_swap(swap.clone(), actor).await.unwrap());
+        assert!(state.watched_claim_swaps.contains(&swap.swap_id));
+        assert_eq!(event_count(&events, "watch_provider_claim"), 2);
     }
 
     #[tokio::test]
