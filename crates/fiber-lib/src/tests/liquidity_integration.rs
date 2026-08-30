@@ -167,6 +167,7 @@ async fn assert_invalid_payout_remains_quiescent(
     fixture: &LiquidityNetworkFixture,
     channel_id: Hash256,
     swap_id: fiber_json_types::Hash256,
+    payment_hash: fiber_json_types::Hash256,
     expected_client: (u128, u128),
     expected_provider: (u128, u128),
     timeout: Duration,
@@ -211,6 +212,21 @@ async fn assert_invalid_payout_remains_quiescent(
                 .iter()
                 .all(|transaction| transaction.role != LiquidityChainTransactionRole::Claim),
             "invalid payout must not produce a client claim: {chain_transactions:?}"
+        );
+
+        let payments = fixture.nodes[CLIENT]
+            .list_payments_before_deadline(
+                deadline,
+                "list_payments request while observing invalid payout",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            payments
+                .payments
+                .iter()
+                .all(|payment| payment.payment_hash != payment_hash),
+            "invalid payout must not create a client payment session: {payments:?}"
         );
 
         let client = channel_snapshot_before_deadline(
@@ -648,7 +664,10 @@ async fn liquidity_ckb_loop_out_rejects_committed_payout_with_wrong_payment_hash
         .output_pts_iter()
         .next()
         .expect("malicious payout output");
-    let malicious_tx_hash = fixture.submit_transaction(PROVIDER, malicious_payout).await;
+    let malicious_tx_hash = fixture
+        .chain
+        .submit_transaction(malicious_payout)
+        .expect("submit adversarial payout through chain controller");
 
     let client_channel_before = channel_snapshot(&fixture, CLIENT, channel_id).await;
     let provider_channel_before = channel_snapshot(&fixture, PROVIDER, channel_id).await;
@@ -680,6 +699,7 @@ async fn liquidity_ckb_loop_out_rejects_committed_payout_with_wrong_payment_hash
         &fixture,
         channel_id,
         quote_id,
+        quote.payment_hash,
         (
             client_channel_before.local_balance,
             client_channel_before.remote_balance,
@@ -691,10 +711,5 @@ async fn liquidity_ckb_loop_out_rejects_committed_payout_with_wrong_payment_hash
         SWAP_TIMEOUT,
     )
     .await;
-    assert!(
-        fixture.pending_transactions().is_empty(),
-        "invalid payout must not create a pending client claim"
-    );
-
     fixture.shutdown().await;
 }

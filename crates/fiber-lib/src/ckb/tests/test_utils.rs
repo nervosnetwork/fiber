@@ -512,6 +512,27 @@ impl MockChainController {
             .collect()
     }
 
+    /// Submit a transaction for explicit resolution by the controlled mock chain.
+    pub fn submit_transaction(&self, transaction: TransactionView) -> Result<Hash256, String> {
+        let tx_hash = transaction.hash().into();
+        let mut state = self.shared.write().unwrap();
+        if state.txs.contains_key(&tx_hash) {
+            return Err(format!("transaction {tx_hash} was already submitted"));
+        }
+        state.txs.insert(
+            tx_hash,
+            GetTxResponse {
+                transaction: Some(transaction),
+                tx_status: TxStatus::Pending,
+            },
+        );
+        state.tx_notifications.send(CkbTxTracingResult {
+            tx_hash,
+            tx_status: TxStatus::Pending,
+        });
+        Ok(tx_hash)
+    }
+
     pub fn commit(&self, tx_hash: Hash256) -> Result<(), String> {
         const MAX_CYCLES: u64 = 100_000_000;
 
