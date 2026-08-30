@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use ckb_types::{
     bytes::Bytes,
     core::TransactionView,
-    packed::{CellOutput, Script},
+    packed::{CellInput, CellOutput, Script},
     prelude::{Builder, Entity, Pack},
 };
 use fiber_json_types::{
@@ -18,7 +18,7 @@ use fiber_json_types::{
     LoopOutParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
 };
 
-use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
 use crate::fiber::Hash256;
 use crate::liquidity::build_liquidity_lock_args;
 use crate::tests::liquidity_test_utils::LiquidityNetworkFixture;
@@ -163,19 +163,15 @@ async fn wait_for_channel_balances(
     }
 }
 
-async fn assert_invalid_payout_remains_quiescent(
+async fn wait_for_invalid_payout_and_assert_quiescent(
     fixture: &LiquidityNetworkFixture,
     channel_id: Hash256,
     swap_id: fiber_json_types::Hash256,
-    payment_hash: fiber_json_types::Hash256,
     expected_client: (u128, u128),
     expected_provider: (u128, u128),
     timeout: Duration,
 ) {
-    const OBSERVATION_WINDOW: Duration = Duration::from_millis(250);
-
     let deadline = Instant::now() + timeout;
-    let observation_ends = Instant::now() + OBSERVATION_WINDOW;
     loop {
         let swap = fixture.nodes[CLIENT]
             .get_swap_before_deadline(
@@ -199,76 +195,87 @@ async fn assert_invalid_payout_remains_quiescent(
             )
             .await
             .unwrap_or_else(|error| panic!("{error}"));
-        assert!(
-            chain_transactions.transactions.iter().any(|transaction| {
-                transaction.role == LiquidityChainTransactionRole::Payout
-                    && transaction.status == "confirmed"
-            }),
-            "committed adversarial payout must be exposed as confirmed: {chain_transactions:?}"
-        );
-        assert!(
-            chain_transactions
-                .transactions
-                .iter()
-                .all(|transaction| transaction.role != LiquidityChainTransactionRole::Claim),
-            "invalid payout must not produce a client claim: {chain_transactions:?}"
-        );
-
-        let payments = fixture.nodes[CLIENT]
-            .list_payments_before_deadline(
-                deadline,
-                "list_payments request while observing invalid payout",
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
-        assert!(
-            payments
-                .payments
-                .iter()
-                .all(|payment| payment.payment_hash != payment_hash),
-            "invalid payout must not create a client payment session: {payments:?}"
-        );
-
-        let client = channel_snapshot_before_deadline(
-            fixture,
-            CLIENT,
-            channel_id,
-            deadline,
-            "list client channels while observing invalid payout",
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-        let provider = channel_snapshot_before_deadline(
-            fixture,
-            PROVIDER,
-            channel_id,
-            deadline,
-            "list provider channels while observing invalid payout",
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{error}"));
-        assert_eq!(
-            (client.local_balance, client.remote_balance),
-            expected_client
-        );
-        assert_eq!(
-            (provider.local_balance, provider.remote_balance),
-            expected_provider
-        );
-        assert!(
-            channel_has_no_pending_tlcs(&client),
-            "client must have no offered, received, or pending TLCs: {client:?}"
-        );
-        assert!(
-            channel_has_no_pending_tlcs(&provider),
-            "provider must have no offered, received, or pending TLCs: {provider:?}"
-        );
-
-        if Instant::now() >= observation_ends {
-            return;
+        let definitive_failure = chain_transactions.transactions.iter().find(|transaction| {
+            transaction.role == LiquidityChainTransactionRole::Payout
+                && transaction.status == "confirmed"
+                && transaction
+                    .failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("payment_hash mismatch"))
+        });
+        if definitive_failure.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for confirmed payout validation failure; latest swap: \
+                 {swap:?}; latest chain records: {chain_transactions:?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    let chain_transactions = fixture.nodes[CLIENT]
+        .list_chain_transactions_before_deadline(
+            deadline,
+            "list chain transactions after invalid payout validation",
+            swap_id,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        chain_transactions
+            .transactions
+            .iter()
+            .all(|transaction| transaction.role != LiquidityChainTransactionRole::Claim),
+        "invalid payout must not produce a client claim: {chain_transactions:?}"
+    );
+
+    let payments = fixture.nodes[CLIENT]
+        .list_payments_before_deadline(
+            deadline,
+            "list_payments request after invalid payout validation",
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        payments.payments.is_empty(),
+        "fresh client must have no payment session after invalid payout: {payments:?}"
+    );
+    let client = channel_snapshot_before_deadline(
+        fixture,
+        CLIENT,
+        channel_id,
+        deadline,
+        "list client channels after invalid payout validation",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    let provider = channel_snapshot_before_deadline(
+        fixture,
+        PROVIDER,
+        channel_id,
+        deadline,
+        "list provider channels after invalid payout validation",
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        (client.local_balance, client.remote_balance),
+        expected_client
+    );
+    assert_eq!(
+        (provider.local_balance, provider.remote_balance),
+        expected_provider
+    );
+    assert!(
+        channel_has_no_pending_tlcs(&client),
+        "client must have no offered, received, or pending TLCs: {client:?}"
+    );
+    assert!(
+        channel_has_no_pending_tlcs(&provider),
+        "provider must have no offered, received, or pending TLCs: {provider:?}"
+    );
 }
 
 #[tokio::test]
@@ -651,7 +658,40 @@ async fn liquidity_ckb_loop_out_rejects_committed_payout_with_wrong_payment_hash
         quote.amount,
         None,
     );
+    let funding_output = CellOutput::new_builder()
+        .capacity(quote.capacity_requirement_ckb)
+        .lock(get_script_by_contract(
+            Contract::Secp256k1Lock,
+            b"invalid-payout-funding",
+        ))
+        .build();
+    let funding_transaction = TransactionView::new_advanced_builder()
+        .output(funding_output)
+        .output_data(Bytes::new().pack())
+        .build();
+    let funding_outpoint = funding_transaction
+        .output_pts_iter()
+        .next()
+        .expect("adversarial payout funding output");
+    let funding_tx_hash = fixture
+        .chain
+        .submit_transaction(funding_transaction)
+        .expect("submit adversarial payout funding transaction");
+    fixture
+        .commit(funding_tx_hash)
+        .expect("commit adversarial payout funding transaction");
+
+    let cell_deps =
+        get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock, Contract::LiquidityLock])
+            .await
+            .expect("resolve adversarial payout cell deps");
     let malicious_payout = TransactionView::new_advanced_builder()
+        .cell_deps(cell_deps)
+        .input(
+            CellInput::new_builder()
+                .previous_output(funding_outpoint)
+                .build(),
+        )
         .output(
             CellOutput::new_builder()
                 .capacity(quote.capacity_requirement_ckb)
@@ -695,11 +735,10 @@ async fn liquidity_ckb_loop_out_rejects_committed_payout_with_wrong_payment_hash
             SWAP_TIMEOUT,
         )
         .await;
-    assert_invalid_payout_remains_quiescent(
+    wait_for_invalid_payout_and_assert_quiescent(
         &fixture,
         channel_id,
         quote_id,
-        quote.payment_hash,
         (
             client_channel_before.local_balance,
             client_channel_before.remote_balance,

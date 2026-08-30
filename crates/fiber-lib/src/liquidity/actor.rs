@@ -833,12 +833,12 @@ where
         }
         let now_ms = now_ms();
 
-        if self
+        let has_payout_tx = self
             .store
             .get_liquidity_chain_tx(&swap_id, LiquidityChainTxRole::Payout)
             .map_err(map_store_error)?
-            .is_some()
-        {
+            .is_some();
+        if has_payout_tx {
             self.store
                 .update_liquidity_chain_tx_status(
                     &swap_id,
@@ -899,12 +899,23 @@ where
                             .update_liquidity_swap(
                                 &swap_id,
                                 LiquiditySwapUpdate {
-                                    failure_reason: Some(reason),
+                                    failure_reason: Some(reason.clone()),
                                     updated_at: now_ms,
                                     ..Default::default()
                                 },
                             )
                             .map_err(map_store_error)?;
+                        if has_payout_tx {
+                            self.store
+                                .update_liquidity_chain_tx_status(
+                                    &swap_id,
+                                    LiquidityChainTxRole::Payout,
+                                    LiquidityChainTxStatus::Confirmed,
+                                    Some(reason),
+                                    now_ms,
+                                )
+                                .map_err(map_store_error)?;
+                        }
                         self.watched_payout_swaps.remove(&swap_id);
                         return Ok(());
                     }
@@ -9517,6 +9528,10 @@ mod tests {
             .unwrap()
             .contains("payout amount mismatch"));
         assert_eq!(payout_tx.status, LiquidityChainTxStatus::Confirmed);
+        assert!(payout_tx
+            .failure_reason
+            .unwrap()
+            .contains("payout amount mismatch"));
         assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 1);
         assert!(payment_requests.borrow().is_empty());
     }
