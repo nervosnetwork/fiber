@@ -56,7 +56,30 @@ const PROVIDER_LOOP_OUT_PAYMENT_RECONCILE_MAX_RELOAD_ATTEMPTS: u32 = 60;
 const PAYOUT_VALIDATION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const PAYOUT_VALIDATION_RETRY_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
+const PAYOUT_VALIDATION_PERIODIC_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PAYOUT_VALIDATION_PERIODIC_RETRY_INTERVAL: Duration = Duration::from_millis(30);
 const PAYOUT_VALIDATION_MAX_ATTEMPTS: u32 = 3;
+const PAYOUT_VALIDATION_FAILURE_PREFIX: &str = "loop out payout validation failed:";
+
+/// Client state that authorizes an exact payout validation attempt.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ClientPayoutAuthorization {
+    /// A live payout confirmation authorizes validation while payout is pending.
+    PayoutConfirmation,
+    /// Restart recovery requires revalidation of a persisted payout lock.
+    PayoutLockedRecovery,
+}
+
+impl ClientPayoutAuthorization {
+    fn expected_state(self) -> LiquiditySwapState {
+        match self {
+            Self::PayoutConfirmation => LiquiditySwapState::PayoutPending,
+            Self::PayoutLockedRecovery => LiquiditySwapState::PayoutLocked,
+        }
+    }
+}
 
 /// Messages accepted by the liquidity actor boundary.
 #[derive(Debug)]
@@ -137,7 +160,7 @@ pub enum LiquidityActorMessage {
     /// Internal continuation after payout lock confirmation.
     PayoutConfirmed(Hash256),
     /// Internal continuation for retrying a transient payout validation failure.
-    RetryPayoutValidation(Hash256, u32),
+    RetryPayoutValidation(Hash256, ClientPayoutAuthorization, u32),
     /// Internal continuation after payment settlement.
     PaymentSettled(Hash256, Hash256),
     /// Internal continuation after client claim confirmation.
@@ -303,12 +326,12 @@ where
                     tracing::warn!(?swap_id, %error, "ignoring loop out payout continuation");
                 }
             }
-            LiquidityActorMessage::RetryPayoutValidation(swap_id, attempt) => {
+            LiquidityActorMessage::RetryPayoutValidation(swap_id, authorization, attempt) => {
                 if !state.payout_validation_retries.remove(&swap_id) {
                     return Ok(());
                 }
                 if let Err(error) = state
-                    .handle_payout_confirmed(swap_id, attempt, myself.clone())
+                    .authorize_client_payout(swap_id, authorization, attempt, myself.clone())
                     .await
                 {
                     tracing::warn!(?swap_id, %error, "ignoring loop out payout validation retry");
@@ -827,9 +850,15 @@ where
             .ok_or_else(|| {
                 LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
             })?;
-        if swap.role == LiquiditySwapRole::Client && swap.state != LiquiditySwapState::PayoutPending
-        {
-            return Ok(());
+        if swap.role == LiquiditySwapRole::Client {
+            return self
+                .authorize_client_payout(
+                    swap_id,
+                    ClientPayoutAuthorization::PayoutConfirmation,
+                    attempt,
+                    myself,
+                )
+                .await;
         }
         let now_ms = now_ms();
 
@@ -850,140 +879,207 @@ where
                 .map_err(map_store_error)?;
         }
 
-        match swap.role {
-            LiquiditySwapRole::Client => {
-                let quote = self.quote_terms(&swap_id)?;
-                let validation = match swap.onchain_outpoint.as_ref() {
-                    Some(outpoint) => {
-                        self.chain
-                            .validate_observed_loop_out_payout(&quote, outpoint)
-                            .await
-                    }
-                    None => Err(PayoutValidationError::Definitive(
-                        "payout outpoint is missing".to_string(),
-                    )),
-                };
-                match validation {
-                    Err(PayoutValidationError::Transient(error)) => {
-                        let reason = format!(
-                            "temporary loop out payout validation failure (attempt {attempt}/{PAYOUT_VALIDATION_MAX_ATTEMPTS}): {error}"
-                        );
-                        self.store
-                            .update_liquidity_chain_tx_status(
-                                &swap_id,
-                                LiquidityChainTxRole::Payout,
-                                LiquidityChainTxStatus::Confirmed,
-                                Some(reason),
-                                now_ms,
-                            )
-                            .map_err(map_store_error)?;
-                        if attempt < PAYOUT_VALIDATION_MAX_ATTEMPTS {
-                            self.payout_validation_retries.insert(swap_id);
-                            self.spawn_job(async move {
-                                tokio::time::sleep(PAYOUT_VALIDATION_RETRY_INTERVAL).await;
-                                if let Err(error) = myself.send_message(
-                                    LiquidityActorMessage::RetryPayoutValidation(
-                                        swap_id,
-                                        attempt + 1,
-                                    ),
-                                ) {
-                                    tracing::warn!(?swap_id, %error, "failed to schedule payout validation retry");
-                                }
-                            });
-                        }
-                        return Ok(());
-                    }
-                    Err(PayoutValidationError::Definitive(error)) => {
-                        let reason = format!("loop out payout validation failed: {error}");
-                        self.store
-                            .update_liquidity_swap(
-                                &swap_id,
-                                LiquiditySwapUpdate {
-                                    failure_reason: Some(reason.clone()),
-                                    updated_at: now_ms,
-                                    ..Default::default()
-                                },
-                            )
-                            .map_err(map_store_error)?;
-                        if has_payout_tx {
-                            self.store
-                                .update_liquidity_chain_tx_status(
-                                    &swap_id,
-                                    LiquidityChainTxRole::Payout,
-                                    LiquidityChainTxStatus::Confirmed,
-                                    Some(reason),
-                                    now_ms,
-                                )
-                                .map_err(map_store_error)?;
-                        }
-                        self.watched_payout_swaps.remove(&swap_id);
-                        return Ok(());
-                    }
-                    Ok(()) => {}
-                }
-                mark_client_payout_locked(&self.store, swap_id, now_ms)?;
-                self.watched_payout_swaps.remove(&swap_id);
-                let request = prepare_client_loop_out_payment(&self.store, quote)?;
-                let payment_hash = request.payment_hash;
-                self.active_payment_swaps.insert(swap_id);
-                let mut payment = self.payment.clone();
-                let store = self.store.clone();
-                self.spawn_job(async move {
-                    if let Err(error) = mark_payment_dispatch_started(&store, swap_id, now_ms) {
-                        tracing::warn!(?swap_id, %error, "failed to persist loop out payment dispatch");
-                        send_payment_recovery_finished(&myself, swap_id);
-                        return;
-                    }
-                    match payment.send_loop_out_payment(request).await {
-                        Ok(preimage) => {
-                            send_payment_settled(&myself, swap_id, preimage);
-                        }
-                        Err(error) => {
-                            tracing::warn!(?swap_id, %error, "loop out payment remains in flight after send failure");
-                            reconcile_loop_out_payment(
-                                store,
-                                payment,
-                                myself,
-                                swap_id,
-                                payment_hash,
-                                LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
-                            )
-                            .await;
-                        }
-                    }
-                });
-            }
-            LiquiditySwapRole::Provider => {
-                mark_provider_payout_locked(&self.store, swap_id, now_ms)?;
-                if self.active_payment_swaps.contains(&swap_id) {
-                    return Ok(());
-                }
-                let quote = self.quote_terms(&swap_id)?;
-                let preimage = quote.payment_preimage.ok_or_else(|| {
-                    LiquidityLoopOutError::Store(format!(
-                        "provider loop out quote {swap_id:?} is missing its preimage"
-                    ))
-                })?;
-                let payment_hash = quote.payment_hash;
-                mark_provider_payment_in_flight(&self.store, swap_id, now_ms)?;
-                self.active_payment_swaps.insert(swap_id);
-                let payment = self.payment.clone();
-                let store = self.store.clone();
-                let actor = myself.clone();
-                self.spawn_job(async move {
-                    observe_provider_loop_out_payment(
-                        store,
-                        payment,
-                        actor,
-                        swap_id,
-                        preimage,
-                        payment_hash,
-                    )
-                    .await;
-                });
-            }
+        mark_provider_payout_locked(&self.store, swap_id, now_ms)?;
+        if self.active_payment_swaps.contains(&swap_id) {
+            return Ok(());
+        }
+        let quote = self.quote_terms(&swap_id)?;
+        let preimage = quote.payment_preimage.ok_or_else(|| {
+            LiquidityLoopOutError::Store(format!(
+                "provider loop out quote {swap_id:?} is missing its preimage"
+            ))
+        })?;
+        let payment_hash = quote.payment_hash;
+        mark_provider_payment_in_flight(&self.store, swap_id, now_ms)?;
+        self.active_payment_swaps.insert(swap_id);
+        let payment = self.payment.clone();
+        let store = self.store.clone();
+        let actor = myself.clone();
+        self.spawn_job(async move {
+            observe_provider_loop_out_payment(
+                store,
+                payment,
+                actor,
+                swap_id,
+                preimage,
+                payment_hash,
+            )
+            .await;
+        });
+
+        Ok(())
+    }
+
+    async fn authorize_client_payout(
+        &mut self,
+        swap_id: Hash256,
+        authorization: ClientPayoutAuthorization,
+        attempt: u32,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let swap = self
+            .store
+            .get_liquidity_swap(&swap_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                LiquidityLoopOutError::Store(format!("liquidity swap not found: {swap_id:?}"))
+            })?;
+        if swap.role != LiquiditySwapRole::Client
+            || swap.swap_kind != LiquiditySwapKind::LoopOut
+            || swap.state != authorization.expected_state()
+            || swap
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with(PAYOUT_VALIDATION_FAILURE_PREFIX))
+            || self.active_payment_swaps.contains(&swap_id)
+        {
+            self.payout_validation_retries.remove(&swap_id);
+            return Ok(());
         }
 
+        let now_ms = now_ms();
+        let has_payout_tx = self
+            .store
+            .get_liquidity_chain_tx(&swap_id, LiquidityChainTxRole::Payout)
+            .map_err(map_store_error)?
+            .is_some();
+        if has_payout_tx {
+            self.store
+                .update_liquidity_chain_tx_status(
+                    &swap_id,
+                    LiquidityChainTxRole::Payout,
+                    LiquidityChainTxStatus::Confirmed,
+                    None,
+                    now_ms,
+                )
+                .map_err(map_store_error)?;
+        }
+
+        let quote = self.quote_terms(&swap.quote_id)?;
+        let validation = match swap.onchain_outpoint.as_ref() {
+            Some(outpoint) => {
+                self.chain
+                    .validate_observed_loop_out_payout(&quote, outpoint)
+                    .await
+            }
+            None => Err(PayoutValidationError::Definitive(
+                "payout outpoint is missing".to_string(),
+            )),
+        };
+        match validation {
+            Err(PayoutValidationError::Transient(error)) => {
+                let bounded_attempt = attempt.min(PAYOUT_VALIDATION_MAX_ATTEMPTS);
+                let reason = format!(
+                    "temporary loop out payout validation failure (attempt {bounded_attempt}/{PAYOUT_VALIDATION_MAX_ATTEMPTS}): {error}"
+                );
+                if has_payout_tx {
+                    self.store
+                        .update_liquidity_chain_tx_status(
+                            &swap_id,
+                            LiquidityChainTxRole::Payout,
+                            LiquidityChainTxStatus::Confirmed,
+                            Some(reason),
+                            now_ms,
+                        )
+                        .map_err(map_store_error)?;
+                }
+                let (next_attempt, delay) = if bounded_attempt < PAYOUT_VALIDATION_MAX_ATTEMPTS {
+                    (bounded_attempt + 1, PAYOUT_VALIDATION_RETRY_INTERVAL)
+                } else {
+                    (
+                        PAYOUT_VALIDATION_MAX_ATTEMPTS,
+                        PAYOUT_VALIDATION_PERIODIC_RETRY_INTERVAL,
+                    )
+                };
+                if self.payout_validation_retries.insert(swap_id) {
+                    self.spawn_job(async move {
+                        tokio::time::sleep(delay).await;
+                        if let Err(error) = myself.send_message(
+                            LiquidityActorMessage::RetryPayoutValidation(
+                                swap_id,
+                                authorization,
+                                next_attempt,
+                            ),
+                        ) {
+                            tracing::warn!(?swap_id, %error, "failed to schedule payout validation retry");
+                        }
+                    });
+                }
+                return Ok(());
+            }
+            Err(PayoutValidationError::Definitive(error)) => {
+                let reason = format!("{PAYOUT_VALIDATION_FAILURE_PREFIX} {error}");
+                self.store
+                    .update_liquidity_swap(
+                        &swap_id,
+                        LiquiditySwapUpdate {
+                            failure_reason: Some(reason.clone()),
+                            updated_at: now_ms,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(map_store_error)?;
+                if has_payout_tx {
+                    self.store
+                        .update_liquidity_chain_tx_status(
+                            &swap_id,
+                            LiquidityChainTxRole::Payout,
+                            LiquidityChainTxStatus::Confirmed,
+                            Some(reason),
+                            now_ms,
+                        )
+                        .map_err(map_store_error)?;
+                }
+                self.payout_validation_retries.remove(&swap_id);
+                self.watched_payout_swaps.remove(&swap_id);
+                return Ok(());
+            }
+            Ok(()) => {}
+        }
+
+        if authorization == ClientPayoutAuthorization::PayoutConfirmation {
+            mark_client_payout_locked(&self.store, swap_id, now_ms)?;
+        }
+        self.payout_validation_retries.remove(&swap_id);
+        self.watched_payout_swaps.remove(&swap_id);
+        self.start_client_payment_dispatch(swap_id, quote, now_ms, myself)?;
+        Ok(())
+    }
+
+    fn start_client_payment_dispatch(
+        &mut self,
+        swap_id: Hash256,
+        quote: LoopOutQuoteTerms,
+        now_ms: u64,
+        myself: ActorRef<LiquidityActorMessage>,
+    ) -> Result<(), LiquidityLoopOutError> {
+        let request = prepare_client_loop_out_payment(&self.store, quote)?;
+        let payment_hash = request.payment_hash;
+        self.active_payment_swaps.insert(swap_id);
+        let mut payment = self.payment.clone();
+        let store = self.store.clone();
+        self.spawn_job(async move {
+            if let Err(error) = mark_payment_dispatch_started(&store, swap_id, now_ms) {
+                tracing::warn!(?swap_id, %error, "failed to persist loop out payment dispatch");
+                send_payment_recovery_finished(&myself, swap_id);
+                return;
+            }
+            match payment.send_loop_out_payment(request).await {
+                Ok(preimage) => send_payment_settled(&myself, swap_id, preimage),
+                Err(error) => {
+                    tracing::warn!(?swap_id, %error, "loop out payment remains in flight after send failure");
+                    reconcile_loop_out_payment(
+                        store,
+                        payment,
+                        myself,
+                        swap_id,
+                        payment_hash,
+                        LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
+                    )
+                    .await;
+                }
+            }
+        });
         Ok(())
     }
 
@@ -1333,41 +1429,18 @@ where
             }
             Some(RecoveryAction::ResumePayment) => {
                 if swap.role == LiquiditySwapRole::Client {
-                    if self.active_payment_swaps.contains(&swap.swap_id) {
+                    if self.active_payment_swaps.contains(&swap.swap_id)
+                        || self.payout_validation_retries.contains(&swap.swap_id)
+                    {
                         return Ok(false);
                     }
-                    let quote = self.quote_terms(&swap.quote_id)?;
-                    let request = prepare_client_loop_out_payment(&self.store, quote)?;
-                    let payment_hash = request.payment_hash;
-                    self.active_payment_swaps.insert(swap.swap_id);
-                    let mut payment = self.payment.clone();
-                    let store = self.store.clone();
-                    let actor = myself.clone();
-                    let swap_id = swap.swap_id;
-                    self.spawn_job(async move {
-                        if let Err(error) =
-                            mark_payment_dispatch_started(&store, swap_id, now_ms())
-                        {
-                            tracing::warn!(?swap_id, %error, "failed to persist restarted loop out payment dispatch");
-                            send_payment_recovery_finished(&actor, swap_id);
-                            return;
-                        }
-                        match payment.send_loop_out_payment(request).await {
-                            Ok(preimage) => send_payment_settled(&actor, swap_id, preimage),
-                            Err(error) => {
-                                tracing::warn!(?swap_id, %error, "loop out payment remains in flight after restart send failure");
-                                reconcile_loop_out_payment(
-                                    store,
-                                    payment,
-                                    actor,
-                                    swap_id,
-                                    payment_hash,
-                                    LOOP_OUT_PAYMENT_RECONCILE_INTERVAL,
-                                )
-                                .await;
-                            }
-                        }
-                    });
+                    self.authorize_client_payout(
+                        swap.swap_id,
+                        ClientPayoutAuthorization::PayoutLockedRecovery,
+                        1,
+                        myself.clone(),
+                    )
+                    .await?;
                 } else {
                     return self
                         .resume_provider_loop_out_payment(swap, myself.clone())
@@ -1758,6 +1831,7 @@ where
 
     fn prune_recovery_guards(&mut self, swap_id: Hash256) {
         self.watched_payout_swaps.remove(&swap_id);
+        self.payout_validation_retries.remove(&swap_id);
         self.active_payment_swaps.remove(&swap_id);
         self.watched_claim_swaps.remove(&swap_id);
         self.active_refund_swaps.remove(&swap_id);
@@ -4392,6 +4466,35 @@ mod tests {
             created_at: 1_000,
             updated_at: 1_000,
         }
+    }
+
+    fn insert_recovered_client_payout_locked(
+        store: &TestLiquidityStore,
+        seed: u8,
+    ) -> (LiquiditySwapRecord, LoopOutQuoteTerms) {
+        let swap = recovery_swap(seed, LiquiditySwapState::PayoutLocked);
+        let quote = LoopOutQuoteTerms {
+            quote_id: swap.quote_id,
+            payment_hash: swap.payment_hash,
+            ..test_loop_out_quote(now_ms() + 60_000)
+        };
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        store
+            .insert_liquidity_chain_tx(LiquidityChainTxRecord {
+                swap_id: swap.swap_id,
+                role: LiquidityChainTxRole::Payout,
+                tx_hash: [seed.saturating_add(40); 32].into(),
+                outpoint: swap.onchain_outpoint.clone(),
+                status: LiquidityChainTxStatus::Confirmed,
+                failure_reason: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        (swap, quote)
     }
 
     async fn call_resume_non_terminal(actor: ractor::ActorRef<LiquidityActorMessage>) -> usize {
@@ -9432,6 +9535,7 @@ mod tests {
         actor
             .send_message(LiquidityActorMessage::RetryPayoutValidation(
                 quote.quote_id,
+                ClientPayoutAuthorization::PayoutConfirmation,
                 PAYOUT_VALIDATION_MAX_ATTEMPTS,
             ))
             .unwrap();
@@ -9441,7 +9545,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_payout_validation_exhaustion_stays_pending_without_payment() {
+    async fn recovered_client_payout_locked_definitive_validation_failure_does_not_pay() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 61);
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.reject_observed_loop_out_payout_with(
+            "observed loop out payout cell not found or already spent",
+        );
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 1);
+        wait_for_event(&events, "validate_observed_loop_out_payout").await;
+        call_resume_non_terminal_result(actor).await.unwrap();
+
+        let recovered = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+        let payout = store
+            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.state, LiquiditySwapState::PayoutLocked);
+        assert!(recovered
+            .failure_reason
+            .unwrap()
+            .contains("not found or already spent"));
+        assert_eq!(payout.status, LiquidityChainTxStatus::Confirmed);
+        assert!(payout
+            .failure_reason
+            .unwrap()
+            .contains("not found or already spent"));
+        assert!(payment_requests.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovered_client_payout_locked_validates_and_pays_once() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 62);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor =
+            spawn_test_liquidity_actor(store, payment, TestLiquidityChain::new(events.clone()))
+                .await;
+
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 1);
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 0);
+        wait_for_event(&events, "payment_send").await;
+        actor
+            .send_message(LiquidityActorMessage::RetryPayoutValidation(
+                swap.swap_id,
+                ClientPayoutAuthorization::PayoutLockedRecovery,
+                PAYOUT_VALIDATION_MAX_ATTEMPTS,
+            ))
+            .unwrap();
+        call_resume_non_terminal_result(actor).await.unwrap();
+
+        assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 1);
+        assert_eq!(payment_requests.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovered_client_payout_locked_transient_burst_then_periodic_success_pays_once() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (_swap, _) = insert_recovered_client_payout_locked(&store, 63);
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.set_observed_loop_out_payout_results(vec![
+            Err(PayoutValidationError::Transient("temporary 1".to_string())),
+            Err(PayoutValidationError::Transient("temporary 2".to_string())),
+            Err(PayoutValidationError::Transient("temporary 3".to_string())),
+            Err(PayoutValidationError::Transient("temporary 4".to_string())),
+            Ok(()),
+        ]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store, payment, chain).await;
+
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 1);
+        wait_for_event_count(&events, "validate_observed_loop_out_payout", 5).await;
+        wait_for_event(&events, "payment_send").await;
+        call_resume_non_terminal_result(actor).await.unwrap();
+
+        assert_eq!(payment_requests.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_payout_validation_exhaustion_retries_periodically_then_pays_once() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
         let quote = test_loop_out_quote(now_ms() + 60_000);
@@ -9451,15 +9645,21 @@ mod tests {
             .unwrap();
         create_client_loop_out(&store, quote.clone(), now_ms(), Some(outpoint)).unwrap();
         let mut chain = TestLiquidityChain::new(events.clone());
-        chain.set_observed_loop_out_payout_results(
-            (0..PAYOUT_VALIDATION_MAX_ATTEMPTS)
-                .map(|attempt| {
-                    Err(PayoutValidationError::Transient(format!(
-                        "temporary ckb rpc failure {attempt}"
-                    )))
-                })
-                .collect(),
-        );
+        chain.set_observed_loop_out_payout_results(vec![
+            Err(PayoutValidationError::Transient(
+                "temporary ckb rpc failure 0".to_string(),
+            )),
+            Err(PayoutValidationError::Transient(
+                "temporary ckb rpc failure 1".to_string(),
+            )),
+            Err(PayoutValidationError::Transient(
+                "temporary ckb rpc failure 2".to_string(),
+            )),
+            Err(PayoutValidationError::Transient(
+                "temporary ckb rpc failure 3".to_string(),
+            )),
+            Ok(()),
+        ]);
         let payment = TestLoopOutPayment::new(events.clone());
         let payment_requests = payment.requests.clone();
         let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
@@ -9467,29 +9667,88 @@ mod tests {
         actor
             .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
             .unwrap();
-        wait_for_event_count(
-            &events,
-            "validate_observed_loop_out_payout",
-            PAYOUT_VALIDATION_MAX_ATTEMPTS as usize,
-        )
-        .await;
-        tokio::time::sleep(PAYOUT_VALIDATION_RETRY_INTERVAL * 2).await;
+        wait_for_event_count(&events, "validate_observed_loop_out_payout", 5).await;
+        wait_for_event(&events, "payment_send").await;
 
         let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
         let payout_tx = store
             .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
             .unwrap()
             .unwrap();
-        assert_eq!(swap.state, LiquiditySwapState::PayoutPending);
+        assert_ne!(swap.state, LiquiditySwapState::PayoutPending);
         assert_eq!(payout_tx.status, LiquidityChainTxStatus::Confirmed);
-        assert!(payout_tx
-            .failure_reason
-            .unwrap()
-            .contains("temporary ckb rpc failure 2"));
-        assert_eq!(
-            event_count(&events, "validate_observed_loop_out_payout"),
-            PAYOUT_VALIDATION_MAX_ATTEMPTS as usize
-        );
+        assert_eq!(payout_tx.failure_reason, None);
+        assert_eq!(payment_requests.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_progression_stops_queued_payout_validation_retry() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let quote = test_loop_out_quote(now_ms() + 60_000);
+        let outpoint = OutPoint::new(Byte32::from_slice(&[16u8; 32]).unwrap(), 1);
+        store
+            .insert_loop_out_quote(quote.clone(), now_ms())
+            .unwrap();
+        create_client_loop_out(&store, quote.clone(), now_ms(), Some(outpoint)).unwrap();
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.set_observed_loop_out_payout_results(vec![Err(PayoutValidationError::Transient(
+            "temporary ckb rpc failure".to_string(),
+        ))]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        actor
+            .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
+            .unwrap();
+        wait_for_event(&events, "validate_observed_loop_out_payout").await;
+        store
+            .update_liquidity_swap_state(
+                &quote.quote_id,
+                LiquidityStateTransition {
+                    state: LiquiditySwapState::RefundPending,
+                    updated_at: now_ms(),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        tokio::time::sleep(PAYOUT_VALIDATION_RETRY_INTERVAL * 3).await;
+        call_resume_non_terminal_result(actor).await.unwrap();
+
+        assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 1);
+        assert!(payment_requests.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn recovered_payout_locked_terminal_progression_stops_queued_validation_retry() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 64);
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.set_observed_loop_out_payout_results(vec![Err(PayoutValidationError::Transient(
+            "temporary ckb rpc failure".to_string(),
+        ))]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 1);
+        wait_for_event(&events, "validate_observed_loop_out_payout").await;
+        store
+            .update_liquidity_swap_state(
+                &swap.swap_id,
+                LiquidityStateTransition {
+                    state: LiquiditySwapState::RefundPending,
+                    updated_at: now_ms(),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        tokio::time::sleep(PAYOUT_VALIDATION_RETRY_INTERVAL * 3).await;
+
+        assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 1);
         assert!(payment_requests.borrow().is_empty());
     }
 
