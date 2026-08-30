@@ -1059,30 +1059,33 @@ where
             }
             Err(PayoutValidationError::Definitive(error)) => {
                 let reason = format!("loop out payout validation failed: {error}");
-                self.definitive_payout_validation_failures.insert(swap_id);
-                self.payout_validation_retries.remove(&swap_id);
-                self.watched_payout_swaps.remove(&swap_id);
-                if let Err(store_error) = self.store.update_liquidity_swap(
-                    &swap_id,
-                    LiquiditySwapUpdate {
-                        failure_reason: Some(reason.clone()),
-                        updated_at: now_ms,
-                        ..Default::default()
-                    },
-                ) {
-                    tracing::warn!(?swap_id, %store_error, "failed to persist definitive payout validation failure on swap");
+                if payout_tx.is_none() {
+                    return Err(LiquidityLoopOutError::Store(format!(
+                        "cannot persist definitive payout validation failure without payout chain record: {swap_id:?}"
+                    )));
                 }
-                if payout_tx.is_some() {
-                    if let Err(store_error) = self.store.update_liquidity_chain_tx_status(
+                self.store
+                    .update_liquidity_swap(
+                        &swap_id,
+                        LiquiditySwapUpdate {
+                            failure_reason: Some(reason.clone()),
+                            updated_at: now_ms,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(map_store_error)?;
+                self.store
+                    .update_liquidity_chain_tx_status(
                         &swap_id,
                         LiquidityChainTxRole::Payout,
                         LiquidityChainTxStatus::Confirmed,
                         Some(reason),
                         now_ms,
-                    ) {
-                        tracing::warn!(?swap_id, %store_error, "failed to persist definitive payout validation failure on chain record");
-                    }
-                }
+                    )
+                    .map_err(map_store_error)?;
+                self.definitive_payout_validation_failures.insert(swap_id);
+                self.payout_validation_retries.remove(&swap_id);
+                self.watched_payout_swaps.remove(&swap_id);
                 return Ok(false);
             }
             Ok(()) => {}
@@ -3272,6 +3275,8 @@ mod tests {
         provider_mode: Shared<bool>,
         provider_mode_writes: Shared<usize>,
         quote_lookup_results: Shared<Vec<Result<(), String>>>,
+        swap_failure_write_results: Shared<Vec<Result<(), String>>>,
+        chain_failure_write_results: Shared<Vec<Result<(), String>>>,
     }
 
     impl TestLiquidityStore {
@@ -3289,6 +3294,8 @@ mod tests {
                 provider_mode: Shared::new(false),
                 provider_mode_writes: Shared::new(0),
                 quote_lookup_results: Shared::new(Vec::new()),
+                swap_failure_write_results: Shared::new(Vec::new()),
+                chain_failure_write_results: Shared::new(Vec::new()),
             }
         }
 
@@ -3302,6 +3309,14 @@ mod tests {
 
         fn set_quote_lookup_results(&self, results: Vec<Result<(), String>>) {
             *self.quote_lookup_results.borrow_mut() = results;
+        }
+
+        fn set_swap_failure_write_results(&self, results: Vec<Result<(), String>>) {
+            *self.swap_failure_write_results.borrow_mut() = results;
+        }
+
+        fn set_chain_failure_write_results(&self, results: Vec<Result<(), String>>) {
+            *self.chain_failure_write_results.borrow_mut() = results;
         }
 
         fn insert_event(
@@ -3499,6 +3514,12 @@ mod tests {
             swap_id: &Hash256,
             update: LiquiditySwapUpdate,
         ) -> Result<(), LiquidityStoreError> {
+            if update.failure_reason.is_some() {
+                let mut results = self.swap_failure_write_results.borrow_mut();
+                if !results.is_empty() {
+                    results.remove(0).map_err(LiquidityStoreError::Backend)?;
+                }
+            }
             let mut swaps = self.swaps.borrow_mut();
             let swap = swaps
                 .get_mut(swap_id)
@@ -3589,6 +3610,12 @@ mod tests {
             failure_reason: Option<String>,
             updated_at: u64,
         ) -> Result<(), LiquidityStoreError> {
+            if role == LiquidityChainTxRole::Payout && failure_reason.is_some() {
+                let mut results = self.chain_failure_write_results.borrow_mut();
+                if !results.is_empty() {
+                    results.remove(0).map_err(LiquidityStoreError::Backend)?;
+                }
+            }
             let mut chain_txs = self.chain_txs.borrow_mut();
             let record = chain_txs.get_mut(&(*swap_id, role)).ok_or_else(|| {
                 LiquidityStoreError::Backend("liquidity chain tx not found".to_string())
@@ -9680,6 +9707,102 @@ mod tests {
             .failure_reason
             .unwrap()
             .contains("not found or already spent"));
+        assert!(payment_requests.borrow().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn definitive_validation_retries_failed_swap_context_write_before_stopping() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 67);
+        store.set_swap_failure_write_results(vec![
+            Err("temporary swap write failure".to_string()),
+            Ok(()),
+        ]);
+        let validation_error = "payout amount mismatch";
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.set_observed_loop_out_payout_results(vec![
+            Err(PayoutValidationError::Definitive(
+                validation_error.to_string(),
+            )),
+            Err(PayoutValidationError::Definitive(
+                validation_error.to_string(),
+            )),
+        ]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 1);
+        wait_for_event_count(&events, "validate_observed_loop_out_payout", 2).await;
+        assert_eq!(call_resume_non_terminal(actor).await, 0);
+        tokio::time::sleep(PAYOUT_VALIDATION_PERIODIC_RETRY_INTERVAL * 2).await;
+
+        let persisted_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+        let payout = store
+            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap();
+        assert!(persisted_swap
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains(validation_error));
+        assert!(payout
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains(validation_error));
+        assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 2);
+        assert!(payment_requests.borrow().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn definitive_validation_retries_failed_chain_context_write_before_stopping() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 68);
+        store.set_chain_failure_write_results(vec![
+            Err("temporary chain write failure".to_string()),
+            Ok(()),
+        ]);
+        let validation_error = "payout lock args mismatch";
+        let mut chain = TestLiquidityChain::new(events.clone());
+        chain.set_observed_loop_out_payout_results(vec![
+            Err(PayoutValidationError::Definitive(
+                validation_error.to_string(),
+            )),
+            Err(PayoutValidationError::Definitive(
+                validation_error.to_string(),
+            )),
+        ]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        events.borrow_mut().clear();
+        let actor = spawn_test_liquidity_actor(store.clone(), payment, chain).await;
+
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 1);
+        wait_for_event_count(&events, "validate_observed_loop_out_payout", 2).await;
+        assert_eq!(call_resume_non_terminal(actor).await, 0);
+        tokio::time::sleep(PAYOUT_VALIDATION_PERIODIC_RETRY_INTERVAL * 2).await;
+
+        let persisted_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+        let payout = store
+            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap();
+        assert!(persisted_swap
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains(validation_error));
+        assert!(payout
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains(validation_error));
+        assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 2);
         assert!(payment_requests.borrow().is_empty());
     }
 
