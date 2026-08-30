@@ -1808,6 +1808,28 @@ impl LiquidityStore for Store {
         Ok(())
     }
 
+    fn clear_liquidity_swap_failure_reason(
+        &self,
+        swap_id: &Hash256,
+        expected_reason: &str,
+        updated_at: u64,
+    ) -> Result<bool, LiquidityStoreError> {
+        let mut swap = self
+            .get_liquidity_swap(swap_id)?
+            .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+        if swap.failure_reason.as_deref() != Some(expected_reason) {
+            return Ok(false);
+        }
+
+        swap.failure_reason = None;
+        swap.updated_at = updated_at;
+        let mut batch = self.batch();
+        let primary = KeyValue::LiquiditySwap(*swap_id, swap);
+        batch.put(primary.key(), primary.value());
+        batch.commit();
+        Ok(true)
+    }
+
     fn insert_liquidity_chain_tx(
         &self,
         record: LiquidityChainTxRecord,

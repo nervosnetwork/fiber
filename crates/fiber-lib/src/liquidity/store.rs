@@ -353,6 +353,14 @@ pub trait LiquidityStore {
         update: LiquiditySwapUpdate,
     ) -> Result<(), LiquidityStoreError>;
 
+    /// Clear a swap failure only when it still matches the supplied context.
+    fn clear_liquidity_swap_failure_reason(
+        &self,
+        swap_id: &Hash256,
+        expected_reason: &str,
+        updated_at: u64,
+    ) -> Result<bool, LiquidityStoreError>;
+
     /// Insert a liquidity CKB transaction identity record.
     fn insert_liquidity_chain_tx(
         &self,

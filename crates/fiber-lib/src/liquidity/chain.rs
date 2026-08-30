@@ -2451,6 +2451,24 @@ mod tests {
             Ok(())
         }
 
+        fn clear_liquidity_swap_failure_reason(
+            &self,
+            swap_id: &Hash256,
+            expected_reason: &str,
+            updated_at: u64,
+        ) -> Result<bool, LiquidityStoreError> {
+            let mut swaps = self.swaps.lock().unwrap();
+            let swap = swaps
+                .get_mut(swap_id)
+                .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+            if swap.failure_reason.as_deref() != Some(expected_reason) {
+                return Ok(false);
+            }
+            swap.failure_reason = None;
+            swap.updated_at = updated_at;
+            Ok(true)
+        }
+
         fn insert_liquidity_chain_tx(
             &self,
             record: LiquidityChainTxRecord,
