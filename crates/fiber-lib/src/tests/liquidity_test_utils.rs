@@ -6,9 +6,10 @@ use fiber_json_types::{
     AddLiquidityAssetParams, GetSwapParams, ImportLiquidityQuoteParams, LiquidityAssetInfo,
     LiquidityChainTransaction, LiquidityChainTransactionRole, LiquidityProviderStatus,
     LiquidityQuoteEnvelope, LiquiditySwapRecord, LiquiditySwapResponse,
-    ListLiquidityChainTransactionsParams, ListLiquidityChainTransactionsResponse, LoopInParams,
-    LoopOutParams, ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams,
-    ProviderQuoteLoopOutParams, QuoteLoopInParams, SetLiquidityProviderModeParams,
+    ListLiquidityChainTransactionsParams, ListLiquidityChainTransactionsResponse,
+    ListPaymentsParams, ListPaymentsResult, LoopInParams, LoopOutParams,
+    ProviderAcceptLoopInParams, ProviderAcceptLoopOutParams, ProviderQuoteLoopOutParams,
+    QuoteLoopInParams, SetLiquidityProviderModeParams,
 };
 use jsonrpsee::{
     core::client::ClientT,
@@ -257,6 +258,24 @@ impl LiquidityNetworkNode {
         .await
     }
 
+    pub(crate) async fn list_payments_before_deadline(
+        &self,
+        deadline: Instant,
+        operation: &str,
+    ) -> Result<ListPaymentsResult, String> {
+        self.request_before_deadline(
+            deadline,
+            operation,
+            "list_payments",
+            ListPaymentsParams {
+                status: None,
+                limit: Some(500),
+                after: None,
+            },
+        )
+        .await
+    }
+
     async fn restart(&mut self) {
         self.node.restart().await;
         let (_, address) = self
@@ -277,7 +296,7 @@ impl LiquidityNetworkNode {
 /// Two interconnected nodes sharing one externally controlled mock CKB chain.
 pub(crate) struct LiquidityNetworkFixture {
     pub(crate) nodes: [LiquidityNetworkNode; 2],
-    chain: MockChainController,
+    pub(crate) chain: MockChainController,
 }
 
 impl LiquidityNetworkFixture {
@@ -304,22 +323,6 @@ impl LiquidityNetworkFixture {
 
     pub(crate) fn pending_transactions(&self) -> Vec<TransactionView> {
         self.chain.pending_transactions()
-    }
-
-    pub(crate) async fn submit_transaction(
-        &self,
-        node: usize,
-        transaction: TransactionView,
-    ) -> Hash256 {
-        let tx_hash = transaction.hash().into();
-        call!(
-            self.nodes[node].node.chain_actor,
-            CkbChainMessage::SendTx,
-            transaction
-        )
-        .expect("chain actor alive")
-        .expect("submit transaction");
-        tx_hash
     }
 
     pub(crate) fn commit(&self, tx_hash: Hash256) -> Result<(), String> {
@@ -659,20 +662,14 @@ async fn liquidity_network_fixture_chain_control_is_narrow_and_operational() {
     let rejected_tx = TransactionView::new_advanced_builder().build();
     let rejected_hash = rejected_tx.hash().into();
 
-    call!(
-        fixture.nodes[0].node.chain_actor,
-        CkbChainMessage::SendTx,
-        committed_tx
-    )
-    .expect("chain actor alive")
-    .expect("submit committed transaction");
-    call!(
-        fixture.nodes[0].node.chain_actor,
-        CkbChainMessage::SendTx,
-        rejected_tx
-    )
-    .expect("chain actor alive")
-    .expect("submit rejected transaction");
+    fixture
+        .chain
+        .submit_transaction(committed_tx)
+        .expect("submit committed transaction");
+    fixture
+        .chain
+        .submit_transaction(rejected_tx)
+        .expect("submit rejected transaction");
 
     let pending_hashes = fixture
         .pending_transactions()
@@ -717,13 +714,10 @@ async fn liquidity_network_fixture_channel_setup_rejects_unrelated_pending_trans
     let mut fixture = LiquidityNetworkFixture::new().await;
     let unrelated_tx = TransactionView::new_advanced_builder().build();
     let unrelated_hash = Hash256::from(unrelated_tx.hash());
-    call!(
-        fixture.nodes[0].node.chain_actor,
-        CkbChainMessage::SendTx,
-        unrelated_tx
-    )
-    .expect("chain actor alive")
-    .expect("submit unrelated transaction");
+    fixture
+        .chain
+        .submit_transaction(unrelated_tx)
+        .expect("submit unrelated transaction");
 
     let error = fixture
         .establish_funded_channel(MIN_RESERVED_CKB + 10_000, MIN_RESERVED_CKB)
@@ -743,7 +737,7 @@ async fn liquidity_network_fixture_channel_setup_rejects_unrelated_pending_trans
 #[tokio::test]
 async fn liquidity_network_fixture_channel_setup_ignores_concurrent_unrelated_transaction() {
     let mut fixture = LiquidityNetworkFixture::new().await;
-    let chain_actor = fixture.nodes[0].node.chain_actor.clone();
+    let chain = fixture.chain.clone();
     let unrelated_tx = TransactionView::new_advanced_builder().build();
     let unrelated_hash = Hash256::from(unrelated_tx.hash());
 
@@ -751,8 +745,8 @@ async fn liquidity_network_fixture_channel_setup_ignores_concurrent_unrelated_tr
         fixture.establish_funded_channel(MIN_RESERVED_CKB + 10_000, MIN_RESERVED_CKB),
         async move {
             tokio::task::yield_now().await;
-            call!(chain_actor, CkbChainMessage::SendTx, unrelated_tx)
-                .expect("chain actor alive")
+            chain
+                .submit_transaction(unrelated_tx)
                 .expect("submit concurrent unrelated transaction");
         }
     );
