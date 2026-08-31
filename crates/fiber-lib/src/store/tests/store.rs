@@ -920,6 +920,85 @@ fn test_store_clears_matching_payout_validation_failure_context() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_transient_validation_preserves_owned_definitive_context() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(12, LiquiditySwapState::PayoutLocked, "ckb");
+    let payout_tx_id: fiber_types::Hash256 = [13u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "definitive validation failure".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Definitive,
+            124,
+        )
+        .unwrap();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "transient validation failure".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Transient,
+            125,
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_liquidity_swap(&swap.swap_id)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("definitive validation failure")
+    );
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("transient validation failure")
+    );
+
+    assert!(store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 126)
+        .unwrap());
+
+    assert_eq!(
+        store
+            .get_liquidity_swap(&swap.swap_id)
+            .unwrap()
+            .unwrap()
+            .failure_reason,
+        None
+    );
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap()
+            .failure_reason,
+        None
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_preserves_equal_looking_unrelated_swap_failure_context() {
     let (store, _dir) = generate_store();
     let swap = mock_liquidity_swap(7, LiquiditySwapState::PayoutLocked, "ckb");
@@ -957,9 +1036,18 @@ fn test_store_preserves_equal_looking_unrelated_swap_failure_context() {
             },
         )
         .unwrap();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "later transient validation failure".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Transient,
+            126,
+        )
+        .unwrap();
 
     assert!(store
-        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 126)
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 127)
         .unwrap());
 
     let updated_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
