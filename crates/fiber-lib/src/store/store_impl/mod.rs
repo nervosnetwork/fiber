@@ -20,7 +20,7 @@ use crate::liquidity::store::{
     loop_out_quote_record_from_bytes, loop_out_quote_record_from_terms,
     loop_out_quote_terms_from_record, LiquidityStateTransition, LiquidityStore,
     LiquidityStoreError, LiquiditySwapFilter, LiquiditySwapPage, LiquiditySwapRecord,
-    LiquiditySwapUpdate,
+    LiquiditySwapUpdate, PayoutValidationFailureKind,
 };
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
@@ -75,10 +75,17 @@ pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
     invoice_write_lock: Arc<parking_lot::Mutex<()>>,
+    liquidity_write_lock: Arc<parking_lot::Mutex<()>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
     #[cfg(feature = "watchtower")]
     onchain_tlc_settlement_write_lock: Arc<parking_lot::Mutex<()>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct PayoutValidationProvenance {
+    payout_tx_id: Hash256,
+    owns_swap_failure_context: bool,
 }
 
 #[cfg(feature = "watchtower")]
@@ -159,6 +166,28 @@ impl Store {
             &[liquidity_chain_tx_role_key(role)],
         ]
         .concat()
+    }
+
+    fn payout_validation_provenance_key(swap_id: &Hash256, payout_tx_id: &Hash256) -> Vec<u8> {
+        [
+            &[LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX],
+            swap_id.as_ref(),
+            payout_tx_id.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn get_payout_validation_provenance(
+        &self,
+        swap_id: &Hash256,
+        payout_tx_id: &Hash256,
+    ) -> Result<Option<PayoutValidationProvenance>, LiquidityStoreError> {
+        self.get(Self::payout_validation_provenance_key(
+            swap_id,
+            payout_tx_id,
+        ))
+        .map(|value| deserialize_liquidity(&value, "PayoutValidationProvenance"))
+        .transpose()
     }
 
     fn liquidity_chain_tx_status_index_key(
@@ -413,6 +442,7 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
         inner: db,
         watcher: None,
         invoice_write_lock: Arc::new(parking_lot::Mutex::new(())),
+        liquidity_write_lock: Arc::new(parking_lot::Mutex::new(())),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -438,6 +468,7 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         inner: db,
         watcher: None,
         invoice_write_lock: Arc::new(parking_lot::Mutex::new(())),
+        liquidity_write_lock: Arc::new(parking_lot::Mutex::new(())),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -562,6 +593,13 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 check_deserialization::<Vec<u8>>(
                     &value,
                     "LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX => {
+                check_deserialization::<PayoutValidationProvenance>(
+                    &value,
+                    "LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX",
                     &mut errors,
                 );
             }
@@ -1754,6 +1792,7 @@ impl LiquidityStore for Store {
         swap_id: &Hash256,
         transition: LiquidityStateTransition,
     ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
         let mut swap = self
             .get_liquidity_swap(swap_id)?
             .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
@@ -1772,6 +1811,22 @@ impl LiquidityStore for Store {
         }
 
         let mut batch = self.batch();
+        if transition.state == LiquiditySwapState::Failed {
+            if let Some(payout) =
+                self.get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            {
+                let key = Self::payout_validation_provenance_key(swap_id, &payout.tx_hash);
+                if let Some(mut provenance) =
+                    self.get_payout_validation_provenance(swap_id, &payout.tx_hash)?
+                {
+                    provenance.owns_swap_failure_context = false;
+                    batch.put(
+                        key,
+                        serialize_to_vec(&provenance, "PayoutValidationProvenance"),
+                    );
+                }
+            }
+        }
         batch.delete(Self::liquidity_swap_state_index_key(old_state, swap_id));
         let primary = KeyValue::LiquiditySwap(*swap_id, swap.clone());
         let state_index = KeyValue::LiquiditySwapStateIndex((swap.state, *swap_id));
@@ -1786,6 +1841,8 @@ impl LiquidityStore for Store {
         swap_id: &Hash256,
         update: LiquiditySwapUpdate,
     ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let overwrites_failure_context = update.failure_reason.is_some();
         let mut swap = self
             .get_liquidity_swap(swap_id)?
             .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
@@ -1802,30 +1859,119 @@ impl LiquidityStore for Store {
         swap.updated_at = update.updated_at;
 
         let mut batch = self.batch();
+        if overwrites_failure_context {
+            if let Some(payout) =
+                self.get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            {
+                let key = Self::payout_validation_provenance_key(swap_id, &payout.tx_hash);
+                if let Some(mut provenance) =
+                    self.get_payout_validation_provenance(swap_id, &payout.tx_hash)?
+                {
+                    provenance.owns_swap_failure_context = false;
+                    batch.put(
+                        key,
+                        serialize_to_vec(&provenance, "PayoutValidationProvenance"),
+                    );
+                }
+            }
+        }
         let primary = KeyValue::LiquiditySwap(*swap_id, swap);
         batch.put(primary.key(), primary.value());
         batch.commit();
         Ok(())
     }
 
-    fn clear_liquidity_swap_failure_reason(
+    fn persist_payout_validation_failure_context(
         &self,
         swap_id: &Hash256,
-        expected_reason: &str,
+        payout_tx_id: &Hash256,
+        reason: String,
+        kind: PayoutValidationFailureKind,
+        updated_at: u64,
+    ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let mut payout = self
+            .get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "payout chain tx not found for swap {swap_id:?}"
+                ))
+            })?;
+        if payout.tx_hash != *payout_tx_id || payout.status != LiquidityChainTxStatus::Confirmed {
+            return Err(LiquidityStoreError::Backend(format!(
+                "payout validation context requires matching confirmed payout tx for swap {swap_id:?}"
+            )));
+        }
+
+        let owns_swap_failure_context = kind == PayoutValidationFailureKind::Definitive;
+        payout.failure_reason = Some(reason.clone());
+        payout.updated_at = updated_at;
+        let provenance = PayoutValidationProvenance {
+            payout_tx_id: *payout_tx_id,
+            owns_swap_failure_context,
+        };
+        let mut batch = self.batch();
+        let payout = KeyValue::LiquidityChainTx((*swap_id, LiquidityChainTxRole::Payout), payout);
+        batch.put(payout.key(), payout.value());
+        if owns_swap_failure_context {
+            let mut swap = self
+                .get_liquidity_swap(swap_id)?
+                .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+            swap.failure_reason = Some(reason);
+            swap.updated_at = updated_at;
+            let swap = KeyValue::LiquiditySwap(*swap_id, swap);
+            batch.put(swap.key(), swap.value());
+        }
+        batch.put(
+            Self::payout_validation_provenance_key(swap_id, payout_tx_id),
+            serialize_to_vec(&provenance, "PayoutValidationProvenance"),
+        );
+        batch.commit();
+        Ok(())
+    }
+
+    fn clear_payout_validation_failure_context(
+        &self,
+        swap_id: &Hash256,
+        payout_tx_id: &Hash256,
         updated_at: u64,
     ) -> Result<bool, LiquidityStoreError> {
-        let mut swap = self
-            .get_liquidity_swap(swap_id)?
-            .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
-        if swap.failure_reason.as_deref() != Some(expected_reason) {
+        let _guard = self.liquidity_write_lock.lock();
+        let Some(provenance) = self.get_payout_validation_provenance(swap_id, payout_tx_id)? else {
+            return Ok(false);
+        };
+        let mut payout = self
+            .get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "payout chain tx not found for swap {swap_id:?}"
+                ))
+            })?;
+        if provenance.payout_tx_id != *payout_tx_id
+            || payout.tx_hash != *payout_tx_id
+            || payout.status != LiquidityChainTxStatus::Confirmed
+        {
             return Ok(false);
         }
 
-        swap.failure_reason = None;
-        swap.updated_at = updated_at;
+        payout.failure_reason = None;
+        payout.updated_at = updated_at;
         let mut batch = self.batch();
-        let primary = KeyValue::LiquiditySwap(*swap_id, swap);
-        batch.put(primary.key(), primary.value());
+        let payout = KeyValue::LiquidityChainTx((*swap_id, LiquidityChainTxRole::Payout), payout);
+        batch.put(payout.key(), payout.value());
+        if provenance.owns_swap_failure_context {
+            let mut swap = self
+                .get_liquidity_swap(swap_id)?
+                .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+            swap.failure_reason = None;
+            swap.updated_at = updated_at;
+            let swap = KeyValue::LiquiditySwap(*swap_id, swap);
+            batch.put(swap.key(), swap.value());
+        }
+        batch.delete(Self::payout_validation_provenance_key(
+            swap_id,
+            payout_tx_id,
+        ));
         batch.commit();
         Ok(true)
     }
@@ -1905,6 +2051,7 @@ impl LiquidityStore for Store {
         failure_reason: Option<String>,
         updated_at: u64,
     ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
         let mut record = self.get_liquidity_chain_tx(swap_id, role)?.ok_or_else(|| {
             LiquidityStoreError::Backend(format!(
                 "liquidity chain tx not found for swap {:?} role {:?}",
@@ -1917,6 +2064,12 @@ impl LiquidityStore for Store {
         record.updated_at = updated_at;
 
         let mut batch = self.batch();
+        if role == LiquidityChainTxRole::Payout {
+            batch.delete(Self::payout_validation_provenance_key(
+                swap_id,
+                &record.tx_hash,
+            ));
+        }
         batch.delete(Self::liquidity_chain_tx_status_index_key(
             old_status, swap_id, role,
         ));

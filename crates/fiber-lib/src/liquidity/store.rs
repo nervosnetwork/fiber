@@ -302,6 +302,15 @@ pub struct LiquiditySwapUpdate {
     pub updated_at: u64,
 }
 
+/// Durable payout validation failure context scope.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum PayoutValidationFailureKind {
+    /// Record a retryable validation failure on the payout transaction only.
+    Transient,
+    /// Record a definitive validation failure on both payout and swap records.
+    Definitive,
+}
+
 /// Store interface required by liquidity swap execution and recovery.
 pub trait LiquidityStore {
     /// Persist provider-generated Loop Out quote terms.
@@ -353,11 +362,21 @@ pub trait LiquidityStore {
         update: LiquiditySwapUpdate,
     ) -> Result<(), LiquidityStoreError>;
 
-    /// Clear a swap failure only when it still matches the supplied context.
-    fn clear_liquidity_swap_failure_reason(
+    /// Atomically persist validation-owned failure context for a confirmed payout transaction.
+    fn persist_payout_validation_failure_context(
         &self,
         swap_id: &Hash256,
-        expected_reason: &str,
+        payout_tx_id: &Hash256,
+        reason: String,
+        kind: PayoutValidationFailureKind,
+        updated_at: u64,
+    ) -> Result<(), LiquidityStoreError>;
+
+    /// Atomically clear context owned by the identified confirmed payout validation.
+    fn clear_payout_validation_failure_context(
+        &self,
+        swap_id: &Hash256,
+        payout_tx_id: &Hash256,
         updated_at: u64,
     ) -> Result<bool, LiquidityStoreError>;
 
