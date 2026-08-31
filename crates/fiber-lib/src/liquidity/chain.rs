@@ -2254,7 +2254,7 @@ mod tests {
     use crate::liquidity::store::{
         LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
         LiquiditySwapKind, LiquiditySwapPage, LiquiditySwapRecord, LiquiditySwapRole,
-        LiquiditySwapUpdate,
+        LiquiditySwapUpdate, PayoutValidationFailureKind,
     };
 
     struct AsyncLiquidityChainWatcher;
@@ -2451,22 +2451,24 @@ mod tests {
             Ok(())
         }
 
-        fn clear_liquidity_swap_failure_reason(
+        fn persist_payout_validation_failure_context(
             &self,
-            swap_id: &Hash256,
-            expected_reason: &str,
-            updated_at: u64,
+            _swap_id: &Hash256,
+            _payout_tx_id: &Hash256,
+            _reason: String,
+            _kind: PayoutValidationFailureKind,
+            _updated_at: u64,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("unused".to_string()))
+        }
+
+        fn clear_payout_validation_failure_context(
+            &self,
+            _swap_id: &Hash256,
+            _payout_tx_id: &Hash256,
+            _updated_at: u64,
         ) -> Result<bool, LiquidityStoreError> {
-            let mut swaps = self.swaps.lock().unwrap();
-            let swap = swaps
-                .get_mut(swap_id)
-                .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
-            if swap.failure_reason.as_deref() != Some(expected_reason) {
-                return Ok(false);
-            }
-            swap.failure_reason = None;
-            swap.updated_at = updated_at;
-            Ok(true)
+            Err(LiquidityStoreError::Backend("unused".to_string()))
         }
 
         fn insert_liquidity_chain_tx(

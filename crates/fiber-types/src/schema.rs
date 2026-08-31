@@ -29,6 +29,7 @@
 //! | 245          | Hash256 | role       | LiquidityChainTxRecord      |
 //! | 246          | status | Hash256 | role | ()                       |
 //! | 247          | Hash256 | role       | LiquidityChainTxSignedTx    |
+//! | 248          | Hash256 | Hash256    | PayoutValidationProvenance |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -75,3 +76,4 @@ pub const LIQUIDITY_LOOP_OUT_QUOTE_PREFIX: u8 = 244;
 pub const LIQUIDITY_CHAIN_TX_PREFIX: u8 = 245;
 pub const LIQUIDITY_CHAIN_TX_STATUS_PREFIX: u8 = 246;
 pub const LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX: u8 = 247;
+pub const LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX: u8 = 248;

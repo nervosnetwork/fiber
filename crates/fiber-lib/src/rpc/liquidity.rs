@@ -691,7 +691,7 @@ mod tests {
     use crate::liquidity::actor::LiquidityActorMessage;
     use crate::liquidity::store::{
         LiquidityStateTransition, LiquidityStoreError, LiquiditySwapPage, LiquiditySwapRole,
-        LiquiditySwapUpdate,
+        LiquiditySwapUpdate, PayoutValidationFailureKind,
     };
 
     #[derive(Default)]
@@ -806,10 +806,21 @@ mod tests {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))
         }
 
-        fn clear_liquidity_swap_failure_reason(
+        fn persist_payout_validation_failure_context(
             &self,
             _swap_id: &Hash256,
-            _expected_reason: &str,
+            _payout_tx_id: &Hash256,
+            _reason: String,
+            _kind: PayoutValidationFailureKind,
+            _updated_at: u64,
+        ) -> Result<(), LiquidityStoreError> {
+            Err(LiquidityStoreError::Backend("not implemented".to_string()))
+        }
+
+        fn clear_payout_validation_failure_context(
+            &self,
+            _swap_id: &Hash256,
+            _payout_tx_id: &Hash256,
             _updated_at: u64,
         ) -> Result<bool, LiquidityStoreError> {
             Err(LiquidityStoreError::Backend("not implemented".to_string()))

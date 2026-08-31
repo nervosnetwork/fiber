@@ -878,26 +878,182 @@ fn test_store_liquidity_swap_update_preserves_none_fields() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-fn test_store_clears_only_matching_liquidity_swap_failure_reason() {
+fn test_store_clears_matching_payout_validation_failure_context() {
     let (store, _dir) = generate_store();
-    let mut swap = mock_liquidity_swap(6, LiquiditySwapState::PayoutLocked, "ckb");
-    swap.failure_reason = Some("payout validation failed".to_string());
+    let swap = mock_liquidity_swap(6, LiquiditySwapState::PayoutLocked, "ckb");
     store.insert_liquidity_swap(swap.clone()).unwrap();
+    let payout_tx_id: fiber_types::Hash256 = [7u8; 32].into();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "payout validation failed".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Definitive,
+            124,
+        )
+        .unwrap();
+    assert!(store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 125)
+        .unwrap());
+
+    let updated_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    let updated_payout = store
+        .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+        .unwrap();
+    assert_eq!(updated_swap.failure_reason, None);
+    assert_eq!(updated_swap.updated_at, 125);
+    assert_eq!(updated_payout.unwrap().failure_reason, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_preserves_equal_looking_unrelated_swap_failure_context() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(7, LiquiditySwapState::PayoutLocked, "ckb");
+    let payout_tx_id: fiber_types::Hash256 = [8u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+    let reason = "same visible failure text".to_string();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            reason.clone(),
+            crate::liquidity::store::PayoutValidationFailureKind::Definitive,
+            124,
+        )
+        .unwrap();
+    store
+        .update_liquidity_swap(
+            &swap.swap_id,
+            LiquiditySwapUpdate {
+                failure_reason: Some(reason.clone()),
+                updated_at: 125,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 126)
+        .unwrap());
+
+    let updated_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    let updated_payout = store
+        .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_swap.failure_reason, Some(reason));
+    assert_eq!(updated_payout.failure_reason, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_payout_validation_cleanup_ignores_unrelated_payout_and_claim_records() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(8, LiquiditySwapState::PayoutLocked, "ckb");
+    let payout_tx_id: fiber_types::Hash256 = [9u8; 32].into();
+    let unrelated_tx_id: fiber_types::Hash256 = [10u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    for (role, tx_hash) in [
+        (fiber_types::LiquidityChainTxRole::Payout, payout_tx_id),
+        (fiber_types::LiquidityChainTxRole::Claim, unrelated_tx_id),
+    ] {
+        store
+            .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+                swap_id: swap.swap_id,
+                role,
+                tx_hash,
+                outpoint: None,
+                status: fiber_types::LiquidityChainTxStatus::Confirmed,
+                failure_reason: Some("unrelated chain failure".to_string()),
+                created_at: 123,
+                updated_at: 123,
+            })
+            .unwrap();
+    }
 
     assert!(!store
-        .clear_liquidity_swap_failure_reason(&swap.swap_id, "unrelated failure", 124)
+        .clear_payout_validation_failure_context(&swap.swap_id, &unrelated_tx_id, 124)
+        .unwrap());
+
+    for role in [
+        fiber_types::LiquidityChainTxRole::Payout,
+        fiber_types::LiquidityChainTxRole::Claim,
+    ] {
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&swap.swap_id, role)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .as_deref(),
+            Some("unrelated chain failure")
+        );
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_payout_validation_cleanup_without_provenance_is_noop() {
+    let (store, _dir) = generate_store();
+    let mut swap = mock_liquidity_swap(9, LiquiditySwapState::PayoutLocked, "ckb");
+    swap.failure_reason = Some("legacy equal-looking reason".to_string());
+    let payout_tx_id: fiber_types::Hash256 = [11u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: Some("legacy equal-looking reason".to_string()),
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+
+    assert!(!store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 124)
         .unwrap());
     assert_eq!(
         store.get_liquidity_swap(&swap.swap_id).unwrap(),
         Some(swap.clone())
     );
-
-    assert!(store
-        .clear_liquidity_swap_failure_reason(&swap.swap_id, "payout validation failed", 125)
-        .unwrap());
-    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
-    assert_eq!(updated.failure_reason, None);
-    assert_eq!(updated.updated_at, 125);
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout,)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("legacy equal-looking reason")
+    );
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
