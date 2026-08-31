@@ -21,6 +21,7 @@ use crate::fiber::{
 use crate::gen_rand_channel_outpoint;
 use crate::gen_rand_fiber_private_key;
 use crate::gen_rand_fiber_public_key;
+use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
@@ -56,14 +57,13 @@ use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
-use secp256k1::{Keypair, SECP256K1};
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;
 
 fn gen_rand_local_signer() -> LocalSigner {
-    let keypair = Keypair::new(SECP256K1, &mut rand::thread_rng());
-    LocalSigner::new(keypair.secret_key())
+    let (secret_key, _) = gen_rand_secp256k1_keypair_tuple();
+    LocalSigner::new(secret_key)
 }
 
 fn mock_node() -> (Privkey, NodeAnnouncement) {

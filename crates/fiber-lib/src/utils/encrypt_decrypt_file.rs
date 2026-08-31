@@ -24,8 +24,8 @@ pub fn encrypt_to_file<P: AsRef<Path>>(
 ) -> Result<(), String> {
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut salt);
+    rand::rng().fill_bytes(&mut nonce);
 
     let key = derive_key_from_password(password, &salt);
     let cipher = Aes256Gcm::new(&key);

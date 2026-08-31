@@ -11,6 +11,7 @@ use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{TrampolineHopPayload, TrampolineOnionPacket};
 use crate::fiber::{FeatureVector, PaymentStatus, Privkey, Pubkey};
 use crate::gen_rand_fiber_public_key;
+use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::invoice::{Currency, InvoiceBuilder, InvoiceStore, PreimageStore};
 use crate::tests::test_utils::*;
 use crate::{
@@ -1998,7 +1999,7 @@ async fn test_trampoline_forwarding_rejects_missing_previous_tlc() {
     let node_b = &nodes[1];
     let payment_hash = gen_rand_sha256_hash();
 
-    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
+    let (_sk, pk) = gen_rand_secp256k1_keypair_tuple();
     let final_target: Pubkey = pk.into();
     let payloads = vec![
         TrampolineHopPayload::Forward {
@@ -2147,7 +2148,7 @@ async fn test_trampoline_forwarding_fee_insufficient_manual_packet() {
 
     // 1. Construct Trampoline Onion for B
     // B should forward 1000 to some final target.
-    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
+    let (_sk, pk) = gen_rand_secp256k1_keypair_tuple();
     let final_target: Pubkey = pk.into();
 
     let forward_payload = TrampolineHopPayload::Forward {
@@ -2248,7 +2249,7 @@ async fn test_trampoline_forwarding_fee_insufficient_equal_amount() {
     let payment_hash = gen_rand_sha256_hash();
 
     // Construct Trampoline Onion for B
-    let (_sk, pk) = SECP256K1.generate_keypair(&mut rand::thread_rng());
+    let (_sk, pk) = gen_rand_secp256k1_keypair_tuple();
     let final_target: Pubkey = pk.into();
 
     let forward_payload = TrampolineHopPayload::Forward {
@@ -3548,7 +3549,7 @@ async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     let payment_hash = gen_rand_sha256_hash();
 
     fn gen_rand_session_key() -> crate::fiber::Privkey {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut key = [0u8; 32];
         rng.fill(&mut key);
         key.into()
@@ -3638,7 +3639,7 @@ async fn test_trampoline_forward_invalid_amount_in_onion_packet() {
     let payment_hash = gen_rand_sha256_hash();
 
     fn gen_rand_session_key() -> crate::fiber::Privkey {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut key = [0u8; 32];
         rng.fill(&mut key);
         key.into()
