@@ -10,7 +10,7 @@ pub struct KeyPair([u8; 32]);
 
 use tentacle::secio::SecioKeyPair;
 
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use std::io::{Error, ErrorKind, Read, Write};
 
 use fiber_types::Privkey;
@@ -19,7 +19,7 @@ impl KeyPair {
     pub fn generate_random_key() -> Self {
         loop {
             let mut key: [u8; 32] = [0; 32];
-            thread_rng().fill(&mut key);
+            rng().fill(&mut key);
             if Self::try_from(key.as_slice()).is_ok() {
                 return Self(key);
             }

@@ -2642,7 +2642,7 @@ dependencies = [
  "parking_lot",
  "pprof",
  "ractor",
- "rand 0.8.6",
+ "rand 0.9.4",
  "regex",
  "scrypt",
  "secp256k1 0.30.0",

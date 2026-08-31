@@ -155,11 +155,11 @@ fn build_graph_for_find_path_bench(
             }
 
             // Connect to 2 random nodes in next layer
-            let num_connections = rng.gen_range(1..=2.min(next_layer_nodes.len()));
+            let num_connections = rng.random_range(1..=2.min(next_layer_nodes.len()));
             let mut selected: HashSet<usize> = HashSet::new();
 
             while selected.len() < num_connections {
-                let idx = rng.gen_range(0..next_layer_nodes.len());
+                let idx = rng.random_range(0..next_layer_nodes.len());
                 selected.insert(next_layer_nodes[idx]);
             }
 
@@ -170,7 +170,7 @@ fn build_graph_for_find_path_bench(
                     (node_b, node_a)
                 };
                 if used_pairs.insert((low, high)) {
-                    let capacity = MIN_RESERVED_CKB + rng.gen_range(1000..20000);
+                    let capacity = MIN_RESERVED_CKB + rng.random_range(1000..20000);
                     edges.push((low, high, capacity));
                 }
             }
@@ -191,8 +191,8 @@ fn build_graph_for_find_path_bench(
             if edges.len() >= channel_count {
                 break;
             }
-            let idx_a = rng.gen_range(0..layer_nodes.len());
-            let idx_b = rng.gen_range(0..layer_nodes.len());
+            let idx_a = rng.random_range(0..layer_nodes.len());
+            let idx_b = rng.random_range(0..layer_nodes.len());
             if idx_a == idx_b {
                 continue;
             }
@@ -204,7 +204,7 @@ fn build_graph_for_find_path_bench(
                 (node_b, node_a)
             };
             if used_pairs.insert((low, high)) {
-                let capacity = MIN_RESERVED_CKB + rng.gen_range(1000..3000);
+                let capacity = MIN_RESERVED_CKB + rng.random_range(1000..3000);
                 edges.push((low, high, capacity));
             }
         }
@@ -213,10 +213,10 @@ fn build_graph_for_find_path_bench(
     // Step 3: Fill remaining capacity with random edges
     // Prefer connections between adjacent or nearby layers
     while edges.len() < channel_count {
-        let layer_a = rng.gen_range(0..num_layers);
+        let layer_a = rng.random_range(0..num_layers);
         // Prefer connecting to nearby layers (within 1-2 hops)
-        let layer_distance = rng.gen_range(1..=2);
-        let layer_b = if rng.gen_bool(0.5) {
+        let layer_distance = rng.random_range(1..=2);
+        let layer_b = if rng.random_bool(0.5) {
             layer_a.saturating_add(layer_distance).min(num_layers - 1)
         } else {
             layer_a.saturating_sub(layer_distance)
@@ -229,8 +229,8 @@ fn build_graph_for_find_path_bench(
             continue;
         }
 
-        let node_a = nodes_a[rng.gen_range(0..nodes_a.len())];
-        let node_b = nodes_b[rng.gen_range(0..nodes_b.len())];
+        let node_a = nodes_a[rng.random_range(0..nodes_a.len())];
+        let node_b = nodes_b[rng.random_range(0..nodes_b.len())];
 
         if node_a == node_b {
             continue;
@@ -242,7 +242,7 @@ fn build_graph_for_find_path_bench(
             (node_b, node_a)
         };
         if used_pairs.insert((low, high)) {
-            let capacity = MIN_RESERVED_CKB + rng.gen_range(500..4000);
+            let capacity = MIN_RESERVED_CKB + rng.random_range(500..4000);
             edges.push((low, high, capacity));
         }
     }
