@@ -1903,7 +1903,12 @@ impl LiquidityStore for Store {
             )));
         }
 
-        let owns_swap_failure_context = kind == PayoutValidationFailureKind::Definitive;
+        let owns_swap_failure_context = kind == PayoutValidationFailureKind::Definitive
+            || self
+                .get_payout_validation_provenance(swap_id, payout_tx_id)?
+                .is_some_and(|provenance| {
+                    provenance.payout_tx_id == *payout_tx_id && provenance.owns_swap_failure_context
+                });
         payout.failure_reason = Some(reason.clone());
         payout.updated_at = updated_at;
         let provenance = PayoutValidationProvenance {
@@ -1913,7 +1918,7 @@ impl LiquidityStore for Store {
         let mut batch = self.batch();
         let payout = KeyValue::LiquidityChainTx((*swap_id, LiquidityChainTxRole::Payout), payout);
         batch.put(payout.key(), payout.value());
-        if owns_swap_failure_context {
+        if kind == PayoutValidationFailureKind::Definitive {
             let mut swap = self
                 .get_liquidity_swap(swap_id)?
                 .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;

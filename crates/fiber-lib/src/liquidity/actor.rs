@@ -3599,10 +3599,16 @@ mod tests {
                     "payout validation context requires matching confirmed payout tx".to_string(),
                 ));
             }
-            let owns_swap_context = kind == PayoutValidationFailureKind::Definitive;
+            let owns_swap_context = kind == PayoutValidationFailureKind::Definitive
+                || self
+                    .payout_validation_provenance
+                    .borrow()
+                    .get(&(*swap_id, *payout_tx_id))
+                    .copied()
+                    .unwrap_or(false);
             payout.failure_reason = Some(reason.clone());
             payout.updated_at = updated_at;
-            if owns_swap_context {
+            if kind == PayoutValidationFailureKind::Definitive {
                 let mut swaps = self.swaps.borrow_mut();
                 let swap = swaps
                     .get_mut(swap_id)
@@ -9997,6 +10003,50 @@ mod tests {
             TestLiquidityChain::new(events.clone()),
         )
         .await;
+        assert_eq!(call_resume_non_terminal(restarted_actor).await, 1);
+        wait_for_event(&events, "payment_send").await;
+
+        let recovered = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+        let payout = store
+            .get_liquidity_chain_tx(&swap.swap_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.failure_reason, None);
+        assert_eq!(payout.failure_reason, None);
+        assert_eq!(payment_requests.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_transient_validation_preserves_definitive_context_until_success() {
+        let events = Shared::new(Vec::new());
+        let store = TestLiquidityStore::new(events.clone(), "client");
+        let (swap, _) = insert_recovered_client_payout_locked(&store, 73);
+        let mut invalid_chain = TestLiquidityChain::new(events.clone());
+        invalid_chain.reject_observed_loop_out_payout_with("payout amount mismatch");
+        let first_actor = spawn_test_liquidity_actor(
+            store.clone(),
+            TestLoopOutPayment::new(events.clone()),
+            invalid_chain,
+        )
+        .await;
+
+        call_resume_non_terminal(first_actor.clone()).await;
+        wait_for_event(&events, "validate_observed_loop_out_payout").await;
+        first_actor.stop(Some("simulate restart".to_string()));
+        events.borrow_mut().clear();
+
+        let mut recovered_chain = TestLiquidityChain::new(events.clone());
+        recovered_chain.set_observed_loop_out_payout_results(vec![
+            Err(PayoutValidationError::Transient(
+                "temporary ckb rpc failure".to_string(),
+            )),
+            Ok(()),
+        ]);
+        let payment = TestLoopOutPayment::new(events.clone());
+        let payment_requests = payment.requests.clone();
+        let restarted_actor =
+            spawn_test_liquidity_actor(store.clone(), payment, recovered_chain).await;
+
         assert_eq!(call_resume_non_terminal(restarted_actor).await, 1);
         wait_for_event(&events, "payment_send").await;
 
