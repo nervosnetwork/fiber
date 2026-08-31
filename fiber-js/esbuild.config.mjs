@@ -17,6 +17,9 @@ await esbuild.build({
         "esnext"
     ],
     platform: "browser",
+    loader: {
+        ".yml": "text"
+    },
     sourcemap: true,
     format: "esm",
     globalName: "CkbLightClient",

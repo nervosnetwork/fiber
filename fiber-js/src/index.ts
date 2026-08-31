@@ -2,6 +2,7 @@
 import DbWorker from "./db.worker.ts";
 import FiberWorker from "./fiber.worker.ts";
 import { Mutex } from "async-mutex";
+import { getDefaultConfig } from "./default-config.ts";
 import { DbWorkerInitializationOptions, FiberInvokeRequest, FiberInvokeResponse, FiberWorkerInitializationOptions } from "./types/general.ts";
 import { AbandonChannelParams, AcceptChannelParams, AcceptChannelResult, ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult, OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult, ShutdownChannelParams, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, UpdateChannelParams } from "./types/channel.ts";
 import { GraphChannelsParams, GraphChannelsResult, GraphNodesParams, GraphNodesResult } from "./types/graph.ts";
@@ -74,8 +75,17 @@ class Fiber {
             this.fiberWorker.onmessage = () => res();
             this.fiberWorker.onerror = (evt) => rej(evt);
         });
-
     }
+
+    /**
+     * Build a browser-compatible mainnet or testnet configuration.
+     * @param network Fiber network whose bundled configuration should be used
+     * @param ckbRpcUrl Trusted CKB RPC endpoint used by the browser
+     */
+    getDefaultConfig(network: "mainnet" | "testnet", ckbRpcUrl: string): string {
+        return getDefaultConfig(network, ckbRpcUrl);
+    }
+
     invokeCommand(name: string, args?: any[]): Promise<any> {
         // Why use lock here?
         // fiber-wasm provided async APIs. Use lock here to avoid mixture of different calls
