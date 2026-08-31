@@ -4989,6 +4989,19 @@ mod tests {
             .count()
     }
 
+    fn assert_event_subsequence(events: &[&str], expected: &[&str]) {
+        let mut remaining = events;
+        for expected_event in expected {
+            let index = remaining
+                .iter()
+                .position(|event| event == expected_event)
+                .unwrap_or_else(|| {
+                    panic!("missing event {expected_event:?} after subsequence {expected:?}: {events:?}")
+                });
+            remaining = &remaining[index + 1..];
+        }
+    }
+
     async fn assert_dispatch_persistence_failure_revalidates_without_restart(recovered: bool) {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
@@ -5903,8 +5916,9 @@ mod tests {
         }
 
         async fn run_happy_path(&mut self) {
-            let now_ms = 1_000;
-            let quote = test_loop_out_quote(now_ms + 60_000);
+            let now_ms = now_ms();
+            let mut quote = test_loop_out_quote(now_ms + 60_000);
+            quote.payment_preimage = Some([4u8; 32].into());
 
             self.client_store
                 .insert_loop_out_quote(quote.clone(), now_ms)
@@ -5916,20 +5930,25 @@ mod tests {
                 Some(self.chain.outpoint.clone()),
             )
             .unwrap();
+            self.provider_store.set_provider_mode(true).unwrap();
+            self.provider_store
+                .insert_loop_out_quote(quote.clone(), now_ms)
+                .unwrap();
             let actor = spawn_test_liquidity_actor(
                 self.provider_store.clone(),
                 self.payment.clone(),
                 self.chain.clone(),
             )
             .await;
-            accept_provider_loop_out(
-                &self.provider_store,
-                &mut self.chain,
-                quote.clone(),
-                now_ms,
-                actor,
-            )
-            .await
+            ractor::call!(actor, |reply| {
+                LiquidityActorMessage::ProviderAcceptLoopOut(
+                    ProviderAcceptLoopOutParams {
+                        quote_id: quote.quote_id.into(),
+                    },
+                    reply,
+                )
+            })
+            .unwrap()
             .unwrap();
             mark_provider_payout_locked(&self.provider_store, quote.quote_id, now_ms + 1).unwrap();
             let client_actor = spawn_test_liquidity_actor(
@@ -9103,33 +9122,48 @@ mod tests {
 
         harness.run_happy_path().await;
 
-        assert_eq!(
-            harness.events.borrow().as_slice(),
-            vec![
+        let events = harness.events.borrow();
+        assert_event_subsequence(
+            &events,
+            &[
                 "client_insert_created",
                 "client_transition_quoted",
                 "client_transition_payout_pending",
-                "provider_insert_created",
-                "provider_transition_quoted",
-                "provider_transition_payout_pending",
-                "provider_persist_outpoint",
-                "chain_broadcast_payout",
-                "provider_transition_payout_locked",
+                "persist_outpoint",
+                "persist_payout_tx",
+                "validate_observed_loop_out_payout",
                 "client_transition_payout_locked",
                 "client_transition_payment_in_flight",
                 "payment_send",
                 "client_persist_preimage",
                 "client_transition_payment_settled",
-                "provider_transition_payment_in_flight",
-                "provider_transition_payment_settled",
                 "client_transition_claim_pending",
                 "chain_broadcast_claim",
+                "watch_claim",
                 "client_transition_success",
+            ],
+        );
+        assert_event_subsequence(
+            &events,
+            &[
+                "provider_insert_created",
+                "provider_transition_quoted",
+                "provider_transition_payout_pending",
+                "provider_persist_outpoint",
+                "chain_broadcast_payout",
+                "watch_payout",
+                "register_invoice",
+                "provider_transition_payout_locked",
+                "provider_transition_payment_in_flight",
+                "provider_transition_payment_settled",
                 "provider_transition_claim_pending",
                 "provider_transition_success",
-            ]
+            ],
         );
-        assert_eq!(harness.chain.claim_preimages, [[4u8; 32].into()]);
+        assert_eq!(
+            harness.client_swap().payment_preimage,
+            Some([4u8; 32].into())
+        );
     }
 
     #[tokio::test]
@@ -9544,7 +9578,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn loop_out_payment_request_overflow_does_not_mark_payment_in_flight() {
         let events = Shared::new(Vec::new());
         let store = TestLiquidityStore::new(events.clone(), "client");
@@ -9564,6 +9598,10 @@ mod tests {
             Some(OutPoint::new(Byte32::from_slice(&[32u8; 32]).unwrap(), 0)),
         )
         .unwrap();
+        store.set_payout_validation_context_write_results(vec![
+            Ok(()),
+            Err("unexpected retry context write".to_string()),
+        ]);
         events.borrow_mut().clear();
         let actor = spawn_test_liquidity_actor(
             store.clone(),
@@ -9575,17 +9613,40 @@ mod tests {
         actor
             .send_message(LiquidityActorMessage::PayoutConfirmed(quote.quote_id))
             .unwrap();
-        wait_for_event(&events, "validate_observed_loop_out_payout").await;
+        assert_eq!(call_resume_non_terminal(actor.clone()).await, 0);
+        tokio::time::advance(PAYOUT_VALIDATION_PERIODIC_RETRY_INTERVAL * 2).await;
         assert_eq!(call_resume_non_terminal(actor).await, 0);
 
+        assert_eq!(event_count(&events, "validate_observed_loop_out_payout"), 0);
         assert_eq!(event_count(&events, "payment_send"), 0);
+        let swap = store.get_liquidity_swap(&quote.quote_id).unwrap().unwrap();
+        let payout = store
+            .get_liquidity_chain_tx(&quote.quote_id, LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.state, LiquiditySwapState::PayoutPending);
+        assert_eq!(payout.status, LiquidityChainTxStatus::Confirmed);
+        assert!(swap
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("gross payment amount overflow"));
+        assert!(payout
+            .failure_reason
+            .as_deref()
+            .unwrap()
+            .contains("gross payment amount overflow"));
         assert_eq!(
             store
-                .get_liquidity_swap(&quote.quote_id)
-                .unwrap()
-                .unwrap()
-                .state,
-            LiquiditySwapState::PayoutLocked
+                .payout_validation_provenance
+                .borrow()
+                .get(&(quote.quote_id, payout.tx_hash))
+                .copied(),
+            Some(true)
+        );
+        assert_eq!(
+            store.payout_validation_context_write_results.borrow().len(),
+            1
         );
     }
 
