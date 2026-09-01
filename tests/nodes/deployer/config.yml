@@ -11,6 +11,7 @@ fiber:
 
 rpc:
   listening_addr: 127.0.0.1:41716
+  # udt-init enables liquidity only for the dedicated provider/client nodes 1 and 2.
   enabled_modules:
     - cch
     - channel
