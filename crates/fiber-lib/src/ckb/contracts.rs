@@ -184,7 +184,8 @@ impl ContractsContext {
             }
             _ => {
                 info!("Creating ContractsContext for dev");
-                // index from 5 ~ 8 are the default contracts: CkbAuth, FundingLock, CommitmentLock, SimpleUDT
+                // Dev genesis contract outputs are CkbAuth (5), FundingLock (6),
+                // CommitmentLock (7), SimpleUDT (8), XUDT (9), and LiquidityLock (10).
                 let ckb_auth_cell_dep = CellDep::new_builder()
                     .out_point(
                         OutPoint::new_builder()
@@ -200,6 +201,7 @@ impl ContractsContext {
                     (Contract::FundingLock, 6u32),
                     (Contract::CommitmentLock, 7u32),
                     (Contract::SimpleUDT, 8u32),
+                    (Contract::LiquidityLock, 10u32),
                 ];
                 for (contract, index) in contract_map.into_iter() {
                     let cell_dep = CellDep::new_builder()
@@ -526,7 +528,7 @@ mod tests {
             .code_hash([1u8; 32].pack())
             .hash_type(ScriptHashType::Data2)
             .build();
-        let outputs = (0..9)
+        let outputs = (0..11)
             .map(|index| {
                 let mut builder = CellOutput::new_builder().capacity(100u64);
                 if index == 1 {
@@ -535,7 +537,7 @@ mod tests {
                 builder.build()
             })
             .collect::<Vec<_>>();
-        let outputs_data = (0..9)
+        let outputs_data = (0..11)
             .map(|index| Bytes::from(vec![index as u8]).pack())
             .collect::<Vec<packed::Bytes>>();
         let genesis_tx = TransactionView::new_advanced_builder()
@@ -598,14 +600,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_get_script_returns_none_for_unconfigured_contract() {
+    async fn try_new_resolves_dev_liquidity_lock_from_output_10() {
         let context =
             ContractsContext::try_new(dev_genesis_block(), vec![], UdtCfgInfos::default(), None)
                 .await
                 .expect("dev context is created");
 
-        assert!(context
+        let script = context
             .try_get_script(Contract::LiquidityLock, b"args")
-            .is_none());
+            .expect("dev liquidity lock script exists");
+        assert_eq!(script.hash_type(), ScriptHashType::Data2.into());
+        let deps = context
+            .get_cell_deps(vec![Contract::LiquidityLock])
+            .await
+            .expect("dev liquidity lock cell dep exists");
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.get(0).unwrap().out_point().index(), 10u32.pack());
     }
 }

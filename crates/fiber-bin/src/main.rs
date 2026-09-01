@@ -182,6 +182,78 @@ async fn run() -> Result<(), ExitMessage> {
     }
 }
 
+#[cfg(test)]
+mod dev_genesis_tests {
+    use ckb_types::{
+        core::{DepType, ScriptHashType},
+        packed::CellOutput,
+        prelude::Unpack,
+        H256,
+    };
+    use fnn::ckb::contracts::{Contract, ContractsContext, ScriptCellDep};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn dev_genesis_resolves_liquidity_lock_at_index_10() {
+        let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dev_spec_path = workspace_dir.join("tests/nodes/deployer/dev.toml");
+        let artifact_path = workspace_dir.join("tests/deploy/contracts/liquidity-lock");
+        let chain_spec = ChainSpec::load_from(&Resource::file_system(dev_spec_path))
+            .expect("load checked-in dev chain spec");
+        let genesis_block = chain_spec.build_genesis().expect("build dev genesis block");
+        let genesis_tx = genesis_block
+            .transaction(0)
+            .expect("genesis block transaction #0 should exist");
+        let output_data = genesis_tx
+            .outputs_data()
+            .get(10)
+            .expect("liquidity lock should be genesis transaction #0 output #10")
+            .raw_data();
+        let artifact = std::fs::read(artifact_path).expect("read liquidity-lock artifact");
+
+        assert!(!artifact.is_empty());
+        assert_eq!(output_data.as_ref(), artifact);
+        assert_eq!(
+            H256::from(CellOutput::calc_data_hash(&output_data)),
+            "70734e0c3b5109538b9801682cc8ef3effc5b5c8214900e91f19799719d7620f"
+                .parse::<H256>()
+                .expect("valid liquidity-lock data hash")
+        );
+
+        let context = ContractsContext::try_new(genesis_block, vec![], Default::default(), None)
+            .await
+            .expect("create contracts context from dev genesis");
+        let script = context
+            .contracts
+            .contract_default_scripts
+            .get(&Contract::LiquidityLock)
+            .expect("liquidity lock script should resolve");
+        let code_hash: H256 = script.code_hash().unpack();
+        assert_eq!(
+            code_hash,
+            "70734e0c3b5109538b9801682cc8ef3effc5b5c8214900e91f19799719d7620f"
+                .parse::<H256>()
+                .expect("valid liquidity-lock code hash")
+        );
+        assert_eq!(script.hash_type(), ScriptHashType::Data2.into());
+
+        let deps = context
+            .contracts
+            .script_cell_deps
+            .get(&Contract::LiquidityLock)
+            .expect("liquidity lock cell deps should resolve");
+        assert!(!deps.is_empty());
+        let [ScriptCellDep::CellDep(cell_dep)] = deps.as_slice() else {
+            panic!("liquidity lock should have exactly one concrete cell dep");
+        };
+        let dep_index: u32 = cell_dep.out_point().index().unpack();
+        assert_eq!(cell_dep.dep_type(), DepType::Code.into());
+        assert_eq!(cell_dep.out_point().tx_hash(), genesis_tx.hash());
+        assert_eq!(dep_index, 10);
+    }
+}
+
 async fn run_node(
     store: fnn::store::Store,
     store_change_port: Option<Arc<OutputPort<fnn::store::store_impl::StoreChange>>>,
