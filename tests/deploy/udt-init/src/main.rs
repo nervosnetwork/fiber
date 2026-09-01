@@ -316,7 +316,11 @@ fn create_node_config(
     config["fiber"]["announced_node_name"] =
         serde_yaml::Value::String(format!("fiber-{}", node_index));
     config["rpc"]["listening_addr"] = serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
-    config["ckb"]["udt_whitelist"] = serde_yaml::to_value(udt_infos).unwrap();
+    let mut node_udt_infos = udt_infos.to_vec();
+    if !matches!(node_index, 1 | 2) {
+        node_udt_infos[0].script.args = "0x.*".to_string();
+    }
+    config["ckb"]["udt_whitelist"] = serde_yaml::to_value(node_udt_infos).unwrap();
 
     if matches!(node_index, 1 | 2) {
         config["rpc"]["enabled_modules"]
@@ -679,7 +683,12 @@ fn main() -> Result<(), Box<dyn StdErr>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, time::SystemTime};
+    use fnn::{
+        ckb::CkbConfig,
+        fiber_types::{UdtArgInfo, UdtCfgInfos},
+        Config,
+    };
+    use std::{collections::HashMap, path::PathBuf, time::SystemTime};
 
     struct TempDir(std::path::PathBuf);
 
@@ -711,118 +720,183 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn generated_nodes_one_and_two_enable_liquidity() {
+    fn source_nodes_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nodes")
+    }
+
+    fn load_dev_chain() -> (BlockView, String) {
+        let deployer_dir = source_nodes_dir().join("deployer");
+        let chain_spec =
+            ChainSpec::load_from(&Resource::file_system(deployer_dir.join("dev.toml")))
+                .expect("load checked-in dev chain spec");
+        let issuer =
+            fs::read_to_string(deployer_dir.join("ckb/wallet")).expect("read deployer wallet");
+        (
+            chain_spec.build_genesis().expect("build dev genesis block"),
+            issuer,
+        )
+    }
+
+    fn wildcard_udt_infos(exact_udt_infos: &[UdtInfo]) -> Vec<UdtInfo> {
+        let mut infos = exact_udt_infos.to_vec();
+        infos[0].script.args = "0x.*".to_string();
+        infos
+    }
+
+    fn typed_udt_infos(infos: &[UdtInfo]) -> UdtCfgInfos {
+        serde_yaml::from_value(serde_yaml::to_value(infos).expect("serialize UDT infos"))
+            .expect("deserialize production UDT config type")
+    }
+
+    fn write_and_parse_node_configs(
+        temp: &TempDir,
+        exact_udt_infos: &[UdtInfo],
+    ) -> Vec<(String, Config)> {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let deployer_dir = manifest_dir.join("../../nodes/deployer");
         let template: serde_yaml::Value = serde_yaml::from_str(
             &fs::read_to_string(deployer_dir.join("config.yml")).expect("read config template"),
         )
         .expect("parse config template");
+        let nodes_dir = temp.0.join("nodes");
+        fs::create_dir_all(&nodes_dir).expect("create temp nodes directory");
 
-        let configs = (0..=3)
-            .map(|node_index| {
-                create_node_config(
+        ["bootnode", "1", "2", "3"]
+            .into_iter()
+            .enumerate()
+            .map(|(node_index, role)| {
+                let node_dir = nodes_dir.join(role);
+                fs::create_dir_all(node_dir.join("fiber")).expect("create temp node directory");
+                fs::copy(
+                    source_nodes_dir().join(role).join("fiber/sk"),
+                    node_dir.join("fiber/sk"),
+                )
+                .expect("copy node key into temp tree");
+                let generated = create_node_config(
                     &template,
-                    &[],
+                    exact_udt_infos,
                     node_index,
                     8343 + node_index as u16,
                     21713 + node_index as u16,
                     None,
-                )
+                );
+                write_node_config(
+                    &nodes_dir,
+                    role,
+                    "# generated test config\n",
+                    &generated,
+                    &deployer_dir.join("dev.toml"),
+                );
+                let parsed = Config::parse_from_file(node_dir.join("config.yml"), &node_dir)
+                    .expect("parse generated config with application parser");
+                (role.to_string(), parsed)
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
 
-        for node_index in [1, 2] {
-            let config = &configs[node_index];
-            assert!(config["rpc"]["enabled_modules"]
-                .as_sequence()
-                .expect("enabled modules")
-                .contains(&serde_yaml::Value::String("liquidity".to_string())));
-            assert_eq!(
-                config["fiber"]["announced_node_name"],
-                format!("fiber-{node_index}")
-            );
-            assert_eq!(
-                config["fiber"]["listening_addr"],
-                format!("/ip4/0.0.0.0/tcp/{}", 8343 + node_index as u16)
-            );
-            assert_eq!(
-                config["rpc"]["listening_addr"],
-                format!("127.0.0.1:{}", 21713 + node_index as u16)
-            );
-            assert_eq!(config["fiber"]["chain"], "dev.toml");
-        }
-
-        for node_index in [0, 3] {
-            assert!(!configs[node_index]["rpc"]["enabled_modules"]
-                .as_sequence()
-                .expect("enabled modules")
-                .contains(&serde_yaml::Value::String("liquidity".to_string())));
-        }
-        let node_names = configs
-            .iter()
-            .map(|config| {
-                config["fiber"]["announced_node_name"]
-                    .as_str()
-                    .expect("announced node name")
-            })
-            .collect::<HashSet<_>>();
-        let rpc_addresses = configs
-            .iter()
-            .map(|config| {
-                config["rpc"]["listening_addr"]
-                    .as_str()
-                    .expect("RPC address")
-            })
-            .collect::<HashSet<_>>();
-        assert_eq!(node_names.len(), configs.len());
-        assert_eq!(rpc_addresses.len(), configs.len());
-        assert!(configs
-            .iter()
-            .all(|config| config["fiber"]["base_dir"].is_null()));
-        assert!(configs
-            .iter()
-            .all(|config| config["ckb"]["base_dir"].is_null()));
-
-        let node_keys = ["bootnode", "1", "2", "3"].map(|node| {
-            fs::read(manifest_dir.join("../../nodes").join(node).join("fiber/sk"))
-                .expect("read node key")
+    #[test]
+    fn generated_node_files_preserve_role_specific_config() {
+        let (genesis, issuer) = load_dev_chain();
+        let exact_infos = generate_udt_infos(&genesis, issuer.trim());
+        let wildcard_infos = wildcard_udt_infos(&exact_infos);
+        let expected_before_whitelist = typed_udt_infos(&wildcard_infos);
+        let expected_exact_whitelist = typed_udt_infos(&exact_infos);
+        let temp = TempDir::new("node-configs");
+        let configs = write_and_parse_node_configs(&temp, &exact_infos);
+        let base_modules = vec![
+            "cch",
+            "channel",
+            "payment",
+            "graph",
+            "info",
+            "invoice",
+            "peer",
+            "pubsub",
+            "watchtower",
+            "dev",
+            "prof",
+        ];
+        let source_keys = ["bootnode", "1", "2", "3"].map(|role| {
+            fs::read(source_nodes_dir().join(role).join("fiber/sk")).expect("read source node key")
         });
-        assert!(node_keys.iter().all(|key| !key.is_empty()));
-        assert_eq!(
-            node_keys.iter().collect::<HashSet<_>>().len(),
-            node_keys.len()
-        );
-        assert!(!template["rpc"]["enabled_modules"]
-            .as_sequence()
-            .expect("template enabled modules")
-            .contains(&serde_yaml::Value::String("liquidity".to_string())));
 
-        let chain_spec =
-            ChainSpec::load_from(&Resource::file_system(deployer_dir.join("dev.toml")))
-                .expect("load checked-in dev chain spec");
-        let genesis = chain_spec.build_genesis().expect("build dev genesis block");
-        let genesis_tx = genesis
-            .transaction(0)
-            .expect("genesis block transaction #0");
-        let liquidity_lock_data = genesis_tx
-            .outputs_data()
-            .get(10)
-            .expect("liquidity-lock genesis output #10")
-            .raw_data();
-        let artifact = fs::read(manifest_dir.join("../contracts/liquidity-lock"))
-            .expect("read liquidity-lock artifact");
+        for (node_index, (role, config)) in configs.iter().enumerate() {
+            let expected_before_modules = base_modules.clone();
+            let mut expected_modules = expected_before_modules.clone();
+            if matches!(node_index, 1 | 2) {
+                expected_modules.push("liquidity");
+            }
+            let expected_whitelist = if matches!(node_index, 1 | 2) {
+                &expected_exact_whitelist
+            } else {
+                &expected_before_whitelist
+            };
+            let fiber = config.parsed_fiber().expect("fiber config");
+            let rpc = config.rpc.as_ref().expect("RPC config");
+            let ckb: &CkbConfig = config.ckb.as_ref().expect("CKB config");
+            let whitelist: &UdtCfgInfos = ckb.udt_whitelist.as_ref().expect("UDT whitelist");
+            let expected_base = temp.0.join("nodes").join(role);
 
-        assert_eq!(liquidity_lock_data.as_ref(), artifact);
+            assert_eq!(
+                expected_before_modules, base_modules,
+                "{role} modules before Task 2"
+            );
+            assert_eq!(
+                rpc.enabled_modules, expected_modules,
+                "{role} expected modules"
+            );
+            assert_eq!(
+                expected_before_whitelist.0[0].script.args, "0x.*",
+                "{role} SIMPLE_UDT before Task 2"
+            );
+            assert_eq!(whitelist, expected_whitelist, "{role} expected whitelist");
+            assert_eq!(config.base_dir, expected_base, "{role} root base path");
+            assert_eq!(
+                fiber.base_dir(),
+                &expected_base.join("fiber"),
+                "{role} fiber base path"
+            );
+            assert_eq!(
+                ckb.base_dir(),
+                &expected_base.join("ckb"),
+                "{role} CKB base path"
+            );
+            assert_eq!(
+                fiber.store_path(),
+                expected_base.join("fiber/store"),
+                "{role} store path"
+            );
+            assert_eq!(
+                fs::read(fiber.base_dir().join("sk")).expect("read generated-tree node key"),
+                source_keys[node_index],
+                "{role} key"
+            );
+            assert_eq!(
+                fiber.listening_addr(),
+                format!("/ip4/0.0.0.0/tcp/{}", 8343 + node_index as u16),
+                "{role} fiber port"
+            );
+            assert_eq!(
+                rpc.listening_addr.as_deref(),
+                Some(format!("127.0.0.1:{}", 21713 + node_index as u16).as_str()),
+                "{role} RPC port"
+            );
+            assert_eq!(
+                rpc.is_module_enabled("liquidity"),
+                matches!(node_index, 1 | 2),
+                "{role} liquidity config"
+            );
+        }
+
+        assert!(source_keys.iter().all(|key| !key.is_empty()));
         assert_eq!(
-            genesis_tx.outputs().get(10).expect("output #10").type_(),
-            None.into()
+            source_keys.iter().collect::<HashSet<_>>().len(),
+            source_keys.len()
         );
     }
 
     #[test]
-    fn generated_bruno_environments_include_liquidity_chain_identity() {
+    fn generated_bruno_environments_preserve_vars_and_encode_full_chain_identity() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let temp = TempDir::new("bruno-environments");
         let nodes_dir = temp.0.join("nodes");
@@ -858,7 +932,16 @@ mod tests {
             .expect("copy genesis contract");
         }
 
-        for environment in ["test.bru", "xudt-test.bru"] {
+        let originals = ["test.bru", "xudt-test.bru"].map(|environment| {
+            let content = fs::read_to_string(
+                manifest_dir
+                    .join("../../bruno/environments")
+                    .join(environment),
+            )
+            .expect("read source Bruno environment");
+            (environment, parse_bruno_vars(&content))
+        });
+        for (environment, _) in &originals {
             fs::copy(
                 manifest_dir
                     .join("../../bruno/environments")
@@ -871,11 +954,46 @@ mod tests {
         let ports = [(8344, 31001), (21714, 32001), (8345, 31002), (21715, 32002)];
         update_bruno_configs(&nodes_dir, &ports).expect("generate Bruno environments");
 
-        for environment in ["test.bru", "xudt-test.bru"] {
+        let (genesis, issuer) = load_dev_chain();
+        let simple_script = generate_udt_type_script_from_genesis(&genesis, 8, issuer.trim());
+        let xudt_script = generate_udt_type_script_from_genesis(&genesis, 9, issuer.trim());
+        let expected_simple_json = ckb_jsonrpc_types::Script::from(simple_script.clone());
+        let expected_xudt_json = ckb_jsonrpc_types::Script::from(xudt_script.clone());
+        let (_, expected_lock_tx_hash) = get_genesis_contract_info(&genesis, 10);
+        let expected_lock_outpoint = ckb_jsonrpc_types::OutPoint {
+            tx_hash: expected_lock_tx_hash,
+            index: 10u32.into(),
+        };
+
+        for (environment, original_vars) in originals {
             let vars = parse_bruno_vars(
                 &fs::read_to_string(environments_dir.join(environment))
                     .expect("read generated Bruno environment"),
             );
+
+            let original_keys = original_vars.keys().cloned().collect::<HashSet<_>>();
+            for (key, value) in original_vars {
+                if !ports
+                    .iter()
+                    .any(|(old_port, _)| value.contains(&old_port.to_string()))
+                    && !key.starts_with("LIQUIDITY_")
+                    && !key.starts_with("SIMPLE_UDT_")
+                    && !key.starts_with("XUDT_")
+                {
+                    assert_eq!(
+                        vars.get(&key),
+                        Some(&value),
+                        "preserve {environment} variable {key}"
+                    );
+                }
+            }
+            assert!(!vars
+                .keys()
+                .filter(|key| !original_keys.contains(*key))
+                .any(|key| {
+                    let key = key.to_ascii_uppercase();
+                    key.contains("SECRET") || key.contains("PRIVATE_KEY") || key.contains("PRIVKEY")
+                }));
 
             assert_eq!(vars["NODE1_RPC_URL"], "http://127.0.0.1:32001");
             assert_eq!(vars["NODE2_RPC_URL"], "http://127.0.0.1:32002");
@@ -927,10 +1045,29 @@ mod tests {
                 vars["LIQUIDITY_LOCK_TX_HASH"],
                 "0x2243dabbe122098f1eb069b45eb91f6b127abc398f5a3853c2d09360d64f5e88"
             );
-            assert_eq!(vars["SIMPLE_UDT_SCRIPT_ARGS"], vars["XUDT_SCRIPT_ARGS"]);
-            assert!(vars["SIMPLE_UDT_TYPE_SCRIPT"].contains(&vars["SIMPLE_UDT_CODE_HASH"]));
-            assert!(vars["XUDT_TYPE_SCRIPT"].contains(&vars["XUDT_CODE_HASH"]));
-            assert!(vars["LIQUIDITY_LOCK_OUTPOINT"].contains(&vars["LIQUIDITY_LOCK_TX_HASH"]));
+            let simple_json: ckb_jsonrpc_types::Script =
+                serde_json::from_str(&vars["SIMPLE_UDT_TYPE_SCRIPT"])
+                    .expect("parse SIMPLE_UDT JSON script");
+            let xudt_json: ckb_jsonrpc_types::Script =
+                serde_json::from_str(&vars["XUDT_TYPE_SCRIPT"]).expect("parse XUDT JSON script");
+            let lock_outpoint: ckb_jsonrpc_types::OutPoint =
+                serde_json::from_str(&vars["LIQUIDITY_LOCK_OUTPOINT"])
+                    .expect("parse liquidity lock JSON outpoint");
+            let simple_molecule: Script = simple_json.clone().into();
+            let xudt_molecule: Script = xudt_json.clone().into();
+
+            assert_eq!(simple_json, expected_simple_json);
+            assert_eq!(xudt_json, expected_xudt_json);
+            assert_eq!(simple_molecule, simple_script);
+            assert_eq!(xudt_molecule, xudt_script);
+            assert_eq!(lock_outpoint, expected_lock_outpoint);
+            assert_eq!(
+                vars["LIQUIDITY_LOCK_CODE_HASH"],
+                "0x70734e0c3b5109538b9801682cc8ef3effc5b5c8214900e91f19799719d7620f"
+            );
+            assert_eq!(vars["LIQUIDITY_LOCK_HASH_TYPE"], "data2");
+            assert_eq!(vars["LIQUIDITY_LOCK_DEP_TYPE"], "code");
+            assert_eq!(vars["LIQUIDITY_LOCK_INDEX"], "0xa");
             let expected_legacy_udt_hash = if environment == "test.bru" {
                 &vars["SIMPLE_UDT_CODE_HASH"]
             } else {
@@ -942,47 +1079,51 @@ mod tests {
     }
 
     #[test]
-    fn generated_simple_udt_whitelist_matches_bruno_script() {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let deployer_dir = manifest_dir.join("../../nodes/deployer");
-        let chain_spec =
-            ChainSpec::load_from(&Resource::file_system(deployer_dir.join("dev.toml")))
-                .expect("load checked-in dev chain spec");
-        let genesis = chain_spec.build_genesis().expect("build dev genesis block");
-        let issuer =
-            fs::read_to_string(deployer_dir.join("ckb/wallet")).expect("read deployer wallet");
+    fn generated_simple_udt_whitelist_matches_complete_bruno_script_and_dep() {
+        let (genesis, issuer) = load_dev_chain();
         let udt_infos = generate_udt_infos(&genesis, issuer.trim());
         let simple_script = generate_udt_type_script_from_genesis(&genesis, 8, issuer.trim());
-        let expected_args = format!("0x{:x}", simple_script.args().raw_data());
+        let temp = TempDir::new("whitelist-consistency");
+        let configs = write_and_parse_node_configs(&temp, &udt_infos);
+        let values = BrunoEnvironmentValues::from_nodes_dir(&source_nodes_dir())
+            .expect("generate Bruno values");
+        let rendered = render_bruno_environment(
+            fs::read_to_string(source_nodes_dir().join("../bruno/environments/test.bru"))
+                .expect("read Bruno environment"),
+            &[],
+            &values,
+        );
+        let vars = parse_bruno_vars(&rendered);
+        let bruno_script: ckb_jsonrpc_types::Script =
+            serde_json::from_str(&vars["SIMPLE_UDT_TYPE_SCRIPT"]).expect("parse Bruno script");
+        let expected_typed = typed_udt_infos(&udt_infos);
+        let expected: &UdtArgInfo = &expected_typed.0[0];
 
-        assert_eq!(udt_infos[0].name, "SIMPLE_UDT");
-        assert_eq!(udt_infos[0].script.args, expected_args);
-        assert_eq!(udt_infos[1].name, "XUDT");
-        assert_eq!(udt_infos[1].script.args, "0x.*");
-
-        let template: serde_yaml::Value = serde_yaml::from_str(
-            &fs::read_to_string(deployer_dir.join("config.yml")).expect("read config template"),
-        )
-        .expect("parse config template");
-        for node_index in 0..=3 {
-            let config = create_node_config(
-                &template,
-                &udt_infos,
-                node_index,
-                8343 + node_index as u16,
-                21713 + node_index as u16,
-                None,
+        for (role, config) in configs
+            .iter()
+            .filter(|(role, _)| role == "1" || role == "2")
+        {
+            let ckb: &CkbConfig = config.ckb.as_ref().expect("CKB config");
+            let actual = &ckb.udt_whitelist.as_ref().expect("UDT whitelist").0[0];
+            assert_eq!(
+                actual.script.code_hash, bruno_script.code_hash,
+                "{role} code hash"
             );
             assert_eq!(
-                config["ckb"]["udt_whitelist"][0]["script"]["args"],
-                expected_args
+                actual.script.hash_type,
+                ScriptHashType::Data2,
+                "{role} hash type"
             );
-            assert_eq!(config["ckb"]["udt_whitelist"][1]["script"]["args"], "0x.*");
+            assert_eq!(
+                actual.script.args,
+                format!("0x{:x}", simple_script.args().raw_data()),
+                "{role} args"
+            );
+            assert_eq!(
+                actual.cell_deps, expected.cell_deps,
+                "{role} complete cell dep"
+            );
+            assert_eq!(actual, expected, "{role} complete whitelist entry");
         }
-
-        let values = BrunoEnvironmentValues::from_nodes_dir(&manifest_dir.join("../../nodes"))
-            .expect("generate Bruno values");
-        assert_eq!(values.simple_udt_script_args, expected_args);
-        assert_eq!(values.xudt_script_args, expected_args);
     }
 }
