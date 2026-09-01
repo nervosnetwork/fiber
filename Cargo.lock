@@ -2334,6 +2334,7 @@ version = "0.9.1"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
+ "ckb-types",
  "fiber-store",
  "fnn",
  "jsonrpsee",
