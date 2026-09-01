@@ -1,0 +1,64 @@
+meta {
+  name: liquidity helper bounded timeout diagnostics
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const rpcUrl = bru.getEnvVar("NODE1_RPC_URL");
+  const expectedState = "state-that-does-not-exist";
+
+  try {
+    await waitLiquidityState({
+      rpcUrl,
+      method: "list_channels",
+      params: [{}],
+      expectedState,
+      getState: () => "current-state",
+      maxAttempts: 2,
+      intervalMs: 1,
+      deadlineMs: 1000,
+    });
+    throw new Error("expected bounded liquidity polling to time out");
+  } catch (error) {
+    const message = String(error && error.message);
+    const requiredDetails = [
+      rpcUrl,
+      "list_channels",
+      expectedState,
+      "attempts=2",
+      "last_response=",
+    ];
+    for (const detail of requiredDetails) {
+      if (!message.includes(detail)) {
+        throw new Error(`timeout diagnostic missing ${detail}: ${message}`);
+      }
+    }
+  }
+}

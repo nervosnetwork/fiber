@@ -1,0 +1,50 @@
+meta {
+  name: liquidity helper immediate success
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const { waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const result = await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    method: "list_channels",
+    params: [{}],
+    expectedState: "valid-list",
+    getState: (value) => Array.isArray(value.channels) ? "valid-list" : "invalid-list",
+    maxAttempts: 1,
+    intervalMs: 1,
+    deadlineMs: 1000,
+  });
+
+  if (result.state !== "valid-list" || result.attempts !== 1) {
+    throw new Error(`unexpected immediate polling result: ${JSON.stringify(result)}`);
+  }
+}
