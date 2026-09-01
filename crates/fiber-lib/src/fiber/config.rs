@@ -126,6 +126,17 @@ pub struct FiberConfig {
     #[arg(name = "FIBER_LISTENING_ADDR", long = "fiber-listening-addr", env)]
     pub(crate) listening_addr: Option<String>,
 
+    /// additional listening addresses for fiber network, merged with `listening_addr`
+    #[arg(
+        name = "FIBER_LISTENING_ADDRS",
+        long = "fiber-listening-addrs",
+        env,
+        value_parser,
+        num_args = 0..,
+        value_delimiter = ','
+    )]
+    pub(crate) listening_addrs: Vec<String>,
+
     /// whether to announce listening address [default: false]
     #[arg(
         name = "FIBER_ANNOUNCE_LISTENING_ADDR",
@@ -528,6 +539,14 @@ impl FiberConfig {
         self.listening_addr
             .as_deref()
             .unwrap_or(DEFAULT_LISTENING_ADDR)
+    }
+
+    /// Returns the effective listening addresses. The legacy `listening_addr` is always first,
+    /// followed by all entries from `listening_addrs`.
+    pub fn listening_addrs(&self) -> Vec<&str> {
+        std::iter::once(self.listening_addr())
+            .chain(self.listening_addrs.iter().map(String::as_str))
+            .collect()
     }
 
     pub fn announce_listening_addr(&self) -> bool {

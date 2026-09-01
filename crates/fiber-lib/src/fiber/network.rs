@@ -7323,8 +7323,11 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut addresses_to_listen = vec![MultiAddr::from_str(config.listening_addr())
-                .expect("valid tentacle listening address")];
+            let mut addresses_to_listen = config
+                .listening_addrs()
+                .into_iter()
+                .map(|addr| MultiAddr::from_str(addr).expect("valid tentacle listening address"))
+                .collect::<Vec<_>>();
             if config.reuse_port_for_websocket {
                 // Re-use the same port for websocket
                 let ws_listens = addresses_to_listen

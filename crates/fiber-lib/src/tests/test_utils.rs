@@ -2404,6 +2404,42 @@ async fn test_connect_to_other_node() {
 }
 
 #[tokio::test]
+async fn test_connect_to_other_node_on_additional_listening_address() {
+    let mut node_a = NetworkNode::new().await;
+    let mut node_b = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.listening_addr = Some("/ip4/127.0.0.1/tcp/0".to_string());
+                config.listening_addrs = vec!["/ip4/127.0.0.1/tcp/0".to_string()];
+                config.reuse_port_for_websocket = false;
+            })
+            .build(),
+    )
+    .await;
+
+    assert_eq!(node_b.listening_addrs.len(), 2);
+    let peer_addr = node_b.listening_addrs[1].clone();
+
+    call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            peer_addr,
+            false,
+            crate::fiber::network::PeerConnectSource::Manual,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node is alive")
+    .expect("connect through the additional listening address");
+    node_a
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::PeerConnected(pubkey, _) if pubkey == &node_b.pubkey)
+        })
+        .await;
+    node_a.expect_debug_event("PeerInit").await;
+    node_b.expect_debug_event("PeerInit").await;
+}
+
+#[tokio::test]
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
     node.restart().await;
