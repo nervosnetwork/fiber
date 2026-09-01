@@ -205,6 +205,39 @@ mod dev_genesis_tests {
         let genesis_tx = genesis_block
             .transaction(0)
             .expect("genesis block transaction #0 should exist");
+
+        for (index, artifact_name, expected_hash) in [
+            (
+                8,
+                "simple_udt",
+                "e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",
+            ),
+            (
+                9,
+                "xudt_rce",
+                "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+            ),
+        ] {
+            let output_data = genesis_tx
+                .outputs_data()
+                .get(index)
+                .expect("UDT genesis output should exist")
+                .raw_data();
+            let artifact = std::fs::read(
+                workspace_dir
+                    .join("tests/deploy/contracts")
+                    .join(artifact_name),
+            )
+            .expect("read UDT artifact");
+            let data_hash = H256::from(CellOutput::calc_data_hash(&output_data));
+
+            assert_eq!(output_data.as_ref(), artifact);
+            assert_eq!(
+                data_hash,
+                expected_hash.parse::<H256>().expect("valid UDT data hash")
+            );
+        }
+
         let output_data = genesis_tx
             .outputs_data()
             .get(10)

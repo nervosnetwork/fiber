@@ -16,6 +16,11 @@ use fiber_types::gen::fiber::{UdtDep, UdtDepUnion};
 use super::config::UdtCfgInfosExt;
 use fiber_types::{UdtArgInfo, UdtCfgInfos};
 
+const LIQUIDITY_LOCK_CODE_HASH: [u8; 32] = [
+    0x70, 0x73, 0x4e, 0x0c, 0x3b, 0x51, 0x09, 0x53, 0x8b, 0x98, 0x01, 0x68, 0x2c, 0xc8, 0xef, 0x3e,
+    0xff, 0xc5, 0xb5, 0xc8, 0x21, 0x49, 0x00, 0xe9, 0x1f, 0x19, 0x79, 0x97, 0x19, 0xd7, 0x62, 0x0f,
+];
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Contract {
     CkbAuth,
@@ -201,7 +206,6 @@ impl ContractsContext {
                     (Contract::FundingLock, 6u32),
                     (Contract::CommitmentLock, 7u32),
                     (Contract::SimpleUDT, 8u32),
-                    (Contract::LiquidityLock, 10u32),
                 ];
                 for (contract, index) in contract_map.into_iter() {
                     let cell_dep = CellDep::new_builder()
@@ -236,6 +240,32 @@ impl ContractsContext {
                             .hash_type(ScriptHashType::Data2)
                             .build(),
                     );
+                }
+
+                if let (Some(_), Some(output_data)) =
+                    (genesis_tx.output(10), genesis_tx.outputs_data().get(10))
+                {
+                    let output_data = output_data.raw_data();
+                    let code_hash = CellOutput::calc_data_hash(&output_data);
+                    if code_hash == LIQUIDITY_LOCK_CODE_HASH.pack() {
+                        let cell_dep = CellDep::new_builder()
+                            .out_point(
+                                OutPoint::new_builder()
+                                    .tx_hash(genesis_tx.hash())
+                                    .index(10u32)
+                                    .build(),
+                            )
+                            .dep_type(DepType::Code)
+                            .build();
+                        script_cell_deps.insert(Contract::LiquidityLock, vec![cell_dep.into()]);
+                        contract_default_scripts.insert(
+                            Contract::LiquidityLock,
+                            Script::new_builder()
+                                .code_hash(code_hash)
+                                .hash_type(ScriptHashType::Data2)
+                                .build(),
+                        );
+                    }
                 }
             }
         }
@@ -523,12 +553,12 @@ mod tests {
 
     use super::*;
 
-    fn dev_genesis_block() -> BlockView {
+    fn dev_genesis_block_with_output_count(output_count: usize) -> BlockView {
         let type_script = Script::new_builder()
             .code_hash([1u8; 32].pack())
             .hash_type(ScriptHashType::Data2)
             .build();
-        let outputs = (0..11)
+        let outputs = (0..output_count)
             .map(|index| {
                 let mut builder = CellOutput::new_builder().capacity(100u64);
                 if index == 1 {
@@ -537,7 +567,7 @@ mod tests {
                 builder.build()
             })
             .collect::<Vec<_>>();
-        let outputs_data = (0..11)
+        let outputs_data = (0..output_count)
             .map(|index| Bytes::from(vec![index as u8]).pack())
             .collect::<Vec<packed::Bytes>>();
         let genesis_tx = TransactionView::new_advanced_builder()
@@ -550,6 +580,10 @@ mod tests {
             .transaction(genesis_tx)
             .transaction(dep_group_tx)
             .build()
+    }
+
+    fn dev_genesis_block() -> BlockView {
+        dev_genesis_block_with_output_count(11)
     }
 
     #[tokio::test]
@@ -600,21 +634,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_new_resolves_dev_liquidity_lock_from_output_10() {
+    async fn try_new_accepts_dev_genesis_without_output_10() {
+        let context = ContractsContext::try_new(
+            dev_genesis_block_with_output_count(9),
+            vec![],
+            UdtCfgInfos::default(),
+            None,
+        )
+        .await
+        .expect("short custom dev genesis is accepted");
+
+        assert!(context
+            .try_get_script(Contract::LiquidityLock, b"args")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn try_new_does_not_map_unrelated_output_10_as_liquidity_lock() {
         let context =
             ContractsContext::try_new(dev_genesis_block(), vec![], UdtCfgInfos::default(), None)
                 .await
                 .expect("dev context is created");
 
-        let script = context
+        assert!(context
             .try_get_script(Contract::LiquidityLock, b"args")
-            .expect("dev liquidity lock script exists");
-        assert_eq!(script.hash_type(), ScriptHashType::Data2.into());
-        let deps = context
-            .get_cell_deps(vec![Contract::LiquidityLock])
-            .await
-            .expect("dev liquidity lock cell dep exists");
-        assert_eq!(deps.len(), 1);
-        assert_eq!(deps.get(0).unwrap().out_point().index(), 10u32.pack());
+            .is_none());
+        assert!(!context
+            .contracts
+            .script_cell_deps
+            .contains_key(&Contract::LiquidityLock));
     }
 }
