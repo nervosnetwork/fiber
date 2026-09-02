@@ -60,5 +60,12 @@ script:post-response {
         throw new Error(`timeout diagnostic missing ${detail}: ${message}`);
       }
     }
+    bru.setVar("LIQUIDITY_HELPER_RESPONSE_TIMEOUT_DIAGNOSTICS", true);
   }
+}
+
+tests {
+  test("helper bounds response-state polling with diagnostics", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_RESPONSE_TIMEOUT_DIAGNOSTICS")).to.equal(true);
+  });
 }

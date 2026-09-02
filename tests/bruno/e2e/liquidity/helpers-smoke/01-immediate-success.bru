@@ -47,4 +47,11 @@ script:post-response {
   if (result.state !== "valid-list" || result.attempts !== 1) {
     throw new Error(`unexpected immediate polling result: ${JSON.stringify(result)}`);
   }
+  bru.setVar("LIQUIDITY_HELPER_IMMEDIATE_SUCCESS", true);
+}
+
+tests {
+  test("helper succeeds on the first matching response", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_IMMEDIATE_SUCCESS")).to.equal(true);
+  });
 }

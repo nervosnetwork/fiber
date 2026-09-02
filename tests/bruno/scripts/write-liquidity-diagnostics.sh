@@ -82,10 +82,12 @@ jq --sort-keys '
     ($key | contains("password")) or
     ($key | contains("passphrase")) or
     ($key | contains("token")) or
+    ($key | contains("bearer")) or
     ($key | contains("authorization")) or
     ($compact | startswith("auth")) or
     ($compact == "apikey") or
     ($compact == "xapikey") or
+    (($compact | startswith("api")) and ($compact | test("key|token|auth|secret|bearer"))) or
     ($key | contains("seed")) or
     ($key | contains("mnemonic")) or
     ($key == "settlement_key") or
@@ -98,7 +100,7 @@ jq --sort-keys '
   def redact_url:
     gsub("://[^@/[:space:]]+@"; "://[REDACTED]@") |
     gsub(
-      "(?<prefix>[?&](?:[a-z0-9_-]*(?:private|privkey|preimage)[a-z0-9_-]*|token|api[_-]?key|x-api-key|key|secret|password|passphrase|authorization|auth[a-z0-9_-]*|seed|mnemonic|settlement_key|local_key|client_invoice|invoice|invoice_address|[a-z0-9_-]+_secret)=)[^&#[:space:]\"'\''},\\]]*";
+      "(?<prefix>[?&](?:[a-z0-9_-]*(?:private|privkey|preimage)[a-z0-9_-]*|[a-z0-9_-]*token[a-z0-9_-]*|[a-z0-9_-]*bearer[a-z0-9_-]*|[a-z0-9_-]*api[a-z0-9_-]*(?:key|token|auth|secret|bearer)[a-z0-9_-]*|key|secret|password|passphrase|authorization|auth[a-z0-9_-]*|seed|mnemonic|settlement_key|local_key|client_invoice|invoice|invoice_address|[a-z0-9_-]+_secret)=)[^&#[:space:]\"'\''},\\]]*";
       "\(.prefix)[REDACTED]";
       "i"
     );

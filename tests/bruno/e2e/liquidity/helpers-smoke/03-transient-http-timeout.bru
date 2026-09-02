@@ -66,4 +66,11 @@ script:post-response {
       throw new Error(`transient timeout diagnostic missing ${detail}: ${message}`);
     }
   }
+  bru.setVar("LIQUIDITY_HELPER_HTTP_TIMEOUT_DIAGNOSTICS", true);
+}
+
+tests {
+  test("helper bounds transient HTTP retries with last-error diagnostics", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_HTTP_TIMEOUT_DIAGNOSTICS")).to.equal(true);
+  });
 }

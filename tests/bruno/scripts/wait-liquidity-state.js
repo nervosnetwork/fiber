@@ -24,7 +24,7 @@ function redactText(value) {
         : match;
     })
     .replace(
-      /((?:private.?key|privkey|preimage|payment.?secret|password|passphrase|token|authorization|api.?key|x-api-key|seed|mnemonic|[a-z0-9]+_secret)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      /((?:private.?key|privkey|preimage|payment.?secret|password|passphrase|token|bearer|authorization|api.?key|x-api-key|seed|mnemonic|[a-z0-9]+_secret)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
       `$1${REDACTED}`,
     );
 }
@@ -38,10 +38,12 @@ function isSensitiveKey(key) {
     || lower.includes("password")
     || lower.includes("passphrase")
     || lower.includes("token")
+    || lower.includes("bearer")
     || lower.includes("authorization")
     || compact.startsWith("auth")
     || compact === "apikey"
     || compact === "xapikey"
+    || (compact.startsWith("api") && /(key|token|auth|secret|bearer)/.test(compact))
     || lower.includes("seed")
     || lower.includes("mnemonic")
     || lower === "settlement_key"

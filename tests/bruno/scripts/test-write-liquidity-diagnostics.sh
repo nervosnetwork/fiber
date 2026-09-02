@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source_writer="$script_dir/../write-liquidity-diagnostics.sh"
+source_writer="$script_dir/write-liquidity-diagnostics.sh"
 fixture="$script_dir/fixtures/sensitive-diagnostics.json"
 sandbox="$(mktemp -d "${TMPDIR:-/tmp}/liquidity-diagnostics-test.XXXXXX")"
 external="$(mktemp -d "${TMPDIR:-/tmp}/liquidity-diagnostics-external.XXXXXX")"
@@ -67,6 +67,8 @@ serialized="$(jq -c . "$output")"
 secrets=(
   encoded%40user p%40ss query-token-value query-api-key-value query-key-value
   query-secret-value query-password-value query-payment-secret query-preimage query-invoice
+  encoded%2Daccess%2Dvalue encoded%2Drefresh%2Dvalue encoded%2Dbearer%2Dvalue
+  encoded%2Dapi%2Dvalue access-token-value refresh-token-value bearer-value api-token-value
   invoice-address-secret invoice-object-secret payment-secret-value payment-preimage-secret
   private-key-value passphrase-value authorization-value auth-header-value api-key-value
   seed-value mnemonic-value suffix-secret-value
@@ -79,6 +81,10 @@ for secret in "${secrets[@]}"; do
 done
 if [[ "$serialized" != *"safe=visible"* ]]; then
   printf 'safe URL query diagnostic was removed\n' >&2
+  exit 1
+fi
+if [[ "$serialized" != *"request failed before"* || "$serialized" != *"and after"* ]]; then
+  printf 'free-form URL context was removed\n' >&2
   exit 1
 fi
 
