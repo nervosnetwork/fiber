@@ -40,7 +40,7 @@ script:post-response {
   if (result.status !== "Paid") {
     throw new Error(`provider invoice must be Paid, got: ${result.status}`);
   }
-  if (result.invoice.amount !== "0x" + bru.getVar("QUOTE_PRINCIPAL")) {
+  if (result.invoice.amount !== bru.getVar("QUOTE_PRINCIPAL")) {
     throw new Error(`provider invoice amount must equal the principal: ${result.invoice.amount}`);
   }
   if (result.invoice.data.payment_hash !== bru.getVar("PAYMENT_HASH")) {

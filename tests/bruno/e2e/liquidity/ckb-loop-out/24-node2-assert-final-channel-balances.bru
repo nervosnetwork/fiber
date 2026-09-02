@@ -33,7 +33,7 @@ assert {
 }
 
 script:post-response {
-  const principal = BigInt("0x" + bru.getVar("QUOTE_PRINCIPAL"));
+  const principal = BigInt(bru.getVar("QUOTE_PRINCIPAL"));
   const channel = (res.body.result.channels || []).find(
     (item) => item.channel_id === bru.getVar("CHANNEL_ID"),
   );

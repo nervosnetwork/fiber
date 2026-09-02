@@ -59,7 +59,8 @@ script:post-response {
 
   const local = BigInt(channel.local_balance);
   // node1 outbound capacity must sit comfortably above the quote amount plus
-  // both fee caps; the 61 CKB funding gives ample headroom over 1111 shannons.
+  // both fee caps (0x3e8 + 0xa + 0x64 = 1110 shannons); the 61 CKB funding
+  // gives ample headroom over the derived threshold.
   if (local < amount + caps) {
     throw new Error(`client local balance ${channel.local_balance} is not comfortably above the quote amount plus fee caps`);
   }
