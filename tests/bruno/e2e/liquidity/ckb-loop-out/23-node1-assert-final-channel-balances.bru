@@ -35,7 +35,7 @@ assert {
 script:post-response {
   // The client pays exactly the principal (quote amount + provider fee);
   // routing fees are zero on the direct channel, never the full cap.
-  const principal = BigInt("0x" + bru.getVar("QUOTE_PRINCIPAL"));
+  const principal = BigInt(bru.getVar("QUOTE_PRINCIPAL"));
   const channel = (res.body.result.channels || []).find(
     (item) => item.channel_id === bru.getVar("CHANNEL_ID"),
   );

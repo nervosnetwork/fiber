@@ -135,7 +135,10 @@ script:post-response {
   bru.setVar("PAYMENT_HASH", envelope.payment_hash);
   bru.setVar("QUOTE_REFUND_LOCK", envelope.refund_lock);
   bru.setVar("QUOTE_AMOUNT", envelope.amount);
-  bru.setVar("QUOTE_PRINCIPAL", (BigInt(envelope.amount) + BigInt(envelope.provider_fee)).toString(16));
+  bru.setVar(
+    "QUOTE_PRINCIPAL",
+    "0x" + (BigInt(envelope.amount) + BigInt(envelope.provider_fee)).toString(16),
+  );
   bru.setVar("QUOTE_ENVELOPE_JSON", JSON.stringify(envelope));
   console.log("loop out quote:", envelope.quote_id, "principal:", bru.getVar("QUOTE_PRINCIPAL"));
 }
