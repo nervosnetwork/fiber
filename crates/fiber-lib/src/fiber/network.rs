@@ -7260,7 +7260,8 @@ where
         let mut service = {
             let mut builder = ServiceBuilder::default()
                 .insert_protocol(fiber_handle.create_meta())
-                .handshake_type(secio_kp.into());
+                .handshake_type(secio_kp.into())
+                .quic_config(tentacle::quic::config::QuicConfig::default());
             if let Some(gossip_handle) = gossip_handle_opt {
                 builder = builder.insert_protocol(gossip_handle.create_meta());
             }
@@ -7973,15 +7974,7 @@ pub async fn start_network<
 }
 
 pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
-    let mut iter = addr.iter();
-
-    iter.find_map(|proto| match proto {
-        Protocol::Ws => Some(TransportType::Ws),
-        Protocol::Wss => Some(TransportType::Wss),
-        Protocol::Onion3(_) => Some(TransportType::Onion),
-        _ => None,
-    })
-    .unwrap_or(TransportType::Tcp)
+    tentacle::utils::find_type(addr)
 }
 
 pub(crate) fn select_connect_peer_address<I>(

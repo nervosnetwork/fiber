@@ -15,6 +15,8 @@ pub enum TransportType {
     Ws,
     /// WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
     Wss,
+    /// QUIC v1 transport (e.g. /ip4/1.2.3.4/udp/8228/quic-v1)
+    QuicV1,
 }
 
 /// Parameters for connecting to a peer.

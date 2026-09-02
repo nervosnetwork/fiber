@@ -1804,6 +1804,7 @@ The type of transport to filter by when resolving peer addresses.
 * `tcp` - TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
 * `ws` - WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
 * `wss` - WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
+* `quic_v1` - QUIC v1 transport (e.g. /ip4/1.2.3.4/udp/8228/quic-v1)
 ---
 
 <a id="#type-udtarginfo"></a>

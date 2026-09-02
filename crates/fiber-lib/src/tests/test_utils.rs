@@ -2439,6 +2439,47 @@ async fn test_connect_to_other_node_on_additional_listening_address() {
     node_b.expect_debug_event("PeerInit").await;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_connect_to_other_node_over_quic() {
+    let quic_node_config = || {
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.listening_addr = Some("/ip4/127.0.0.1/tcp/0".to_string());
+                config.listening_addrs = vec!["/ip4/127.0.0.1/udp/0/quic-v1".to_string()];
+                config.reuse_port_for_websocket = false;
+            })
+            .build()
+    };
+    let mut node_a = NetworkNode::new_with_config(quic_node_config()).await;
+    let mut node_b = NetworkNode::new_with_config(quic_node_config()).await;
+
+    let peer_addr = node_b
+        .listening_addrs
+        .iter()
+        .find(|addr| tentacle::utils::find_type(addr) == tentacle::utils::TransportType::QuicV1)
+        .expect("node has a QUIC listening address")
+        .clone();
+
+    call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            peer_addr,
+            false,
+            crate::fiber::network::PeerConnectSource::Manual,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node is alive")
+    .expect("connect over QUIC");
+    node_a
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::PeerConnected(pubkey, _) if pubkey == &node_b.pubkey)
+        })
+        .await;
+    node_a.expect_debug_event("PeerInit").await;
+    node_b.expect_debug_event("PeerInit").await;
+}
+
 #[tokio::test]
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;

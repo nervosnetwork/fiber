@@ -64,13 +64,14 @@ hyper = { version = "1.5" }
 jsonrpsee = { version = "0.25.1", features = ["client", "server", "macros"] }
 lnd-grpc-tonic-client = "0.3.0"
 tonic = "0.11.0"
-tentacle = { version = "0.7", default-features = false, features = [
+tentacle = { version = "0.7.7", default-features = false, features = [
   "upnp",
   "parking_lot",
   "openssl-vendored",
   "tokio-runtime",
   "tokio-timer",
   "ws",
+  "quic",
 ] }
 tokio = { version = "1", features = [
   "io-util",
@@ -104,7 +105,7 @@ jsonrpsee = { version = "0.25.1", features = [
   "server-core",
   "wasm-client",
 ] }
-tentacle = { version = "0.7", default-features = false, features = [
+tentacle = { version = "0.7.7", default-features = false, features = [
   "wasm-timer",
 ] }
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }

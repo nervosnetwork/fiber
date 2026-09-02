@@ -514,6 +514,18 @@ fn build_ws_multiaddr(use_wss: bool) -> Multiaddr {
 }
 
 #[test]
+fn test_select_connect_peer_address_by_quic_transport() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+
+    assert_eq!(tentacle::utils::find_type(&quic), TransportType::QuicV1);
+    assert_eq!(
+        select_connect_peer_address(vec![tcp, quic.clone()], Some(TransportType::QuicV1)),
+        Some(quic)
+    );
+}
+
+#[test]
 fn test_select_connect_peer_address_respects_explicit_transport_filter() {
     let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
