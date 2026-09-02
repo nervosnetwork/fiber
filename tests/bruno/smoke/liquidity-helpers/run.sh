@@ -2,7 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-collection_dir="$(cd -- "$script_dir/../../.." &>/dev/null && pwd)"
+collection_dir="$(cd -- "$script_dir/../.." &>/dev/null && pwd)"
 mock_server="$(mktemp "${TMPDIR:-/tmp}/liquidity-helper-smoke.XXXXXX.js")"
 mock_pid=""
 
@@ -67,4 +67,4 @@ if ! kill -0 "$mock_pid" 2>/dev/null; then
   printf 'liquidity helper mock responder failed to start\n' >&2
   exit 1
 fi
-npx @usebruno/cli@1.20.0 run e2e/liquidity/helpers-smoke -r --env test
+npx @usebruno/cli@1.20.0 run smoke/liquidity-helpers -r --env test

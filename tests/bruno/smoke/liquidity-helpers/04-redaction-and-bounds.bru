@@ -64,12 +64,21 @@ script:post-response {
     "bearer-value",
     "api-token-value",
     "api-key-value",
+    "header-secret",
+    "standalone-bearer-secret",
+    "basic-secret",
+    "token-scheme-secret",
+    "standalone-basic-secret",
+    "standalone-token-secret",
+    "standalone-api-secret",
+    "free-api-credential",
     "seed-value",
     "mnemonic-value",
     "suffix-secret-value",
   ];
 
-  const redactedFixture = JSON.stringify(redact(fixture));
+  const redacted = redact(fixture);
+  const redactedFixture = JSON.stringify(redacted);
   const diagnostics = await collectLiquidityDiagnostics({
     nodes: [
       {
@@ -101,6 +110,18 @@ script:post-response {
       && redactedFixture.includes("safe=visible")
       && redactedFixture.includes("and after"),
   );
+  const messages = redacted.nested[0];
+  bru.setVar(
+    "LIQUIDITY_HELPER_AUTHORIZATION_REDACTION_PASSED",
+    messages.message_one === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_two === "before Bearer [REDACTED] after"
+      && messages.message_three === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_four === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_five === "before Basic [REDACTED] after"
+      && messages.message_six === "before Token [REDACTED] after"
+      && messages.message_seven === "before ApiKey [REDACTED] after"
+      && messages.message_eight === "upstream X-API-Key: [REDACTED] rejected",
+  );
   bru.setVar(
     "LIQUIDITY_HELPER_LIST_LIMIT_PASSED",
     providerCalls.list_swaps.result.received_params[0].limit === "0x64",
@@ -121,6 +142,10 @@ tests {
 
   test("helper preserves non-secret free-form URL diagnostics", function() {
     expect(bru.getVar("LIQUIDITY_HELPER_SAFE_URL_PRESERVED")).to.equal(true);
+  });
+
+  test("helper redacts complete free-form authorization credentials", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_AUTHORIZATION_REDACTION_PASSED")).to.equal(true);
   });
 
   test("helper sends the bounded hexadecimal list limit", function() {
