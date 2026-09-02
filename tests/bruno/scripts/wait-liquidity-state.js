@@ -1,7 +1,8 @@
 const axios = require("axios");
 
+const DIAGNOSTIC_LIST_LIMIT = 100;
+const DIAGNOSTIC_LIST_LIMIT_HEX = "0x64";
 const REDACTED = "[REDACTED]";
-const SENSITIVE_KEY = /(private.?key|privkey|preimage|password)/i;
 let rpcRequestSequence = 0;
 
 function sleep(ms) {
@@ -11,10 +12,49 @@ function sleep(ms) {
 function redactText(value) {
   return value
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@/\s]+@/gi, `$1${REDACTED}@`)
+    .replace(/([?&])([^=&#\s]+)=([^&#\s"'},\]]*)/g, (match, separator, key) => {
+      let decodedKey = key;
+      try {
+        decodedKey = decodeURIComponent(key.replace(/\+/g, " "));
+      } catch (_) {
+        // Keep malformed query keys visible unless their encoded spelling is recognizably sensitive.
+      }
+      return isSensitiveQueryKey(decodedKey)
+        ? `${separator}${key}=${REDACTED}`
+        : match;
+    })
     .replace(
-      /((?:private.?key|privkey|preimage|password)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
+      /((?:private.?key|privkey|preimage|payment.?secret|password|passphrase|token|authorization|api.?key|x-api-key|seed|mnemonic|[a-z0-9]+_secret)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
       `$1${REDACTED}`,
     );
+}
+
+function isSensitiveKey(key) {
+  const lower = key.toLowerCase();
+  const compact = lower.replace(/[-_]/g, "");
+  return lower.includes("private")
+    || lower.includes("privkey")
+    || lower.includes("preimage")
+    || lower.includes("password")
+    || lower.includes("passphrase")
+    || lower.includes("token")
+    || lower.includes("authorization")
+    || compact.startsWith("auth")
+    || compact === "apikey"
+    || compact === "xapikey"
+    || lower.includes("seed")
+    || lower.includes("mnemonic")
+    || lower === "settlement_key"
+    || lower === "local_key"
+    || lower === "client_invoice"
+    || lower === "invoice"
+    || lower === "invoice_address"
+    || lower === "secret"
+    || lower.endsWith("_secret");
+}
+
+function isSensitiveQueryKey(key) {
+  return isSensitiveKey(key) || key.toLowerCase() === "key";
 }
 
 function redact(value) {
@@ -24,7 +64,7 @@ function redact(value) {
   if (value && typeof value === "object") {
     const redacted = {};
     for (const [key, child] of Object.entries(value)) {
-      redacted[key] = SENSITIVE_KEY.test(key) ? REDACTED : redact(child);
+      redacted[key] = isSensitiveKey(key) ? REDACTED : redact(child);
     }
     return redacted;
   }
@@ -212,6 +252,15 @@ async function diagnosticRpc(url, method, params) {
   }
 }
 
+function capDiagnosticList(response, field) {
+  const result = response && response.result;
+  if (result && Array.isArray(result[field]) && result[field].length > DIAGNOSTIC_LIST_LIMIT) {
+    result[field] = result[field].slice(0, DIAGNOSTIC_LIST_LIMIT);
+    result.truncated = true;
+  }
+  return response;
+}
+
 async function collectLiquidityDiagnostics({ nodes, listParams = {} } = {}) {
   if (!Array.isArray(nodes) || nodes.length < 2) {
     throw new Error(
@@ -243,10 +292,11 @@ async function collectLiquidityDiagnostics({ nodes, listParams = {} } = {}) {
     nodeNames.add(name);
   });
 
+  const boundedListParams = { ...listParams, limit: DIAGNOSTIC_LIST_LIMIT_HEX };
   const diagnostics = await Promise.all(
     nodes.map(async ({ name, rpcUrl, swapId, paymentHash }) => {
       const calls = {
-        list_swaps: diagnosticRpc(rpcUrl, "list_swaps", [listParams]),
+        list_swaps: diagnosticRpc(rpcUrl, "list_swaps", [boundedListParams]),
         get_swap: diagnosticRpc(rpcUrl, "get_swap", [{ swap_id: swapId }]),
         list_liquidity_chain_transactions: diagnosticRpc(
           rpcUrl,
@@ -261,7 +311,10 @@ async function collectLiquidityDiagnostics({ nodes, listParams = {} } = {}) {
       const entries = await Promise.all(
         Object.entries(calls).map(async ([method, call]) => [method, await call]),
       );
-      return [name, { rpc_url: rpcUrl, calls: Object.fromEntries(entries) }];
+      const completedCalls = Object.fromEntries(entries);
+      capDiagnosticList(completedCalls.list_swaps, "swaps");
+      capDiagnosticList(completedCalls.list_liquidity_chain_transactions, "transactions");
+      return [name, { rpc_url: rpcUrl, calls: completedCalls }];
     }),
   );
 

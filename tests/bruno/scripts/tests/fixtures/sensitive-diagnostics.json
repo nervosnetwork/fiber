@@ -1,0 +1,43 @@
+{
+  "rpc_url": "https://encoded%40user:p%40ss@example.test/rpc?safe=visible&token=query-token-value&api_key=query-api-key-value&key=query-key-value&secret=query-secret-value&password=query-password-value&payment_secret=query-payment-secret&preimage=query-preimage&invoice=query-invoice",
+  "get_invoice": {
+    "invoice_address": "invoice-address-secret",
+    "invoice": {
+      "currency": "Fibd",
+      "amount": "0x64",
+      "signature": "invoice-object-secret",
+      "data": {
+        "payment_hash": "0xpublic-invoice-hash",
+        "attrs": [
+          {
+            "payment_secret": "payment-secret-value"
+          }
+        ]
+      }
+    },
+    "status": "Open"
+  },
+  "get_payment": {
+    "payment_hash": "0xpublic-payment-hash",
+    "payment_preimage": "payment-preimage-secret",
+    "status": "Success",
+    "created_at": "0x1",
+    "last_updated_at": "0x2",
+    "failed_error": null,
+    "fee": "0x0",
+    "custom_records": null
+  },
+  "nested": [
+    {
+      "generic_url": "prefix ftp://username@example.test/file suffix",
+      "private_key": "private-key-value",
+      "passphrase": "passphrase-value",
+      "Authorization": "authorization-value",
+      "auth_header": "auth-header-value",
+      "x-api-key": "api-key-value",
+      "seed": "seed-value",
+      "mnemonic": "mnemonic-value",
+      "custom_secret": "suffix-secret-value"
+    }
+  ]
+}
