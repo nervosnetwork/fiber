@@ -95,12 +95,16 @@ script:post-response {
     throw new Error(`outpoint decode mismatch: ${JSON.stringify(outpoint)}`);
   }
 
-  // Malformed inputs must be rejected.
+  // Malformed inputs must be rejected, including a script whose molecule
+  // total size header disagrees with the actual buffer length.
+  const corruptedTotalSize =
+    known.slice(0, 2) + "39" + known.slice(4);
   const invalidCases = [
     () => encodeMoleculeScript({ codeHash: "0x1234", hashType: "data", args: "0x" }),
     () => encodeMoleculeScript({ codeHash: "0x" + "00".repeat(32), hashType: "secp", args: "0x" }),
     () => decodeOutpoint("0x1234"),
     () => decodeMoleculeScript("0x0100"),
+    () => decodeMoleculeScript(corruptedTotalSize),
   ];
   for (const run of invalidCases) {
     let failed = false;

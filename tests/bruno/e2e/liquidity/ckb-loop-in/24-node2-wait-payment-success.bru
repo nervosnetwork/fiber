@@ -60,5 +60,6 @@ script:post-response {
   if (typeof record.payment_preimage !== "string" || record.payment_preimage.length !== 66) {
     throw new Error(`settled provider payment must expose the revealed preimage: ${JSON.stringify(record)}`);
   }
-  console.log("provider payment settled with preimage:", record.payment_preimage);
+  // Length-only logging: the preimage value itself is a secret.
+  console.log("provider payment settled, preimage length:", record.payment_preimage.length);
 }

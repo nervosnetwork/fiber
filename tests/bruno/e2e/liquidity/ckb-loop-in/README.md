@@ -84,7 +84,8 @@ funds on-chain for the lock transaction instead.
   by it (asserted exactly on both nodes, requests 31/32).
 - **On-chain**: the client funds the lock cell with the gross amount
   (`QUOTE_GROSS_ONCHAIN` = amount + provider fee, which also equals
-  `capacity_requirement_ckb` for CKB loop-in quotes); the provider claims the
+  `capacity_requirement_ckb` for CKB loop-in quotes; asserted against the live
+  lock cell capacity in request 22); the provider claims the
   full lock cell into its own default funding lock. The provider fee is
   therefore charged on-chain, not through the channel: the provider nets the
   provider fee plus the claimed cell, the client pays the funding transaction
@@ -93,7 +94,7 @@ funds on-chain for the lock transaction instead.
 - The provider fee expectation is derived from the registry response
   (`base_fee + amount * proportional_fee_ppm / 1_000_000`), never duplicated.
 
-Swap amount and fee caps are defined once in request 11's pre-request script
+Swap amount and fee caps are defined once in request 04's pre-request script
 (`SWAP_AMOUNT_HEX`, `MAX_PROVIDER_FEE_HEX`, `MAX_ROUTING_FEE_HEX`); every later
 assertion derives from the quote/registry responses.
 
