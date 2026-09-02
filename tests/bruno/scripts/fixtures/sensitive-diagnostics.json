@@ -1,5 +1,5 @@
 {
-  "rpc_url": "https://encoded%40user:p%40ss@example.test/rpc?safe=visible&token=query-token-value&api_key=query-api-key-value&key=query-key-value&secret=query-secret-value&password=query-password-value&payment_secret=query-payment-secret&preimage=query-preimage&invoice=query-invoice",
+  "rpc_url": "request failed before https://encoded%40user:p%40ss@example.test/rpc?safe=visible&token=query-token-value&api_key=query-api-key-value&key=query-key-value&secret=query-secret-value&password=query-password-value&payment_secret=query-payment-secret&preimage=query-preimage&invoice=query-invoice&access_token=encoded%2Daccess%2Dvalue&refresh_token=encoded%2Drefresh%2Dvalue&bearer=encoded%2Dbearer%2Dvalue&api_token=encoded%2Dapi%2Dvalue and after",
   "get_invoice": {
     "invoice_address": "invoice-address-secret",
     "invoice": {
@@ -34,6 +34,10 @@
       "passphrase": "passphrase-value",
       "Authorization": "authorization-value",
       "auth_header": "auth-header-value",
+      "access_token": "access-token-value",
+      "refresh_token": "refresh-token-value",
+      "bearer": "bearer-value",
+      "api_token": "api-token-value",
       "x-api-key": "api-key-value",
       "seed": "seed-value",
       "mnemonic": "mnemonic-value",
