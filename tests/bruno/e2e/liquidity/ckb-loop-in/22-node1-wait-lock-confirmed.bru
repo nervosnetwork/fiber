@@ -29,7 +29,9 @@ body:json {
 }
 
 script:post-response {
-  const { waitLiquidityState, waitSwapState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const { waitCkbLiveCell, waitLiquidityState, waitSwapState } = require(
+    process.cwd() + "/scripts/wait-liquidity-state",
+  );
 
   // The client lock transaction must be confirmed before the provider can
   // accept it, so wait for the persisted chain record to flip to confirmed.
@@ -71,4 +73,29 @@ script:post-response {
   if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
     throw new Error(`client swap payment_hash mismatch: ${record.payment_hash}`);
   }
+
+  // The confirmed lock cell must still be live (the provider only claims it
+  // later) and hold exactly the gross on-chain amount (swap amount + provider
+  // fee), which the quote advertised as capacity_requirement_ckb. The CKB
+  // outpoint JSON carries the index as a hex quantity.
+  const lockOutpoint = {
+    tx_hash: bru.getVar("LOCK_TX_HASH"),
+    index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+  };
+  const liveCell = await waitCkbLiveCell({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    outPoint: lockOutpoint,
+    expectedStatus: "live",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  const capacity =
+    liveCell.result && liveCell.result.cell && liveCell.result.cell.output
+      ? liveCell.result.cell.output.capacity
+      : undefined;
+  if (BigInt(capacity) !== BigInt(bru.getVar("QUOTE_GROSS_ONCHAIN"))) {
+    throw new Error(`lock cell capacity must equal the gross on-chain amount ${bru.getVar("QUOTE_GROSS_ONCHAIN")}, got: ${capacity}`);
+  }
+  console.log("lock cell live with capacity:", capacity);
 }

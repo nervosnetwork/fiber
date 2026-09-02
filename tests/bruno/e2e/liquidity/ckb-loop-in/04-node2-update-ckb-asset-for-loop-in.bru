@@ -42,6 +42,17 @@ assert {
   res.body.error: isUndefined
 }
 
+script:pre-request {
+  // Single source for the swap amount and client fee caps consumed by the
+  // invoice (13), quote (16), import (17) and execute (19) requests below.
+  // 0x6fc23ac00 is 300 CKB: the loop-in lock cell capacity equals the gross
+  // on-chain amount and must cover the CKB minimum occupied capacity of the
+  // liquidity-lock script (roughly 222 CKB).
+  bru.setVar("SWAP_AMOUNT_HEX", "0x6fc23ac00");
+  bru.setVar("MAX_PROVIDER_FEE_HEX", "0xa");
+  bru.setVar("MAX_ROUTING_FEE_HEX", "0x64");
+}
+
 script:post-response {
   const asset = res.body.result;
   const expectedAssetId = bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID");
@@ -55,11 +66,16 @@ script:post-response {
     throw new Error("updated ckb asset must be enabled");
   }
   // The loop-in lock cell capacity equals the gross on-chain amount
-  // (amount + provider fee), and that cell must satisfy the CKB minimum
-  // occupied capacity of roughly 222 CKB. The registry therefore has to
-  // accept the 300 CKB swap amount used by this suite.
-  if (BigInt(asset.max_amount) < 0x6fc23ac00n || BigInt(asset.available_capacity) < 0x6fc23ac00n) {
-    throw new Error(`updated ckb asset limits are too small for the loop in swap: ${JSON.stringify(asset)}`);
+  // (amount + provider fee, the latter derived from this very entry's fee
+  // parameters), and that cell must satisfy the CKB minimum occupied
+  // capacity of roughly 222 CKB. The registry therefore has to accept the
+  // 300 CKB swap amount plus its fee.
+  const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
+  const providerFee =
+    BigInt(asset.base_fee) + (amount * BigInt(asset.proportional_fee_ppm)) / 1000000n;
+  const grossOnchain = amount + providerFee;
+  if (BigInt(asset.max_amount) < grossOnchain || BigInt(asset.available_capacity) < grossOnchain) {
+    throw new Error(`updated ckb asset limits are too small for the loop in swap gross 0x${grossOnchain.toString(16)}: ${JSON.stringify(asset)}`);
   }
-  console.log("ckb asset limits updated for loop in:", JSON.stringify(asset));
+  console.log("ckb asset limits updated for loop in, gross floor:", `0x${grossOnchain.toString(16)}`);
 }

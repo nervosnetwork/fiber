@@ -32,17 +32,6 @@ assert {
   res.body.error: isUndefined
 }
 
-script:pre-request {
-  // Single source for the swap amount and client fee caps consumed by the
-  // invoice (13), quote (16), import (17) and execute (19) requests below.
-  // 0x6fc23ac00 is 300 CKB: the loop-in lock cell capacity equals the gross
-  // on-chain amount and must cover the CKB minimum occupied capacity of the
-  // liquidity-lock script (roughly 222 CKB).
-  bru.setVar("SWAP_AMOUNT_HEX", "0x6fc23ac00");
-  bru.setVar("MAX_PROVIDER_FEE_HEX", "0xa");
-  bru.setVar("MAX_ROUTING_FEE_HEX", "0x64");
-}
-
 script:post-response {
   const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
   const routingCap = BigInt(bru.getVar("MAX_ROUTING_FEE_HEX"));

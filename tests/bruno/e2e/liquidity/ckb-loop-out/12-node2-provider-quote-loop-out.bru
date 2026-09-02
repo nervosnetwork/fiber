@@ -39,32 +39,30 @@ assert {
 
 script:pre-request {
   // Encode the claimant lock script (code_hash 0x00..00, hash_type data,
-  // ASCII args) as molecule table bytes: total size u32, one u32 offset per
-  // field, then code_hash (32 bytes), hash_type (1 byte) and args (Bytes).
+  // ASCII args) as molecule table bytes via the shared tested helper.
+  const { encodeMoleculeScript } = require(process.cwd() + "/scripts/molecule-script");
+
   const args = "bruno-ckb-loop-out-claimant";
-  const pushU32 = (bytes, value) => {
-    bytes.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff);
-  };
-
-  const bytes = [];
-  pushU32(bytes, 16 + 32 + 1 + 4 + args.length);
-  pushU32(bytes, 16);
-  pushU32(bytes, 48);
-  pushU32(bytes, 49);
-  for (let i = 0; i < 32; i++) {
-    bytes.push(0);
-  }
-  bytes.push(0);
-  pushU32(bytes, args.length);
-  for (let i = 0; i < args.length; i++) {
-    bytes.push(args.charCodeAt(i));
-  }
-
-  const claimantLock = "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
-  bru.setVar("CLAIMANT_LOCK", claimantLock);
+  const argsHex =
+    "0x" +
+    Array.from(args)
+      .map((ch) => ch.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
+  bru.setVar(
+    "CLAIMANT_LOCK",
+    encodeMoleculeScript({
+      codeHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      hashType: "data",
+      args: argsHex,
+    }),
+  );
 }
 
 script:post-response {
+  const { decodeMoleculeScript, encodeMoleculeScript } = require(
+    process.cwd() + "/scripts/molecule-script",
+  );
+
   const envelope = res.body.result;
   if (!envelope || !envelope.quote_id) {
     throw new Error(`provider_quote_loop_out returned no envelope: ${JSON.stringify(res.body)}`);
@@ -102,8 +100,16 @@ script:post-response {
   if (envelope.claimant_lock !== bru.getVar("CLAIMANT_LOCK")) {
     throw new Error(`final claimant_lock must echo the request: ${envelope.claimant_lock}`);
   }
-  if (typeof envelope.refund_lock !== "string" || !envelope.refund_lock.startsWith("0x") || envelope.refund_lock.length < 100) {
-    throw new Error(`refund_lock must be a molecule script hex: ${envelope.refund_lock}`);
+  // The provider refund lock must decode as a well-formed molecule Script and
+  // round trip back to the exact same bytes.
+  let decodedRefundLock;
+  try {
+    decodedRefundLock = decodeMoleculeScript(envelope.refund_lock);
+  } catch (error) {
+    throw new Error(`refund_lock must decode as a molecule script: ${envelope.refund_lock} (${error.message})`);
+  }
+  if (encodeMoleculeScript(decodedRefundLock) !== envelope.refund_lock) {
+    throw new Error(`refund_lock must round trip through the molecule codec: ${envelope.refund_lock}`);
   }
   if (envelope.client_invoice !== undefined) {
     throw new Error("loop out quote must not carry a client_invoice");
