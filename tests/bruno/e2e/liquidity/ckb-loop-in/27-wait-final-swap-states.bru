@@ -1,0 +1,74 @@
+meta {
+  name: wait for final swap states on both nodes
+  type: http
+  seq: 27
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitSwapState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const options = {
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  };
+
+  // The provider claim confirmation completes the swap with Success.
+  const provider = await waitSwapState({
+    ...options,
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "success",
+  });
+
+  // M0 note: the client loop-in swap has no dedicated completion continuation
+  // (the client is the invoice payee and no invoice-paid hook advances the
+  // swap), so OnchainLocked is its final state.
+  const client = await waitSwapState({
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "onchain_locked",
+  });
+
+  for (const [node, record] of [["provider", provider.result], ["client", client.result]]) {
+    if (record.swap_kind !== "loop_in") {
+      throw new Error(`${node} swap_kind must be loop_in: ${JSON.stringify(record)}`);
+    }
+    if (record.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID")) {
+      throw new Error(`${node} swap asset_id mismatch: ${record.asset_id}`);
+    }
+    if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+      throw new Error(`${node} swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
+    }
+    if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+      throw new Error(`${node} swap payment_hash mismatch: ${record.payment_hash}`);
+    }
+  }
+}

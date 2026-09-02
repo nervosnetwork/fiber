@@ -1,0 +1,124 @@
+meta {
+  name: molecule script encoder round trip
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const { decodeMoleculeScript, decodeOutpoint, encodeMoleculeScript } = require(
+    process.cwd() + "/scripts/molecule-script",
+  );
+
+  // Known-bytes check for the molecule Script table layout: u32 total size,
+  // three u32 field offsets, 32-byte code_hash, 1-byte hash_type, then the
+  // args Bytes vector (u32 length + payload).
+  const known = encodeMoleculeScript({
+    codeHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+    hashType: "data",
+    args: "0x616263",
+  });
+  const expectedKnown =
+    "0x38000000100000003000000031000000"
+    + "00".repeat(32)
+    + "00"
+    + "03000000"
+    + "616263";
+  if (known !== expectedKnown) {
+    throw new Error(`known-bytes encoding mismatch: ${known}`);
+  }
+
+  // hash_type name/byte mapping in both directions.
+  for (const [name, byte] of Object.entries({ data: 0, type: 1, data1: 2, data2: 3 })) {
+    const encoded = encodeMoleculeScript({
+      codeHash: "0x" + "11".repeat(32),
+      hashType: name,
+      args: "0x",
+    });
+    if (parseInt(encoded.slice(2).slice(96, 98), 16) !== byte) {
+      throw new Error(`hash_type ${name} must encode as byte ${byte}: ${encoded}`);
+    }
+    const decoded = decodeMoleculeScript(encoded);
+    if (decoded.hashType !== name || decoded.hashTypeByte !== byte) {
+      throw new Error(`hash_type ${name} round trip failed: ${JSON.stringify(decoded)}`);
+    }
+    if (decoded.args !== "0x") {
+      throw new Error(`empty args round trip failed: ${decoded.args}`);
+    }
+  }
+
+  // Realistic secp256k1 funding lock round trip.
+  const script = {
+    codeHash: "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+    hashType: "type",
+    args: "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7",
+  };
+  const encoded = encodeMoleculeScript(script);
+  const decoded = decodeMoleculeScript(encoded);
+  if (
+    decoded.codeHash !== script.codeHash
+    || decoded.hashType !== script.hashType
+    || decoded.args !== script.args
+  ) {
+    throw new Error(`script round trip mismatch: ${JSON.stringify(decoded)}`);
+  }
+
+  // OutPoint decoding: tx_hash (32 bytes) + LE u32 index.
+  const txHash = "ab".repeat(32);
+  const outpoint = decodeOutpoint("0x" + txHash + "0a000000");
+  if (outpoint.txHash !== "0x" + txHash || outpoint.index !== 10) {
+    throw new Error(`outpoint decode mismatch: ${JSON.stringify(outpoint)}`);
+  }
+
+  // Malformed inputs must be rejected.
+  const invalidCases = [
+    () => encodeMoleculeScript({ codeHash: "0x1234", hashType: "data", args: "0x" }),
+    () => encodeMoleculeScript({ codeHash: "0x" + "00".repeat(32), hashType: "secp", args: "0x" }),
+    () => decodeOutpoint("0x1234"),
+    () => decodeMoleculeScript("0x0100"),
+  ];
+  for (const run of invalidCases) {
+    let failed = false;
+    try {
+      run();
+    } catch (_) {
+      failed = true;
+    }
+    if (!failed) {
+      throw new Error("malformed molecule input must be rejected");
+    }
+  }
+
+  bru.setVar("MOLECULE_SCRIPT_HELPER_OK", true);
+}
+
+tests {
+  test("molecule script encoder round trips and rejects malformed input", function() {
+    expect(bru.getVar("MOLECULE_SCRIPT_HELPER_OK")).to.equal(true);
+  });
+}
