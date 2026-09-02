@@ -57,8 +57,8 @@ script:post-response {
     if (record.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID")) {
       throw new Error(`${node} swap asset_id mismatch: ${record.asset_id}`);
     }
-    if (record.amount !== "0x3e8") {
-      throw new Error(`${node} swap amount must be 0x3e8: ${record.amount}`);
+    if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+      throw new Error(`${node} swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
     }
     if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
       throw new Error(`${node} swap payment_hash mismatch: ${record.payment_hash}`);

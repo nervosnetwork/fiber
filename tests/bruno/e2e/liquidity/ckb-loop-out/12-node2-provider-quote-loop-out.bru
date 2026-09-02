@@ -23,10 +23,10 @@ body:json {
     "params": [
       {
         "asset_id": "{{LIQUIDITY_CKB_ASSET_ID}}",
-        "amount": "0x3e8",
+        "amount": "{{SWAP_AMOUNT_HEX}}",
         "claimant_lock": "{{CLAIMANT_LOCK}}",
-        "max_provider_fee": "0xa",
-        "max_routing_fee": "0x64",
+        "max_provider_fee": "{{MAX_PROVIDER_FEE_HEX}}",
+        "max_routing_fee": "{{MAX_ROUTING_FEE_HEX}}",
         "expires_after_seconds": "0xe10"
       }
     ]
@@ -73,21 +73,26 @@ script:post-response {
   if (envelope.swap_kind !== "loop_out") {
     throw new Error(`swap_kind must be loop_out, got: ${envelope.swap_kind}`);
   }
-  if (envelope.provider_pubkey !== bru.getEnvVar("LIQUIDITY_PROVIDER_PUBKEY")) {
-    throw new Error(`quote provider_pubkey mismatch: ${envelope.provider_pubkey}`);
+  if (envelope.provider_pubkey !== bru.getEnvVar("NODE2_PUBKEY")) {
+    throw new Error(`quote provider_pubkey must be the provider node2 pubkey: ${envelope.provider_pubkey}`);
   }
   if (envelope.asset.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID") || envelope.asset.kind !== "ckb") {
     throw new Error(`quoted asset mismatch: ${JSON.stringify(envelope.asset)}`);
   }
-  if (envelope.amount !== "0x3e8") {
-    throw new Error(`quote amount must be 0x3e8, got: ${envelope.amount}`);
+  if (envelope.amount !== bru.getVar("SWAP_AMOUNT_HEX")) {
+    throw new Error(`quote amount must be the requested ${bru.getVar("SWAP_AMOUNT_HEX")}, got: ${envelope.amount}`);
   }
-  // base_fee 0x1 with proportional_fee_ppm 0x0 yields a deterministic fee.
-  if (envelope.provider_fee !== "0x1") {
-    throw new Error(`provider_fee must be 0x1, got: ${envelope.provider_fee}`);
+  // Provider fee is derived from the registry response captured in request 04:
+  // base_fee + amount * proportional_fee_ppm / 1_000_000.
+  const expectedProviderFee =
+    BigInt(bru.getVar("REGISTRY_BASE_FEE"))
+    + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / 1000000n;
+  if (envelope.provider_fee !== "0x" + expectedProviderFee.toString(16)) {
+    throw new Error(`provider_fee must be the registry-derived fee 0x${expectedProviderFee.toString(16)}, got: ${envelope.provider_fee}`);
   }
-  if (envelope.routing_fee_limit !== "0x64") {
-    throw new Error(`routing_fee_limit must be 0x64, got: ${envelope.routing_fee_limit}`);
+  // The provider echoes the client-requested routing fee cap unchanged.
+  if (envelope.routing_fee_limit !== bru.getVar("MAX_ROUTING_FEE_HEX")) {
+    throw new Error(`routing_fee_limit must be the requested cap ${bru.getVar("MAX_ROUTING_FEE_HEX")}, got: ${envelope.routing_fee_limit}`);
   }
   // Provider quote constants (liquidity actor): onchain fee estimate 1000,
   // capacity requirement 10000 shannons.
@@ -129,6 +134,7 @@ script:post-response {
   bru.setVar("QUOTE_ID", envelope.quote_id);
   bru.setVar("PAYMENT_HASH", envelope.payment_hash);
   bru.setVar("QUOTE_REFUND_LOCK", envelope.refund_lock);
+  bru.setVar("QUOTE_AMOUNT", envelope.amount);
   bru.setVar("QUOTE_PRINCIPAL", (BigInt(envelope.amount) + BigInt(envelope.provider_fee)).toString(16));
   bru.setVar("QUOTE_ENVELOPE_JSON", JSON.stringify(envelope));
   console.log("loop out quote:", envelope.quote_id, "principal:", bru.getVar("QUOTE_PRINCIPAL"));
