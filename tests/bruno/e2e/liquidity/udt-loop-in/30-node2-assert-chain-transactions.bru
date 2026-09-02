@@ -1,0 +1,121 @@
+meta {
+  name: node2 assert chain transactions and claim UDT output
+  type: http
+  seq: 30
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { decodeOutpoint, decodeMoleculeScript } = require(
+    process.cwd() + "/scripts/molecule-script",
+  );
+  const { decodeUdtAmount } = require(process.cwd() + "/scripts/liquidity-lock-args");
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const transactions = res.body.result.transactions || [];
+  const lock = transactions.find((tx) => tx.role === "loop_in_lock");
+  if (!lock) {
+    throw new Error(`provider must record the observed loop in lock transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (lock.status !== "confirmed") {
+    throw new Error(`provider loop in lock record must be confirmed, got: ${lock.status}`);
+  }
+  if (lock.tx_hash !== bru.getVar("LOCK_TX_HASH")) {
+    throw new Error(`provider lock tx_hash mismatch: ${lock.tx_hash}`);
+  }
+  const outpoint = decodeOutpoint(lock.outpoint);
+  if (outpoint.txHash !== bru.getVar("LOCK_TX_HASH")) {
+    throw new Error(`provider lock outpoint tx_hash mismatch: ${lock.outpoint}`);
+  }
+  if (BigInt(outpoint.index) !== BigInt(bru.getVar("LOCK_INDEX"))) {
+    throw new Error(`provider lock outpoint index mismatch: ${lock.outpoint}`);
+  }
+
+  // Unlike Loop Out, the provider drives the Loop In claim itself: it spends
+  // the client lock after its channel payment settles and reveals the
+  // preimage in the claim witness.
+  const claim = transactions.find((tx) => tx.role === "claim");
+  if (!claim) {
+    throw new Error(`provider must record the claim transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (claim.status !== "confirmed") {
+    throw new Error(`provider claim record must be confirmed, got: ${claim.status}`);
+  }
+  if (typeof claim.tx_hash !== "string" || claim.tx_hash.length !== 66) {
+    throw new Error(`provider claim tx_hash must be a 32-byte hex: ${JSON.stringify(claim)}`);
+  }
+
+  const refund = transactions.find((tx) => tx.role === "refund");
+  if (refund) {
+    throw new Error(`successful loop in must not record a refund: ${JSON.stringify(refund)}`);
+  }
+
+  // The claim transaction must preserve the UDT semantics of the lock cell:
+  // the claimed output keeps the exact simple UDT type script and the gross
+  // UDT amount (16-byte little-endian cell data) under the provider funding
+  // lock, with the same operational CKB capacity as the lock cell.
+  const claimTx = await rpc(
+    bru.getEnvVar("CKB_RPC_URL"),
+    "get_transaction",
+    [claim.tx_hash],
+  );
+  const tx = claimTx.result && claimTx.result.transaction;
+  if (!tx || !Array.isArray(tx.outputs) || tx.outputs.length !== 1) {
+    throw new Error(`claim transaction must have exactly one output: ${JSON.stringify(claimTx.result)}`);
+  }
+  const output = tx.outputs[0];
+  const outputData = (tx.outputs_data || [])[0];
+
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+  const typeScript = output.type_;
+  if (!typeScript
+    || typeScript.code_hash !== expectedScript.code_hash
+    || typeScript.hash_type !== expectedScript.hash_type
+    || typeScript.args !== expectedScript.args) {
+    throw new Error(`claim output type script must be the simple UDT script: ${JSON.stringify(typeScript)}`);
+  }
+  if (!outputData || decodeUdtAmount(outputData) !== BigInt(bru.getVar("QUOTE_GROSS_UDT"))) {
+    throw new Error(`claim output data must decode to the gross UDT amount ${bru.getVar("QUOTE_GROSS_UDT")}, got: ${outputData}`);
+  }
+  if (BigInt(output.capacity) !== BigInt(bru.getVar("QUOTE_CAPACITY_CKB"))) {
+    throw new Error(`claim output capacity must equal the lock cell capacity ${bru.getVar("QUOTE_CAPACITY_CKB")}, got: ${output.capacity}`);
+  }
+
+  // The claimed UDT lands under the provider default funding lock (the quote
+  // claimant_lock, encoded as packed molecule script bytes).
+  const providerLock = decodeMoleculeScript(bru.getVar("PROVIDER_FUNDING_LOCK"));
+  const claimLock = output.lock;
+  if (claimLock.code_hash !== providerLock.codeHash
+    || claimLock.hash_type !== providerLock.hashType
+    || claimLock.args !== providerLock.args) {
+    throw new Error(`claim output lock must be the provider funding lock: ${JSON.stringify(claimLock)}`);
+  }
+  console.log("claim output verified: capacity", output.capacity, "udt amount", bru.getVar("QUOTE_GROSS_UDT"));
+}
