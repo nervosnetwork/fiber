@@ -1,0 +1,65 @@
+meta {
+  name: node2 update ckb asset limits for loop in
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "update_liquidity_asset",
+    "params": [
+      {
+        "asset": {
+          "asset_id": "{{LIQUIDITY_CKB_ASSET_ID}}",
+          "kind": "ckb",
+          "udt_type_script": null,
+          "min_amount": "0x1",
+          "max_amount": "0x174876e800",
+          "available_capacity": "0x174876e800",
+          "base_fee": "0x1",
+          "proportional_fee_ppm": "0x0",
+          "enabled": true
+        }
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const asset = res.body.result;
+  const expectedAssetId = bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID");
+  if (asset.asset_id !== expectedAssetId) {
+    throw new Error(`updated asset_id must be ${expectedAssetId}, got: ${asset.asset_id}`);
+  }
+  if (asset.kind !== "ckb" || asset.udt_type_script !== null) {
+    throw new Error(`unexpected updated asset shape: ${JSON.stringify(asset)}`);
+  }
+  if (asset.enabled !== true) {
+    throw new Error("updated ckb asset must be enabled");
+  }
+  // The loop-in lock cell capacity equals the gross on-chain amount
+  // (amount + provider fee), and that cell must satisfy the CKB minimum
+  // occupied capacity of roughly 222 CKB. The registry therefore has to
+  // accept the 300 CKB swap amount used by this suite.
+  if (BigInt(asset.max_amount) < 0x6fc23ac00n || BigInt(asset.available_capacity) < 0x6fc23ac00n) {
+    throw new Error(`updated ckb asset limits are too small for the loop in swap: ${JSON.stringify(asset)}`);
+  }
+  console.log("ckb asset limits updated for loop in:", JSON.stringify(asset));
+}
