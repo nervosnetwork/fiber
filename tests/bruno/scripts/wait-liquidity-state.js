@@ -11,6 +11,14 @@ function sleep(ms) {
 
 function redactText(value) {
   return value
+    .replace(
+      /(Authorization\s*:\s*)(?:[a-z][a-z0-9_-]*\s+)?[^\s,;"'}]+/gi,
+      `$1${REDACTED}`,
+    )
+    .replace(
+      /\b(Bearer|Basic|Token|(?:X-)?Api[-_]?Key)(\s+|\s*:\s*)[^\s,;"'}]+/gi,
+      `$1$2${REDACTED}`,
+    )
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@/\s]+@/gi, `$1${REDACTED}@`)
     .replace(/([?&])([^=&#\s]+)=([^&#\s"'},\]]*)/g, (match, separator, key) => {
       let decodedKey = key;

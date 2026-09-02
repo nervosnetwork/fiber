@@ -71,6 +71,8 @@ secrets=(
   encoded%2Dapi%2Dvalue access-token-value refresh-token-value bearer-value api-token-value
   invoice-address-secret invoice-object-secret payment-secret-value payment-preimage-secret
   private-key-value passphrase-value authorization-value auth-header-value api-key-value
+  header-secret standalone-bearer-secret basic-secret token-scheme-secret
+  standalone-basic-secret standalone-token-secret standalone-api-secret free-api-credential
   seed-value mnemonic-value suffix-secret-value
 )
 for secret in "${secrets[@]}"; do
@@ -85,6 +87,19 @@ if [[ "$serialized" != *"safe=visible"* ]]; then
 fi
 if [[ "$serialized" != *"request failed before"* || "$serialized" != *"and after"* ]]; then
   printf 'free-form URL context was removed\n' >&2
+  exit 1
+fi
+if ! jq -e '
+  .nested[0].message_one == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_two == "before Bearer [REDACTED] after" and
+  .nested[0].message_three == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_four == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_five == "before Basic [REDACTED] after" and
+  .nested[0].message_six == "before Token [REDACTED] after" and
+  .nested[0].message_seven == "before ApiKey [REDACTED] after" and
+  .nested[0].message_eight == "upstream X-API-Key: [REDACTED] rejected"
+' "$output" >/dev/null; then
+  printf 'free-form authorization credentials were not fully redacted\n' >&2
   exit 1
 fi
 

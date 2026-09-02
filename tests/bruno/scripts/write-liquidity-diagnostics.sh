@@ -98,6 +98,16 @@ jq --sort-keys '
     ($key == "secret") or
     ($key | endswith("_secret"));
   def redact_url:
+    gsub(
+      "(?<prefix>Authorization[[:space:]]*:[[:space:]]*)(?:[a-z][a-z0-9_-]*[[:space:]]+)?[^[:space:],;\"'\''}]+";
+      "\(.prefix)[REDACTED]";
+      "i"
+    ) |
+    gsub(
+      "(?<prefix>\\b(?:Bearer|Basic|Token|(?:X-)?Api[-_]?Key)(?:[[:space:]]+|[[:space:]]*:[[:space:]]*))[^[:space:],;\"'\''}]+";
+      "\(.prefix)[REDACTED]";
+      "i"
+    ) |
     gsub("://[^@/[:space:]]+@"; "://[REDACTED]@") |
     gsub(
       "(?<prefix>[?&](?:[a-z0-9_-]*(?:private|privkey|preimage)[a-z0-9_-]*|[a-z0-9_-]*token[a-z0-9_-]*|[a-z0-9_-]*bearer[a-z0-9_-]*|[a-z0-9_-]*api[a-z0-9_-]*(?:key|token|auth|secret|bearer)[a-z0-9_-]*|key|secret|password|passphrase|authorization|auth[a-z0-9_-]*|seed|mnemonic|settlement_key|local_key|client_invoice|invoice|invoice_address|[a-z0-9_-]+_secret)=)[^&#[:space:]\"'\''},\\]]*";
