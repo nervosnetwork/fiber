@@ -33,6 +33,7 @@ use fiber_store::db_migrate::DbMigrate;
 use fiber_store::migration::{
     MigrateConfirmFn, MigrateProgressFn, INIT_DB_VERSION, MIGRATION_VERSION_KEY,
 };
+use fiber_types::channel::ChannelImmutableData;
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
@@ -944,8 +945,43 @@ impl ChannelActorStateStore for Store {
             let kv = KeyValue::OutPointChannelId(outpoint, state.id);
             batch.put(kv.key(), kv.value());
         }
+
+        // Extract immutable data before state is consumed by KeyValue.
+        let immutable = ChannelImmutableData {
+            local_pubkey: state.local_pubkey,
+            remote_pubkey: state.remote_pubkey,
+            id: state.id,
+            funding_tx: state.funding_tx.clone(),
+            funding_tx_confirmed_at: state.funding_tx_confirmed_at.clone(),
+            funding_udt_type_script: state.funding_udt_type_script.clone(),
+            is_acceptor: state.is_acceptor,
+            is_one_way: state.is_one_way,
+            local_reserved_ckb_amount: state.local_reserved_ckb_amount,
+            remote_reserved_ckb_amount: state.remote_reserved_ckb_amount,
+            commitment_fee_rate: state.commitment_fee_rate,
+            commitment_delay_epoch: state.commitment_delay_epoch,
+            funding_fee_rate: state.funding_fee_rate,
+            signer: state.signer.clone(),
+            local_channel_public_keys: state.local_channel_public_keys.clone(),
+            local_constraints: state.local_constraints.clone(),
+            remote_constraints: state.remote_constraints.clone(),
+            remote_shutdown_script: state.remote_shutdown_script.clone(),
+            local_shutdown_script: state.local_shutdown_script.clone(),
+            created_at: state.created_at,
+        };
+
         let kv = KeyValue::ChannelActorState(state.id, state);
         batch.put(kv.key(), kv.value());
+
+        // Write immutable data under a separate prefix for future optimization.
+        let immutable_key = [&[CHANNEL_IMMUTABLE_DATA_PREFIX], immutable.id.as_ref()].concat();
+        if self.get(&immutable_key).is_none() {
+            batch.put(
+                immutable_key,
+                serialize_to_vec(&immutable, "ChannelImmutableData"),
+            );
+        }
+
         batch.commit();
     }
 
@@ -963,8 +999,41 @@ impl ChannelActorStateStore for Store {
             let kv = KeyValue::OutPointChannelId(outpoint, state.id);
             batch.put(kv.key(), kv.value());
         }
+
+        // Extract immutable data before state is consumed by KeyValue.
+        let immutable = ChannelImmutableData {
+            local_pubkey: state.local_pubkey,
+            remote_pubkey: state.remote_pubkey,
+            id: state.id,
+            funding_tx: state.funding_tx.clone(),
+            funding_tx_confirmed_at: state.funding_tx_confirmed_at.clone(),
+            funding_udt_type_script: state.funding_udt_type_script.clone(),
+            is_acceptor: state.is_acceptor,
+            is_one_way: state.is_one_way,
+            local_reserved_ckb_amount: state.local_reserved_ckb_amount,
+            remote_reserved_ckb_amount: state.remote_reserved_ckb_amount,
+            commitment_fee_rate: state.commitment_fee_rate,
+            commitment_delay_epoch: state.commitment_delay_epoch,
+            funding_fee_rate: state.funding_fee_rate,
+            signer: state.signer.clone(),
+            local_channel_public_keys: state.local_channel_public_keys.clone(),
+            local_constraints: state.local_constraints.clone(),
+            remote_constraints: state.remote_constraints.clone(),
+            remote_shutdown_script: state.remote_shutdown_script.clone(),
+            local_shutdown_script: state.local_shutdown_script.clone(),
+            created_at: state.created_at,
+        };
+
         let kv = KeyValue::ChannelActorState(state.id, state);
         batch.put(kv.key(), kv.value());
+
+        let immutable_key = [&[CHANNEL_IMMUTABLE_DATA_PREFIX], channel_id.as_ref()].concat();
+        if self.get(&immutable_key).is_none() {
+            batch.put(
+                immutable_key,
+                serialize_to_vec(&immutable, "ChannelImmutableData"),
+            );
+        }
 
         let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
         batch.put(key, serialize_to_vec(diff, "CommitDiff"));

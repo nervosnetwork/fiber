@@ -42,6 +42,7 @@ pub const ATTEMPT_CHANNEL_INDEX_PREFIX: u8 = 196;
 pub const HOLD_TLC_PREFIX: u8 = 197;
 // A shared prefix for watchtower and channel store
 pub const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
+pub const CHANNEL_IMMUTABLE_DATA_PREFIX: u8 = 208;
 pub const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
 #[cfg(feature = "watchtower")]
 mod watchtower {
