@@ -2,6 +2,7 @@ const axios = require("axios");
 
 const REDACTED = "[REDACTED]";
 const SENSITIVE_KEY = /(private.?key|privkey|preimage|password)/i;
+let rpcRequestSequence = 0;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -9,7 +10,7 @@ function sleep(ms) {
 
 function redactText(value) {
   return value
-    .replace(/(\/\/[^:/\s]+:)[^@/\s]+@/g, `$1${REDACTED}@`)
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^@/\s]+@/gi, `$1${REDACTED}@`)
     .replace(
       /((?:private.?key|privkey|preimage|password)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi,
       `$1${REDACTED}`,
@@ -45,9 +46,11 @@ async function rpc(url, method, params = [], timeoutMs) {
     throw new Error("rpc requires an explicit url and method");
   }
 
+  rpcRequestSequence += 1;
+  const requestId = `bruno-liquidity-${rpcRequestSequence}`;
   const response = await axios.post(
     url,
-    { id: "42", jsonrpc: "2.0", method, params },
+    { id: requestId, jsonrpc: "2.0", method, params },
     timeoutMs === undefined ? undefined : { timeout: timeoutMs },
   );
   const data = response && response.data;
@@ -57,6 +60,18 @@ async function rpc(url, method, params = [], timeoutMs) {
   }
   if (data.jsonrpc !== "2.0") {
     throw new Error(`invalid JSON-RPC response for ${method}: jsonrpc must be 2.0`);
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(data, "id")
+    || !Object.is(data.id, requestId)
+  ) {
+    const redactedResponse = redact(data);
+    const actualId = String(redact(data.id));
+    const error = new Error(
+      `JSON-RPC response id mismatch for ${method}: expected=${requestId}, actual=${actualId}, response=${JSON.stringify(redactedResponse)}`,
+    );
+    error.rpcResponse = redactedResponse;
+    throw error;
   }
   if (data.error != null) {
     const error = new Error(`JSON-RPC ${method} failed: ${JSON.stringify(redact(data.error))}`);
@@ -197,33 +212,51 @@ async function diagnosticRpc(url, method, params) {
   }
 }
 
-async function collectLiquidityDiagnostics({ nodes, listParams = {} }) {
-  if (!Array.isArray(nodes) || nodes.length === 0) {
-    throw new Error("collectLiquidityDiagnostics requires explicit nodes");
+async function collectLiquidityDiagnostics({ nodes, listParams = {} } = {}) {
+  if (!Array.isArray(nodes) || nodes.length < 2) {
+    throw new Error(
+      "collectLiquidityDiagnostics requires at least two explicit participating nodes",
+    );
   }
+
+  const nodeNames = new Set();
+  nodes.forEach((node, index) => {
+    const { name, rpcUrl, swapId, paymentHash } = node || {};
+    const label = name || `at index ${index}`;
+    if (!name || !rpcUrl || !swapId || !paymentHash) {
+      const missing = [
+        ["name", name],
+        ["rpcUrl", rpcUrl],
+        ["swapId", swapId],
+        ["paymentHash", paymentHash],
+      ]
+        .filter(([, value]) => !value)
+        .map(([field]) => field);
+      const missingDescription = missing.length > 2
+        ? `${missing.slice(0, -1).join(", ")}, and ${missing[missing.length - 1]}`
+        : missing.join(" and ");
+      throw new Error(`diagnostics node ${label} requires ${missingDescription}`);
+    }
+    if (nodeNames.has(name)) {
+      throw new Error(`collectLiquidityDiagnostics requires unique node names: ${name}`);
+    }
+    nodeNames.add(name);
+  });
 
   const diagnostics = await Promise.all(
     nodes.map(async ({ name, rpcUrl, swapId, paymentHash }) => {
-      if (!name || !rpcUrl) {
-        throw new Error("each diagnostics node requires a name and rpcUrl");
-      }
-
       const calls = {
         list_swaps: diagnosticRpc(rpcUrl, "list_swaps", [listParams]),
-      };
-      if (swapId) {
-        calls.get_swap = diagnosticRpc(rpcUrl, "get_swap", [{ swap_id: swapId }]);
-        calls.list_liquidity_chain_transactions = diagnosticRpc(
+        get_swap: diagnosticRpc(rpcUrl, "get_swap", [{ swap_id: swapId }]),
+        list_liquidity_chain_transactions: diagnosticRpc(
           rpcUrl,
           "list_liquidity_chain_transactions",
           [{ swap_id: swapId }],
-        );
-      }
-      if (paymentHash) {
-        const params = [{ payment_hash: paymentHash }];
-        calls.get_payment = diagnosticRpc(rpcUrl, "get_payment", params);
-        calls.get_invoice = diagnosticRpc(rpcUrl, "get_invoice", params);
-      }
+        ),
+      };
+      const paymentParams = [{ payment_hash: paymentHash }];
+      calls.get_payment = diagnosticRpc(rpcUrl, "get_payment", paymentParams);
+      calls.get_invoice = diagnosticRpc(rpcUrl, "get_invoice", paymentParams);
 
       const entries = await Promise.all(
         Object.entries(calls).map(async ([method, call]) => [method, await call]),
@@ -235,7 +268,24 @@ async function collectLiquidityDiagnostics({ nodes, listParams = {} }) {
   return redact({ collected_at: new Date().toISOString(), nodes: Object.fromEntries(diagnostics) });
 }
 
-async function collectCkbDiagnostics({ ckbRpcUrl, transactionHashes = [], outPoints = [] }) {
+async function collectCkbDiagnostics({
+  ckbRpcUrl,
+  transactionHashes = [],
+  outPoints = [],
+} = {}) {
+  if (!ckbRpcUrl) {
+    throw new Error("collectCkbDiagnostics requires ckbRpcUrl");
+  }
+  if (!Array.isArray(transactionHashes) || !Array.isArray(outPoints)) {
+    throw new Error("collectCkbDiagnostics transactionHashes and outPoints must be arrays");
+  }
+  if (transactionHashes.length === 0 && outPoints.length === 0) {
+    throw new Error("collectCkbDiagnostics requires at least one transaction hash or outpoint");
+  }
+  if (transactionHashes.some((txHash) => !txHash) || outPoints.some((outPoint) => !outPoint)) {
+    throw new Error("collectCkbDiagnostics contains an empty transaction hash or outpoint");
+  }
+
   const transactions = await Promise.all(transactionHashes.map(async (txHash) => ({
     tx_hash: txHash,
     response: await diagnosticRpc(ckbRpcUrl, "get_transaction", [txHash]),
