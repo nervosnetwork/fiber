@@ -72,6 +72,10 @@ script:post-response {
     "standalone-token-secret",
     "standalone-api-secret",
     "free-api-credential",
+    "double-quoted-bearer-secret",
+    "double-quoted-basic-secret",
+    "single-quoted-bearer-secret",
+    "single-quoted-token-secret",
     "seed-value",
     "mnemonic-value",
     "suffix-secret-value",
@@ -120,7 +124,11 @@ script:post-response {
       && messages.message_five === "before Basic [REDACTED] after"
       && messages.message_six === "before Token [REDACTED] after"
       && messages.message_seven === "before ApiKey [REDACTED] after"
-      && messages.message_eight === "upstream X-API-Key: [REDACTED] rejected",
+      && messages.message_eight === "upstream X-API-Key: [REDACTED] rejected"
+      && messages.message_nine === "before Bearer [REDACTED] after"
+      && messages.message_ten === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_eleven === "before Bearer [REDACTED] after"
+      && messages.message_twelve === "upstream Authorization: [REDACTED] rejected",
   );
   bru.setVar(
     "LIQUIDITY_HELPER_LIST_LIMIT_PASSED",

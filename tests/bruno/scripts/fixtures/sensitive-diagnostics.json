@@ -47,6 +47,10 @@
       "message_six": "before Token standalone-token-secret after",
       "message_seven": "before ApiKey standalone-api-secret after",
       "message_eight": "upstream X-API-Key: free-api-credential rejected",
+      "message_nine": "before Bearer \"double-quoted-bearer-secret\" after",
+      "message_ten": "upstream Authorization: Basic \"double-quoted-basic-secret\" rejected",
+      "message_eleven": "before Bearer 'single-quoted-bearer-secret' after",
+      "message_twelve": "upstream Authorization: Token 'single-quoted-token-secret' rejected",
       "seed": "seed-value",
       "mnemonic": "mnemonic-value",
       "custom_secret": "suffix-secret-value"

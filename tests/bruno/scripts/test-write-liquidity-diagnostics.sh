@@ -73,6 +73,8 @@ secrets=(
   private-key-value passphrase-value authorization-value auth-header-value api-key-value
   header-secret standalone-bearer-secret basic-secret token-scheme-secret
   standalone-basic-secret standalone-token-secret standalone-api-secret free-api-credential
+  double-quoted-bearer-secret double-quoted-basic-secret single-quoted-bearer-secret
+  single-quoted-token-secret
   seed-value mnemonic-value suffix-secret-value
 )
 for secret in "${secrets[@]}"; do
@@ -97,7 +99,11 @@ if ! jq -e '
   .nested[0].message_five == "before Basic [REDACTED] after" and
   .nested[0].message_six == "before Token [REDACTED] after" and
   .nested[0].message_seven == "before ApiKey [REDACTED] after" and
-  .nested[0].message_eight == "upstream X-API-Key: [REDACTED] rejected"
+  .nested[0].message_eight == "upstream X-API-Key: [REDACTED] rejected" and
+  .nested[0].message_nine == "before Bearer [REDACTED] after" and
+  .nested[0].message_ten == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_eleven == "before Bearer [REDACTED] after" and
+  .nested[0].message_twelve == "upstream Authorization: [REDACTED] rejected"
 ' "$output" >/dev/null; then
   printf 'free-form authorization credentials were not fully redacted\n' >&2
   exit 1

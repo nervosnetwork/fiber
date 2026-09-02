@@ -99,12 +99,12 @@ jq --sort-keys '
     ($key | endswith("_secret"));
   def redact_url:
     gsub(
-      "(?<prefix>Authorization[[:space:]]*:[[:space:]]*)(?:[a-z][a-z0-9_-]*[[:space:]]+)?[^[:space:],;\"'\''}]+";
+      "(?<prefix>Authorization[[:space:]]*:[[:space:]]*)(?:[a-z][a-z0-9_-]*[[:space:]]+)?(?:\"[^\"]*\"|\u0027[^\u0027]*\u0027|[^[:space:],;\"'\''}]+)";
       "\(.prefix)[REDACTED]";
       "i"
     ) |
     gsub(
-      "(?<prefix>\\b(?:Bearer|Basic|Token|(?:X-)?Api[-_]?Key)(?:[[:space:]]+|[[:space:]]*:[[:space:]]*))[^[:space:],;\"'\''}]+";
+      "(?<prefix>\\b(?:Bearer|Basic|Token|(?:X-)?Api[-_]?Key)(?:[[:space:]]+|[[:space:]]*:[[:space:]]*))(?:\"[^\"]*\"|\u0027[^\u0027]*\u0027|[^[:space:],;\"'\''}]+)";
       "\(.prefix)[REDACTED]";
       "i"
     ) |
