@@ -1,0 +1,61 @@
+meta {
+  name: node1 capture loop out channel id
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE2_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const existingIds = new Set(JSON.parse(bru.getVar("EXISTING_CHANNEL_IDS") || "[]"));
+  const findNewChannel = (channels) =>
+    channels.find((channel) => !existingIds.has(channel.channel_id));
+
+  let newChannel = findNewChannel(res.body.result.channels || []);
+  if (!newChannel) {
+    // The auto-accept handshake may still be in flight; poll briefly.
+    const rpcUrl = bru.getEnvVar("NODE1_RPC_URL");
+    const peerPubkey = bru.getEnvVar("NODE2_PUBKEY");
+    for (let attempt = 0; attempt < 30 && !newChannel; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const result = await rpc(rpcUrl, "list_channels", [{ pubkey: peerPubkey }]);
+      newChannel = findNewChannel(result.result.channels || []);
+    }
+  }
+
+  if (!newChannel) {
+    throw new Error("no new channel between node1 and node2 was found after open_channel");
+  }
+
+  bru.setVar("CHANNEL_ID", newChannel.channel_id);
+  console.log("loop out channel:", JSON.stringify(newChannel));
+}

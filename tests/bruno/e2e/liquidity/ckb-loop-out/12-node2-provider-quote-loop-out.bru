@@ -1,0 +1,135 @@
+meta {
+  name: node2 provider quote loop out
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_quote_loop_out",
+    "params": [
+      {
+        "asset_id": "{{LIQUIDITY_CKB_ASSET_ID}}",
+        "amount": "0x3e8",
+        "claimant_lock": "{{CLAIMANT_LOCK}}",
+        "max_provider_fee": "0xa",
+        "max_routing_fee": "0x64",
+        "expires_after_seconds": "0xe10"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:pre-request {
+  // Encode the claimant lock script (code_hash 0x00..00, hash_type data,
+  // ASCII args) as molecule table bytes: total size u32, one u32 offset per
+  // field, then code_hash (32 bytes), hash_type (1 byte) and args (Bytes).
+  const args = "bruno-ckb-loop-out-claimant";
+  const pushU32 = (bytes, value) => {
+    bytes.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+
+  const bytes = [];
+  pushU32(bytes, 16 + 32 + 1 + 4 + args.length);
+  pushU32(bytes, 16);
+  pushU32(bytes, 48);
+  pushU32(bytes, 49);
+  for (let i = 0; i < 32; i++) {
+    bytes.push(0);
+  }
+  bytes.push(0);
+  pushU32(bytes, args.length);
+  for (let i = 0; i < args.length; i++) {
+    bytes.push(args.charCodeAt(i));
+  }
+
+  const claimantLock = "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  bru.setVar("CLAIMANT_LOCK", claimantLock);
+}
+
+script:post-response {
+  const envelope = res.body.result;
+  if (!envelope || !envelope.quote_id) {
+    throw new Error(`provider_quote_loop_out returned no envelope: ${JSON.stringify(res.body)}`);
+  }
+
+  if (envelope.swap_kind !== "loop_out") {
+    throw new Error(`swap_kind must be loop_out, got: ${envelope.swap_kind}`);
+  }
+  if (envelope.provider_pubkey !== bru.getEnvVar("LIQUIDITY_PROVIDER_PUBKEY")) {
+    throw new Error(`quote provider_pubkey mismatch: ${envelope.provider_pubkey}`);
+  }
+  if (envelope.asset.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID") || envelope.asset.kind !== "ckb") {
+    throw new Error(`quoted asset mismatch: ${JSON.stringify(envelope.asset)}`);
+  }
+  if (envelope.amount !== "0x3e8") {
+    throw new Error(`quote amount must be 0x3e8, got: ${envelope.amount}`);
+  }
+  // base_fee 0x1 with proportional_fee_ppm 0x0 yields a deterministic fee.
+  if (envelope.provider_fee !== "0x1") {
+    throw new Error(`provider_fee must be 0x1, got: ${envelope.provider_fee}`);
+  }
+  if (envelope.routing_fee_limit !== "0x64") {
+    throw new Error(`routing_fee_limit must be 0x64, got: ${envelope.routing_fee_limit}`);
+  }
+  // Provider quote constants (liquidity actor): onchain fee estimate 1000,
+  // capacity requirement 10000 shannons.
+  if (envelope.onchain_fee_estimate_ckb !== "0x3e8" || envelope.capacity_requirement_ckb !== "0x2710") {
+    throw new Error(`unexpected on-chain cost estimates: ${JSON.stringify(envelope)}`);
+  }
+  if (envelope.claimant_lock !== bru.getVar("CLAIMANT_LOCK")) {
+    throw new Error(`final claimant_lock must echo the request: ${envelope.claimant_lock}`);
+  }
+  if (typeof envelope.refund_lock !== "string" || !envelope.refund_lock.startsWith("0x") || envelope.refund_lock.length < 100) {
+    throw new Error(`refund_lock must be a molecule script hex: ${envelope.refund_lock}`);
+  }
+  if (envelope.client_invoice !== undefined) {
+    throw new Error("loop out quote must not carry a client_invoice");
+  }
+  if (typeof envelope.payment_hash !== "string" || envelope.payment_hash.length !== 66) {
+    throw new Error(`payment_hash must be a 32-byte hex: ${envelope.payment_hash}`);
+  }
+
+  const expiresAt = BigInt(envelope.expires_at);
+  const nowMs = BigInt(Date.now());
+  if (expiresAt <= nowMs) {
+    throw new Error(`quote must not be expired: expires_at=${envelope.expires_at}`);
+  }
+  if (BigInt(envelope.payout_deadline) !== expiresAt + 10000n) {
+    throw new Error(`payout_deadline must be expires_at + 10000ms: ${envelope.payout_deadline}`);
+  }
+  // refund_after_lock_time is an absolute CKB `since` timestamp covering
+  // expires_at + 20s, rounded up to whole seconds in the 56-bit value field.
+  const since = BigInt(envelope.refund_after_lock_time);
+  const seconds = since & 0x00ffffffffffffffn;
+  if (since === seconds) {
+    throw new Error(`refund_after_lock_time must carry since flag bits: ${envelope.refund_after_lock_time}`);
+  }
+  if (seconds * 1000n < expiresAt + 20000n || seconds * 1000n >= expiresAt + 21000n) {
+    throw new Error(`refund since timestamp does not cover expiry + 20s: ${envelope.refund_after_lock_time}`);
+  }
+
+  bru.setVar("QUOTE_ID", envelope.quote_id);
+  bru.setVar("PAYMENT_HASH", envelope.payment_hash);
+  bru.setVar("QUOTE_REFUND_LOCK", envelope.refund_lock);
+  bru.setVar("QUOTE_PRINCIPAL", (BigInt(envelope.amount) + BigInt(envelope.provider_fee)).toString(16));
+  bru.setVar("QUOTE_ENVELOPE_JSON", JSON.stringify(envelope));
+  console.log("loop out quote:", envelope.quote_id, "principal:", bru.getVar("QUOTE_PRINCIPAL"));
+}
