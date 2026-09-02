@@ -39,6 +39,7 @@ jq --sort-keys '
         end
       )
     elif type == "array" then map(redact)
+    elif type == "string" then gsub("://[^@/[:space:]]+@"; "://[REDACTED]@")
     else .
     end;
   redact
