@@ -23,8 +23,8 @@ body:json {
     "params": [
       {
         "quote": {{QUOTE_ENVELOPE_JSON}},
-        "max_provider_fee": "0xa",
-        "max_routing_fee": "0x64"
+        "max_provider_fee": "{{MAX_PROVIDER_FEE_HEX}}",
+        "max_routing_fee": "{{MAX_ROUTING_FEE_HEX}}"
       }
     ]
   }
@@ -45,7 +45,7 @@ script:post-response {
   if (envelope.refund_lock !== bru.getVar("QUOTE_REFUND_LOCK")) {
     throw new Error(`imported refund_lock must be preserved: ${envelope.refund_lock}`);
   }
-  if (envelope.amount !== "0x3e8" || envelope.provider_fee !== "0x1") {
+  if (envelope.amount !== bru.getVar("QUOTE_AMOUNT") || envelope.provider_fee !== "0x" + (BigInt(bru.getVar("QUOTE_PRINCIPAL")) - BigInt(bru.getVar("QUOTE_AMOUNT"))).toString(16)) {
     throw new Error(`imported amounts must be preserved: ${JSON.stringify(envelope)}`);
   }
 }
