@@ -1,0 +1,104 @@
+meta {
+  name: assert payout udt lock cell
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitCkbLiveCell } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const { decodeLiquidityLockArgs, decodeUdtAmount } = require(
+    process.cwd() + "/scripts/liquidity-lock-args",
+  );
+
+  // The provider payout cell is live between the payout confirmation and the
+  // client claim: it holds the swap amount as a UDT cell under the
+  // liquidity-lock contract. Verify the UDT semantics directly on chain.
+  const payoutOutpoint = {
+    tx_hash: bru.getVar("PAYOUT_TX_HASH"),
+    index: "0x" + BigInt(bru.getVar("PAYOUT_INDEX")).toString(16),
+  };
+  const liveCell = await waitCkbLiveCell({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    outPoint: payoutOutpoint,
+    expectedStatus: "live",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  const cell = liveCell.result && liveCell.result.cell;
+  if (!cell || !cell.output) {
+    throw new Error(`payout live cell response is missing the cell output: ${JSON.stringify(liveCell.result)}`);
+  }
+
+  // CKB capacity: exactly the quoted capacity requirement (10000 shannons,
+  // asset-kind agnostic provider quote constants).
+  const expectedCapacity = BigInt(bru.getVar("QUOTE_CAPACITY_CKB"));
+  if (BigInt(cell.output.capacity) !== expectedCapacity) {
+    throw new Error(`payout cell capacity must equal the capacity requirement ${expectedCapacity}, got: ${cell.output.capacity}`);
+  }
+
+  // UDT cell data: the swap amount as a 16-byte little-endian u128.
+  const amount = BigInt(bru.getVar("QUOTE_AMOUNT"));
+  if (decodeUdtAmount(cell.data.content) !== amount) {
+    throw new Error(`payout cell UDT data must decode to the swap amount ${bru.getVar("QUOTE_AMOUNT")}, got: ${cell.data.content}`);
+  }
+
+  // Type script: exactly the generated simple UDT script.
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+  const typeScript = cell.output.type_;
+  if (!typeScript
+    || typeScript.code_hash !== expectedScript.code_hash
+    || typeScript.hash_type !== expectedScript.hash_type
+    || typeScript.args !== expectedScript.args) {
+    throw new Error(`payout cell type script must be the simple UDT script: ${JSON.stringify(typeScript)}`);
+  }
+
+  // Lock: the deployed liquidity-lock contract with the 152-byte args layout
+  // (payment hash, claimant/refund lock hashes, refund since, swap amount,
+  // simple UDT script hash). The refund lock is the provider funding lock and
+  // the claimant lock is the client-requested claim destination.
+  const expectedAssetTypeHash = bru.getEnvVar("SIMPLE_UDT_SCRIPT_HASH");
+  const lock = cell.output.lock;
+  if (lock.code_hash !== bru.getEnvVar("LIQUIDITY_LOCK_CODE_HASH")
+    || lock.hash_type !== bru.getEnvVar("LIQUIDITY_LOCK_HASH_TYPE")) {
+    throw new Error(`payout cell must use the deployed liquidity-lock script: ${JSON.stringify(lock)}`);
+  }
+  const args = decodeLiquidityLockArgs(lock.args);
+  if (args.paymentHash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`lock args payment_hash mismatch: ${args.paymentHash}`);
+  }
+  if (args.refundAfterLockTime !== BigInt(bru.getVar("QUOTE_REFUND_AFTER_LOCK_TIME"))) {
+    throw new Error(`lock args refund_after_lock_time mismatch: ${args.refundAfterLockTime}`);
+  }
+  if (args.amount !== amount) {
+    throw new Error(`lock args amount must be the swap amount ${bru.getVar("QUOTE_AMOUNT")}, got: ${args.amount}`);
+  }
+  if (args.assetTypeHash !== expectedAssetTypeHash) {
+    throw new Error(`lock args asset_type_hash must be the simple UDT script hash ${expectedAssetTypeHash}, got: ${args.assetTypeHash}`);
+  }
+  console.log("payout cell live: capacity", cell.output.capacity, "udt amount", args.amount);
+}

@@ -1,0 +1,143 @@
+meta {
+  name: node2 provider quote loop in
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "quote_loop_in",
+    "params": [
+      {
+        "provider": "{{NODE2_PUBKEY}}",
+        "asset_id": "{{LIQUIDITY_SIMPLE_UDT_ASSET_ID}}",
+        "amount": "{{SWAP_AMOUNT_HEX}}",
+        "client_invoice": "{{CLIENT_INVOICE}}",
+        "refund_lock": "{{REFUND_LOCK}}",
+        "max_provider_fee": "{{MAX_PROVIDER_FEE_HEX}}",
+        "max_routing_fee": "{{MAX_ROUTING_FEE_HEX}}",
+        "expires_after_seconds": "0xe10"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // quote_loop_in is the provider-side quote endpoint for Loop In (it
+  // requires provider mode); there is no separate provider_quote_loop_in RPC.
+  // The request carries no udt_type_script: the provider stamps its registry
+  // entry's script into the quote and rejects mismatches with the invoice.
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+
+  const envelope = res.body.result;
+  if (!envelope || !envelope.quote_id) {
+    throw new Error(`quote_loop_in returned no envelope: ${JSON.stringify(res.body)}`);
+  }
+
+  if (envelope.swap_kind !== "loop_in") {
+    throw new Error(`swap_kind must be loop_in, got: ${envelope.swap_kind}`);
+  }
+  if (envelope.provider_pubkey !== bru.getEnvVar("NODE2_PUBKEY")) {
+    throw new Error(`quote provider_pubkey must be the provider node2 pubkey: ${envelope.provider_pubkey}`);
+  }
+  if (envelope.asset.asset_id !== bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID") || envelope.asset.kind !== "udt") {
+    throw new Error(`quoted asset mismatch: ${JSON.stringify(envelope.asset)}`);
+  }
+  const quotedScript = envelope.asset.udt_type_script;
+  if (!quotedScript
+    || quotedScript.code_hash !== expectedScript.code_hash
+    || quotedScript.hash_type !== expectedScript.hash_type
+    || quotedScript.args !== expectedScript.args) {
+    throw new Error(`quoted asset must carry the generated simple UDT type script: ${JSON.stringify(quotedScript)}`);
+  }
+  if (envelope.amount !== bru.getVar("SWAP_AMOUNT_HEX")) {
+    throw new Error(`quote amount must be the requested ${bru.getVar("SWAP_AMOUNT_HEX")}, got: ${envelope.amount}`);
+  }
+  // Provider fee is derived from the registry response captured in request 05:
+  // base_fee + amount * proportional_fee_ppm / 1_000_000.
+  const expectedProviderFee =
+    BigInt(bru.getVar("REGISTRY_BASE_FEE"))
+    + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / BigInt(1000000);
+  if (envelope.provider_fee !== "0x" + expectedProviderFee.toString(16)) {
+    throw new Error(`provider_fee must be the registry-derived fee 0x${expectedProviderFee.toString(16)}, got: ${envelope.provider_fee}`);
+  }
+  // The provider echoes the client-requested routing fee cap unchanged.
+  if (envelope.routing_fee_limit !== bru.getVar("MAX_ROUTING_FEE_HEX")) {
+    throw new Error(`routing_fee_limit must be the requested cap ${bru.getVar("MAX_ROUTING_FEE_HEX")}, got: ${envelope.routing_fee_limit}`);
+  }
+  // Provider quote constants (liquidity actor): onchain fee estimate 1000.
+  if (envelope.onchain_fee_estimate_ckb !== "0x3e8") {
+    throw new Error(`unexpected on-chain fee estimate: ${envelope.onchain_fee_estimate_ckb}`);
+  }
+  // UDT Loop In semantics (build_loop_in_quote_terms): for a UDT asset the
+  // capacity_requirement_ckb is the CKB operational capacity of the lock cell
+  // (the on-chain fee estimate), NOT the gross UDT amount. The gross UDT
+  // amount lives in the lock cell data instead (asserted in request 22).
+  if (envelope.capacity_requirement_ckb !== envelope.onchain_fee_estimate_ckb) {
+    throw new Error(`udt capacity_requirement_ckb must equal the on-chain fee estimate ${envelope.onchain_fee_estimate_ckb}, got: ${envelope.capacity_requirement_ckb}`);
+  }
+  // The payment hash comes from the client invoice.
+  if (envelope.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`quote payment_hash must be the client invoice payment hash: ${envelope.payment_hash}`);
+  }
+  // For Loop In the payout deadline is the quote expiry itself (Loop Out adds
+  // a 10 second grace period).
+  if (BigInt(envelope.payout_deadline) !== BigInt(envelope.expires_at)) {
+    throw new Error(`payout_deadline must equal expires_at for loop in: ${envelope.payout_deadline} vs ${envelope.expires_at}`);
+  }
+  const expiresAt = BigInt(envelope.expires_at);
+  const nowMs = BigInt(Date.now());
+  if (expiresAt <= nowMs) {
+    throw new Error(`quote must not be expired: expires_at=${envelope.expires_at}`);
+  }
+  // refund_after_lock_time is an absolute CKB `since` timestamp covering the
+  // quote expiry, rounded up to whole seconds in the 56-bit value field.
+  const since = BigInt(envelope.refund_after_lock_time);
+  const seconds = since & BigInt("0x00ffffffffffffff");
+  if (since === seconds) {
+    throw new Error(`refund_after_lock_time must carry since flag bits: ${envelope.refund_after_lock_time}`);
+  }
+  if (seconds * BigInt(1000) < expiresAt || seconds * BigInt(1000) >= expiresAt + BigInt(1000)) {
+    throw new Error(`refund since timestamp does not cover the quote expiry: ${envelope.refund_after_lock_time}`);
+  }
+  // The provider claims the lock cell into its own default funding lock and
+  // echoes the client refund lock unchanged.
+  if (envelope.claimant_lock !== bru.getVar("PROVIDER_FUNDING_LOCK")) {
+    throw new Error(`claimant_lock must be the provider funding lock script: ${envelope.claimant_lock}`);
+  }
+  if (envelope.refund_lock !== bru.getVar("REFUND_LOCK")) {
+    throw new Error(`refund_lock must echo the client refund lock: ${envelope.refund_lock}`);
+  }
+  if (envelope.client_invoice !== bru.getVar("CLIENT_INVOICE")) {
+    throw new Error(`quote must carry the client invoice: ${envelope.client_invoice}`);
+  }
+
+  bru.setVar("QUOTE_ID", envelope.quote_id);
+  bru.setVar("QUOTE_AMOUNT", envelope.amount);
+  bru.setVar("QUOTE_PROVIDER_FEE", envelope.provider_fee);
+  bru.setVar("QUOTE_CAPACITY_CKB", envelope.capacity_requirement_ckb);
+  bru.setVar("QUOTE_REFUND_AFTER_LOCK_TIME", envelope.refund_after_lock_time);
+  bru.setVar(
+    "QUOTE_GROSS_UDT",
+    "0x" + (BigInt(envelope.amount) + BigInt(envelope.provider_fee)).toString(16),
+  );
+  bru.setVar("QUOTE_ENVELOPE_JSON", JSON.stringify(envelope));
+  console.log("loop in quote:", envelope.quote_id, "gross UDT:", bru.getVar("QUOTE_GROSS_UDT"), "lock cell capacity:", envelope.capacity_requirement_ckb);
+}

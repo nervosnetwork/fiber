@@ -1,0 +1,49 @@
+meta {
+  name: node1 execute loop out
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "loop_out",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}",
+        "max_provider_fee": "{{MAX_PROVIDER_FEE_HEX}}",
+        "max_routing_fee": "{{MAX_ROUTING_FEE_HEX}}",
+        "payout_outpoint": {{PAYOUT_OUTPOINT_JSON}}
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const response = res.body.result;
+  if (!response || response.swap_id !== bru.getVar("QUOTE_ID")) {
+    throw new Error(`client loop_out swap_id must equal the quote_id: ${JSON.stringify(res.body)}`);
+  }
+  if (response.state !== "PayoutPending") {
+    throw new Error(`client loop_out must start in PayoutPending, got: ${response.state}`);
+  }
+  if (response.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`client loop_out payment_hash mismatch: ${response.payment_hash}`);
+  }
+}

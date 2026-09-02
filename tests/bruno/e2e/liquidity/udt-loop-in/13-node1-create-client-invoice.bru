@@ -1,0 +1,85 @@
+meta {
+  name: node1 create client invoice
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "new_invoice",
+    "params": [
+      {
+        "amount": "{{SWAP_AMOUNT_HEX}}",
+        "currency": "Fibd",
+        "description": "bruno udt loop in client invoice",
+        "expiry": "0xe10",
+        "payment_preimage": "{{RANDOM_PREIMAGE}}",
+        "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}}
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:pre-request {
+  // A fresh random preimage keeps the invoice (and therefore the quote, whose
+  // payment hash is derived from the invoice) unique across re-runs.
+  let preimage = "0x";
+  for (let i = 0; i < 64; i++) {
+    preimage += Math.floor(Math.random() * 16).toString(16);
+  }
+  bru.setVar("RANDOM_PREIMAGE", preimage);
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+
+  const result = res.body.result;
+  if (typeof result.invoice_address !== "string" || !result.invoice_address.startsWith("ckb")) {
+    throw new Error(`new_invoice must return a signed invoice string: ${JSON.stringify(result)}`);
+  }
+  const paymentHash = result.invoice && result.invoice.data && result.invoice.data.payment_hash;
+  if (typeof paymentHash !== "string" || paymentHash.length !== 66) {
+    throw new Error(`client invoice payment_hash must be a 32-byte hex: ${JSON.stringify(result.invoice)}`);
+  }
+  if (result.invoice.amount !== bru.getVar("SWAP_AMOUNT_HEX")) {
+    throw new Error(`client invoice amount must be the swap amount ${bru.getVar("SWAP_AMOUNT_HEX")}, got: ${result.invoice.amount}`);
+  }
+  // The invoice must carry the simple UDT type script (serialized as the
+  // snake_case `udt_script` attribute): the provider-side quote validation
+  // rejects loop-in invoices whose UDT script does not match the registered
+  // asset (validate_loop_in_invoice).
+  const attrs = (result.invoice.data && result.invoice.data.attrs) || [];
+  const udtAttr = attrs.find((attr) => attr && typeof attr === "object" && attr.udt_script);
+  if (!udtAttr) {
+    throw new Error(`client invoice must carry a udt_script attribute: ${JSON.stringify(attrs)}`);
+  }
+  const invoiceScript = udtAttr.udt_script;
+  if (!invoiceScript
+    || invoiceScript.code_hash !== expectedScript.code_hash
+    || invoiceScript.hash_type !== expectedScript.hash_type
+    || invoiceScript.args !== expectedScript.args) {
+    throw new Error(`client invoice must carry the simple UDT type script: ${JSON.stringify(udtAttr)}`);
+  }
+
+  bru.setVar("CLIENT_INVOICE", result.invoice_address);
+  bru.setVar("PAYMENT_HASH", paymentHash);
+  console.log("client invoice payment hash:", paymentHash);
+}

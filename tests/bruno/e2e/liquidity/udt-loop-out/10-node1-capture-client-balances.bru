@@ -1,0 +1,80 @@
+meta {
+  name: node1 capture client balances before loop out
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE2_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:pre-request {
+  // Single source for the swap amount and client fee caps consumed by the
+  // quote (12), import (13) and execute (15) requests below.
+  bru.setVar("SWAP_AMOUNT_HEX", "0x3e8");
+  bru.setVar("MAX_PROVIDER_FEE_HEX", "0xa");
+  bru.setVar("MAX_ROUTING_FEE_HEX", "0x64");
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+  const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
+  const caps = BigInt(bru.getVar("MAX_PROVIDER_FEE_HEX")) + BigInt(bru.getVar("MAX_ROUTING_FEE_HEX"));
+
+  const channel = (res.body.result.channels || []).find(
+    (item) => item.channel_id === bru.getVar("CHANNEL_ID"),
+  );
+  if (!channel) {
+    throw new Error(`channel ${bru.getVar("CHANNEL_ID")} not found on node1`);
+  }
+  if (channel.state.state_name !== "ChannelReady") {
+    throw new Error(`channel must be ChannelReady, got: ${channel.state.state_name}`);
+  }
+  if (!channel.funding_udt_type_script
+    || channel.funding_udt_type_script.code_hash !== expectedScript.code_hash
+    || channel.funding_udt_type_script.hash_type !== expectedScript.hash_type
+    || channel.funding_udt_type_script.args !== expectedScript.args) {
+    throw new Error(`loop out channel must be funded with the simple UDT type script: ${JSON.stringify(channel.funding_udt_type_script)}`);
+  }
+
+  const local = BigInt(channel.local_balance);
+  // The client outbound UDT capacity must sit comfortably above the quote
+  // amount plus both fee caps (0x3e8 + 0xa + 0x64 = 1110 UDT atoms); the
+  // 0x3b9aca00 (1,000,000,000 atom) funding gives ample headroom.
+  if (local < amount + caps) {
+    throw new Error(`client local balance ${channel.local_balance} is not comfortably above the quote amount plus fee caps`);
+  }
+  if (channel.offered_tlc_balance !== "0x0" || channel.received_tlc_balance !== "0x0") {
+    throw new Error(`client channel must start with no outstanding TLC balances: ${JSON.stringify(channel)}`);
+  }
+  if (!Array.isArray(channel.pending_tlcs) || channel.pending_tlcs.length !== 0) {
+    throw new Error("client channel must start with no pending TLCs");
+  }
+
+  bru.setVar("CLIENT_LOCAL_BEFORE", channel.local_balance);
+  bru.setVar("CLIENT_REMOTE_BEFORE", channel.remote_balance);
+}
