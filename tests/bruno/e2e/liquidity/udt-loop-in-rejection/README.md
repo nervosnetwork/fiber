@@ -80,7 +80,7 @@ reasoning as `udt-loop-in`).
    `import_liquidity_quote` on node1.
 4. Assert pre-accept invariants: no swap for the quote, invoice `Open`, no
    provider payment record. Every rejected accept re-asserts the same
-   invariants (requests 18/20/22/24/26/28/30/32).
+   invariants (requests 18/20/22/24/26/28/30/32/34).
 5. Mutation cases: one request pair per mutated field. The build request
    POSTs the quote terms to the sidecar, publishes the signed transaction,
    mines and waits for the cell to commit; the accept request asserts the
@@ -90,6 +90,7 @@ reasoning as `udt-loop-in`).
    | ---- | -------- | ------------------------- |
    | payment hash | lock args bytes 0..32 flipped | `observed lock payment_hash mismatch` |
    | claimant script | lock args bytes 32..64 flipped | `observed lock claimant_lock_hash mismatch` |
+   | refund script | lock args bytes 64..96 flipped | `observed lock refund_lock_hash mismatch` |
    | args amount | lock args amount +1 atom | `observed lock amount mismatch` |
    | refund since | lock args since +1 second | `observed lock refund_after_lock_time mismatch` |
    | asset hash | lock args bytes 120..152 flipped | `observed lock asset_type_hash mismatch for UDT asset` |
@@ -112,7 +113,7 @@ reasoning as `udt-loop-in`).
      variants conserve via the change output;
    - the wrong-UDT-amount case collects inputs for the mutated amount and
      conserves it in the change output.
-6. Positive control (requests 33-39): the helper commits a fully valid lock
+6. Positive control (requests 35-41): the helper commits a fully valid lock
    cell from the same quote terms; the provider accept must succeed
    (`OnchainLockPending`/`OnchainLocked`), pay the client invoice through
    the channel, broadcast the claim, and reach `Success` after mining. The

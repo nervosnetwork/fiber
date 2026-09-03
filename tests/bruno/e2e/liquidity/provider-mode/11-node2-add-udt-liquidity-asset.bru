@@ -1,0 +1,97 @@
+meta {
+  name: node2 add udt liquidity asset
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "add_liquidity_asset",
+    "params": [
+      {
+        "asset": {
+          "asset_id": "{{LIQUIDITY_SIMPLE_UDT_ASSET_ID}}",
+          "kind": "udt",
+          "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+          "min_amount": "0x1",
+          "max_amount": "0x174876e800",
+          "available_capacity": "0x174876e800",
+          "base_fee": "0x1",
+          "proportional_fee_ppm": "0x0",
+          "enabled": true
+        }
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+
+  // Propagate the registry fee parameters so the quote assertion (request 12)
+  // derives its expected provider fee from the registry response instead of
+  // duplicated constants.
+  const captureRegistryParams = (asset) => {
+    bru.setVar("REGISTRY_BASE_FEE", asset.base_fee);
+    bru.setVar("REGISTRY_FEE_PPM", asset.proportional_fee_ppm);
+  };
+
+  // The loop-in quote below requires the registered simple UDT asset with
+  // caps covering the gross amount. Idempotent on re-runs ("already exists"
+  // accepted): the registry entry is re-read through list_liquidity_assets
+  // so the fee parameters are captured on every run.
+  if (res.body.error) {
+    if (!String(res.body.error.message).includes("already exists")) {
+      throw new Error(`add_liquidity_asset failed: ${res.body.error.message}`);
+    }
+    console.log("udt liquidity asset already registered (idempotent re-run)");
+
+    const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+    const expectedAssetId = bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID");
+    const list = await rpc(bru.getEnvVar("NODE2_RPC_URL"), "list_liquidity_assets", []);
+    const asset = (list.result.assets || []).find((entry) => entry.asset_id === expectedAssetId);
+    if (!asset) {
+      throw new Error(`udt asset ${expectedAssetId} missing from provider registry: ${JSON.stringify(list.result)}`);
+    }
+    if (asset.kind !== "udt" || !asset.udt_type_script
+      || asset.udt_type_script.code_hash !== expectedScript.code_hash
+      || asset.udt_type_script.hash_type !== expectedScript.hash_type
+      || asset.udt_type_script.args !== expectedScript.args) {
+      throw new Error(`unexpected registered udt asset shape: ${JSON.stringify(asset)}`);
+    }
+    if (asset.enabled !== true) {
+      throw new Error("udt asset must be enabled");
+    }
+    captureRegistryParams(asset);
+    return;
+  }
+
+  const asset = res.body.result;
+  const expectedAssetId = bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID");
+  if (asset.asset_id !== expectedAssetId) {
+    throw new Error(`asset_id must be the simple UDT asset id ${expectedAssetId}, got: ${asset.asset_id}`);
+  }
+  if (asset.kind !== "udt" || !asset.udt_type_script
+    || asset.udt_type_script.code_hash !== expectedScript.code_hash
+    || asset.udt_type_script.hash_type !== expectedScript.hash_type
+    || asset.udt_type_script.args !== expectedScript.args) {
+    throw new Error(`unexpected udt asset shape: ${JSON.stringify(asset)}`);
+  }
+  if (asset.enabled !== true) {
+    throw new Error("udt asset must be enabled");
+  }
+  captureRegistryParams(asset);
+}

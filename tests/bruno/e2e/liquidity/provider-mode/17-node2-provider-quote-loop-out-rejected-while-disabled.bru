@@ -1,0 +1,70 @@
+meta {
+  name: node2 provider quote loop out rejected while disabled
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_quote_loop_out",
+    "params": [
+      {
+        "asset_id": "{{LIQUIDITY_CKB_ASSET_ID}}",
+        "amount": "0x1",
+        "claimant_lock": "{{CLAIMANT_LOCK}}",
+        "max_provider_fee": "0xa",
+        "max_routing_fee": "0x64",
+        "expires_after_seconds": "0xe10"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:pre-request {
+  // The claimant lock never reaches validation while provider mode is
+  // disabled, but the request still carries a well-formed molecule script so
+  // the rejection is attributable to the mode check alone.
+  const { encodeMoleculeScript } = require(process.cwd() + "/scripts/molecule-script");
+
+  const args = "bruno-provider-mode-claimant";
+  const argsHex =
+    "0x" +
+    Array.from(args)
+      .map((ch) => ch.charCodeAt(0).toString(16).padStart(2, "0"))
+      .join("");
+  bru.setVar(
+    "CLAIMANT_LOCK",
+    encodeMoleculeScript({
+      codeHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      hashType: "data",
+      args: argsHex,
+    }),
+  );
+}
+
+script:post-response {
+  // handle_provider_quote_loop_out runs ensure_provider_mode before any asset
+  // or parameter validation, so a disabled provider must reject the request
+  // with exactly the mode error.
+  const message = String(res.body.error && res.body.error.message);
+  if (!message.includes("provider mode is disabled")) {
+    throw new Error(`provider_quote_loop_out must be rejected while provider mode is disabled, got: ${message}`);
+  }
+}

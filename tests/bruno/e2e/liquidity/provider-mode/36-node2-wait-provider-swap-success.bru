@@ -1,0 +1,64 @@
+meta {
+  name: wait for provider swap success after the valid accept
+  type: http
+  seq: 36
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { waitSwapState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // The claim confirmation mined in the previous request completes the
+  // provider swap with Success. The client swap stays terminal at
+  // OnchainLocked (asserted in request 37).
+  const provider = await waitSwapState({
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "success",
+  });
+
+  const record = provider.result;
+  if (record.swap_kind !== "loop_in") {
+    throw new Error(`provider swap_kind must be loop_in: ${JSON.stringify(record)}`);
+  }
+  if (record.asset_id !== bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID")) {
+    throw new Error(`provider swap asset_id mismatch: ${record.asset_id}`);
+  }
+  if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+    throw new Error(`provider swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
+  }
+  if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`provider swap payment_hash mismatch: ${record.payment_hash}`);
+  }
+  console.log("provider swap reached success for the positive control");
+}
