@@ -171,8 +171,20 @@ jobs:
           name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
 
-      # Liquidity suites write node/CKB diagnostics, swap JSON, chain tx JSON
-      # and CKB snapshots under tests/artifacts/liquidity/<suite>/ on failure.
+      # Write redacted failure diagnostics (node swap/chain-tx JSON plus the
+      # CKB tip header) under tests/artifacts/liquidity/<suite>/ for the
+      # liquidity matrix entries; the upload step below publishes them.
+      # Purely best-effort so the job failure and artifact upload are
+      # unaffected.
+      - name: Collect liquidity failure diagnostics
+        if: failure() && steps.e2eTests.outcome == 'failure' && startsWith(matrix.workflow, 'liquidity/')
+        run: |
+          suite_dir="${{ matrix.workflow }}"
+          bash tests/bruno/scripts/collect-liquidity-failure-diagnostics.sh "${suite_dir##*/}" || true
+
+      # Liquidity suites (and the collector step above) write node/CKB
+      # diagnostics, swap JSON and chain tx JSON under
+      # tests/artifacts/liquidity/<suite>/ on failure.
       - uses: actions/upload-artifact@v4
         if: failure() && steps.e2eTests.outcome == 'failure'
         with:
@@ -332,9 +344,19 @@ jobs:
 
           ./tests/nodes/wait.sh
 
-          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/liquidity/ckb-loop-out -r --env test) &
+          collect_failure() {
+            bash tests/bruno/scripts/collect-liquidity-failure-diagnostics.sh ckb-loop-out || true
+          }
 
-          wait -n
+          set +e
+          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/liquidity/ckb-loop-out -r --env test)
+          first_status=$?
+          set -e
+
+          if [ "$first_status" -ne 0 ]; then
+            collect_failure
+            exit "$first_status"
+          fi
 
           # Second run: same chain and nodes, no reset - the suite must be
           # independent of the state the first run left behind.
@@ -343,9 +365,16 @@ jobs:
             exit 1
           fi
           echo "first run passed; re-running against existing chain and node state"
-          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/liquidity/ckb-loop-out -r --env test) &
 
-          wait -n
+          set +e
+          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/liquidity/ckb-loop-out -r --env test)
+          second_status=$?
+          set -e
+
+          if [ "$second_status" -ne 0 ]; then
+            collect_failure
+            exit "$second_status"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: failure() && steps.rerunTests.outcome == 'failure'

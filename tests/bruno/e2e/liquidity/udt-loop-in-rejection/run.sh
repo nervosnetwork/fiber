@@ -3,10 +3,15 @@ set -euo pipefail
 
 # Runner for the UDT loop-in rejection suite. Builds (once) and starts the
 # liquidity-lock-mutator sidecar that signs the mutated lock funding
-# transactions, then runs the Bruno suite against the local dev chain.
+# transactions, then runs the Bruno suite against the local dev chain. On
+# Bruno failure it writes best-effort redacted diagnostics (swap and chain
+# transaction JSON from both nodes plus the CKB tip header) under
+# tests/artifacts/liquidity/udt-loop-in-rejection/, never masking the Bruno
+# exit code.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-repo_root="$(cd -- "$script_dir/../../../.." &>/dev/null && pwd)"
+# tests/bruno/e2e/liquidity/udt-loop-in-rejection is five levels below the repo root.
+repo_root="$(cd -- "$script_dir/../../../../.." &>/dev/null && pwd)"
 mutator_dir="$repo_root/tests/liquidity-lock-mutator"
 binary="$mutator_dir/target/debug/liquidity-lock-mutator"
 
@@ -72,4 +77,16 @@ fi
 
 cd "$repo_root/tests/bruno"
 export CKB_MUTATOR_URL="$MUTATOR_URL"
+
+collector="$script_dir/../../../scripts/collect-liquidity-failure-diagnostics.sh"
+
+set +e
 npx @usebruno/cli@1.20.0 run e2e/liquidity/udt-loop-in-rejection -r --env test
+bruno_status=$?
+set -e
+
+if [[ "$bruno_status" -ne 0 ]]; then
+  echo "Bruno suite failed; writing failure diagnostics (best effort)"
+  bash "$collector" udt-loop-in-rejection || true
+fi
+exit "$bruno_status"
