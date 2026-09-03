@@ -6963,7 +6963,10 @@ impl ChannelActorState {
     }
 
     /// Get the counterparty commitment point for the given commitment number.
-    fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
+    fn get_remote_commitment_point(
+        &self,
+        commitment_number: u64,
+    ) -> Result<Pubkey, ProcessingChannelError> {
         self.remote_commitment_points
             .iter()
             .find_map(|(number, point)| {
@@ -6973,13 +6976,12 @@ impl ChannelActorState {
                     None
                 }
             })
-            .expect(
-                format!(
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
                     "remote commitment point: {:?} should exist",
                     commitment_number
-                )
-                .as_str(),
-            )
+                ))
+            })
     }
 
     fn get_current_local_commitment_point(&self) -> Pubkey {
@@ -7127,7 +7129,7 @@ impl ChannelActorState {
         .map_err(ProcessingChannelError::InvalidParameter)?;
         let remote_pubkey = try_derive_tlc_pubkey(
             &self.get_remote_channel_public_keys().tlc_base_key,
-            &self.get_remote_commitment_point(local_commitment_number),
+            &self.get_remote_commitment_point(local_commitment_number)?,
         )
         .map_err(ProcessingChannelError::InvalidParameter)?;
         Ok((local_pubkey, remote_pubkey))
@@ -7143,7 +7145,7 @@ impl ChannelActorState {
             self.signer.derive_tlc_key(remote_commitment_number),
             try_derive_tlc_pubkey(
                 &self.get_remote_channel_public_keys().tlc_base_key,
-                &self.get_remote_commitment_point(local_commitment_number),
+                &self.get_remote_commitment_point(local_commitment_number)?,
             )
             .map_err(ProcessingChannelError::InvalidParameter)?,
         ))
@@ -9668,11 +9670,15 @@ impl ChannelActorState {
     // The function returns a tuple, the first element is the commitment transaction itself,
     // and the second element is the settlement data which can be used to construct the witness
     // to unlock the commitment transaction.
-    fn build_commitment_tx_and_settlement_data(
+    pub(crate) fn build_commitment_tx_and_settlement_data(
         &self,
         for_remote: bool,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
-        let funding_out_point = self.must_get_funding_transaction_outpoint();
+        let Some(funding_out_point) = self.get_funding_transaction_outpoint() else {
+            return Err(ProcessingChannelError::InvalidState(
+                "Funding transaction outpoint is missing".to_string(),
+            ));
+        };
         let (output, output_data, settlement_data) =
             self.build_commitment_transaction_output(for_remote)?;
 
@@ -9750,7 +9756,7 @@ impl ChannelActorState {
         }
     }
 
-    fn build_settlement_data(
+    pub(crate) fn build_settlement_data(
         &self,
         for_remote: bool,
     ) -> Result<SettlementData, ProcessingChannelError> {

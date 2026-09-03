@@ -1,18 +1,24 @@
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, resolve_onchain_tlc,
+    can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
+    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
+    has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, resolve_onchain_tlc,
     LegacyOnChainTlcSettlement, OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
 };
-use crate::gen_rand_sha256_hash;
+use crate::{gen_rand_fiber_public_key, gen_rand_sha256_hash};
 
+use ckb_types::core::TransactionBuilder;
+use ckb_types::packed::CellOutput;
+use ckb_types::prelude::*;
 use fiber_types::{
-    AppliedFlags, ChannelState, CloseFlags, CommitmentNumbers, Hash256, HashAlgorithm,
-    InboundTlcStatus, OutboundTlcStatus, RemoveTlcFulfill, RemoveTlcReason, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
+    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey, RemoveTlcFulfill,
+    RemoveTlcReason, RevocationData, SettlementData, SettlementTlc, TLCId, TlcErr, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus,
 };
+use musig2::CompactSignature;
 
 const TEST_SHARED_SECRET: [u8; 32] = [7u8; 32];
 
@@ -675,7 +681,25 @@ fn closed_state_with_offered_local_announced(
 ) -> crate::fiber::channel::ChannelActorState {
     let mut state = empty_channel_state(channel_id);
     state.state = ChannelState::Closed(flags);
+    state.to_local_amount = 100_000_000;
+    state.to_remote_amount = 100_000_000;
     state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let funding_tx = TransactionBuilder::default()
+        .output(
+            CellOutput::new_builder()
+                .capacity(100_000_000 * 100_000_000u64)
+                .build(),
+        )
+        .build();
+    state.funding_tx = Some(funding_tx.data());
+    state.remote_channel_public_keys = Some(ChannelBasePublicKeys {
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_base_key: gen_rand_fiber_public_key(),
+    });
+    state.remote_commitment_points = vec![
+        (0, gen_rand_fiber_public_key()),
+        (1, gen_rand_fiber_public_key()),
+    ];
     state
 }
 
@@ -773,6 +797,243 @@ fn collect_timeout_includes_forwarded_local_announced() {
     );
 }
 
+fn settlement_tlc_for(tlc: &TlcInfo) -> SettlementTlc {
+    SettlementTlc {
+        tlc_id: tlc.tlc_id,
+        hash_algorithm: tlc.hash_algorithm,
+        payment_amount: tlc.amount,
+        payment_hash: tlc.payment_hash,
+        expiry: tlc.expiry,
+        local_key: Privkey::from([1u8; 32]),
+        remote_key: Privkey::from([2u8; 32]).pubkey(),
+    }
+}
+
+fn settlement_data_for_commitment(
+    channel_data: &ChannelData,
+    for_remote: bool,
+    commitment_number: u64,
+) -> &SettlementData {
+    if for_remote {
+        if channel_data
+            .revocation_data
+            .as_ref()
+            .and_then(|revocation| {
+                commitment_number
+                    .checked_sub(1)
+                    .map(|previous| revocation.commitment_number == previous)
+            })
+            .unwrap_or(false)
+        {
+            &channel_data.remote_settlement_data
+        } else {
+            &channel_data.pending_remote_settlement_data
+        }
+    } else {
+        &channel_data.local_settlement_data
+    }
+}
+
+#[test]
+fn settlement_data_for_commitment_distinguishes_pending_and_preceding_remote_commitments() {
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, HashAlgorithm::CkbHash);
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+
+    let preceding_remote_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![],
+    };
+    let pending_remote_settlement = SettlementData {
+        local_amount: 0,
+        remote_amount: 1000,
+        tlcs: vec![settlement_tlc_for(&tlc)],
+    };
+    let local_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![],
+    };
+
+    let channel_data = ChannelData {
+        channel_id,
+        funding_udt_type_script: None,
+        local_settlement_key: Privkey::from([1u8; 32]),
+        remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
+        local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
+        remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
+        remote_settlement_data: preceding_remote_settlement.clone(),
+        pending_remote_settlement_data: pending_remote_settlement.clone(),
+        local_settlement_data: local_settlement.clone(),
+        revocation_data: Some(RevocationData {
+            commitment_number: 5,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        }),
+    };
+
+    // Commitment 6 is the preceding unrevoked remote commitment (revocation.commitment_number == 6 - 1)
+    let selected_preceding = settlement_data_for_commitment(&channel_data, true, 6);
+    assert_eq!(selected_preceding.tlcs.len(), 0);
+
+    // Commitment 7 is the pending remote commitment
+    let selected_pending = settlement_data_for_commitment(&channel_data, true, 7);
+    assert_eq!(selected_pending.tlcs.len(), 1);
+    assert_eq!(selected_pending.tlcs[0].tlc_id, TLCId::Offered(0));
+
+    // Local commitment
+    let selected_local = settlement_data_for_commitment(&channel_data, false, 6);
+    assert_eq!(selected_local.tlcs.len(), 0);
+}
+
+#[test]
+fn has_unresolved_distinguishes_pending_and_preceding_remote_force_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc.clone(),
+    );
+
+    let preceding_remote_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![],
+    };
+    let pending_remote_settlement = SettlementData {
+        local_amount: 0,
+        remote_amount: 1000,
+        tlcs: vec![settlement_tlc_for(&tlc)],
+    };
+
+    // When the preceding remote commitment is published on-chain, the LocalAnnounced TLC is NOT in the snapshot
+    // and must not block on-chain settlement.
+    assert!(
+        !has_unresolved_onchain_tlcs_for_snapshot(&state, &preceding_remote_settlement, true),
+        "preceding remote commitment omits offered LocalAnnounced TLC and must not block finalization"
+    );
+
+    // When the pending remote commitment is published on-chain, the LocalAnnounced TLC IS in the snapshot
+    // and must be waited on until settled.
+    assert!(
+        has_unresolved_onchain_tlcs_for_snapshot(&state, &pending_remote_settlement, true),
+        "pending remote commitment includes offered LocalAnnounced TLC and must wait for settlement"
+    );
+
+    // Once resolved on-chain (e.g. marked removed after preimage or timeout), it no longer blocks.
+    state.tlc_state.set_offered_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &TEST_SHARED_SECRET,
+        )),
+    );
+    assert!(
+        !has_unresolved_onchain_tlcs_for_snapshot(&state, &pending_remote_settlement, true),
+        "resolved TLC in pending remote commitment must not block finalization"
+    );
+}
+
+#[test]
+fn has_unresolved_and_fulfill_for_received_announce_wait_ack_on_local_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let tlc = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck),
+        payment_hash,
+        hash_algorithm,
+    );
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.tlc_state.received_tlcs.tlcs = vec![tlc.clone()];
+
+    // Local commitment contains received AnnounceWaitAck TLC (from counterparty's view it is flipped)
+    let local_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0), // flipped for local commitment
+            hash_algorithm,
+            payment_amount: 1000,
+            payment_hash,
+            expiry: 10,
+            local_key: Privkey::from([1u8; 32]),
+            remote_key: Privkey::from([2u8; 32]).pubkey(),
+        }],
+    };
+
+    assert!(can_reconcile_onchain_fulfillment(&tlc));
+    assert!(
+        has_unresolved_onchain_tlcs_for_snapshot(&state, &local_settlement, false),
+        "local force close commitment includes received AnnounceWaitAck TLC and must wait for settlement"
+    );
+
+    let store = MockStore::new().with_onchain_preimage(
+        channel_id,
+        TLCId::Received(0),
+        payment_hash,
+        hash_algorithm,
+        preimage,
+    );
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
+    assert_eq!(fulfilled.len(), 1);
+    assert_eq!(fulfilled[0].tlc_id, TLCId::Received(0));
+    assert_eq!(fulfilled[0].preimage, preimage);
+
+    state.tlc_state.set_received_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        }),
+    );
+    assert!(
+        !has_unresolved_onchain_tlcs_for_snapshot(&state, &local_settlement, false),
+        "resolved received TLC in local commitment must not block finalization"
+    );
+}
+
+#[test]
+fn has_unresolved_ignores_local_announced_on_local_force_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    let state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc,
+    );
+
+    assert!(
+        !has_unresolved_onchain_tlcs(&state),
+        "a local force-close broadcasts the local commitment, which omits offered LocalAnnounced TLCs"
+    );
+}
+
 #[test]
 fn has_unresolved_keeps_local_announced_on_remote_force_close() {
     let channel_id = gen_rand_sha256_hash();
@@ -795,23 +1056,100 @@ fn has_unresolved_keeps_local_announced_on_remote_force_close() {
 }
 
 #[test]
-fn has_unresolved_ignores_local_announced_on_local_force_close() {
+fn has_unresolved_ignores_local_announced_on_preceding_remote_commitment_force_close() {
     let channel_id = gen_rand_sha256_hash();
-    let tlc = tlc_info(
+    let mut tlc = tlc_info(
         TLCId::Offered(0),
         TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         gen_rand_sha256_hash(),
         HashAlgorithm::CkbHash,
     );
-    let state = closed_state_with_offered_local_announced(
+    tlc.created_at = CommitmentNumbers {
+        local: 1,
+        remote: 1,
+    };
+
+    let mut state = closed_state_with_offered_local_announced(
         channel_id,
-        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
         tlc,
     );
+    // Remote force-closed by broadcasting preceding commitment (not matching pending commitment hash)
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
 
     assert!(
         !has_unresolved_onchain_tlcs(&state),
-        "a local force-close broadcasts the local commitment, which omits offered LocalAnnounced TLCs"
+        "a remote force-close broadcasting preceding commitment omits LocalAnnounced TLC and must not block settlement"
+    );
+}
+
+#[test]
+fn has_unresolved_waits_for_local_announced_on_pending_remote_commitment_force_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    tlc.created_at = CommitmentNumbers {
+        local: 1,
+        remote: 1,
+    };
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc,
+    );
+    let (pending_tx, _) = state
+        .build_commitment_tx_and_settlement_data(true)
+        .expect("build pending commitment tx");
+    state.shutdown_transaction_hash = Some(pending_tx.hash().unpack());
+
+    assert!(
+        has_unresolved_onchain_tlcs(&state),
+        "a remote force-close broadcasting pending commitment includes LocalAnnounced TLC and must wait for settlement"
+    );
+
+    // Once resolved on-chain, it no longer blocks
+    state.tlc_state.set_offered_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &TEST_SHARED_SECRET,
+        )),
+    );
+    assert!(
+        !has_unresolved_onchain_tlcs(&state),
+        "resolved LocalAnnounced TLC must not block settlement"
+    );
+}
+
+#[test]
+fn has_unresolved_falls_back_to_waiting_when_commitment_is_unknown() {
+    let channel_id = gen_rand_sha256_hash();
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    tlc.created_at = CommitmentNumbers {
+        local: 1,
+        remote: 1,
+    };
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc,
+    );
+    state.shutdown_transaction_hash = None;
+
+    assert!(
+        has_unresolved_onchain_tlcs(&state),
+        "when confirmed commitment transaction is not yet known, conservatively wait for LocalAnnounced TLC"
     );
 }
 
@@ -841,4 +1179,286 @@ fn set_offered_tlc_removed_accepts_local_announced() {
         .expect("offered tlc remains after on-chain remove");
     assert_eq!(updated.outbound_status(), OutboundTlcStatus::RemoteRemoved);
     assert!(updated.removed_reason.is_some());
+}
+
+#[test]
+fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment() {
+    let channel_id = gen_rand_sha256_hash();
+    let preceding_remote = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+    let pending_remote = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    let local = SettlementData {
+        local_amount: 500,
+        remote_amount: 600,
+        tlcs: vec![],
+    };
+
+    let channel_data_no_revocation = ChannelData {
+        channel_id,
+        funding_udt_type_script: None,
+        local_settlement_key: Privkey::from([1u8; 32]),
+        remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
+        local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
+        remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
+        remote_settlement_data: preceding_remote.clone(),
+        pending_remote_settlement_data: pending_remote.clone(),
+        local_settlement_data: local.clone(),
+        revocation_data: None,
+    };
+
+    // When revocation_data is None, remote commitment falls back to pending_remote_settlement_data
+    assert_eq!(
+        settlement_data_for_commitment(&channel_data_no_revocation, true, 1).local_amount,
+        300
+    );
+    // Commitment number 0 should not underflow and should return pending
+    assert_eq!(
+        settlement_data_for_commitment(&channel_data_no_revocation, true, 0).local_amount,
+        300
+    );
+    // Local commitment returns local_settlement_data
+    assert_eq!(
+        settlement_data_for_commitment(&channel_data_no_revocation, false, 0).local_amount,
+        500
+    );
+
+    let channel_data_with_revocation = ChannelData {
+        channel_id,
+        funding_udt_type_script: None,
+        local_settlement_key: Privkey::from([1u8; 32]),
+        remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
+        local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
+        remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
+        remote_settlement_data: preceding_remote,
+        pending_remote_settlement_data: pending_remote,
+        local_settlement_data: local,
+        revocation_data: Some(RevocationData {
+            commitment_number: 0,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        }),
+    };
+
+    // Commitment 0 with revocation for 0: checked_sub(1) underflows safely to None -> returns pending
+    assert_eq!(
+        settlement_data_for_commitment(&channel_data_with_revocation, true, 0).local_amount,
+        300
+    );
+    // Commitment 1 with revocation for 0: 1 - 1 == 0 -> returns preceding (remote_settlement_data)
+    assert_eq!(
+        settlement_data_for_commitment(&channel_data_with_revocation, true, 1).local_amount,
+        100
+    );
+}
+
+#[test]
+fn multiple_concurrent_tlcs_distinguish_pending_and_preceding_remote_close() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let preimage_0 = gen_rand_sha256_hash();
+    let tlc_0 = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash_for(preimage_0, hash_algorithm),
+        hash_algorithm,
+    );
+
+    let preimage_1 = gen_rand_sha256_hash();
+    let tlc_1 = tlc_info(
+        TLCId::Offered(1),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash_for(preimage_1, hash_algorithm),
+        hash_algorithm,
+    );
+
+    let preimage_2 = gen_rand_sha256_hash();
+    let tlc_2 = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        payment_hash_for(preimage_2, hash_algorithm),
+        hash_algorithm,
+    );
+
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc_0.clone(), tlc_1.clone()];
+    state.tlc_state.received_tlcs.tlcs = vec![tlc_2.clone()];
+
+    // Preceding commitment contains TLC 1 and TLC 2, but NOT TLC 0 (LocalAnnounced)
+    let preceding_remote_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![settlement_tlc_for(&tlc_1), settlement_tlc_for(&tlc_2)],
+    };
+
+    // Pending commitment contains TLC 0, TLC 1, and TLC 2
+    let pending_remote_settlement = SettlementData {
+        local_amount: 0,
+        remote_amount: 1000,
+        tlcs: vec![
+            settlement_tlc_for(&tlc_0),
+            settlement_tlc_for(&tlc_1),
+            settlement_tlc_for(&tlc_2),
+        ],
+    };
+
+    // Both snapshots initially report unresolved TLCs
+    assert!(has_unresolved_onchain_tlcs_for_snapshot(
+        &state,
+        &preceding_remote_settlement,
+        true
+    ));
+    assert!(has_unresolved_onchain_tlcs_for_snapshot(
+        &state,
+        &pending_remote_settlement,
+        true
+    ));
+
+    // Resolve TLC 1 (offered committed)
+    state.tlc_state.set_offered_tlc_removed(
+        1,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage_1,
+        }),
+    );
+    assert!(has_unresolved_onchain_tlcs_for_snapshot(
+        &state,
+        &preceding_remote_settlement,
+        true
+    ));
+    assert!(has_unresolved_onchain_tlcs_for_snapshot(
+        &state,
+        &pending_remote_settlement,
+        true
+    ));
+
+    // Resolve TLC 2 (received committed)
+    state.tlc_state.set_received_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &TEST_SHARED_SECRET,
+        )),
+    );
+
+    // Preceding commitment now has NO unresolved TLCs (TLC 0 LocalAnnounced was not in it)
+    assert!(
+        !has_unresolved_onchain_tlcs_for_snapshot(&state, &preceding_remote_settlement, true),
+        "preceding remote commitment should be fully resolved once TLC 1 & 2 are settled"
+    );
+
+    // Pending commitment STILL has unresolved TLC 0 (LocalAnnounced)
+    assert!(
+        has_unresolved_onchain_tlcs_for_snapshot(&state, &pending_remote_settlement, true),
+        "pending remote commitment must still wait for TLC 0 LocalAnnounced to resolve"
+    );
+
+    // Resolve TLC 0 (offered LocalAnnounced)
+    state.tlc_state.set_offered_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &TEST_SHARED_SECRET,
+        )),
+    );
+
+    // Now pending commitment is also fully resolved
+    assert!(
+        !has_unresolved_onchain_tlcs_for_snapshot(&state, &pending_remote_settlement, true),
+        "pending remote commitment should be fully resolved once TLC 0 is also settled"
+    );
+}
+
+#[test]
+fn multiple_concurrent_tlcs_local_force_close_resolution() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+
+    let tlc_0 = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        hash_algorithm,
+    );
+
+    let preimage_1 = gen_rand_sha256_hash();
+    let tlc_1 = tlc_info(
+        TLCId::Offered(1),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash_for(preimage_1, hash_algorithm),
+        hash_algorithm,
+    );
+
+    let preimage_2 = gen_rand_sha256_hash();
+    let tlc_2 = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck),
+        payment_hash_for(preimage_2, hash_algorithm),
+        hash_algorithm,
+    );
+
+    let preimage_3 = gen_rand_sha256_hash();
+    let tlc_3 = tlc_info(
+        TLCId::Received(1),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        payment_hash_for(preimage_3, hash_algorithm),
+        hash_algorithm,
+    );
+
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc_0, tlc_1];
+    state.tlc_state.received_tlcs.tlcs = vec![tlc_2, tlc_3];
+
+    // Local force close should block while committed/announced-received TLCs are unresolved
+    assert!(
+        has_unresolved_onchain_tlcs(&state),
+        "local force close has active committed & AnnounceWaitAck TLCs"
+    );
+
+    // Resolve TLC 1 (offered committed)
+    state.tlc_state.set_offered_tlc_removed(
+        1,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage_1,
+        }),
+    );
+    assert!(has_unresolved_onchain_tlcs(&state));
+
+    // Resolve TLC 2 (received AnnounceWaitAck)
+    state.tlc_state.set_received_tlc_removed(
+        0,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage_2,
+        }),
+    );
+    assert!(has_unresolved_onchain_tlcs(&state));
+
+    // Resolve TLC 3 (received committed)
+    state.tlc_state.set_received_tlc_removed(
+        1,
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage_3,
+        }),
+    );
+
+    // Now all local commitment TLCs are resolved. TLC 0 (Offered LocalAnnounced) is omitted
+    // from local commitment and must not block finalization!
+    assert!(
+        !has_unresolved_onchain_tlcs(&state),
+        "local force close should not be blocked by offered LocalAnnounced TLC"
+    );
 }
