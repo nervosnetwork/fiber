@@ -1,0 +1,48 @@
+meta {
+  name: node2 quote rejects disabled asset
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_quote_loop_out",
+    "params": [
+      {
+        "asset_id": "provider-mode-disabled-probe",
+        "amount": "0x1",
+        "claimant_lock": "{{CLAIMANT_LOCK}}",
+        "max_provider_fee": "0xa",
+        "max_routing_fee": "0x64",
+        "expires_after_seconds": "0xe10"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  // validate_loop_out_quote_request rejects a disabled asset before any other
+  // validation: with provider mode enabled (request 08) the rejection must be
+  // attributable to the asset switch alone.
+  const message = String(res.body.error && res.body.error.message);
+  if (!message.includes("liquidity asset disabled: provider-mode-disabled-probe")) {
+    throw new Error(`quote must be rejected for the disabled probe asset, got: ${message}`);
+  }
+}

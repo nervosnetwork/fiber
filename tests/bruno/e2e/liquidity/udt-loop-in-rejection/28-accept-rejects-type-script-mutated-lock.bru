@@ -1,0 +1,55 @@
+meta {
+  name: node2 accept rejects type-script-mutated loop in lock
+  type: http
+  seq: 28
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_accept_loop_in",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}",
+        "lock_tx_hash": "{{MUTATION_TX_HASH}}",
+        "lock_output_index": {{MUTATION_OUTPOINT_INDEX}}
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  const { assertQuoteUnconsumed } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
+
+  // The cell type script keeps the UDT code hash but carries different args, so the cell is no longer the quoted UDT asset.
+  // The provider accept must reject the observed cell during validation and
+  // must not persist any swap state: the quote stays consumable, the client
+  // invoice stays Open and the provider holds no payment record.
+  const message = String(res.body.error && res.body.error.message);
+  if (!message.includes("observed loop in lock UDT type script mismatch")) {
+    throw new Error(`provider accept must fail on type script validation, got: ${message}`);
+  }
+  await assertQuoteUnconsumed({
+    quoteId: bru.getVar("QUOTE_ID"),
+    paymentHash: bru.getVar("PAYMENT_HASH"),
+    providerRpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    clientRpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+  });
+  console.log("provider rejected the type script mutated lock");
+}

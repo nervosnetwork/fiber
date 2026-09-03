@@ -512,6 +512,7 @@ impl BrunoEnvironmentValues {
         vec![
             ("LIQUIDITY_CKB_ASSET_ID", "ckb".to_string()),
             ("LIQUIDITY_SIMPLE_UDT_ASSET_ID", "simple-udt".to_string()),
+            ("CKB_MUTATOR_URL", "http://127.0.0.1:38117".to_string()),
             ("SIMPLE_UDT_CODE_HASH", simple_udt_code_hash.clone()),
             ("SIMPLE_UDT_HASH_TYPE", "data2".to_string()),
             (
@@ -1012,6 +1013,7 @@ mod tests {
 
             assert_eq!(vars["LIQUIDITY_CKB_ASSET_ID"], "ckb");
             assert_eq!(vars["LIQUIDITY_SIMPLE_UDT_ASSET_ID"], "simple-udt");
+            assert_eq!(vars["CKB_MUTATOR_URL"], "http://127.0.0.1:38117");
             assert_eq!(
                 vars["SIMPLE_UDT_CODE_HASH"],
                 "0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419"

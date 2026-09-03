@@ -1,0 +1,41 @@
+meta {
+  name: node2 disable liquidity asset probe
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "disable_liquidity_asset",
+    "params": ["provider-mode-disabled-probe"]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // disable_liquidity_asset takes the bare asset id string and returns the
+  // disabled registry entry.
+  const asset = res.body.result;
+  if (!asset || asset.asset_id !== "provider-mode-disabled-probe") {
+    throw new Error(`disable_liquidity_asset must return the probe asset: ${JSON.stringify(res.body)}`);
+  }
+  if (asset.enabled !== false) {
+    throw new Error(`probe asset must be disabled, got: ${JSON.stringify(asset)}`);
+  }
+}
