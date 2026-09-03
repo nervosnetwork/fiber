@@ -720,6 +720,33 @@ async fn test_set_announced_addrs_without_p2p() {
 }
 
 #[tokio::test]
+async fn test_public_quic_announced_address_is_saved_to_graph() {
+    let addr = "/ip4/1.1.1.1/udp/8346/quic-v1".to_string();
+    let announced_addr = addr.clone();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.announce_listening_addr = Some(false);
+                config.announce_private_addr = Some(false);
+                config.announced_addrs = vec![announced_addr];
+            })
+            .build(),
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+
+    let peer_id = PeerId::from_public_key(&crate::fiber::types::pubkey_to_tentacle(node.pubkey));
+    let expected_addr = Multiaddr::from_str(&format!("{addr}/p2p/{peer_id}"))
+        .expect("valid announced QUIC multiaddr");
+    let nodes = node.get_network_graph_nodes().await;
+
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, node.get_public_key());
+    assert!(nodes[0].addresses.contains(&expected_addr));
+}
+
+#[tokio::test]
 async fn test_sync_channel_announcement_on_startup() {
     init_tracing();
 

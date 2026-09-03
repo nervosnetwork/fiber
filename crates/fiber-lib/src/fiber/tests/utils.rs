@@ -66,6 +66,39 @@ fn test_is_addr_reachable_with_private_quic_address() {
 }
 
 #[test]
+fn test_is_addr_reachable_with_public_ipv6_quic_address() {
+    let public_addr = Multiaddr::from_str("/ip6/2606:4700:4700::1111/udp/8228/quic-v1")
+        .expect("valid public IPv6 QUIC multiaddr");
+
+    assert!(
+        is_addr_reachable(&public_addr),
+        "public IPv6 QUIC address should be considered reachable"
+    );
+}
+
+#[test]
+fn test_is_addr_reachable_with_private_ipv6_quic_address() {
+    let private_addr = Multiaddr::from_str("/ip6/fc00::1/udp/8228/quic-v1")
+        .expect("valid private IPv6 QUIC multiaddr");
+
+    assert!(
+        !is_addr_reachable(&private_addr),
+        "private IPv6 QUIC address should not be considered reachable"
+    );
+}
+
+#[test]
+fn test_is_addr_reachable_rejects_dns_quic_address() {
+    let dns_quic_addr = Multiaddr::from_str("/dns4/example.com/udp/8228/quic-v1")
+        .expect("syntactically valid DNS QUIC multiaddr");
+
+    assert!(
+        !is_addr_reachable(&dns_quic_addr),
+        "DNS QUIC address should be rejected because Tentacle does not support dialing it"
+    );
+}
+
+#[test]
 fn test_is_addr_reachable_with_dns4_address() {
     let dns4_addr =
         Multiaddr::from_str("/dns4/example.com/tcp/8228").expect("valid dns4 multiaddr");
