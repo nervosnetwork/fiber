@@ -1,0 +1,54 @@
+meta {
+  name: node1 swap progresses past payout pending
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{SWAP_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // Once the payout is confirmed the client revalidates the live payout cell
+  // (hardened in-loop authorization), transitions to payout_locked and pays
+  // the provider invoice. The exact intermediate state depends on polling
+  // timing, so accept any forward progress out of payout_pending but treat
+  // failure states as immediate errors.
+  await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    method: "get_swap",
+    params: [{ swap_id: bru.getVar("SWAP_ID") }],
+    expectedState: "progressed",
+    getState: (result) => {
+      if (result.state === "failed" || result.state === "refunded") {
+        throw new Error(`client swap must not fail during recovery, got: ${result.state}`);
+      }
+      return result.state === "payout_pending" ? "waiting" : "progressed";
+    },
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  });
+}
