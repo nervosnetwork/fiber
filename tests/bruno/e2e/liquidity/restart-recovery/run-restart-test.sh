@@ -12,19 +12,22 @@ set -Eeuo pipefail
 # Flow:
 #   1. Preflight dependency and port checks (refuses to touch foreign processes).
 #   2. Build the fnn binary and the udt-init provisioner.
-#   3. Initialize the CKB dev chain (nilpotent) and start CKB as an owned PID.
-#   4. Refresh the liquidity-enabled node configs via tests/deploy/deploy.sh.
-#   5. Start node1 (client) and node2 (provider) as owned PIDs.
-#   6. Run the phase1 Bruno suite: setup, channel, quote, accept, execute,
+#   3. Initialize the CKB dev chain (nilpotent; the one-time init provisions
+#      the liquidity-enabled node configs itself) and start CKB as an owned
+#      PID. On existing chains only the Bruno environment files are refreshed
+#      chain-free; node configs are verified, never rewritten, here.
+#   4. Start node1 (client) and node2 (provider) as owned PIDs.
+#   5. Run the phase1 Bruno suite: setup, channel, quote, accept, execute,
 #      and both swaps parked in PayoutPending with the payout broadcast but
 #      deliberately not mined.
-#   7. Discover the swap identifiers over RPC, gate on the persisted payout
+#   6. Discover the swap identifiers over RPC, gate on the persisted payout
 #      broadcast record, and write the phase-handoff artifact.
-#   8. Stop node2 (SIGTERM to its own PID, bounded await), restart it with the
+#   7. Stop node2 (SIGTERM to its own PID, bounded await), restart it with the
 #      same data directory and password, and wait for its RPC.
-#   9. Run the phase2 Bruno suite with the handoff injected via --env-var:
+#   8. Run the phase2 Bruno suite with the handoff injected via --env-var:
 #      reconnect, mine the payout, complete the payment and claim, and require
-#      both swaps to reach Success with the same payout hash.
+#      both swaps to reach Success with the same payout hash and the exact
+#      pre-restart channel balance delta.
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 repo_root="$(cd -- "$script_dir/../../../../.." &>/dev/null && pwd)"
@@ -54,6 +57,8 @@ HANDOFF_SWAP_ID=""
 HANDOFF_PAYMENT_HASH=""
 RESTART_PAYOUT_TX_HASH=""
 HANDOFF_CHANNEL_ID=""
+CLIENT_LOCAL_BEFORE=""
+CLIENT_REMOTE_BEFORE=""
 
 log() { echo "[restart-recovery] $*"; }
 
@@ -174,6 +179,10 @@ rpc_ready() {
 
 port_busy() {
   nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+}
+
+port_free() {
+  ! port_busy "$1"
 }
 
 process_gone() {
@@ -324,19 +333,59 @@ build_binaries() {
   (cd "$deploy_dir/udt-init" && cargo build --locked)
 }
 
+ensure_liquidity_module_enabled() {
+  local node_dir
+  for node_dir in "$nodes_dir/1" "$nodes_dir/2"; do
+    if ! grep -q '^[[:space:]]*-[[:space:]]*liquidity[[:space:]]*$' "$node_dir/config.yml" 2>/dev/null; then
+      cat >&2 <<EOF
+$node_dir/config.yml does not enable the 'liquidity' RPC module.
+This supervisor deliberately does not run chain-bound provisioning
+(tests/deploy/deploy.sh) against an existing dev chain. To regenerate the
+liquidity-enabled node configs, start the dev chain once and run the full
+provisioner, then retry:
+
+  ckb run -C $deploy_dir/node-data --indexer &
+  $deploy_dir/deploy.sh
+  kill %1
+
+or regenerate everything from scratch with:
+  REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/liquidity/ckb-loop-out
+EOF
+      exit 1
+    fi
+  done
+}
+
 provision_dev_chain() {
   local fresh_chain="0"
   if [[ ! -d "$deploy_dir/node-data" ]]; then
     fresh_chain="1"
     FAILURE_CONTEXT="initializing the CKB dev chain (one-time)"
     log "dev chain data missing; running tests/deploy/init-dev-chain.sh (one-time)"
+    log "(the one-time init provisions contracts, wallets and the liquidity-enabled node configs itself)"
     "$deploy_dir/init-dev-chain.sh"
+  elif [[ -z "${SKIP_PROVISIONING:-}" ]]; then
+    # Existing chain: the full provisioner (udt-init main mode) funds UDT
+    # accounts over live CKB RPC, which is not available before this
+    # supervisor starts its own CKB. Refresh only the genesis-derived Bruno
+    # environment files, which need no chain connection.
+    FAILURE_CONTEXT="refreshing the Bruno environment files (chain-free)"
+    log "refreshing Bruno environment files via udt-init GENERATE_BRUNO_ENVIRONMENTS_ONLY (no chain RPC)"
+    GENERATE_BRUNO_ENVIRONMENTS_ONLY=1 NODES_DIR="$nodes_dir" \
+      "$deploy_dir/udt-init/target/debug/udt-init"
   fi
-  if [[ "$fresh_chain" == "0" && -z "${SKIP_PROVISIONING:-}" ]]; then
-    FAILURE_CONTEXT="refreshing liquidity-enabled node configs"
-    log "refreshing node configs via tests/deploy/deploy.sh (idempotent)"
-    "$deploy_dir/deploy.sh"
-  fi
+  FAILURE_CONTEXT="verifying the liquidity-enabled node configs"
+  ensure_liquidity_module_enabled
+}
+
+wait_provisioning_ports_released() {
+  local port
+  for port in "$CKB_PORT" "$NODE1_P2P_PORT" "$NODE2_P2P_PORT" 21714 21715; do
+    FAILURE_CONTEXT="waiting for port $port to be released"
+    if ! wait_until "port $port to be released after provisioning" 15 port_free "$port"; then
+      failure "port $port is still occupied after provisioning"
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -395,9 +444,8 @@ discover_handoff() {
     || failure "client list_channels response was not parseable"
   [[ "$(jq 'length' <<<"$ready_channels")" -eq 1 ]] || failure "expected exactly one ChannelReady channel on the client"
   HANDOFF_CHANNEL_ID="$(jq -r '.[0].channel_id' <<<"$ready_channels")"
-  local client_local_before client_remote_before
-  client_local_before="$(jq -r '.[0].local_balance' <<<"$ready_channels")"
-  client_remote_before="$(jq -r '.[0].remote_balance' <<<"$ready_channels")"
+  CLIENT_LOCAL_BEFORE="$(jq -r '.[0].local_balance' <<<"$ready_channels")"
+  CLIENT_REMOTE_BEFORE="$(jq -r '.[0].remote_balance' <<<"$ready_channels")"
 
   mkdir -p "$run_dir"
   jq -n \
@@ -405,8 +453,8 @@ discover_handoff() {
     --arg payment_hash "$HANDOFF_PAYMENT_HASH" \
     --arg payout_tx_hash "$RESTART_PAYOUT_TX_HASH" \
     --arg channel_id "$HANDOFF_CHANNEL_ID" \
-    --arg client_local_balance_before_payment "$client_local_before" \
-    --arg client_remote_balance_before_payment "$client_remote_before" \
+    --arg client_local_balance_before_payment "$CLIENT_LOCAL_BEFORE" \
+    --arg client_remote_balance_before_payment "$CLIENT_REMOTE_BEFORE" \
     --arg captured_at "$(date -u +%FT%TZ)" \
     '{
       swap_id: $swap_id,
@@ -450,9 +498,9 @@ main() {
   check_ports_free
   build_binaries
   provision_dev_chain
-  # Let the deploy scripts' temporary CKB (fresh-chain path) release its
-  # ports before this supervisor binds them.
-  sleep 2
+  # The fresh-chain path runs a temporary CKB during initialization; wait for
+  # it to release its ports instead of sleeping a fixed interval.
+  wait_provisioning_ports_released
 
   if [[ -z "${KEEP_FIBER_STATE:-}" ]]; then
     FAILURE_CONTEXT="resetting the fiber stores"
@@ -499,7 +547,9 @@ main() {
       --env-var "RESTART_SWAP_ID=$HANDOFF_SWAP_ID" \
       --env-var "RESTART_PAYMENT_HASH=$HANDOFF_PAYMENT_HASH" \
       --env-var "RESTART_PAYOUT_TX_HASH=$RESTART_PAYOUT_TX_HASH" \
-      --env-var "RESTART_CHANNEL_ID=$HANDOFF_CHANNEL_ID"; then
+      --env-var "RESTART_CHANNEL_ID=$HANDOFF_CHANNEL_ID" \
+      --env-var "RESTART_CLIENT_LOCAL_BEFORE=$CLIENT_LOCAL_BEFORE" \
+      --env-var "RESTART_CLIENT_REMOTE_BEFORE=$CLIENT_REMOTE_BEFORE"; then
     failure "phase2 suite failed (the restarted provider did not recover the swap to Success)"
   fi
 

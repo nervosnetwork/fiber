@@ -35,29 +35,43 @@ The supervisor therefore
   tails the logs to stderr;
 - uses bounded waits for every readiness and shutdown transition.
 
-Provisioning is owned as well: the supervisor builds the `fnn` binary
-(`--locked`, plus `debug-add-tlc` for non-release builds, mirroring
-`tests/nodes/start.sh`), builds the `udt-init` provisioner, initializes the
-dev chain through the nilpotent `tests/deploy/init-dev-chain.sh` when needed,
-and refreshes the liquidity-enabled node configs through the idempotent
-`tests/deploy/deploy.sh` (this matters because `tests/nodes/*/config.yml` is a
-generated artifact; stale copies may lack the `liquidity` RPC module). Before
-the first node start it wipes `tests/nodes/{1,2}/fiber/store` so the run begins
-from a deterministic swap/channel state (`KEEP_FIBER_STATE=1` keeps them).
+Provisioning is owned as well, and split by chain state:
+
+- **Fresh dev chain** (`tests/deploy/node-data` missing): the supervisor runs
+  the nilpotent `tests/deploy/init-dev-chain.sh`, which provisions everything
+  itself with its own temporary CKB - contracts deployed, node wallets funded,
+  UDT accounts initialized, and the liquidity-enabled `tests/nodes/*/config.yml`
+  generated.
+- **Existing dev chain**: the full provisioner (`tests/deploy/deploy.sh` ->
+  `udt-init` main mode) funds UDT accounts over live CKB RPC, which this
+  supervisor does not have before it starts its own chain. It therefore only
+  refreshes the genesis-derived Bruno environment files chain-free via
+  `GENERATE_BRUNO_ENVIRONMENTS_ONLY=1 NODES_DIR=... tests/deploy/udt-init`
+  (`udt-init/src/main.rs` main mode guard) and then **verifies** that both
+  generated node configs enable the `liquidity` RPC module, refusing to start
+  with regeneration instructions if they do not. The supervisor never rewrites
+  node configs against an existing chain.
+
+The supervisor builds the `fnn` binary (`--locked`, plus `debug-add-tlc` for
+non-release builds, mirroring `tests/nodes/start.sh`) and the `udt-init`
+provisioner. Before the first node start it wipes
+`tests/nodes/{1,2}/fiber/store` so the run begins from a deterministic
+swap/channel state (`KEEP_FIBER_STATE=1` keeps them).
 
 Environment knobs: `TEST_ENV` (default `debug`), `RPC_READY_TIMEOUT`
 (default 120s), `STOP_GRACE_SECONDS` (default 30s), `KEEP_FIBER_STATE`,
-`SKIP_PROVISIONING`.
+`SKIP_PROVISIONING` (skips the chain-free environment refresh; the node-config
+verification always runs).
 
 ## Flow
 
 | Phase | Actor | Steps |
 | ----- | ----- | ----- |
-| supervisor | - | preflight, build, provision, start CKB + node1 + node2 (owned PIDs) |
+| supervisor | - | preflight, build, provision (fresh: full init; existing: chain-free env refresh + config verification), start CKB + node1 + node2 (owned PIDs) |
 | phase1 (Bruno) | both | connect, provider mode, CKB asset, open channel, fund, ready, quote/import/accept/execute |
 | phase1 (Bruno) | both | park both swaps in `PayoutPending` and pin the durable pre-stop state |
 | supervisor | node2 | discover swap ids over RPC, gate on the persisted payout broadcast record, write the handoff artifact, SIGTERM node2, verify its RPC is down, restart node2 (same data dir + `password2`), wait for RPC |
-| phase2 (Bruno) | both | reconnect, verify persisted swap + payout record, mine the payout, payment leg, claim, mine, both swaps `Success` |
+| phase2 (Bruno) | both | reconnect, verify persisted swap + payout record, mine the payout, payment leg, claim, mine, both swaps `Success` with the exact pre-restart channel balance delta |
 | supervisor | - | tear down owned PIDs (trap) |
 
 The payout transaction is broadcast by `provider_accept_loop_out` in phase 1
@@ -136,10 +150,16 @@ three-layered:
    recover.
 3. **Bruno env injection.** The supervisor passes the same values to phase 2
    via repeated `--env-var RESTART_*=...` flags (supported by the pinned
-   `@usebruno/cli@1.20.0`). Phase-2 requests cross-check every injected value
-   against the live swap/chain-tx records, and request 01 falls back to
-   discovering the single non-terminal `loop_out` swap when the suite is run
-   by hand without injection.
+   `@usebruno/cli@1.20.0`): `RESTART_SWAP_ID`, `RESTART_PAYMENT_HASH`,
+   `RESTART_PAYOUT_TX_HASH`, `RESTART_CHANNEL_ID`,
+   `RESTART_CLIENT_LOCAL_BEFORE` and `RESTART_CLIENT_REMOTE_BEFORE`. Phase-2
+   requests cross-check every injected value against the live swap/chain-tx
+   records, and request 01 falls back to discovering the single non-terminal
+   `loop_out` swap when the suite is run by hand without injection. The
+   balance baseline pair activates the exact channel-balance delta assertion
+   in request 12 (payment principal out, principal in); without injection
+   (manual run) request 12 logs and skips that one assertion while all swap
+   and chain-transaction assertions stay enforced.
 
 ## Node role mapping
 
@@ -153,5 +173,18 @@ three-layered:
 - `ckb`, `ckb-cli`, `cargo`, `jq`, `curl`, `nc`, and node >= 18 (for
   `npx @usebruno/cli@1.20.0`) on PATH.
 - No other process holding the CKB/FNN ports listed above.
-- First run initializes the dev chain (contracts deployed, wallets funded) -
-  this takes several minutes; later runs reuse the existing chain data.
+- Fresh machine: the first run initializes the dev chain (contracts deployed,
+  wallets funded, liquidity-enabled node configs generated) - this takes
+  several minutes. Later runs reuse the existing chain data and only refresh
+  the Bruno environment files chain-free; they require the node configs to
+  already enable the `liquidity` RPC module (the supervisor verifies and
+  prints regeneration instructions otherwise).
+
+## Plan naming note
+
+The task plan refers to this suite as `restart/`; the committed directory is
+`restart-recovery/`. The name was chosen to describe what the suite actually
+proves (restart-driven recovery of a non-terminal swap) and to keep the
+directory name distinct from the generic "restart" wording used by the
+supervisor's log lines. All plan requirements map onto
+`tests/bruno/e2e/liquidity/restart-recovery/`.
