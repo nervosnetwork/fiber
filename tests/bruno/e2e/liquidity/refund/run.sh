@@ -4,11 +4,16 @@ set -euo pipefail
 # Runner for the real liquidity refund suite. Builds (once) and starts the
 # liquidity-lock-mutator sidecar (its "kind": "refund" mode builds the
 # runtime-shaped refund transactions without needing any private key), then
-# runs the Bruno suite against the local dev chain. The dev chain and both
-# FNN nodes must already be running (see the suite README).
+# runs the Bruno suite against the local dev chain. On Bruno failure it
+# writes best-effort redacted diagnostics (swap and chain transaction JSON
+# from both nodes plus the CKB tip header) under
+# tests/artifacts/liquidity/refund/, never masking the Bruno exit code.
+# The dev chain and both FNN nodes must already be running (see the suite
+# README).
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-repo_root="$(cd -- "$script_dir/../../../.." &>/dev/null && pwd)"
+# tests/bruno/e2e/liquidity/refund is five levels below the repo root.
+repo_root="$(cd -- "$script_dir/../../../../.." &>/dev/null && pwd)"
 mutator_dir="$repo_root/tests/liquidity-lock-mutator"
 binary="$mutator_dir/target/debug/liquidity-lock-mutator"
 
@@ -69,4 +74,16 @@ fi
 
 cd "$repo_root/tests/bruno"
 export CKB_MUTATOR_URL="$MUTATOR_URL"
+
+collector="$script_dir/../../../scripts/collect-liquidity-failure-diagnostics.sh"
+
+set +e
 npx @usebruno/cli@1.20.0 run e2e/liquidity/refund -r --env test
+bruno_status=$?
+set -e
+
+if [[ "$bruno_status" -ne 0 ]]; then
+  echo "Bruno suite failed; writing failure diagnostics (best effort)"
+  bash "$collector" refund || true
+fi
+exit "$bruno_status"
