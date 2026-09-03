@@ -1,0 +1,84 @@
+meta {
+  name: node1 build and publish data length mutated loop in locks
+  type: http
+  seq: 29
+}
+
+post {
+  url: {{CKB_MUTATOR_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "payment_hash": "{{PAYMENT_HASH}}",
+    "claimant_lock": "{{PROVIDER_FUNDING_LOCK}}",
+    "refund_lock": "{{REFUND_LOCK}}",
+    "refund_after_lock_time": "{{QUOTE_REFUND_AFTER_LOCK_TIME}}",
+    "gross_amount": "{{QUOTE_GROSS_UDT}}",
+    "capacity_ckb": "{{QUOTE_CAPACITY_CKB}}",
+    "liquidity_lock_code_hash": "{{LIQUIDITY_LOCK_CODE_HASH}}",
+    "liquidity_lock_hash_type": "{{LIQUIDITY_LOCK_HASH_TYPE}}",
+    "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+    "mutation": { "kind": "data_length", "length": 0 }
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.tx: isDefined
+}
+
+script:post-response {
+  const { buildMutatedLockTx, publishSignedLockTx } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
+
+  // One request case covers the whole UDT data length family: the helper
+  // commits three cells whose data is missing (0 bytes), 15 bytes and 17
+  // bytes. Each transaction is funded from the node1 dev wallet, submitted
+  // through the CKB JSON-RPC and mined before the next one is built, so the
+  // cell collector never reuses the previous case's inputs.
+  const mutatorUrl = bru.getEnvVar("CKB_MUTATOR_URL");
+  const baseRequest = {
+    payment_hash: bru.getVar("PAYMENT_HASH"),
+    claimant_lock: bru.getVar("PROVIDER_FUNDING_LOCK"),
+    refund_lock: bru.getVar("REFUND_LOCK"),
+    refund_after_lock_time: bru.getVar("QUOTE_REFUND_AFTER_LOCK_TIME"),
+    gross_amount: bru.getVar("QUOTE_GROSS_UDT"),
+    capacity_ckb: bru.getVar("QUOTE_CAPACITY_CKB"),
+    liquidity_lock_code_hash: bru.getEnvVar("LIQUIDITY_LOCK_CODE_HASH"),
+    liquidity_lock_hash_type: bru.getEnvVar("LIQUIDITY_LOCK_HASH_TYPE"),
+    udt_type_script: JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT")),
+  };
+  const ckbRpcUrl = bru.getEnvVar("CKB_RPC_URL");
+
+  const lengths = [0, 15, 17];
+  const builds = [res.body];
+  for (const length of [15, 17]) {
+    builds.push(
+      await buildMutatedLockTx({
+        mutatorUrl,
+        request: { ...baseRequest, mutation: { kind: "data_length", length } },
+      }),
+    );
+  }
+
+  const txHashes = [];
+  for (let i = 0; i < builds.length; i++) {
+    const published = await publishSignedLockTx({ ckbRpcUrl, built: builds[i] });
+    if (published.txHash !== builds[i].tx_hash) {
+      throw new Error(`data length ${lengths[i]} publish must return its own tx hash: ${published.txHash}`);
+    }
+    txHashes.push(published.txHash);
+    console.log("data length", lengths[i], "lock committed:", published.txHash);
+  }
+
+  bru.setVar("DATA_LENGTH_TX_HASHES", JSON.stringify(txHashes));
+  bru.setVar("DATA_LENGTHS", JSON.stringify(lengths));
+  bru.setVar("MUTATION_OUTPOINT_INDEX", "0");
+}

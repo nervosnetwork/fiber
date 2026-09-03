@@ -1,0 +1,106 @@
+meta {
+  name: node2 provider quote loop out when enabled
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_quote_loop_out",
+    "params": [
+      {
+        "asset_id": "{{LIQUIDITY_CKB_ASSET_ID}}",
+        "amount": "0x1",
+        "claimant_lock": "{{CLAIMANT_LOCK}}",
+        "max_provider_fee": "0xa",
+        "max_routing_fee": "0x64",
+        "expires_after_seconds": "0xe10"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { decodeMoleculeScript, encodeMoleculeScript } = require(
+    process.cwd() + "/scripts/molecule-script",
+  );
+
+  // The identical request that was rejected in request 03 must now produce a
+  // full quote envelope: enabling provider mode is the only difference.
+  const envelope = res.body.result;
+  if (!envelope || !envelope.quote_id) {
+    throw new Error(`provider_quote_loop_out returned no envelope: ${JSON.stringify(res.body)}`);
+  }
+  if (envelope.swap_kind !== "loop_out") {
+    throw new Error(`swap_kind must be loop_out, got: ${envelope.swap_kind}`);
+  }
+  if (envelope.provider_pubkey !== bru.getEnvVar("NODE2_PUBKEY")) {
+    throw new Error(`quote provider_pubkey must be the provider node2 pubkey: ${envelope.provider_pubkey}`);
+  }
+  if (envelope.asset.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID") || envelope.asset.kind !== "ckb") {
+    throw new Error(`quoted asset mismatch: ${JSON.stringify(envelope.asset)}`);
+  }
+  if (envelope.amount !== "0x1") {
+    throw new Error(`quote amount must be the requested 0x1, got: ${envelope.amount}`);
+  }
+  const expectedProviderFee =
+    BigInt(bru.getVar("REGISTRY_BASE_FEE"))
+    + (BigInt("0x1") * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / BigInt(1000000);
+  if (envelope.provider_fee !== "0x" + expectedProviderFee.toString(16)) {
+    throw new Error(`provider_fee must be the registry-derived fee 0x${expectedProviderFee.toString(16)}, got: ${envelope.provider_fee}`);
+  }
+  if (envelope.routing_fee_limit !== "0x64") {
+    throw new Error(`routing_fee_limit must be the requested cap 0x64, got: ${envelope.routing_fee_limit}`);
+  }
+  // Provider quote constants (liquidity actor): onchain fee estimate 1000,
+  // capacity requirement 10000 shannons.
+  if (envelope.onchain_fee_estimate_ckb !== "0x3e8" || envelope.capacity_requirement_ckb !== "0x2710") {
+    throw new Error(`unexpected on-chain cost estimates: ${JSON.stringify(envelope)}`);
+  }
+  if (envelope.claimant_lock !== bru.getVar("CLAIMANT_LOCK")) {
+    throw new Error(`final claimant_lock must echo the request: ${envelope.claimant_lock}`);
+  }
+  // The provider refund lock must decode as a well-formed molecule Script and
+  // round trip back to the exact same bytes.
+  let decodedRefundLock;
+  try {
+    decodedRefundLock = decodeMoleculeScript(envelope.refund_lock);
+  } catch (error) {
+    throw new Error(`refund_lock must decode as a molecule script: ${envelope.refund_lock} (${error.message})`);
+  }
+  if (encodeMoleculeScript(decodedRefundLock) !== envelope.refund_lock) {
+    throw new Error(`refund_lock must round trip through the molecule codec: ${envelope.refund_lock}`);
+  }
+  if (envelope.client_invoice !== undefined) {
+    throw new Error("loop out quote must not carry a client_invoice");
+  }
+  if (typeof envelope.payment_hash !== "string" || envelope.payment_hash.length !== 66) {
+    throw new Error(`payment_hash must be a 32-byte hex: ${envelope.payment_hash}`);
+  }
+  const expiresAt = BigInt(envelope.expires_at);
+  const nowMs = BigInt(Date.now());
+  if (expiresAt <= nowMs) {
+    throw new Error(`quote must not be expired: expires_at=${envelope.expires_at}`);
+  }
+  if (BigInt(envelope.payout_deadline) !== expiresAt + BigInt(10000)) {
+    throw new Error(`payout_deadline must be expires_at + 10000ms: ${envelope.payout_deadline}`);
+  }
+  console.log("enabled-provider quote:", envelope.quote_id);
+}

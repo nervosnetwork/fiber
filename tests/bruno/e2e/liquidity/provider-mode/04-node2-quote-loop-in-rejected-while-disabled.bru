@@ -1,0 +1,50 @@
+meta {
+  name: node2 quote loop in rejected while disabled
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "quote_loop_in",
+    "params": [
+      {
+        "provider": "{{NODE2_PUBKEY}}",
+        "asset_id": "{{LIQUIDITY_CKB_ASSET_ID}}",
+        "amount": "0x1",
+        "client_invoice": "bruno-provider-mode-placeholder-invoice",
+        "refund_lock": "0x",
+        "max_provider_fee": "0xa",
+        "max_routing_fee": "0x64",
+        "expires_after_seconds": "0xe10"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  // handle_quote_loop_in runs ensure_provider_mode before the asset lookup
+  // and invoice parsing, so the placeholder invoice and empty refund lock are
+  // never reached: the rejection must be the mode error itself.
+  const message = String(res.body.error && res.body.error.message);
+  if (!message.includes("provider mode is disabled")) {
+    throw new Error(`quote_loop_in must be rejected while provider mode is disabled, got: ${message}`);
+  }
+}

@@ -1,0 +1,62 @@
+meta {
+  name: node2 add disabled-asset probe
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "add_liquidity_asset",
+    "params": [
+      {
+        "asset": {
+          "asset_id": "provider-mode-disabled-probe",
+          "kind": "udt",
+          "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+          "min_amount": "0x1",
+          "max_amount": "0xf4240",
+          "available_capacity": "0xf4240",
+          "base_fee": "0x1",
+          "proportional_fee_ppm": "0x0",
+          "enabled": true
+        }
+      }
+    ]
+  }
+}
+
+script:post-response {
+  // A dedicated probe asset keeps the disabled-asset rejection test isolated:
+  // the production simple UDT asset stays enabled for the other suites.
+  if (res.body.error) {
+    if (!String(res.body.error.message).includes("already exists")) {
+      throw new Error(`add_liquidity_asset failed: ${res.body.error.message}`);
+    }
+    console.log("probe asset already registered (idempotent re-run)");
+    return;
+  }
+
+  const asset = res.body.result;
+  if (asset.asset_id !== "provider-mode-disabled-probe") {
+    throw new Error(`probe asset_id mismatch: ${asset.asset_id}`);
+  }
+  if (asset.kind !== "udt" || !asset.udt_type_script) {
+    throw new Error(`probe asset must be a udt asset: ${JSON.stringify(asset)}`);
+  }
+  if (asset.enabled !== true) {
+    throw new Error("probe asset must start enabled");
+  }
+}
