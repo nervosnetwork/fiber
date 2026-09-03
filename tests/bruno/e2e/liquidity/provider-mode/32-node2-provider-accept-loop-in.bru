@@ -1,0 +1,58 @@
+meta {
+  name: node2 provider accepts the imported loop in quote
+  type: http
+  seq: 32
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_accept_loop_in",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}",
+        "lock_tx_hash": "{{LOCK_TX_HASH}}",
+        "lock_output_index": {{LOCK_INDEX}}
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // F2 positive side: the identical acceptance that was rejected in request
+  // 25 (same imported quote, same confirmed lock cell) now succeeds after
+  // re-enabling the provider. The accept validates the observed cell against
+  // the quote and starts the provider-side flow. Because the lock is already
+  // confirmed when the accept runs, the returned state can be
+  // OnchainLockPending or already OnchainLocked depending on tracer timing.
+  const response = res.body.result;
+  if (!response || response.swap_id !== bru.getVar("QUOTE_ID")) {
+    throw new Error(`provider accept swap_id must equal the quote_id: ${JSON.stringify(res.body)}`);
+  }
+  if (response.state !== "OnchainLockPending" && response.state !== "OnchainLocked") {
+    throw new Error(`provider accept must start before the payment, got: ${response.state}`);
+  }
+  if (response.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`provider accept payment_hash mismatch: ${response.payment_hash}`);
+  }
+  if (response.payout_outpoint !== undefined) {
+    throw new Error(`loop in accept must not return a payout_outpoint: ${JSON.stringify(response.payout_outpoint)}`);
+  }
+  console.log("provider accepted the imported loop in quote in state:", response.state);
+}

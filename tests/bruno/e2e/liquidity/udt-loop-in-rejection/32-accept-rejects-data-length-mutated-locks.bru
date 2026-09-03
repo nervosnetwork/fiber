@@ -1,0 +1,87 @@
+meta {
+  name: node2 accept rejects every data length mutated loop in lock
+  type: http
+  seq: 32
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_accept_loop_in",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}",
+        "lock_tx_hash": "{{DATA_LENGTH_PROBE_TX_HASH}}",
+        "lock_output_index": {{MUTATION_OUTPOINT_INDEX}}
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  // The three data length mutations (missing/15/17 byte cell data) are
+  // validated and rejected inside the script below, one provider accept per
+  // committed cell; the HTTP request itself carries no params and must fail
+  // with an empty params error so a buggy suite fails loudly.
+  bru.setVar("DATA_LENGTH_PROBE_TX_HASH", "");
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  const { assertQuoteUnconsumed } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const providerRpcUrl = bru.getEnvVar("NODE2_RPC_URL");
+  const clientRpcUrl = bru.getEnvVar("NODE1_RPC_URL");
+  const quoteId = bru.getVar("QUOTE_ID");
+  const paymentHash = bru.getVar("PAYMENT_HASH");
+  const txHashes = JSON.parse(bru.getVar("DATA_LENGTH_TX_HASHES"));
+  const lengths = JSON.parse(bru.getVar("DATA_LENGTHS"));
+
+  if (txHashes.length !== lengths.length) {
+    throw new Error(`data length case corruption: ${txHashes.length} hashes for ${lengths.length} lengths`);
+  }
+
+  for (let i = 0; i < txHashes.length; i++) {
+    // The provider accept validates the UDT cell data length (16 bytes) and
+    // must reject the cell without persisting any swap state.
+    let failed = false;
+    let message = "";
+    try {
+      await rpc(providerRpcUrl, "provider_accept_loop_in", [
+        { quote_id: quoteId, lock_tx_hash: txHashes[i], lock_output_index: 0 },
+      ]);
+    } catch (error) {
+      failed = true;
+      message = String((error && error.message) || error);
+    }
+    if (!failed) {
+      throw new Error(`provider accept must reject the data length ${lengths[i]} mutated lock: ${txHashes[i]}`);
+    }
+    if (!message.includes("observed loop in lock UDT data length")) {
+      throw new Error(`provider accept must fail on the data length ${lengths[i]} validation, got: ${message}`);
+    }
+    await assertQuoteUnconsumed({
+      quoteId,
+      paymentHash,
+      providerRpcUrl,
+      clientRpcUrl,
+    });
+    console.log("provider rejected the data length", lengths[i], "mutated lock");
+  }
+}

@@ -1,0 +1,53 @@
+meta {
+  name: node2 wait for claim broadcast
+  type: http
+  seq: 38
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // The claim transaction only exists once the provider payment settled (the
+  // provider learned the preimage from the settlement). Wait until it is at
+  // least broadcast before mining the next confirmation.
+  await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    method: "list_liquidity_chain_transactions",
+    params: [{ swap_id: bru.getVar("QUOTE_ID") }],
+    expectedState: "claim-present",
+    getState: (result) => {
+      const claim = (result.transactions || []).find((tx) => tx.role === "claim");
+      if (claim && (claim.status === "broadcast" || claim.status === "confirmed")) {
+        return "claim-present";
+      }
+      return "claim-missing";
+    },
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  });
+}
