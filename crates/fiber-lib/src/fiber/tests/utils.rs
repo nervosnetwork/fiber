@@ -1,7 +1,10 @@
-use std::str::FromStr;
+use std::{borrow::Cow, str::FromStr};
 
 use tempfile::NamedTempFile;
-use tentacle::multiaddr::Multiaddr;
+use tentacle::{
+    multiaddr::{Multiaddr, Protocol},
+    secio::PeerId,
+};
 
 use crate::utils::encrypt_decrypt_file::decrypt_from_file;
 use crate::utils::encrypt_decrypt_file::encrypt_to_file;
@@ -36,6 +39,29 @@ fn test_is_addr_reachable_with_public_ip() {
     assert!(
         is_addr_reachable(&public_addr),
         "public IP address should be considered reachable"
+    );
+}
+
+#[test]
+fn test_is_addr_reachable_with_public_quic_address() {
+    let mut public_addr =
+        Multiaddr::from_str("/ip4/1.1.1.1/udp/8228/quic-v1").expect("valid public QUIC multiaddr");
+    public_addr.push(Protocol::P2P(Cow::Owned(PeerId::random().into_bytes())));
+
+    assert!(
+        is_addr_reachable(&public_addr),
+        "public QUIC address should be considered reachable"
+    );
+}
+
+#[test]
+fn test_is_addr_reachable_with_private_quic_address() {
+    let private_addr = Multiaddr::from_str("/ip4/192.168.1.1/udp/8228/quic-v1")
+        .expect("valid private QUIC multiaddr");
+
+    assert!(
+        !is_addr_reachable(&private_addr),
+        "private QUIC address should not be considered reachable"
     );
 }
 

@@ -5,12 +5,12 @@ pub(crate) mod payment;
 pub mod tx;
 
 use tentacle::multiaddr::{Multiaddr, Protocol};
-use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
+use tentacle::utils::{is_reachable, multiaddr_to_socketaddr, multiaddr_to_udp_socketaddr};
 
 /// Check whether a multiaddr is publicly reachable.
 ///
-/// For IP-based addresses (`Ip4`/`Ip6`), this delegates to tentacle's
-/// `multiaddr_to_socketaddr` + `is_reachable` check.
+/// For IP-based addresses (`Ip4`/`Ip6`), this extracts either a TCP or UDP
+/// socket address and delegates to tentacle's `is_reachable` check.
 ///
 /// For DNS-based addresses (`Dns4`/`Dns6`), we treat them as always reachable
 /// because a DNS name implies a publicly resolvable endpoint.
@@ -30,6 +30,7 @@ pub(crate) fn is_addr_reachable(addr: &Multiaddr) -> bool {
     }
 
     multiaddr_to_socketaddr(addr)
+        .or_else(|| multiaddr_to_udp_socketaddr(addr))
         .map(|socket_addr| is_reachable(socket_addr.ip()))
         .unwrap_or_default()
 }
