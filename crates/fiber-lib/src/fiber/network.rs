@@ -7496,7 +7496,10 @@ where
             default_shutdown_script,
             network: myself.clone(),
             control,
+            #[cfg(not(target_arch = "wasm32"))]
             outbound_proxy_enabled: config.proxy.proxy_url.is_some(),
+            #[cfg(target_arch = "wasm32")]
+            outbound_proxy_enabled: false,
             peer_message_policy,
             #[cfg(not(target_arch = "wasm32"))]
             onion_service_token,
