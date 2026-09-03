@@ -4,9 +4,10 @@
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
 use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+use ckb_types::prelude::Unpack;
 use fiber_types::{
     ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus,
-    RemoveTlcReason, TLCId, TlcInfo,
+    RemoveTlcReason, SettlementData, TLCId, TlcInfo,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -331,21 +332,91 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
         .collect()
 }
 
+/// Returns true when any TLC included in the active settlement snapshot remains unresolved.
+pub(crate) fn has_unresolved_onchain_tlcs_for_snapshot(
+    state: &ChannelActorState,
+    snapshot: &SettlementData,
+    for_remote: bool,
+) -> bool {
+    snapshot.tlcs.iter().any(|settlement_tlc| {
+        let tlc_id = if for_remote {
+            settlement_tlc.tlc_id
+        } else {
+            settlement_tlc.tlc_id.flip()
+        };
+        let Some(tlc) = state.tlc_state.get(&tlc_id) else {
+            return false;
+        };
+        can_reconcile_onchain_fulfillment(tlc)
+    })
+}
+
 pub(crate) fn has_unresolved_onchain_tlcs(state: &ChannelActorState) -> bool {
-    // Offered LocalAnnounced TLCs are only in the remote commitment. A local force-close
-    // spends the local commitment, so they must not block settlement completion.
+    let local_uncooperative_close = matches!(
+        state.state,
+        ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+    );
     let remote_uncooperative_close = matches!(
         state.state,
         ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
     );
+
+    if local_uncooperative_close {
+        // On local force-close, check against the local commitment snapshot which omits uncommitted offered TLCs.
+        if let Ok(local_snapshot) = state.build_settlement_data(false) {
+            return has_unresolved_onchain_tlcs_for_snapshot(state, &local_snapshot, false);
+        }
+    } else if remote_uncooperative_close {
+        // Deterministically derive the pending remote commitment tx hash to determine whether
+        // the remote party published the pending commitment (containing LocalAnnounced TLCs)
+        // or the preceding one (omitting them).
+        let pending_commitment_hash = state
+            .build_commitment_tx_and_settlement_data(true)
+            .map(|(tx, _)| tx.hash().unpack())
+            .ok();
+
+        return state.tlc_state.all_tlcs().any(|tlc| {
+            if !can_reconcile_onchain_fulfillment(tlc) {
+                return false;
+            }
+            if tlc.is_offered()
+                && matches!(tlc.outbound_status(), OutboundTlcStatus::LocalAnnounced)
+            {
+                match (&state.shutdown_transaction_hash, &pending_commitment_hash) {
+                    // Confirmed tx matches pending commitment: TLC is on-chain, must wait for settlement.
+                    // Different hash (e.g. preceding commitment broadcasted): TLC was never on-chain, do not block.
+                    (Some(confirmed_hash), Some(pending_hash)) => confirmed_hash == pending_hash,
+                    // Unknown shutdown tx hash: fall back to conservative waiting.
+                    _ => true,
+                }
+            } else {
+                // All other active TLCs on remote force-close must be settled on-chain.
+                true
+            }
+        });
+    }
+
+    // Fallback: verify all active committed or inbound announced TLCs when snapshot construction is unavailable.
+
     state.tlc_state.all_tlcs().any(|tlc| {
         if !can_reconcile_onchain_fulfillment(tlc) {
             return false;
         }
-        if tlc.is_offered() && matches!(tlc.outbound_status(), OutboundTlcStatus::LocalAnnounced) {
-            return remote_uncooperative_close;
+        if local_uncooperative_close {
+            if tlc.is_offered() {
+                matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
+            } else {
+                matches!(
+                    tlc.inbound_status(),
+                    InboundTlcStatus::RemoteAnnounced
+                        | InboundTlcStatus::AnnounceWaitPrevAck
+                        | InboundTlcStatus::AnnounceWaitAck
+                        | InboundTlcStatus::Committed
+                )
+            }
+        } else {
+            true
         }
-        true
     })
 }
 
@@ -362,7 +433,9 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
     } else {
         matches!(
             tlc.inbound_status(),
-            InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+            InboundTlcStatus::AnnounceWaitPrevAck
+                | InboundTlcStatus::AnnounceWaitAck
+                | InboundTlcStatus::Committed
         )
     }
 }
