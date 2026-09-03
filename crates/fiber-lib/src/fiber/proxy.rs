@@ -4,7 +4,11 @@ use url::Url;
 /// SOCKS5 proxy configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProxyConfig {
-    /// Socks5 proxy URL for fiber. e.g. socks5://username:password@127.0.0.1:1080
+    /// SOCKS5 proxy URL for outbound Fiber TCP connections.
+    ///
+    /// Outbound QUIC is disabled when this option is set because QUIC uses UDP and is not
+    /// supported by the proxy transport. Inbound QUIC listeners remain available.
+    /// Example: socks5://username:password@127.0.0.1:1080
     pub proxy_url: Option<String>,
 
     /// Use random auth for each proxy connection [default: true]

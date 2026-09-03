@@ -17,8 +17,9 @@ use crate::{
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
-            select_connect_peer_address, AcceptChannelCommand, DebugEvent, FiberMessageWithTarget,
-            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason, TestFiberMessageKind,
+            select_connect_peer_address, select_outbound_address, AcceptChannelCommand, DebugEvent,
+            FiberMessageWithTarget, NetworkActorStateStore, OpenChannelCommand,
+            PeerDisconnectReason, TestFiberMessageKind,
         },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
@@ -520,7 +521,7 @@ fn test_select_connect_peer_address_by_quic_transport() {
 
     assert_eq!(tentacle::utils::find_type(&quic), TransportType::QuicV1);
     assert_eq!(
-        select_connect_peer_address(vec![tcp, quic.clone()], Some(TransportType::QuicV1)),
+        select_connect_peer_address(vec![tcp, quic.clone()], Some(TransportType::QuicV1), false,),
         Some(quic)
     );
 }
@@ -531,7 +532,8 @@ fn test_select_connect_peer_address_respects_explicit_transport_filter() {
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
     let wss = build_ws_multiaddr(true);
 
-    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss], Some(TransportType::Ws));
+    let selected =
+        select_connect_peer_address(vec![tcp, ws.clone(), wss], Some(TransportType::Ws), false);
 
     assert_eq!(selected, Some(ws));
 }
@@ -543,7 +545,7 @@ fn test_select_connect_peer_address_defaults_to_tcp_on_native() {
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
     let wss = build_ws_multiaddr(true);
 
-    let selected = select_connect_peer_address(vec![tcp.clone(), ws, wss], None);
+    let selected = select_connect_peer_address(vec![tcp.clone(), ws, wss], None, false);
 
     assert_eq!(selected, Some(tcp));
 }
@@ -555,9 +557,40 @@ fn test_select_connect_peer_address_defaults_to_websocket_on_wasm() {
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
     let wss = build_ws_multiaddr(true);
 
-    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss.clone()], None);
+    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss.clone()], None, false);
 
     assert!(matches!(selected, Some(addr) if addr == ws || addr == wss));
+}
+
+#[test]
+fn test_select_connect_peer_address_rejects_quic_with_proxy() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+
+    assert_eq!(
+        select_connect_peer_address(
+            vec![tcp.clone(), quic.clone()],
+            Some(TransportType::Tcp),
+            true,
+        ),
+        Some(tcp)
+    );
+    assert_eq!(
+        select_connect_peer_address(vec![quic], Some(TransportType::QuicV1), true),
+        None
+    );
+}
+
+#[test]
+fn test_automatic_address_selection_rejects_quic_with_proxy() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+
+    assert_eq!(
+        select_outbound_address(vec![quic.clone(), tcp.clone()], true),
+        Some(tcp)
+    );
+    assert_eq!(select_outbound_address(vec![quic], true), None);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -12,7 +12,7 @@ use ractor::concurrency::Duration;
 use ractor::{
     call_t, forward, Actor, ActorCell, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent,
 };
-use rand::seq::{IndexedRandom, IteratorRandom};
+use rand::seq::IteratorRandom;
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -2324,6 +2324,14 @@ where
             NetworkActorCommand::ConnectPeer(addr, save, source, rpc_reply) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
+                if !outbound_address_allowed(&addr, state.outbound_proxy_enabled) {
+                    let err = outbound_quic_proxy_error(&addr);
+                    warn!("{}", err);
+                    if let Some(reply) = rpc_reply {
+                        let _ = reply.send(Err(err));
+                    }
+                    return Ok(());
+                }
                 if matches!(source, PeerConnectSource::Manual) {
                     state.resume_peer_auto_reconnect_by_address(&addr);
                 }
@@ -2351,7 +2359,12 @@ where
             NetworkActorCommand::ConnectPeerWithPubkey(pubkey, addr_type, source, reply) => {
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
                 let has_known_addresses = !addresses.is_empty();
-                let address = select_connect_peer_address(addresses, addr_type);
+                if state.outbound_proxy_enabled && addr_type == Some(TransportType::QuicV1) {
+                    let _ = reply.send(Err(outbound_quic_proxy_error_for_peer(&pubkey)));
+                    return Ok(());
+                }
+                let address =
+                    select_connect_peer_address(addresses, addr_type, state.outbound_proxy_enabled);
                 let Some(addr) = address else {
                     let err = if let Some(transport) = addr_type {
                         Error::NoMatchingAddress(pubkey, transport)
@@ -2429,11 +2442,13 @@ where
                 debug_event!(myself, "PeerReconnectBackoffAttempt");
 
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
-                if let Some(addr) = addresses.iter().choose(&mut rand::rng()) {
+                if let Some(addr) =
+                    select_outbound_address(addresses.iter().cloned(), state.outbound_proxy_enabled)
+                {
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::ConnectPeer(
-                                addr.clone(),
+                                addr,
                                 false,
                                 PeerConnectSource::Automatic,
                                 None,
@@ -2480,11 +2495,14 @@ where
                         &channel_id, &pubkey, &channel_state, &addresses
                     );
 
-                    if let Some(addr) = addresses.iter().choose(&mut rand::rng()) {
+                    if let Some(addr) = select_outbound_address(
+                        addresses.iter().cloned(),
+                        state.outbound_proxy_enabled,
+                    ) {
                         myself
                             .send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::ConnectPeer(
-                                    addr.to_owned(),
+                                    addr,
                                     false,
                                     PeerConnectSource::Automatic,
                                     None,
@@ -2559,7 +2577,11 @@ where
                     }
 
                     // Randomly pick one address to connect
-                    if let Some(addr) = addresses.choose(&mut rng) {
+                    if let Some(addr) = addresses
+                        .iter()
+                        .filter(|addr| outbound_address_allowed(addr, state.outbound_proxy_enabled))
+                        .choose(&mut rng)
+                    {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
@@ -2592,7 +2614,11 @@ where
                     }
 
                     // Randomly pick one address to connect
-                    if let Some(addr) = addresses.choose(&mut rng) {
+                    if let Some(addr) = addresses
+                        .iter()
+                        .filter(|addr| outbound_address_allowed(addr, state.outbound_proxy_enabled))
+                        .choose(&mut rng)
+                    {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
@@ -5055,6 +5081,9 @@ pub struct NetworkActorState<S, C> {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
+    // SOCKS5 proxying is currently available only for TCP-based transports.
+    // Keep this policy here so every outbound dial path can fail closed.
+    outbound_proxy_enabled: bool,
     peer_message_policy: Arc<StdMutex<PeerMessagePolicy>>,
     // Cancellation token for the onion service background task.
     #[cfg(not(target_arch = "wasm32"))]
@@ -7268,23 +7297,15 @@ where
 
             // Set SOCKS5 proxy config
             if let Some(proxy_url) = &config.proxy.proxy_url {
-                match super::proxy::check_proxy_url(proxy_url) {
-                    Ok(()) => {
-                        builder = builder
-                            .tcp_proxy_config(proxy_url)
-                            .tcp_proxy_random_auth(config.proxy.proxy_random_auth);
-                        info!(
-                            "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
-                            proxy_url, config.proxy.proxy_random_auth
-                        );
-                    }
-                    Err(err) => {
-                        error!(
-                            "Invalid proxy_url in config, skipping tcp_proxy_config. proxy_url={:?}, error={}",
-                            proxy_url, err
-                        );
-                    }
-                }
+                super::proxy::check_proxy_url(proxy_url)
+                    .map_err(|err| anyhow::anyhow!("Invalid proxy_url in config: {err}"))?;
+                builder = builder
+                    .tcp_proxy_config(proxy_url)
+                    .tcp_proxy_random_auth(config.proxy.proxy_random_auth);
+                info!(
+                    "Set tcp_proxy_config: {:?}, proxy_random_auth: {}",
+                    proxy_url, config.proxy.proxy_random_auth
+                );
             }
 
             // Set onion proxy config (for .onion address connections via Tor SOCKS5)
@@ -7475,6 +7496,7 @@ where
             default_shutdown_script,
             network: myself.clone(),
             control,
+            outbound_proxy_enabled: config.proxy.proxy_url.is_some(),
             peer_message_policy,
             #[cfg(not(target_arch = "wasm32"))]
             onion_service_token,
@@ -7980,6 +8002,7 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
 pub(crate) fn select_connect_peer_address<I>(
     addresses: I,
     addr_type: Option<TransportType>,
+    outbound_proxy_enabled: bool,
 ) -> Option<Multiaddr>
 where
     I: IntoIterator<Item = Multiaddr>,
@@ -7989,13 +8012,44 @@ where
     match addr_type {
         Some(transport) => addresses
             .into_iter()
+            .filter(|addr| outbound_address_allowed(addr, outbound_proxy_enabled))
             .filter(|addr| find_type(addr) == transport)
             .choose(&mut rng),
         None => addresses
             .into_iter()
+            .filter(|addr| outbound_address_allowed(addr, outbound_proxy_enabled))
             .filter(target_default_transport_matches)
             .choose(&mut rng),
     }
+}
+
+pub(crate) fn select_outbound_address<I>(
+    addresses: I,
+    outbound_proxy_enabled: bool,
+) -> Option<Multiaddr>
+where
+    I: IntoIterator<Item = Multiaddr>,
+{
+    addresses
+        .into_iter()
+        .filter(|addr| outbound_address_allowed(addr, outbound_proxy_enabled))
+        .choose(&mut rand::rng())
+}
+
+fn outbound_address_allowed(addr: &Multiaddr, outbound_proxy_enabled: bool) -> bool {
+    !outbound_proxy_enabled || find_type(addr) != TransportType::QuicV1
+}
+
+fn outbound_quic_proxy_error(addr: &Multiaddr) -> String {
+    format!(
+        "outbound QUIC address {addr} is disabled while proxy.proxy_url is configured because the SOCKS5 proxy supports TCP connections only"
+    )
+}
+
+fn outbound_quic_proxy_error_for_peer(pubkey: &Pubkey) -> String {
+    format!(
+        "outbound QUIC connection to peer {pubkey:?} is disabled while proxy.proxy_url is configured because the SOCKS5 proxy supports TCP connections only"
+    )
 }
 
 #[cfg(target_arch = "wasm32")]

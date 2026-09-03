@@ -2480,6 +2480,86 @@ async fn test_connect_to_other_node_over_quic() {
     node_b.expect_debug_event("PeerInit").await;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_three_nodes_quic_connections_with_socks5_proxy() {
+    let quic_node_config = |proxy_url: Option<String>| {
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.listening_addr = Some("/ip4/127.0.0.1/tcp/0".to_string());
+                config.listening_addrs = vec!["/ip4/127.0.0.1/udp/0/quic-v1".to_string()];
+                config.reuse_port_for_websocket = false;
+                config.proxy.proxy_url = proxy_url;
+            })
+            .build()
+    };
+    let mut node_a = NetworkNode::new_with_config(quic_node_config(Some(
+        "socks5://127.0.0.1:65535".to_string(),
+    )))
+    .await;
+    let mut node_b = NetworkNode::new_with_config(quic_node_config(None)).await;
+    let mut node_c = NetworkNode::new_with_config(quic_node_config(None)).await;
+
+    let quic_address = |node: &NetworkNode| {
+        node.listening_addrs
+            .iter()
+            .find(|addr| tentacle::utils::find_type(addr) == tentacle::utils::TransportType::QuicV1)
+            .expect("node has a QUIC listening address")
+            .clone()
+    };
+
+    let rejected = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            quic_address(&node_b),
+            false,
+            crate::fiber::network::PeerConnectSource::Manual,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("proxied node is alive")
+    .expect_err("outbound QUIC must be rejected when SOCKS5 is configured");
+    assert!(
+        rejected.contains("outbound QUIC") && rejected.contains("proxy.proxy_url"),
+        "unexpected rejection: {rejected}"
+    );
+
+    call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            quic_address(&node_a),
+            false,
+            crate::fiber::network::PeerConnectSource::Manual,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node B is alive")
+    .expect("inbound QUIC remains available on the proxied node");
+    node_b
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::PeerConnected(pubkey, _) if pubkey == &node_a.pubkey)
+        })
+        .await;
+    node_b.expect_debug_event("PeerInit").await;
+    node_a.expect_debug_event("PeerInit").await;
+
+    call!(node_c.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
+            quic_address(&node_b),
+            false,
+            crate::fiber::network::PeerConnectSource::Manual,
+            Some(rpc_reply),
+        ))
+    })
+    .expect("node C is alive")
+    .expect("unproxied nodes connect over QUIC");
+    node_c
+        .expect_event(|event| {
+            matches!(event, NetworkServiceEvent::PeerConnected(pubkey, _) if pubkey == &node_b.pubkey)
+        })
+        .await;
+    node_c.expect_debug_event("PeerInit").await;
+    node_b.expect_debug_event("PeerInit").await;
+}
+
 #[tokio::test]
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
