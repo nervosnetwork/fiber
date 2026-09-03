@@ -1,0 +1,111 @@
+meta {
+  name: assert refund settled and lock cell dead
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_tip_block_number",
+    "params": []
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const { waitCkbLiveCell } = require(
+    process.cwd() + "/scripts/wait-liquidity-state",
+  );
+  const { decodeUdtAmount } = require(
+    process.cwd() + "/scripts/liquidity-lock-args",
+  );
+
+  const ckbRpcUrl = bru.getEnvVar("CKB_RPC_URL");
+  const lockOutpoint = {
+    tx_hash: bru.getVar("LOCK_TX_HASH"),
+    index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+  };
+
+  // The original liquidity-lock cell must be dead: the refund transaction
+  // consumed it as its only input.
+  const deadCell = await waitCkbLiveCell({
+    ckbRpcUrl,
+    outPoint: lockOutpoint,
+    expectedStatus: "dead",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  if (!deadCell.result || deadCell.result.status !== "dead") {
+    throw new Error(`lock cell must be dead after the refund: ${JSON.stringify(deadCell.result)}`);
+  }
+
+  // The refund output cell (output 0 of the refund transaction) must be live
+  // and carry exactly the runtime-shaped terminal output.
+  const refundOutpoint = {
+    tx_hash: bru.getVar("REFUND_TX_HASH"),
+    index: "0x0",
+  };
+  const refundCell = await waitCkbLiveCell({
+    ckbRpcUrl,
+    outPoint: refundOutpoint,
+    expectedStatus: "live",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  const cell = refundCell.result && refundCell.result.cell;
+  if (!cell || !cell.output) {
+    throw new Error(`refund cell response is missing the cell output: ${JSON.stringify(refundCell.result)}`);
+  }
+
+  // Capacity: unchanged operational capacity of the terminal output
+  // (build_loop_in_terminal_output).
+  const expectedCapacity = BigInt(bru.getVar("QUOTE_CAPACITY_CKB"));
+  if (BigInt(cell.output.capacity) !== expectedCapacity) {
+    throw new Error(`refund cell capacity must equal ${expectedCapacity}, got: ${cell.output.capacity}`);
+  }
+
+  // Lock: exactly the client refund lock captured from node1's funding lock
+  // in request 11 - the funds returned to the client wallet.
+  const expectedRefundScript = JSON.parse(bru.getVar("REFUND_LOCK_SCRIPT_JSON"));
+  const refundLock = cell.output.lock;
+  if (!refundLock
+    || refundLock.code_hash !== expectedRefundScript.code_hash
+    || refundLock.hash_type !== expectedRefundScript.hash_type
+    || refundLock.args !== expectedRefundScript.args) {
+    throw new Error(`refund cell lock must be the client refund lock: ${JSON.stringify(refundLock)}`);
+  }
+
+  // Type script and data: the UDT group is conserved through the refund, the
+  // gross amount moves intact into the refund cell data.
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+  const typeScript = cell.output.type_;
+  if (!typeScript
+    || typeScript.code_hash !== expectedScript.code_hash
+    || typeScript.hash_type !== expectedScript.hash_type
+    || typeScript.args !== expectedScript.args) {
+    throw new Error(`refund cell type script must be the simple UDT script: ${JSON.stringify(typeScript)}`);
+  }
+  const gross = BigInt(bru.getVar("QUOTE_GROSS_UDT"));
+  if (decodeUdtAmount(cell.data.content) !== gross) {
+    throw new Error(`refund cell data must decode to the gross amount ${bru.getVar("QUOTE_GROSS_UDT")}, got: ${cell.data.content}`);
+  }
+  console.log("refund cell live: capacity", cell.output.capacity, "udt amount", gross.toString());
+}

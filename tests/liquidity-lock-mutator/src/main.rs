@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
 use ckb_types::packed;
 use liquidity_lock_mutator::{
-    handle_request, parse_request_payload, MutatorRequest, MutatorResponse,
+    handle_refund_request, handle_request, parse_sidecar_payload, MutatorRequest, MutatorResponse,
+    SidecarRequest,
 };
 use secp256k1::SecretKey;
 
@@ -72,16 +73,27 @@ fn process(
     options: &CliOptions,
     locked: &mut HashSet<packed::OutPoint>,
 ) -> Result<MutatorResponse> {
-    let request = parse_request_payload(payload)?;
-    let rpc_url = options
-        .rpc_url
-        .clone()
-        .or_else(|| request.rpc_url.clone())
-        .context("no rpc url: pass --rpc-url or an rpc_url field in the request")?;
-    let privkey = resolve_privkey(options, &request)?;
-    let (response, used) = handle_request(&request, &rpc_url, &privkey, locked)?;
-    locked.extend(used);
-    Ok(response)
+    let rpc_url = |request: Option<&String>| -> Result<String> {
+        options
+            .rpc_url
+            .clone()
+            .or_else(|| request.cloned())
+            .context("no rpc url: pass --rpc-url or an rpc_url field in the request")
+    };
+    match parse_sidecar_payload(payload)? {
+        // Refund requests need no wallet key: the liquidity-lock refund path
+        // requires no secp256k1 signature.
+        SidecarRequest::Refund(request) => {
+            handle_refund_request(&request, &rpc_url(request.rpc_url.as_ref())?)
+        }
+        SidecarRequest::Lock(request) => {
+            let rpc_url = rpc_url(request.rpc_url.as_ref())?;
+            let privkey = resolve_privkey(options, &request)?;
+            let (response, used) = handle_request(&request, &rpc_url, &privkey, locked)?;
+            locked.extend(used);
+            Ok(response)
+        }
+    }
 }
 
 fn run_stdin(options: &CliOptions) -> Result<()> {

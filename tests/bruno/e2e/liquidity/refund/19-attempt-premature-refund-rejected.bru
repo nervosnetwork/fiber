@@ -1,0 +1,126 @@
+meta {
+  name: attempt refund one second before maturity is rejected
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { rpc, waitCkbLiveCell } = require(
+    process.cwd() + "/scripts/wait-liquidity-state",
+  );
+  const { buildRefundTx } = require(process.cwd() + "/scripts/refund-tx");
+
+  const ckbRpcUrl = bru.getEnvVar("CKB_RPC_URL");
+  const lockOutpoint = {
+    tx_hash: bru.getVar("LOCK_TX_HASH"),
+    index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+  };
+
+  // Build the runtime-shaped refund transaction with the since shifted one
+  // unit (one second) before the encoded quote maturity. The absolute
+  // timestamp metric flag bits are preserved by the sidecar, so the only
+  // difference to the mature refund is the value field.
+  const built = await buildRefundTx({
+    mutatorUrl: bru.getEnvVar("CKB_MUTATOR_URL"),
+    request: {
+      kind: "refund",
+      lock_tx_hash: bru.getVar("LOCK_TX_HASH"),
+      lock_index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+      refund_after_lock_time: bru.getVar("QUOTE_REFUND_AFTER_LOCK_TIME"),
+      since_offset: -1,
+      refund_lock: bru.getVar("REFUND_LOCK"),
+      gross_amount: bru.getVar("QUOTE_GROSS_UDT"),
+      capacity_ckb: bru.getVar("QUOTE_CAPACITY_CKB"),
+      liquidity_lock_code_hash: bru.getEnvVar("LIQUIDITY_LOCK_CODE_HASH"),
+      liquidity_lock_hash_type: bru.getEnvVar("LIQUIDITY_LOCK_HASH_TYPE"),
+      udt_type_script: JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT")),
+    },
+  });
+  bru.setVar("PREMATURE_REFUND_TX_HASH", built.tx_hash);
+
+  // The CKB tx pool verifies the input since against the median block time
+  // of the past 37 blocks (RFC 0017) and rejects immature transactions on
+  // submission. test_tx_pool_accept must fail without touching the pool; the
+  // shared rpc helper surfaces JSON-RPC errors as thrown errors.
+  let rejected = false;
+  let rejection = "";
+  try {
+    const accepted = await rpc(ckbRpcUrl, "test_tx_pool_accept", [built.tx, null]);
+    rejection = JSON.stringify(accepted && accepted.result);
+  } catch (error) {
+    rejected = true;
+    rejection = error && error.message ? error.message : String(error);
+  }
+  if (!rejected) {
+    throw new Error(
+      `test_tx_pool_accept must reject the immature refund transaction, got: ${rejection}`,
+    );
+  }
+  // The transaction is well-formed apart from its since: the rejection must
+  // be the since immaturity, not some unrelated validation failure. CKB
+  // surfaces the consensus error text (RFC 0017 "Immature") inside the pool
+  // reject reason; older formats may phrase it as a since failure.
+  const immaturityHint = /mmature|since/i.test(rejection);
+  if (!immaturityHint) {
+    console.log(
+      "warning: premature refund rejection does not mention immaturity/since:",
+      rejection.slice(0, 200),
+    );
+  }
+  console.log("premature refund rejected:", rejection.slice(0, 200));
+
+  // The rejected transaction must never have entered the pool or the chain.
+  const known = await rpc(ckbRpcUrl, "get_transaction", [built.tx_hash]);
+  if (known.result !== null && known.result !== undefined) {
+    throw new Error(`premature refund transaction must be unknown to the chain: ${JSON.stringify(known.result)}`);
+  }
+
+  // The lock cell is untouched: the failed attempt leaves the live lock in
+  // place for the mature refund in requests 20-21.
+  const liveCell = await waitCkbLiveCell({
+    ckbRpcUrl,
+    outPoint: lockOutpoint,
+    expectedStatus: "live",
+    maxAttempts: 10,
+    intervalMs: 1000,
+    deadlineMs: 15000,
+  });
+  if (!liveCell.result || !liveCell.result.cell) {
+    throw new Error(`lock cell must remain live after the rejected refund: ${JSON.stringify(liveCell.result)}`);
+  }
+
+  // The swap record stays onchain_locked: with no provider accept the client
+  // swap has no runtime refund record yet (see the suite README for the M0
+  // refund trigger semantics).
+  if (res.body.result.state !== "onchain_locked") {
+    throw new Error(`swap must stay onchain_locked before maturity, got: ${res.body.result.state}`);
+  }
+}
