@@ -70,7 +70,7 @@ use musig2::secp::MaybeScalar;
 use musig2::CompactSignature;
 use musig2::SecNonce;
 use secp256k1::SecretKey;
-use secp256k1::{Keypair, SECP256K1};
+use secp256k1::SECP256K1;
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;

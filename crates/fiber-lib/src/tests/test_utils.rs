@@ -33,6 +33,7 @@ use crate::rpc::config::RpcConfig;
 use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
+use aes_gcm::aead::OsRng;
 use ckb_sdk::core::TransactionBuilder;
 #[cfg(test)]
 use ckb_types::bytes::Bytes;
