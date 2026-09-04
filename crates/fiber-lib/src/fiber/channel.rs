@@ -1400,9 +1400,7 @@ where
         state: &mut ChannelActorState,
         tlc: TlcInfo,
     ) {
-        // Do not settle a forwarding TLC from a globally visible preimage
-        // before the downstream forwarding result is known.
-        if state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id) {
+        if !state.can_auto_fulfill_received_tlc(&tlc) {
             return;
         }
 
@@ -2937,6 +2935,10 @@ where
                         NetworkActorCommand::SettleTlcSet(payment_hash, vec![(state.id, id)]),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
+
+            if !state.can_auto_fulfill_received_tlc(tlc) {
                 continue;
             }
 
@@ -5710,6 +5712,30 @@ impl ChannelActorState {
 
     pub(crate) fn is_waiting_forward_result_for_received_tlc(&self, tlc_id: TLCId) -> bool {
         self.waiting_forward_tlc_tasks.contains_key(&tlc_id)
+    }
+
+    /// Returns whether a received TLC may be fulfilled from a preimage in the local store.
+    ///
+    /// A stored preimage only proves that *some* payment with the same hash succeeded. It does
+    /// not prove that this forwarding attempt succeeded. Forwarded TLCs must therefore be
+    /// resolved by the result from their own downstream `(channel_id, tlc_id)`:
+    ///
+    /// ```text
+    /// incoming TLC
+    ///   |-- final hop ------------------------------> local preimage may fulfill
+    ///   `-- forwarding
+    ///         |-- waiting_forward_tlc_tasks --------> wait for AddTlc result
+    ///         |-- forwarding_tlc = Some(...) -------> wait for downstream RemoveTlc
+    ///         `-- retryable RemoveTlc --------------> preserve the selected failure
+    /// ```
+    pub(crate) fn can_auto_fulfill_received_tlc(&self, tlc: &TlcInfo) -> bool {
+        tlc.is_received()
+            && tlc.removed_reason.is_none()
+            && tlc.forwarding_tlc.is_none()
+            && !self.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+            && !self.retryable_tlc_operations.iter().any(|operation| {
+                matches!(operation, RetryableTlcOperation::RemoveTlc(tlc_id, _) if *tlc_id == tlc.tlc_id)
+            })
     }
 
     fn update_graph_for_local_channel_change(&mut self) {
