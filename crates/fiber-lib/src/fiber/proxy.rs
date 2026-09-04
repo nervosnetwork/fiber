@@ -7,7 +7,10 @@ pub struct ProxyConfig {
     /// SOCKS5 proxy URL for outbound Fiber TCP connections.
     ///
     /// Outbound QUIC is disabled when this option is set because QUIC uses UDP and is not
-    /// supported by the proxy transport. Inbound QUIC listeners remain available.
+    /// supported by the proxy transport. QUIC addresses are also excluded from the announced
+    /// addresses, since advertising them would disclose the very network location the proxy is
+    /// meant to hide. Inbound QUIC listeners remain available but bypass the proxy, so the node
+    /// logs a warning when one is configured together with this option.
     /// Example: socks5://username:password@127.0.0.1:1080
     pub proxy_url: Option<String>,
 

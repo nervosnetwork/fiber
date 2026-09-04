@@ -2558,7 +2558,6 @@ where
                     (saved_peers_to_connect, graph_nodes_to_connect)
                 };
 
-                let mut rng = rand::rng();
                 for (pubkey, addresses) in saved_peers_to_connect {
                     debug!("Peer to connect: {:?}, {:?}", pubkey, addresses);
                     if let Some(peer) = state.peer_session_map.get(&pubkey) {
@@ -2577,16 +2576,14 @@ where
                     }
 
                     // Randomly pick one address to connect
-                    if let Some(addr) = addresses
-                        .iter()
-                        .filter(|addr| outbound_address_allowed(addr, state.outbound_proxy_enabled))
-                        .choose(&mut rng)
+                    if let Some(addr) =
+                        select_outbound_address(addresses, state.outbound_proxy_enabled)
                     {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::ConnectPeer(
-                                    addr.clone(),
+                                    addr,
                                     false,
                                     PeerConnectSource::Automatic,
                                     None,
@@ -2614,16 +2611,14 @@ where
                     }
 
                     // Randomly pick one address to connect
-                    if let Some(addr) = addresses
-                        .iter()
-                        .filter(|addr| outbound_address_allowed(addr, state.outbound_proxy_enabled))
-                        .choose(&mut rng)
+                    if let Some(addr) =
+                        select_outbound_address(addresses, state.outbound_proxy_enabled)
                     {
                         state
                             .network
                             .send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::ConnectPeer(
-                                    addr.clone(),
+                                    addr,
                                     false,
                                     PeerConnectSource::Automatic,
                                     None,
@@ -7284,6 +7279,12 @@ where
             (None, None)
         };
 
+        // Resolve the listening addresses before building the service: an invalid address must
+        // abort startup with a readable error instead of panicking, and the socket options below
+        // are derived from the complete address set.
+        #[cfg(not(target_arch = "wasm32"))]
+        let addresses_to_listen = resolve_listening_addresses(&config)?;
+
         // Build service with or without gossip protocol based on configuration
         #[cfg(not(target_arch = "wasm32"))]
         let mut service = {
@@ -7293,6 +7294,20 @@ where
                 .quic_config(tentacle::quic::config::QuicConfig::default());
             if let Some(gossip_handle) = gossip_handle_opt {
                 builder = builder.insert_protocol(gossip_handle.create_meta());
+            }
+
+            // On dual stack hosts an IPv6 wildcard listener also accepts IPv4 traffic, so binding
+            // both `/ip4/0.0.0.0/tcp/P` and `/ip6/::/tcp/P` fails with `EADDRINUSE`. Restrict the
+            // IPv6 socket to IPv6 whenever the same port is also served by an IPv4 listener.
+            let ipv6_only_ports = dual_stack_conflicting_ports(&addresses_to_listen);
+            if !ipv6_only_ports.is_empty() {
+                info!(
+                    "Setting IPV6_V6ONLY on IPv6 listeners for ports {:?} because the same ports are also served by IPv4 listeners",
+                    ipv6_only_ports
+                );
+                builder = builder.tcp_config(move |socket, context| {
+                    set_ipv6_only_for_listener(socket, context, &ipv6_only_ports)
+                });
             }
 
             // Set SOCKS5 proxy config
@@ -7345,30 +7360,11 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         let listening_addr = {
-            let mut addresses_to_listen = config
-                .listening_addrs()
-                .into_iter()
-                .map(|addr| MultiAddr::from_str(addr).expect("valid tentacle listening address"))
-                .collect::<Vec<_>>();
-            if config.reuse_port_for_websocket {
-                // Re-use the same port for websocket
-                let ws_listens = addresses_to_listen
-                    .iter()
-                    .cloned()
-                    .filter_map(|mut addr| {
-                        if matches!(find_type(&addr), TransportType::Tcp) {
-                            addr.push(Protocol::Ws);
-                            Some(addr)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                addresses_to_listen.extend(ws_listens);
-            }
             let mut listening_addr = vec![];
             for addr in addresses_to_listen.into_iter() {
-                let mut current_addr = service.listen(addr).await.expect("listen tentacle");
+                let mut current_addr = service.listen(addr.clone()).await.map_err(|err| {
+                    anyhow::anyhow!("Failed to listen on configured address {addr}: {err}")
+                })?;
 
                 current_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
                 if config.announce_listening_addr() {
@@ -7410,6 +7406,35 @@ where
 
         if !config.announce_private_addr.unwrap_or_default() {
             announced_addrs.retain(crate::utils::is_addr_reachable);
+        }
+
+        // A SOCKS5 proxy is normally configured to hide the node's real network location, but a
+        // QUIC listener bypasses it: it binds UDP directly and would advertise the real address to
+        // the whole network. Outbound QUIC is already refused in this case, so announcing a QUIC
+        // address would only leak the node location without being usable by proxied peers.
+        #[cfg(not(target_arch = "wasm32"))]
+        if config.proxy.proxy_url.is_some() {
+            announced_addrs.retain(|addr| {
+                let is_quic = find_type(addr) == TransportType::QuicV1;
+                if is_quic {
+                    warn!(
+                        "Not announcing QUIC address {} because proxy.proxy_url is configured: \
+                        announcing it would disclose the real node address that the proxy hides",
+                        addr
+                    );
+                }
+                !is_quic
+            });
+            if listening_addr
+                .iter()
+                .any(|addr| find_type(addr) == TransportType::QuicV1)
+            {
+                warn!(
+                    "A QUIC listener is configured together with proxy.proxy_url. Inbound QUIC \
+                    connections bypass the SOCKS5 proxy and expose the real node address; remove \
+                    the QUIC entry from listening_addrs if the proxy is used for privacy"
+                );
+            }
         }
 
         // Start Tor onion hidden service if configured
@@ -8002,6 +8027,112 @@ pub(crate) fn find_type(addr: &Multiaddr) -> TransportType {
     tentacle::utils::find_type(addr)
 }
 
+/// Parse and validate the configured listening addresses.
+///
+/// Duplicated entries are dropped so that an address is never listened on (and announced) twice,
+/// and the websocket companion listeners are appended here when `reuse_port_for_websocket` is on.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn resolve_listening_addresses(
+    config: &FiberConfig,
+) -> Result<Vec<MultiAddr>, anyhow::Error> {
+    let mut addresses: Vec<MultiAddr> = Vec::new();
+    for addr in config.listening_addrs() {
+        let parsed = MultiAddr::from_str(addr).map_err(|err| {
+            anyhow::anyhow!("Invalid listening address {addr:?} in config: {err}")
+        })?;
+        if !addresses.contains(&parsed) {
+            addresses.push(parsed);
+        }
+    }
+
+    if config.reuse_port_for_websocket {
+        // Re-use the same port for websocket
+        let ws_listens = addresses
+            .iter()
+            .cloned()
+            .filter_map(|mut addr| {
+                if matches!(find_type(&addr), TransportType::Tcp) {
+                    addr.push(Protocol::Ws);
+                    Some(addr)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        addresses.extend(ws_listens);
+    }
+
+    Ok(addresses)
+}
+
+/// Returns the TCP ports that are served by both an IPv4 and an IPv6 listener.
+///
+/// Binding an IPv6 wildcard socket on a dual stack host implicitly covers the IPv4 space, so such
+/// ports need `IPV6_V6ONLY` to keep both listeners working. Port `0` is excluded because the
+/// kernel picks a distinct random port for every socket.
+#[cfg(not(target_arch = "wasm32"))]
+fn dual_stack_conflicting_ports(addresses: &[MultiAddr]) -> HashSet<u16> {
+    let mut ipv4_ports = HashSet::new();
+    let mut ipv6_ports = HashSet::new();
+    for addr in addresses {
+        // Only TCP listeners share the socket transformer, QUIC listeners bind their own UDP
+        // endpoint which tentacle does not expose for configuration.
+        let Some(socket_addr) = tentacle::utils::multiaddr_to_socketaddr(addr) else {
+            continue;
+        };
+        if socket_addr.port() == 0 {
+            continue;
+        }
+        match socket_addr.ip() {
+            std::net::IpAddr::V4(_) => ipv4_ports.insert(socket_addr.port()),
+            std::net::IpAddr::V6(_) => ipv6_ports.insert(socket_addr.port()),
+        };
+    }
+    ipv6_ports
+        .intersection(&ipv4_ports)
+        .copied()
+        .collect::<HashSet<_>>()
+}
+
+/// Socket transformer that sets `IPV6_V6ONLY` on the IPv6 listeners whose port is also bound by an
+/// IPv4 listener. Dial sockets are returned untouched, so proxy and onion dialing are unaffected.
+#[cfg(not(target_arch = "wasm32"))]
+fn set_ipv6_only_for_listener(
+    socket: tentacle::service::TcpSocket,
+    context: tentacle::service::TransformerContext,
+    ipv6_only_ports: &HashSet<u16>,
+) -> std::io::Result<tentacle::service::TcpSocket> {
+    if context.state != tentacle::service::SocketState::Listen
+        || !context.address.is_ipv6()
+        || !ipv6_only_ports.contains(&context.address.port())
+    {
+        return Ok(socket);
+    }
+
+    // safety: the raw handle is immediately re-wrapped and given back to tentacle, and socket2
+    // does not perform any operation other than a `setsockopt` on it.
+    unsafe {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::{FromRawFd, IntoRawFd};
+            let socket2_socket = socket2::Socket::from_raw_fd(socket.into_raw_fd());
+            socket2_socket.set_only_v6(true)?;
+            Ok(tentacle::service::TcpSocket::from_raw_fd(
+                socket2_socket.into_raw_fd(),
+            ))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{FromRawSocket, IntoRawSocket};
+            let socket2_socket = socket2::Socket::from_raw_socket(socket.into_raw_socket());
+            socket2_socket.set_only_v6(true)?;
+            Ok(tentacle::service::TcpSocket::from_raw_socket(
+                socket2_socket.into_raw_socket(),
+            ))
+        }
+    }
+}
+
 pub(crate) fn select_connect_peer_address<I>(
     addresses: I,
     addr_type: Option<TransportType>,
@@ -8010,22 +8141,26 @@ pub(crate) fn select_connect_peer_address<I>(
 where
     I: IntoIterator<Item = Multiaddr>,
 {
-    let mut rng = rand::rng();
-
     match addr_type {
+        // An explicit transport filter is an explicit user request, honour it verbatim.
         Some(transport) => addresses
             .into_iter()
             .filter(|addr| outbound_address_allowed(addr, outbound_proxy_enabled))
             .filter(|addr| find_type(addr) == transport)
-            .choose(&mut rng),
-        None => addresses
-            .into_iter()
-            .filter(|addr| outbound_address_allowed(addr, outbound_proxy_enabled))
-            .filter(target_default_transport_matches)
-            .choose(&mut rng),
+            .choose(&mut rand::rng()),
+        None => select_outbound_address(addresses, outbound_proxy_enabled),
     }
 }
 
+/// Pick an address to dial out of the addresses known for a peer.
+///
+/// This is the single policy shared by every path that dials a peer without an explicit transport
+/// (manual `connect_peer` by pubkey, reconnect backoff, channel maintenance, bootnodes, ...), so
+/// that automatic and manual connections never disagree on which transports are usable.
+///
+/// The transport preferred by the current target is used whenever the peer publishes one, and any
+/// other dialable transport is used as a fallback. That keeps TCP the default on native builds
+/// while still allowing a peer that only publishes QUIC (or websocket) addresses to be reached.
 pub(crate) fn select_outbound_address<I>(
     addresses: I,
     outbound_proxy_enabled: bool,
@@ -8033,14 +8168,42 @@ pub(crate) fn select_outbound_address<I>(
 where
     I: IntoIterator<Item = Multiaddr>,
 {
-    addresses
+    let mut rng = rand::rng();
+    let candidates = addresses
         .into_iter()
         .filter(|addr| outbound_address_allowed(addr, outbound_proxy_enabled))
-        .choose(&mut rand::rng())
+        .filter(target_can_dial_transport)
+        .collect::<Vec<_>>();
+
+    candidates
+        .iter()
+        .filter(|addr| target_default_transport_matches(addr))
+        .choose(&mut rng)
+        .cloned()
+        .or_else(|| candidates.into_iter().choose(&mut rng))
 }
 
 fn outbound_address_allowed(addr: &Multiaddr, outbound_proxy_enabled: bool) -> bool {
     !outbound_proxy_enabled || find_type(addr) != TransportType::QuicV1
+}
+
+/// Whether the current build is able to dial the transport of `addr` at all.
+#[cfg(target_arch = "wasm32")]
+fn target_can_dial_transport(addr: &Multiaddr) -> bool {
+    // Browsers can only open websocket connections.
+    matches!(find_type(addr), TransportType::Ws | TransportType::Wss)
+}
+
+/// Whether the current build is able to dial the transport of `addr` at all.
+#[cfg(not(target_arch = "wasm32"))]
+fn target_can_dial_transport(addr: &Multiaddr) -> bool {
+    matches!(
+        find_type(addr),
+        TransportType::Tcp | TransportType::Ws | TransportType::Wss | TransportType::QuicV1
+        // Onion dialing additionally requires the onion/proxy configuration, tentacle reports a
+        // dial error when it is missing.
+        | TransportType::Onion
+    )
 }
 
 fn outbound_quic_proxy_error(addr: &Multiaddr) -> String {

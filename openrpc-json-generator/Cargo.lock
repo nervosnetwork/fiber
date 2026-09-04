@@ -2272,6 +2272,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
+ "socket2 0.6.4",
  "strum 0.28.0",
  "tentacle",
  "thiserror 1.0.69",

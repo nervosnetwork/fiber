@@ -126,7 +126,8 @@ pub struct FiberConfig {
     #[arg(name = "FIBER_LISTENING_ADDR", long = "fiber-listening-addr", env)]
     pub(crate) listening_addr: Option<String>,
 
-    /// additional listening addresses for fiber network, merged with `listening_addr`
+    /// additional listening addresses for fiber network, merged with `listening_addr`.
+    /// When `listening_addr` is unset, only these addresses are used (no default TCP listener).
     #[arg(
         name = "FIBER_LISTENING_ADDRS",
         long = "fiber-listening-addrs",
@@ -541,12 +542,27 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_LISTENING_ADDR)
     }
 
-    /// Returns the effective listening addresses. The legacy `listening_addr` is always first,
-    /// followed by all entries from `listening_addrs`.
+    /// Returns the effective listening addresses, in order and without duplicates.
+    ///
+    /// * If `listening_addr` is set explicitly it always comes first, followed by `listening_addrs`.
+    /// * If `listening_addr` is not set but `listening_addrs` is, only `listening_addrs` is used.
+    ///   This makes it possible to opt out of the default TCP listener, e.g. to listen on QUIC only.
+    /// * If neither is set, the default listening address is used.
     pub fn listening_addrs(&self) -> Vec<&str> {
-        std::iter::once(self.listening_addr())
-            .chain(self.listening_addrs.iter().map(String::as_str))
-            .collect()
+        let mut addrs: Vec<&str> = Vec::with_capacity(self.listening_addrs.len() + 1);
+        match self.listening_addr.as_deref() {
+            Some(addr) => addrs.push(addr),
+            // Only fall back to the default listener when no address is configured at all,
+            // otherwise a node could never listen on a non-default transport exclusively.
+            None if self.listening_addrs.is_empty() => addrs.push(DEFAULT_LISTENING_ADDR),
+            None => {}
+        }
+        for addr in self.listening_addrs.iter().map(String::as_str) {
+            if !addrs.contains(&addr) {
+                addrs.push(addr);
+            }
+        }
+        addrs
     }
 
     pub fn announce_listening_addr(&self) -> bool {

@@ -64,6 +64,8 @@ hyper = { version = "1.5" }
 jsonrpsee = { version = "0.25.1", features = ["client", "server", "macros"] }
 lnd-grpc-tonic-client = "0.3.0"
 tonic = "0.11.0"
+# Used to set IPV6_V6ONLY on tentacle's listening sockets, keep in sync with tentacle's socket2.
+socket2 = "0.6"
 tentacle = { version = "0.7.7", default-features = false, features = [
   "upnp",
   "parking_lot",

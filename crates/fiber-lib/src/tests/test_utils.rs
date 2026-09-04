@@ -267,7 +267,12 @@ pub struct NetworkNode {
     pub fiber_config: FiberConfig,
     pub rpc_config: Option<RpcConfig>,
     pub ckb_config: Option<CkbConfig>,
+    /// The addresses the node actually listens on.
     pub listening_addrs: Vec<MultiAddr>,
+    /// The addresses the node announces to the network. This is not the same as
+    /// [`Self::listening_addrs`]: private addresses are filtered out unless
+    /// `announce_private_addr` is set, and QUIC addresses are dropped when a proxy is configured.
+    pub announced_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
@@ -839,7 +844,7 @@ impl NetworkNode {
     }
 
     pub fn get_node_address(&self) -> &MultiAddr {
-        &self.listening_addrs[0]
+        &self.announced_addrs[0]
     }
 
     pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
@@ -1691,7 +1696,7 @@ impl NetworkNode {
         .0;
 
         #[allow(clippy::never_loop)]
-        let (started_pubkey, _listening_addr, announced_addrs) = loop {
+        let (started_pubkey, listening_addrs, announced_addrs) = loop {
             select! {
                 Some(NetworkServiceEvent::NetworkStarted(pubkey, listening_addr, announced_addrs)) = event_receiver.recv() => {
                     break (pubkey, listening_addr, announced_addrs);
@@ -1782,7 +1787,8 @@ impl NetworkNode {
             ckb_config,
             rpc_config,
             channels_tx_map: Default::default(),
-            listening_addrs: announced_addrs,
+            listening_addrs,
+            announced_addrs,
             network_actor,
             chain_client,
             mock_chain_actor_middleware,
@@ -1957,10 +1963,10 @@ impl NetworkNode {
     }
 
     pub async fn connect_to_nonblocking(&mut self, other: &Self) {
-        let peer_addr = other.listening_addrs[0].clone();
+        let peer_addr = other.announced_addrs[0].clone();
         debug!(
             "Trying to connect to {:?} from {:?}",
-            other.listening_addrs, &self.listening_addrs
+            other.announced_addrs, &self.announced_addrs
         );
 
         let result = call!(self.network_actor, |rpc_reply| {
@@ -2410,7 +2416,12 @@ async fn test_connect_to_other_node_on_additional_listening_address() {
         NetworkNodeConfigBuilder::new()
             .fiber_config_updater(|config| {
                 config.listening_addr = Some("/ip4/127.0.0.1/tcp/0".to_string());
-                config.listening_addrs = vec!["/ip4/127.0.0.1/tcp/0".to_string()];
+                config.listening_addrs = vec![
+                    // Duplicated on purpose: it must be deduplicated instead of being listened
+                    // on (and announced) twice.
+                    "/ip4/127.0.0.1/tcp/0".to_string(),
+                    "/ip4/127.0.0.1/tcp/0/ws".to_string(),
+                ];
                 config.reuse_port_for_websocket = false;
             })
             .build(),
@@ -2419,6 +2430,10 @@ async fn test_connect_to_other_node_on_additional_listening_address() {
 
     assert_eq!(node_b.listening_addrs.len(), 2);
     let peer_addr = node_b.listening_addrs[1].clone();
+    assert_eq!(
+        tentacle::utils::find_type(&peer_addr),
+        tentacle::utils::TransportType::Ws
+    );
 
     call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(
@@ -2437,6 +2452,53 @@ async fn test_connect_to_other_node_on_additional_listening_address() {
         .await;
     node_a.expect_debug_event("PeerInit").await;
     node_b.expect_debug_event("PeerInit").await;
+}
+
+/// A dual stack IPv6 wildcard socket also covers the IPv4 space, so listening on
+/// `/ip4/0.0.0.0/tcp/P` and `/ip6/::/tcp/P` only works when the IPv6 socket is restricted with
+/// `IPV6_V6ONLY`. This is exactly the combination suggested by the shipped config files.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_listen_on_ipv4_and_ipv6_wildcard_with_the_same_port() {
+    if std::net::TcpListener::bind("[::]:0").is_err() {
+        // No usable IPv6 stack in this environment, nothing to verify.
+        return;
+    }
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("read the ephemeral port")
+        .port();
+
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.listening_addr = Some(format!("/ip4/0.0.0.0/tcp/{port}"));
+                config.listening_addrs = vec![format!("/ip6/::/tcp/{port}")];
+                config.reuse_port_for_websocket = false;
+            })
+            .build(),
+    )
+    .await;
+
+    assert_eq!(node.listening_addrs.len(), 2);
+}
+
+/// An unusable listening address must abort startup with a readable error instead of panicking.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_invalid_listening_address_reports_an_error() {
+    use crate::fiber::network::resolve_listening_addresses;
+
+    let config = crate::FiberConfig {
+        listening_addrs: vec!["/ip4/0.0.0.0/tcp/8228".to_string(), "nonsense".to_string()],
+        ..Default::default()
+    };
+    let err = resolve_listening_addresses(&config).expect_err("invalid address must be rejected");
+    assert!(
+        err.to_string().contains("nonsense"),
+        "the error must name the offending address, got: {err}"
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
