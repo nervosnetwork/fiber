@@ -106,17 +106,6 @@ Error while processing signer notification: Musig2VerifyError(BadSignature)
 
 为了暂时允许 CI 通过，pending commitment tail 和 pending revoke tail 两个场景中，重启后的“channel/payment 完全恢复”断言被注释；revoke tail 的“runtime buffer 全部清空”断言也被注释。测试中的 NOTE 标明了这些断言应在协议行为确认并实现后重新启用。
 
-## 已撤掉的修复尝试
-
-之前的本地提交同时加入测试和以下生产行为。为避免在协议语义未经 review 时把修复藏在测试提交里，这些改动已经全部从当前分支历史中移除：
-
-1. external signature pending 时，对相同 `CommitmentSigned`/`RevokeAndAck` 不再重复入队；
-2. 收到已完成 nonce 对应的 `CommitmentSigned` 时直接忽略；
-3. 收到字段完全相同的已有 `AddTlc` 时直接忽略；
-4. reestablishment 遇到 pending `SendRevokeAndAck` 且没有 cached `last_revoke_ack_msg` 时暂时返回成功。
-
-这些处理能让测试恢复，但它们共同改变了 replay/idempotency 的协议边界，不能只以“测试能通过”证明正确。例如，按 nonce 忽略 `CommitmentSigned` 必须先证明该 nonce 足以唯一标识已经完成且可安全重放的状态转移；同样，重复 `AddTlc` 是应该幂等接受、返回协议错误，还是说明双方状态已经不可恢复，也需要统一定义。
-
 ## 需要 review 的问题
 
 1. channel reestablishment 是否保证可能重放最后一轮 `CommitmentSigned`、`RevokeAndAck` 和 TLC update？如果保证，消息的幂等键分别是什么？
