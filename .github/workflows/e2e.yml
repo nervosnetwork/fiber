@@ -179,6 +179,7 @@ jobs:
       - name: Collect liquidity failure diagnostics
         if: failure() && steps.e2eTests.outcome == 'failure' && startsWith(matrix.workflow, 'liquidity/')
         run: |
+          source tests/bruno/scripts/resolve-node-urls.sh
           suite_dir="${{ matrix.workflow }}"
           bash tests/bruno/scripts/collect-liquidity-failure-diagnostics.sh "${suite_dir##*/}" || true
 
@@ -345,6 +346,7 @@ jobs:
           ./tests/nodes/wait.sh
 
           collect_failure() {
+            source tests/bruno/scripts/resolve-node-urls.sh
             bash tests/bruno/scripts/collect-liquidity-failure-diagnostics.sh ckb-loop-out || true
           }
 
