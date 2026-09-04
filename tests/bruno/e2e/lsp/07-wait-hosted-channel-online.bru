@@ -1,0 +1,55 @@
+meta {
+  name: wait hosted channel online
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "lsp_list_tenants"
+  }
+}
+
+vars:post-response {
+  HOSTED_CHANNEL_MAX_ITERATIONS: 30
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const tenant = (res.body.result.tenants || []).find(item => item.tenant_id === bru.getVar("LSP_TENANT_ID"));
+  const iteration = Number(bru.getVar("HOSTED_CHANNEL_ITERATION") || 0);
+  const maxIterations = Number(bru.getVar("HOSTED_CHANNEL_MAX_ITERATIONS"));
+
+  if (tenant?.channel_online && tenant.private_channel_id) {
+    if (tenant.runtime_status !== "active") {
+      throw new Error(`online tenant is not active: ${JSON.stringify(tenant)}`);
+    }
+    bru.setVar("HOSTED_CHANNEL_ID", tenant.private_channel_id);
+    bru.setVar("HOSTED_CHANNEL_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < maxIterations) {
+    bru.setVar("HOSTED_CHANNEL_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait hosted channel online");
+    return;
+  }
+  throw new Error(`hosted channel did not become online: ${JSON.stringify(tenant)}`);
+}

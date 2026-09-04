@@ -1,0 +1,50 @@
+meta {
+  name: open hosted channel with SDK signer
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id":"42","jsonrpc":"2.0","method":"open_channel_with_external_funding","params":[{
+      "pubkey":"{{NODE2_PUBKEY}}","funding_amount":"0xba43b7400","public":false,
+      "shutdown_script":{},"funding_lock_script":{},"external_channel_signer":{}
+    }]
+  }
+}
+
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+  const body = req.getBody();
+  body.params[0].shutdown_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
+  body.params[0].funding_lock_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
+  body.params[0].external_channel_signer = bru.getVar("REMOTE_OPEN_MATERIAL");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channel_id: isDefined
+  res.body.result.unsigned_funding_tx: isDefined
+}
+
+script:post-response {
+  bru.setVar("REMOTE_CHANNEL_ID", res.body.result.channel_id);
+  bru.setEnvVar("REMOTE_CHANNEL_ID", res.body.result.channel_id);
+  bru.setVar("REMOTE_UNSIGNED_TX", res.body.result.unsigned_funding_tx);
+  bru.setEnvVar("REMOTE_UNSIGNED_TX", res.body.result.unsigned_funding_tx);
+}

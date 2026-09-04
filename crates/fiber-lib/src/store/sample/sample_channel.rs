@@ -40,6 +40,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            signer_buffers: Default::default(),
         }
     }
 
@@ -65,6 +66,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            signer_buffers: Default::default(),
         }
     }
 }

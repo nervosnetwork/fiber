@@ -153,7 +153,7 @@ fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
 /// Paginate the CKB indexer to find the first transaction whose `io_type` is
 /// `CellType::Input` for the given funding lock script. Returns `None` if no
 /// such transaction exists.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(feature = "watchtower", test)))]
 pub(crate) fn find_first_input_tx_hash(
     client: &ckb_sdk::CkbRpcClient,
     funding_lock_script: &Script,

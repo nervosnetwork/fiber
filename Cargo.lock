@@ -2362,6 +2362,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "fiber-lsp-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode 1.3.3",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-json-types",
+ "fiber-types 0.9.1",
+ "getrandom 0.3.4",
+ "hex",
+ "molecule",
+ "musig2",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 1.0.69",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "fiber-lsp-sdk-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "clap",
+ "fiber-json-types",
+ "fiber-lsp-sdk",
+ "fiber-types 0.9.1",
+ "hex",
+ "musig2",
+ "reqwest",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fiber-sphinx"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2397,6 +2444,7 @@ dependencies = [
  "console_error_panic_hook",
  "fiber-types 0.8.1",
  "fiber-types 0.9.0-rc4",
+ "fiber-types 0.9.1",
  "fiber-wasm-db-common",
  "rusqlite",
  "serde",
@@ -2620,6 +2668,7 @@ dependencies = [
  "criterion",
  "either",
  "fiber-json-types",
+ "fiber-lsp-sdk",
  "fiber-sphinx 3.0.0",
  "fiber-store",
  "fiber-types 0.9.1",

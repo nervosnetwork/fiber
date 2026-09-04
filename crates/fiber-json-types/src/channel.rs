@@ -2,8 +2,9 @@
 
 use crate::define_rpc_flags;
 use crate::schema_helpers::*;
-use crate::serde_utils::{EntityHex, Hash256, Pubkey, U128Hex, U64Hex};
+use crate::serde_utils::{EntityHex, Hash256, Pubkey, SliceHex, U128Hex, U64Hex};
 use ckb_jsonrpc_types::{CellDep, EpochNumberWithFraction, Script, Transaction};
+use ckb_types::packed::CellOutput;
 use ckb_types::packed::OutPoint;
 use ckb_types::H256;
 use schemars::JsonSchema;
@@ -252,6 +253,10 @@ pub struct OpenChannelWithExternalFundingParams {
     #[serde_as(as = "Option<U64Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub max_tlc_number_in_flight: Option<u64>,
+
+    /// Optional public channel-signer material. When present, the node treats the
+    /// channel as externally signed and never holds or falls back to local channel keys.
+    pub external_channel_signer: Option<ChannelOpenSignerMaterial>,
 }
 
 /// Result of opening a channel with external funding.
@@ -593,4 +598,366 @@ pub struct UpdateChannelParams {
     #[serde_as(as = "Option<U128Hex>")]
     #[schemars(schema_with = "schema_as_uint_hex_optional")]
     pub tlc_fee_proportional_millionths: Option<u128>,
+}
+
+/// Parameters for querying a channel's external signing status.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetChannelSigningStatusParams {
+    /// The channel whose signer state should be read.
+    pub channel_id: Hash256,
+}
+
+/// Result of querying a channel's external signing status.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetChannelSigningStatusResult {
+    /// The channel whose signer state was read.
+    pub channel_id: Hash256,
+    /// Current signer status for this channel.
+    pub status: ChannelSigningStatus,
+}
+
+/// Read-only projection of a channel's signer sub-state.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
+pub enum ChannelSigningStatus {
+    /// This channel uses the node's local signer.
+    Internal,
+    /// This channel uses an external signer, but no signature is currently required.
+    NoSignatureRequired,
+    /// Channel processing is paused until this exact signature is submitted.
+    SignatureRequired {
+        /// Identifier of the outstanding signature request.
+        request_id: Hash256,
+        /// Semantic channel transition that produced this request.
+        transition: ChannelSigningTransition,
+        /// Structured MuSig2 plaintext independently hashed by the external signer.
+        content: Musig2SigningContent,
+        /// Balance and TLC snapshot captured with this commitment, when present.
+        #[serde(default)]
+        settlement: Option<SigningSettlement>,
+    },
+}
+
+/// Public settlement snapshot attached to a commitment signing request.
+///
+/// Clients must hash this snapshot the same way Fiber builds CommitmentLock
+/// args and compare that hash to the unsigned commitment transaction. The
+/// amounts and TLC set are not trustworthy until that check succeeds.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SigningSettlement {
+    /// Local channel balance assigned by this commitment.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub local_amount: u128,
+    /// Remote channel balance assigned by this commitment.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub remote_amount: u128,
+    /// Local TLC base key hashed into the settlement witness.
+    pub local_settlement_pubkey: Pubkey,
+    /// Remote TLC base key hashed into the settlement witness.
+    pub remote_settlement_pubkey: Pubkey,
+    /// `true` for `SendCommitmentSigned`, `false` for `CompleteReceivedCommitment`.
+    pub for_remote: bool,
+    /// Live TLCs committed by this snapshot.
+    pub tlcs: Vec<SigningSettlementTlc>,
+}
+
+/// One TLC in a [`SigningSettlement`].
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SigningSettlementTlc {
+    /// Whether this TLC is inbound to the local party.
+    pub inbound: bool,
+    /// Payment hash locked by this TLC.
+    pub payment_hash: Hash256,
+    /// Amount locked by this TLC.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub payment_amount: u128,
+    /// Hash algorithm locked by this TLC.
+    pub hash_algorithm: crate::invoice::HashAlgorithm,
+    /// Expiry time for the TLC in milliseconds.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub expiry: u64,
+    /// Local TLC public key hashed into the settlement witness.
+    pub local_key_pubkey: Pubkey,
+    /// Remote TLC public key hashed into the settlement witness.
+    pub remote_key: Pubkey,
+}
+
+/// Public semantic label for a channel signing transition.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+pub enum ChannelSigningTransition {
+    /// Sign and then send our `CommitmentSigned` message.
+    SendCommitmentSigned,
+    /// Complete processing a peer `CommitmentSigned` after our signature is supplied.
+    CompleteReceivedCommitment,
+    /// Sign and then send our `RevokeAndAck` message.
+    SendRevokeAndAck,
+    /// Complete processing a peer `RevokeAndAck` after our signature is supplied.
+    CompleteReceivedRevokeAndAck,
+    /// Sign and then send our `ClosingSigned` message.
+    SendClosingSigned,
+    /// Sign the public channel announcement.
+    SignChannelAnnouncement,
+}
+
+/// Matches Fiber's native MuSig2 nonce contexts.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+pub enum NoncePurpose {
+    /// Fiber's commitment nonce derivation.
+    Commitment,
+    /// Fiber's revocation nonce derivation.
+    Revocation,
+    /// The one-off public-channel announcement signature.
+    ChannelAnnouncement,
+}
+
+/// Unique deterministic MuSig2 nonce location within one channel signer.
+#[serde_as]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+pub struct NonceSlot {
+    /// Signing domain for the nonce.
+    pub purpose: NoncePurpose,
+    /// Commitment number for commitment/revocation slots; zero for announcement.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub commitment_number: u64,
+}
+
+/// Selects which Fiber commitment counter supplies a signing request's number.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+pub enum CommitmentCounter {
+    /// The local commitment counter.
+    Local,
+    /// The remote commitment counter.
+    Remote,
+}
+
+/// Plaintext MuSig2 payload from which the signer computes the signing digest.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum Musig2SignableContent {
+    /// An unsigned commitment transaction.
+    CommitmentTransaction {
+        /// Unsigned commitment transaction.
+        transaction: Transaction,
+    },
+    /// An unsigned cooperative close transaction.
+    CooperativeCloseTransaction {
+        /// Unsigned cooperative close transaction.
+        transaction: Transaction,
+    },
+    /// The exact byte preimage used by Fiber's revocation signature.
+    Revocation {
+        /// Settlement output committed by the revocation signature.
+        #[serde_as(as = "EntityHex")]
+        #[schemars(schema_with = "schema_as_hex_bytes")]
+        output: CellOutput,
+        /// Settlement output data committed by the revocation signature.
+        #[serde_as(as = "SliceHex")]
+        #[schemars(schema_with = "schema_as_hex_bytes")]
+        output_data: Vec<u8>,
+        /// Commitment-lock arguments committed by the revocation signature.
+        #[serde_as(as = "SliceHex")]
+        #[schemars(schema_with = "schema_as_hex_bytes")]
+        commitment_lock_script_args: Vec<u8>,
+    },
+    /// Unsigned fields of a public channel announcement, encoded as molecule bytes.
+    ChannelAnnouncement {
+        /// Canonical unsigned announcement bytes independently hashed by the signer.
+        #[serde_as(as = "SliceHex")]
+        #[schemars(schema_with = "schema_as_hex_bytes")]
+        unsigned_announcement: Vec<u8>,
+    },
+}
+
+/// MuSig2 plaintext and session context signed by a channel signer.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct Musig2SigningContent {
+    /// Domain-separated nonce slot.
+    pub slot: NonceSlot,
+    /// Counter whose value was used for `slot`; absent for announcements.
+    pub commitment_counter: Option<CommitmentCounter>,
+    /// Ordered MuSig2 key aggregation context, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub key_agg_ctx: Vec<u8>,
+    /// Aggregate of both participants' public nonces, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub agg_nonce: Vec<u8>,
+    /// Plaintext object from which the signer computes the digest.
+    pub content: Musig2SignableContent,
+}
+
+/// One counterparty's public keys which do not change over the life of a channel.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+pub struct ChannelBasePublicKeys {
+    /// The public key used to sign commitment transactions, as it appears in the
+    /// on-chain 2-of-2 MuSig2 funding output.
+    pub funding_pubkey: Pubkey,
+    /// The base point used to derive per-commitment TLC public keys.
+    pub tlc_base_key: Pubkey,
+}
+
+/// Public channel-signer material required to send Fiber's `OpenChannel` message.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelOpenSignerMaterial {
+    /// Static funding and TLC public keys for this channel.
+    pub base_public_keys: ChannelBasePublicKeys,
+    /// Per-commitment point for commitment number 1.
+    pub first_commitment_point: Pubkey,
+    /// Per-commitment point for commitment number 2.
+    pub second_commitment_point: Pubkey,
+    /// Commitment public nonce at the initial local commitment number, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub commitment_nonce: Vec<u8>,
+    /// Commitment public nonce published in `TxComplete`, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub next_commitment_nonce: Vec<u8>,
+    /// Revocation public nonce published with `OpenChannel`, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub revocation_nonce: Vec<u8>,
+    /// Channel-announcement public nonce; required for public channels and forbidden for private ones.
+    #[serde_as(as = "Option<SliceHex>")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
+    pub channel_announcement_nonce: Option<Vec<u8>>,
+}
+
+/// Follow-up public signer material submitted together with a channel signature.
+#[serde_as]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct NextChannelSignerMaterial {
+    /// Next local per-commitment point the node will need.
+    pub next_commitment_point: Option<Pubkey>,
+    /// Next commitment public nonce, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "Option<SliceHex>")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
+    pub next_commitment_nonce: Option<Vec<u8>>,
+    /// Next revocation public nonce, encoded as `0x`-prefixed hex.
+    #[serde_as(as = "Option<SliceHex>")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
+    pub next_revocation_nonce: Option<Vec<u8>>,
+}
+
+/// Parameters for submitting an external channel signature.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct SubmitChannelSignatureParams {
+    /// The channel that produced the outstanding signature request.
+    pub channel_id: Hash256,
+    /// Identifier of the outstanding signature request.
+    pub request_id: Hash256,
+    /// MuSig2 partial signature over the persisted plaintext (32 bytes, `0x`-prefixed hex).
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub partial_signature: [u8; 32],
+    /// Optional next-round public commitment point and nonces.
+    pub next_material: Option<NextChannelSignerMaterial>,
+}
+
+/// Result of submitting an external channel signature.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(tag = "type")]
+pub enum SubmitChannelSignatureResult {
+    /// The signature was verified and the channel state machine resumed.
+    Applied,
+    /// The same signature was already applied for this request.
+    AlreadyApplied,
+}
+
+/// Signer-owned key used to authorize a commitment-output spend.
+#[serde_as]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(tag = "type")]
+pub enum OnchainKeyPurpose {
+    /// The channel TLC base key used for the final balance settlement path.
+    Settlement,
+    /// A TLC key derived from the channel TLC base key and commitment point.
+    Tlc {
+        /// Commitment point index used by Fiber's native TLC key derivation.
+        #[serde_as(as = "U64Hex")]
+        #[schemars(schema_with = "schema_as_uint_hex")]
+        commitment_number: u64,
+    },
+}
+
+/// Plaintext on-chain transaction signed by a channel signer.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct OnchainSigningContent {
+    /// Selects either the TLC base key or one derived TLC key.
+    pub key_purpose: OnchainKeyPurpose,
+    /// Unsigned transaction from which the signer computes the CKB digest.
+    pub transaction: Transaction,
+}
+
+/// Parameters for querying a watched channel's external signing status.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetWatchtowerSigningStatusParams {
+    /// The watched channel whose signer state should be read.
+    pub channel_id: Hash256,
+}
+
+/// Result of querying a watched channel's external signing status.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetWatchtowerSigningStatusResult {
+    /// The watched channel whose signer state was read.
+    pub channel_id: Hash256,
+    /// Current signer status for this watched channel.
+    pub status: WatchtowerSigningStatus,
+}
+
+/// Read-only projection of a watchtower's external signer sub-state.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum WatchtowerSigningStatus {
+    /// This watched channel holds a local settlement secret.
+    Internal,
+    /// External signer, but no signature is currently required.
+    NoSignatureRequired,
+    /// Settlement or TLC spend is paused until this signature is submitted.
+    SignatureRequired {
+        /// Identifier of the outstanding signature request.
+        request_id: Hash256,
+        /// Structured on-chain plaintext independently hashed by the signer.
+        content: OnchainSigningContent,
+    },
+}
+
+/// Parameters for submitting an external watchtower signature.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct SubmitWatchtowerSignatureParams {
+    /// The watched channel that produced the outstanding signature request.
+    pub channel_id: Hash256,
+    /// Identifier of the outstanding signature request.
+    pub request_id: Hash256,
+    /// Recoverable ECDSA signature (64 bytes + recovery id), `0x`-prefixed hex.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub signature: Vec<u8>,
+}
+
+/// Result of submitting an external watchtower signature.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(tag = "type")]
+pub enum SubmitWatchtowerSignatureResult {
+    /// The signature was verified and the watchtower resumed.
+    Applied,
+    /// The same signature was already applied for this request.
+    AlreadyApplied,
 }

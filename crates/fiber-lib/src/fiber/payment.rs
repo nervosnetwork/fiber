@@ -17,8 +17,8 @@ use crate::fiber::network::{
     NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_TRY_LIMIT,
 };
 use crate::fiber::{
-    KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
-    ASSUME_NETWORK_ACTOR_ALIVE,
+    FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef, KeyPair,
+    PublicNetworkCommand, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore, PreimageStore};
 use crate::Error;
@@ -397,6 +397,15 @@ impl SendPaymentDataExt for SendPaymentData {
             }
         }
 
+        let trampoline_hops = command.trampoline_hops.or_else(|| {
+            invoice.as_ref().and_then(|invoice| {
+                invoice
+                    .trampoline_route_hint()
+                    .copied()
+                    .map(|node_id| vec![node_id.into()])
+            })
+        });
+
         fn validate_field<T: PartialEq + Clone>(
             field: Option<T>,
             invoice_field: Option<T>,
@@ -554,7 +563,7 @@ impl SendPaymentDataExt for SendPaymentData {
             .hop_hints(hop_hints)
             .allow_mpp(allow_mpp)
             .dry_run(command.dry_run)
-            .trampoline_hops(command.trampoline_hops)
+            .trampoline_hops(trampoline_hops)
             .build()
     }
 
@@ -656,6 +665,8 @@ impl From<PaymentSession> for SendPaymentResponse {
             payment_preimage,
             status,
             failed_error: session.last_error.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            failed_error_code: session.last_error_code,
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
             custom_records: session.request.custom_records.clone(),
@@ -786,7 +797,8 @@ impl SendPaymentWithRouterCommand {
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
-        // specify the router to be used
+        // An explicit router takes precedence over an invoice route hint.
+        payment_data.trampoline_hops = None;
         payment_data.router = self.router.clone();
         Ok(payment_data)
     }
@@ -857,7 +869,7 @@ pub struct PaymentActor<S> {
     // An event emitter to notify outside observers.
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
-    network: ActorRef<NetworkActorMessage>,
+    network: FiberActorRef,
 }
 
 #[async_trait::async_trait]
@@ -911,8 +923,8 @@ where
     ) -> Result<(), ActorProcessingErr> {
         debug!("Payment actor is stopped {:?}", myself.get_name());
         self.network
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::PaymentActorStopped(
+            .send_message(FiberActorMessage::Event(
+                FiberActorEvent::PaymentActorStopped(
                     state.payment_hash,
                     state.last_error_packet.clone(),
                 ),
@@ -962,7 +974,7 @@ where
     pub fn new(
         store: S,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
-        network: ActorRef<NetworkActorMessage>,
+        network: FiberActorRef,
     ) -> Self {
         Self {
             store: store.clone(),
@@ -1148,11 +1160,7 @@ where
         }
     }
 
-    async fn update_graph_with_tlc_fail(
-        &self,
-        network: &ActorRef<NetworkActorMessage>,
-        tlc_error_detail: &TlcErr,
-    ) {
+    async fn update_graph_with_tlc_fail(&self, network: &FiberActorRef, tlc_error_detail: &TlcErr) {
         let error_code = tlc_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
@@ -1163,11 +1171,9 @@ where
             }) = &tlc_error_detail.extra_data
             {
                 network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessages(vec![
-                            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
-                        ]),
-                    ))
+                    .send_public_command(PublicNetworkCommand::BroadcastMessages(vec![
+                        BroadcastMessageWithTimestamp::ChannelUpdate(channel_update.clone()),
+                    ]))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
@@ -1541,7 +1547,7 @@ where
         match call_t!(
             self.network,
             |tx| {
-                NetworkActorMessage::new_command(NetworkActorCommand::SendPaymentOnionPacket(
+                FiberActorMessage::new_command(FiberActorCommand::SendPaymentOnionPacket(
                     SendOnionPacketCommand {
                         peeled_onion_packet,
                         previous_tlc: None,

@@ -2,7 +2,7 @@ use crate::ckb::tests::test_utils::{MockChainActorMiddleware, MockChainActorStat
 use crate::ckb::CkbChainMessage;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::payment::SendPaymentCommand;
-use crate::fiber::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
+use crate::fiber::{FiberActorCommand, FiberActorEvent, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{
     CancelInvoiceError, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore, PreimageStore,
@@ -146,7 +146,9 @@ fn insert_watch_channel_with_pending_tlc(
             payment_amount: 42,
             payment_hash,
             expiry: u64::MAX,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -155,7 +157,8 @@ fn insert_watch_channel_with_pending_tlc(
         NodeId::local(),
         channel_id,
         None,
-        local_settlement_key,
+        Some(local_settlement_key.clone()),
+        local_settlement_key.pubkey(),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -349,7 +352,7 @@ async fn test_settle_invoice_status_checks() {
     assert!(res.is_ok());
 
     let cancel_res = call!(node.network_actor, |reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+        NetworkActorMessage::new_command(FiberActorCommand::CancelInvoice(
             payment_hash_success,
             reply,
         ))
@@ -693,8 +696,8 @@ async fn test_mpp_force_close_keeps_preimage_for_onchain_split() {
     let tx_hash = TransactionBuilder::default().build().hash();
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionConfirmed(
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ClosingTransactionConfirmed(
                 node_0.pubkey,
                 channels[0],
                 tx_hash,
@@ -809,8 +812,8 @@ async fn test_mpp_payer_force_close_keeps_watchtower_preimage_for_onchain_split(
     let tx_hash = TransactionBuilder::default().build().hash();
     node_1
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionConfirmed(
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ClosingTransactionConfirmed(
                 node_0.pubkey,
                 channels[0],
                 tx_hash,

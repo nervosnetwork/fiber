@@ -1,0 +1,38 @@
+meta {
+  name: kick tenant check_channel_shutdown
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"check_channel_shutdown","params":[{"channel_id":"placeholder"}]}
+}
+
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+  const body = req.getBody();
+  body.params[0].channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+}

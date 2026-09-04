@@ -12,7 +12,7 @@ use ckb_types::prelude::{Pack, Unpack};
 use gen_invoice::{
     Description, ExpiryTime, FallbackAddr, Feature, FinalHtlcMinimumExpiryDelta, FinalHtlcTimeout,
     InvoiceAttr, InvoiceAttrUnion, InvoiceAttrsVec, PayeePublicKey, PaymentHash, PaymentSecret,
-    RawInvoiceDataBuilder, UdtScript,
+    RawInvoiceDataBuilder, TrampolineRouteHint, UdtScript,
 };
 use molecule::prelude::Byte;
 use molecule::prelude::{Builder, Entity};
@@ -132,6 +132,9 @@ pub enum InvoiceError {
     /// Invoice payee public key is malformed.
     #[error("Invalid payee public key")]
     InvalidPayeePublicKey,
+    /// Invoice trampoline route hint is malformed.
+    #[error("Invalid trampoline route hint")]
+    InvalidTrampolineRouteHint,
     /// Invoice signature contains malformed base32 data.
     #[error("Invalid signature encoding")]
     InvalidSignatureEncoding,
@@ -583,6 +586,8 @@ pub enum Attribute {
     Feature(FeatureVector),
     /// The payment secret of the invoice.
     PaymentSecret(Hash256),
+    /// A public trampoline node that the payer should use to reach the payee.
+    TrampolineRouteHint(PublicKey),
 }
 
 /// The metadata of the invoice.
@@ -849,6 +854,14 @@ impl CkbInvoice {
             .any(|attr| matches!(attr, Attribute::Feature(feature) if feature.supports_trampoline_routing()))
     }
 
+    /// Returns the public trampoline node suggested by the payee.
+    pub fn trampoline_route_hint(&self) -> Option<&PublicKey> {
+        self.data.attrs.iter().find_map(|attr| match attr {
+            Attribute::TrampolineRouteHint(node_id) => Some(node_id),
+            _ => None,
+        })
+    }
+
     /// Returns whether the invoice has expired based on the current time.
     pub fn is_expired(&self) -> bool {
         self.expiry_time().is_some_and(|expiry| {
@@ -1112,6 +1125,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(payment_secret.into())
                     .build(),
             ),
+            Attribute::TrampolineRouteHint(node_id) => InvoiceAttrUnion::TrampolineRouteHint(
+                TrampolineRouteHint::new_builder()
+                    .node_id(node_id.serialize().pack())
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -1166,6 +1184,13 @@ impl TryFrom<InvoiceAttr> for Attribute {
                 Attribute::HashAlgorithm(hash_algorithm)
             }
             InvoiceAttrUnion::PaymentSecret(x) => Attribute::PaymentSecret(x.value().into()),
+            InvoiceAttrUnion::TrampolineRouteHint(x) => {
+                let node_id: Vec<u8> = x.node_id().unpack();
+                Attribute::TrampolineRouteHint(
+                    PublicKey::from_slice(&node_id)
+                        .map_err(|_| InvoiceError::InvalidTrampolineRouteHint)?,
+                )
+            }
         };
         Ok(attr)
     }
@@ -1335,7 +1360,10 @@ fn encode_unsigned_invoice(raw_invoice_data: gen_invoice::RawInvoiceData) -> Str
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_parse_malformed_compressed_invoice_returns_error_without_panic() {
     let mut data = vec![u5::try_from_u8(0).unwrap()];
-    data.extend(std::iter::repeat(u5::try_from_u8(31).unwrap()).take(SIGNATURE_U5_SIZE));
+    data.extend(std::iter::repeat_n(
+        u5::try_from_u8(31).unwrap(),
+        SIGNATURE_U5_SIZE,
+    ));
     let invoice = encode("fibb", data, Variant::Bech32m).unwrap();
 
     let result = std::panic::catch_unwind(|| CkbInvoice::from_str_allowing_unsigned(&invoice));
@@ -1368,9 +1396,7 @@ fn test_decompressed_invoice_data_length_is_limited() {
 fn test_malformed_text_attribute_returns_error_without_panic() {
     let attr = InvoiceAttr::new_builder()
         .set(InvoiceAttrUnion::Description(
-            Description::new_builder()
-                .value(vec![0xff; 200].pack())
-                .build(),
+            Description::new_builder().value([0xff; 200].pack()).build(),
         ))
         .build();
     let invoice = encode_unsigned_invoice(raw_invoice_data_with_attrs(vec![attr]));
@@ -1390,7 +1416,7 @@ fn test_malformed_payee_public_key_returns_error_without_panic() {
     let attr = InvoiceAttr::new_builder()
         .set(InvoiceAttrUnion::PayeePublicKey(
             PayeePublicKey::new_builder()
-                .value(vec![1, 2, 3].pack())
+                .value([1, 2, 3].pack())
                 .build(),
         ))
         .build();

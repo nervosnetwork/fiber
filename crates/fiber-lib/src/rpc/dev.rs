@@ -2,7 +2,7 @@
 // use crate::watchtower::WatchtowerStore;
 use crate::fiber::{
     channel::{ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-    NetworkActorCommand, NetworkActorMessage,
+    FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
 use crate::rpc::utils::rpc_error;
 use ckb_sdk::util::blake160;
@@ -16,6 +16,8 @@ use fiber_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::Extensions;
 
 use ractor::call;
 use std::str::FromStr;
@@ -62,8 +64,11 @@ trait DevRpc {
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned>;
 
-    /// Manually trigger CheckShutdownTx on all channels
-    #[method(name = "check_channel_shutdown")]
+    /// Manually trigger CheckShutdownTx on a channel.
+    ///
+    /// A tenant Biscuit routes this to the hosted tenant Fiber; other
+    /// callers hit the public host node.
+    #[method(name = "check_channel_shutdown", with_extensions)]
     async fn check_channel_shutdown(
         &self,
         params: CheckChannelShutdownParams,
@@ -86,6 +91,8 @@ pub struct DevRpcServerImpl {
     ckb_chain_actor: ActorRef<CkbChainMessage>,
     network_actor: ActorRef<NetworkActorMessage>,
     commitment_txs: Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
 
 impl DevRpcServerImpl {
@@ -100,7 +107,18 @@ impl DevRpcServerImpl {
             ckb_chain_actor,
             network_actor,
             commitment_txs,
+            #[cfg(not(target_arch = "wasm32"))]
+            lsp_actor: None,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lsp_actor(
+        mut self,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    ) -> Self {
+        self.lsp_actor = lsp_actor;
+        self
     }
 }
 
@@ -135,9 +153,10 @@ impl DevRpcServer for DevRpcServerImpl {
 
     async fn check_channel_shutdown(
         &self,
+        extensions: &Extensions,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
-        self.check_channel_shutdown(params).await
+        self.check_channel_shutdown(extensions, params).await
     }
 
     async fn sign_external_funding_tx(
@@ -154,7 +173,7 @@ impl DevRpcServerImpl {
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::CommitmentSigned(Some(rpc_reply)),
@@ -173,7 +192,7 @@ impl DevRpcServerImpl {
             .unwrap_or_default();
 
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::AddTlc(
@@ -226,7 +245,7 @@ impl DevRpcServerImpl {
             }
         };
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::RemoveTlc(
@@ -277,16 +296,28 @@ impl DevRpcServerImpl {
 
     pub async fn check_channel_shutdown(
         &self,
+        #[cfg(not(target_arch = "wasm32"))] extensions: &Extensions,
         params: CheckChannelShutdownParams,
     ) -> Result<(), ErrorObjectOwned> {
         let channel_id = params.channel_id.into();
+        #[cfg(not(target_arch = "wasm32"))]
+        let actor = if let Some(context) =
+            crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref())
+                .await?
+        {
+            context.fiber_actor
+        } else {
+            FiberActorRef::from_network(&self.network_actor)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let actor = FiberActorRef::from_network(&self.network_actor);
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::CheckChannelShutdown(
+            FiberActorMessage::new_command(FiberActorCommand::CheckChannelShutdown(
                 channel_id, rpc_reply,
             ))
         };
 
-        handle_actor_call!(self.network_actor, message, params)
+        handle_actor_call!(actor, message, params)
     }
 
     pub async fn sign_external_funding_tx(

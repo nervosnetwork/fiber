@@ -1,0 +1,45 @@
+meta {
+  name: tenant pushes preimage for on-chain TLC claim
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "create_preimage",
+    "params": [
+      {
+        "payment_hash": "{{LSP_INCOMING_PAYMENT_HASH}}",
+        "preimage": "{{LSP_INCOMING_PREIMAGE}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("LSP_INCOMING_PAYMENT_HASH");
+  body.params[0].preimage = bru.getVar("LSP_INCOMING_PREIMAGE");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}

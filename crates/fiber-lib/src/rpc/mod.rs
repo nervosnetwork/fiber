@@ -12,6 +12,8 @@ pub mod graph;
 pub mod info;
 pub mod invoice;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod lsp;
+#[cfg(not(target_arch = "wasm32"))]
 mod middleware;
 pub mod payment;
 pub mod peer;
@@ -19,6 +21,8 @@ pub mod peer;
 pub mod prof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pubsub;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod tenant;
 pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,6 +40,7 @@ pub mod server {
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
+    use crate::rpc::lsp::{LspRpcServer, LspRpcServerImpl};
     use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
@@ -275,6 +280,7 @@ pub mod server {
         fiber_config: Option<FiberConfig>,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
         cch_actor: Option<ActorRef<CchMessage>>,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
         store: S,
         store_actor: Option<ActorRef<StoreActorMessage>>,
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
@@ -288,6 +294,15 @@ pub mod server {
         let listening_addr = config.listening_addr.as_deref().unwrap_or("[::1]:0");
         if config.biscuit_public_key.is_none() && is_public_addr(listening_addr)? {
             bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
+        }
+
+        if config.biscuit_private_key_path.is_some() {
+            if lsp_actor.is_none() {
+                bail!("rpc.biscuit_private_key_path requires the LSP service");
+            }
+            if config.biscuit_public_key.is_none() {
+                bail!("rpc.biscuit_private_key_path requires rpc.biscuit_public_key");
+            }
         }
 
         let auth = match config.biscuit_public_key.as_ref() {
@@ -308,6 +323,7 @@ pub mod server {
                         network_actor.clone(),
                         fiber_config.clone(),
                     )
+                    .with_lsp_actor(lsp_actor.clone())
                     .into_rpc(),
                 )
                 .unwrap();
@@ -341,7 +357,9 @@ pub mod server {
             if config.is_module_enabled("channel") {
                 modules
                     .merge(
-                        ChannelRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc(),
+                        ChannelRpcServerImpl::new(network_actor.clone(), store.clone())
+                            .with_lsp_actor(lsp_actor.clone())
+                            .into_rpc(),
                     )
                     .unwrap();
             }
@@ -349,7 +367,9 @@ pub mod server {
             if config.is_module_enabled("payment") {
                 modules
                     .merge(
-                        PaymentRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc(),
+                        PaymentRpcServerImpl::new(network_actor.clone(), store.clone())
+                            .with_lsp_actor(lsp_actor.clone())
+                            .into_rpc(),
                     )
                     .unwrap();
             }
@@ -375,6 +395,7 @@ pub mod server {
                             rpc_dev_module_commitment_txs
                                 .expect("rpc_dev_module_commitment_txs should be set"),
                         )
+                        .with_lsp_actor(lsp_actor.clone())
                         .into_rpc(),
                     )
                     .unwrap();
@@ -395,6 +416,13 @@ pub mod server {
             if config.is_module_enabled("cch") {
                 modules
                     .merge(CchRpcServerImpl::new(cch_actor).into_rpc())
+                    .unwrap();
+            }
+        }
+        if let Some(lsp_actor) = lsp_actor {
+            if config.is_module_enabled("lsp") {
+                modules
+                    .merge(LspRpcServerImpl::new(lsp_actor).into_rpc())
                     .unwrap();
             }
         }

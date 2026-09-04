@@ -119,6 +119,32 @@ fn test_invoice_bc32m() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
+fn test_trampoline_route_hint_roundtrip() {
+    let (private_key, payee) = gen_rand_secp256k1_keypair_tuple();
+    let trampoline = gen_rand_fiber_public_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(1_000))
+        .payment_preimage(gen_rand_sha256_hash())
+        .payee_pub_key(payee)
+        .trampoline_route_hint(trampoline.into())
+        .build_with_sign(|message| Secp256k1::new().sign_ecdsa_recoverable(message, &private_key))
+        .expect("build invoice with trampoline route hint");
+
+    assert!(invoice.allow_trampoline_routing());
+    assert_eq!(
+        invoice.trampoline_route_hint(),
+        Some(&secp256k1::PublicKey::from(trampoline))
+    );
+
+    let decoded = invoice
+        .to_string()
+        .parse::<CkbInvoice>()
+        .expect("decode invoice with trampoline route hint");
+    assert_eq!(decoded, invoice);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_invoice_from_str_err() {
     let invoice = mock_invoice();
 

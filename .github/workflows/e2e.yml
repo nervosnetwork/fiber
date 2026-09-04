@@ -17,6 +17,12 @@ jobs:
           - 3-nodes-transfer
           - external-funding-open
           - invoice-ops
+          - lsp
+          - lsp-remote-signer
+          - lsp-remote-signer-watchtower
+          - lsp-remote-signer-watchtower-evict
+          - lsp-remote-signer-watchtower-preimage
+          - lsp-remote-signer-watchtower-revocation
           - open-use-close-a-channel
           - udt
           - reestablish

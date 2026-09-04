@@ -15,6 +15,7 @@
 //! - `payment`: Payment types
 //! - `graph`: Network graph types
 //! - `invoice`: Invoice types
+//! - `lsp`: Hosted LSP administration and delivery types
 //! - `info`: Node info types
 //! - `peer`: Peer management types
 //! - `cch`: Cross-chain hub types
@@ -40,6 +41,7 @@ pub mod dev;
 pub mod graph;
 pub mod info;
 pub mod invoice;
+pub mod lsp;
 pub mod payment;
 pub mod peer;
 pub mod prof;
@@ -54,6 +56,7 @@ pub use dev::*;
 pub use graph::*;
 pub use info::*;
 pub use invoice::*;
+pub use lsp::*;
 pub use payment::*;
 pub use peer::*;
 pub use prof::*;
