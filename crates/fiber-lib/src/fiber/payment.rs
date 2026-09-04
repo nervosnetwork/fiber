@@ -502,7 +502,7 @@ impl SendPaymentDataExt for SendPaymentData {
                 return Err("keysend payment should not have payment_hash".to_string());
             }
             // generate a random preimage for keysend payment
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             let mut result = [0u8; 32];
             rng.fill(&mut result[..]);
             let preimage: Hash256 = result.into();

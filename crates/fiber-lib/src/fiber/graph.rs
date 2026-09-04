@@ -29,7 +29,7 @@ use fiber_types::{
     Pubkey, RouterHop, SendPaymentData, TlcErr, UdtCfgInfos,
 };
 use parking_lot::Mutex;
-use rand::{thread_rng, Rng};
+use rand::{rng, Rng};
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -2199,7 +2199,7 @@ where
             .min(max_random_expiry_delta)
             / DEFAULT_TLC_EXPIRY_DELTA;
 
-        thread_rng().gen_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA
+        rng().random_range(1..max_rand_expiry_num.max(2)) * DEFAULT_TLC_EXPIRY_DELTA
     }
 
     // A helper function to evaluate whether an edge should be added to the heap of nodes to visit.

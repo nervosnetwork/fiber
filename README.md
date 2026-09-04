@@ -13,7 +13,7 @@ Features
 - **Low latency**, e.g. 0.0001 cent payment in your p2p connection latency, e.g. 20ms;
 - **High throughput**, because transactions are only processed by involved peers, no network consensus required;
 - **High privacy**, your transactions are only seen by involved peers;
-- **Based on more advanced cryptographic techniques** to ensure security and privacy, e.g. uses PTLC not HTLC;
+- **Based on more advanced cryptographic techniques** to ensure security and privacy, e.g. hash-based HTLC payment contracts today, with PTLC planned as a future direction;
 - **Composable** with other contracts/scripts on CKB;
 
 !!! The implementation is still a work-in-progress and will have iterations even after mainnet, please use it with caution and report any issues/limitations in the issue tracker.
@@ -23,11 +23,12 @@ TODO
 - [x] Establishing connections with other fiber nodes
 - [x] Creating and closing fiber channel
 - [x] Payments over fiber channel (via [fiber-scripts])
+- [x] Basic Multi-Path Payment (MPP)
 - [x] Cross-network asset transfer
-- [ ] Web-browser friendly runtime
-- [ ] Programmable conditional payment
-- [ ] Advanced channel liquidity management
-- [ ] Atomic multi-path payment
+- [x] Web-browser friendly runtime (WASM/[fiber-js], productization in progress)
+- [ ] Programmable conditional payment — official roadmap item covering PTLC, hold-invoice application protocols, on-chain contract conditions, and agent fair exchange
+- [ ] Advanced channel liquidity management — under active development (Loop In/Out and provider mode), not yet released
+- [ ] Atomic multi-path payment — long-term research direction (Basic MPP already released)
 
 ## Quick Install (One-liner)
 
@@ -130,3 +131,4 @@ For the v0.7.x to v0.8.0 legacy migration flow, see
 * [Fiber WSS Configuration Manual](docs/fiber-node-wss.md)
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts
+[fiber-js]: https://www.npmjs.com/package/@nervosnetwork/fiber-js

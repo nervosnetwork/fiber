@@ -19,6 +19,7 @@ use crate::fiber::{
     Attempt, EcdsaSignature, FeatureVector, PaymentCustomRecords, PaymentSession, PaymentStatus,
     Pubkey, SessionRoute,
 };
+use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::rpc::config::RpcConfig;
@@ -44,9 +45,7 @@ use jsonrpsee::{
 
 use ractor::RpcReplyPort;
 use ractor::{call, Actor, ActorRef};
-use rand::distributions::Alphanumeric;
-use rand::rngs::OsRng;
-use rand::Rng;
+use rand::distr::{Alphanumeric, SampleString};
 use secp256k1::{Message, SECP256K1};
 #[cfg(not(target_arch = "wasm32"))]
 use serde::{de::DeserializeOwned, Serialize};
@@ -241,8 +240,7 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
 
 // Mock function to create a dummy EcdsaSignature
 pub fn mock_ecdsa_signature() -> EcdsaSignature {
-    let mut rng = OsRng;
-    let (secret_key, _public_key) = SECP256K1.generate_keypair(&mut rng);
+    let (secret_key, _public_key) = gen_rand_secp256k1_keypair_tuple();
     let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
     let signature = SECP256K1.sign_ecdsa(&message, &secret_key);
     EcdsaSignature(signature)
@@ -376,11 +374,7 @@ impl NetworkNodeConfigBuilder {
 
         // generate a random string as db name to avoid conflict
         // when build multiple nodes in the same NetworkNodeConfig
-        let rand_name: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(5)
-            .map(char::from)
-            .collect();
+        let rand_name: String = Alphanumeric.sample_string(&mut rand::rng(), 5);
         let rand_db_dir = Path::new(base_dir.to_str()).join(rand_name);
         let store = open_store(rand_db_dir).expect("create store");
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());

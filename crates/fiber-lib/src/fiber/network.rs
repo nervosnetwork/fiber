@@ -13,7 +13,7 @@ use ractor::{
     call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, DerivedActorRef, RpcReplyPort,
     SupervisionEvent,
 };
-use rand::seq::{IteratorRandom, SliceRandom};
+use rand::seq::{IndexedRandom, IteratorRandom};
 use secp256k1::SECP256K1;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -5510,7 +5510,7 @@ where
                     "PeerReconnectBackoffAttempt"
                 );
                 let addresses = state.get_peer_addresses_by_pubkey(&pubkey);
-                if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+                if let Some(addr) = addresses.iter().choose(&mut rand::rng()) {
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             PublicNetworkCommand::ConnectPeer(
@@ -5688,7 +5688,7 @@ where
                 "Reconnecting channel {:x} peers {:?} in state {:?} with addresses {:?}",
                 channel_id, pubkey, channel_state, addresses
             );
-            if let Some(addr) = addresses.iter().choose(&mut rand::thread_rng()) {
+            if let Some(addr) = addresses.iter().choose(&mut rand::rng()) {
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         PublicNetworkCommand::ConnectPeer(
@@ -5731,7 +5731,7 @@ where
             )
         };
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for (pubkey, addresses) in saved_peers.into_iter().chain(graph_peers) {
             if state.public.peer_session_map.contains_key(&pubkey)
                 || state.public.requested_disconnect_peers.contains(&pubkey)
@@ -9161,7 +9161,7 @@ pub(crate) fn select_connect_peer_address<I>(
 where
     I: IntoIterator<Item = Multiaddr>,
 {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     match addr_type {
         Some(transport) => addresses

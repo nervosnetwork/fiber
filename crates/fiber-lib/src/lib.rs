@@ -99,7 +99,7 @@ pub fn set_mocked_time(time: u64) {
 }
 
 pub fn gen_rand_sha256_hash() -> Hash256 {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut result = [0u8; 32];
     rng.fill(&mut result[..]);
     result.into()

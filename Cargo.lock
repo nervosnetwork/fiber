@@ -905,9 +905,9 @@ checksum = "8b3b72a38c9920a29990df12002c4d069a147c8782f0c211f8a01b2df8f42bfd"
 
 [[package]]
 name = "ckb-chain-spec"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11c44c70f17b3dba2ec2f758ade6d9a84bd1089cda615fe85982aeb796691851"
+checksum = "70187bb9e6d87c5d2c6eb95d24732ab79f02e1e221225f63edf0825dc1b9176a"
 dependencies = [
  "cacache",
  "ckb-constant",
@@ -1047,9 +1047,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-jsonrpc-types"
-version = "1.1.2"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "495cd453425519ad63885c37b8194fdc44f4041043e573b0939602d499f1373a"
+checksum = "b7c621e0ea2746f0b0b8bfd220bae8d73896158986b77e881f38161bfa17c989"
 dependencies = [
  "ckb-types",
  "faster-hex",
@@ -1159,9 +1159,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-resource"
-version = "1.1.2"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "432d0094bb06b28624c8167b3c134c19319b2f20a66eb62516d609214009d7ef"
+checksum = "9b4bd2ca99cdfa3eadccf0e8e6a2ee01f25502157cc65934b6f3073e118bdd25"
 dependencies = [
  "ckb-system-scripts 0.5.4",
  "ckb-types",
@@ -1318,9 +1318,9 @@ dependencies = [
 
 [[package]]
 name = "ckb-types"
-version = "1.1.2"
+version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "411518697fc61a52654f8052ec6657954a19408e69c31329b480ebc84caf5b83"
+checksum = "e05da0ac5d3f7fbd8563b1aaae39d45f1d3f3172686f73bd2a0dffb394b37fce"
 dependencies = [
  "bit-vec",
  "bytes",
@@ -2157,9 +2157,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.17.0"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "elliptic-curve"
@@ -2330,7 +2330,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-bin"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ckb-chain-spec",
  "ckb-resource",
@@ -2347,11 +2347,11 @@ dependencies = [
 
 [[package]]
 name = "fiber-json-types"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-types 0.9.0",
+ "fiber-types 0.9.1",
  "hex",
  "molecule",
  "musig2",
@@ -2370,7 +2370,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
  "fiber-json-types",
- "fiber-types 0.9.0",
+ "fiber-types 0.9.1",
  "getrandom 0.3.4",
  "hex",
  "molecule",
@@ -2395,7 +2395,7 @@ dependencies = [
  "clap",
  "fiber-json-types",
  "fiber-lsp-sdk",
- "fiber-types 0.9.0",
+ "fiber-types 0.9.1",
  "hex",
  "musig2",
  "reqwest",
@@ -2436,15 +2436,15 @@ dependencies = [
 
 [[package]]
 name = "fiber-store"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "ckb-rocksdb",
  "console_error_panic_hook",
  "fiber-types 0.8.1",
- "fiber-types 0.9.0",
  "fiber-types 0.9.0-rc4",
+ "fiber-types 0.9.1",
  "fiber-wasm-db-common",
  "rusqlite",
  "serde",
@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "fiber-types"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -2556,7 +2556,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
- "strum 0.26.3",
+ "strum 0.28.0",
  "tentacle-multiaddr",
  "thiserror 1.0.69",
  "tracing",
@@ -2646,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2671,7 +2671,7 @@ dependencies = [
  "fiber-lsp-sdk",
  "fiber-sphinx 3.0.0",
  "fiber-store",
- "fiber-types 0.9.0",
+ "fiber-types 0.9.1",
  "futures",
  "getrandom 0.3.4",
  "git-version",
@@ -2691,7 +2691,7 @@ dependencies = [
  "parking_lot",
  "pprof",
  "ractor",
- "rand 0.8.6",
+ "rand 0.9.4",
  "regex",
  "scrypt",
  "secp256k1 0.30.0",
@@ -2699,7 +2699,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
- "strum 0.26.3",
+ "strum 0.28.0",
  "tempfile",
  "tentacle",
  "thiserror 1.0.69",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "fnn-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "ckb-jsonrpc-types",
@@ -4215,9 +4215,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lru"
@@ -6650,9 +6650,9 @@ dependencies = [
 
 [[package]]
 name = "tentacle"
-version = "0.7.6"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ab80c50726dc639daf326406efc983c578e65d06efa84f6d11385abc6dc27be"
+checksum = "ece1f30bebb1d7e7dcb2c32591aa677b4ca72c66c6b73be721886b041f22e470"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6684,9 +6684,9 @@ dependencies = [
 
 [[package]]
 name = "tentacle-multiaddr"
-version = "0.3.7"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7b06b419ae75898680ae449d5db5bf9dfedb531c49cdb6f24d42054508a2df3"
+checksum = "557b93edd813d6f875e03013f2cf5bb2b4318b9e440d69a98ce8536bb302699e"
 dependencies = [
  "arrayref",
  "bs58",

@@ -1825,11 +1825,11 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-json-types"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "ckb-jsonrpc-types",
  "ckb-types",
- "fiber-types 0.9.0",
+ "fiber-types 0.9.1",
  "hex",
  "molecule 0.9.2",
  "musig2",
@@ -1867,13 +1867,13 @@ dependencies = [
 
 [[package]]
 name = "fiber-store"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "console_error_panic_hook",
  "fiber-types 0.8.1",
- "fiber-types 0.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fiber-types 0.9.0",
  "fiber-wasm-db-common",
  "serde",
  "thiserror 1.0.69",
@@ -1921,6 +1921,42 @@ dependencies = [
 [[package]]
 name = "fiber-types"
 version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c5c8d346af3bee9cf465df7035f7afae22fb96811040fe024d8a1e01f06fa54"
+dependencies = [
+ "anyhow",
+ "arcode",
+ "bech32 0.9.1",
+ "bincode 1.3.3",
+ "bitflags 2.10.0",
+ "bs58",
+ "ckb-gen-types",
+ "ckb-hash",
+ "ckb-jsonrpc-types",
+ "ckb-types",
+ "fiber-sphinx 3.0.0",
+ "getrandom 0.2.17",
+ "hex",
+ "molecule 0.9.2",
+ "musig2",
+ "nom",
+ "num_enum",
+ "paste",
+ "secp256k1 0.30.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.10.9",
+ "strum 0.26.3",
+ "tentacle-multiaddr",
+ "thiserror 1.0.69",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "fiber-types"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "arcode",
@@ -1947,43 +1983,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sha2 0.10.9",
- "strum 0.26.3",
- "tentacle-multiaddr",
- "thiserror 1.0.69",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "fiber-types"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf751717e38d435851678fd0f28551766f52d4af552d44bc0617b055e941e2f"
-dependencies = [
- "anyhow",
- "arcode",
- "bech32 0.9.1",
- "bincode 1.3.3",
- "bitflags 2.10.0",
- "bs58",
- "ckb-gen-types",
- "ckb-hash",
- "ckb-jsonrpc-types",
- "ckb-types",
- "fiber-sphinx 3.0.0",
- "getrandom 0.2.17",
- "hex",
- "molecule 0.9.2",
- "musig2",
- "nom",
- "num_enum",
- "paste",
- "secp256k1 0.30.0",
- "serde",
- "serde_json",
- "serde_with",
- "sha2 0.10.9",
- "strum 0.26.3",
+ "strum 0.28.0",
  "tentacle-multiaddr",
  "thiserror 1.0.69",
  "tracing",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "fnn"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2045,7 +2045,7 @@ dependencies = [
  "fiber-json-types",
  "fiber-sphinx 3.0.0",
  "fiber-store",
- "fiber-types 0.9.0",
+ "fiber-types 0.9.1",
  "futures",
  "getrandom 0.3.4",
  "git-version",
@@ -2061,7 +2061,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "ractor",
- "rand 0.8.5",
+ "rand 0.9.2",
  "regex",
  "scrypt",
  "secp256k1 0.30.0",
@@ -2069,7 +2069,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "serde_yaml",
- "strum 0.26.3",
+ "strum 0.28.0",
  "tentacle",
  "thiserror 1.0.69",
  "tokio",
@@ -5183,6 +5183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
+]
+
+[[package]]
 name = "strum_macros"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5200,6 +5209,18 @@ name = "strum_macros"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
  "heck",
  "proc-macro2",

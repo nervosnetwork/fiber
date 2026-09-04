@@ -369,8 +369,8 @@ where
                 {
                     return error("Node does not support MPP, please enable MPP feature");
                 }
-                let mut rng = rand::thread_rng();
-                let payment_secret: [u8; 32] = rng.gen();
+                let mut rng = rand::rng();
+                let payment_secret: [u8; 32] = rng.random();
                 invoice_builder = invoice_builder.payment_secret(payment_secret.into());
             }
         };

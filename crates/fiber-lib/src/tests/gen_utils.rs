@@ -14,6 +14,7 @@ use crate::fiber::{
 };
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::protocol::AnnouncedNodeName;
+use rand::Rng;
 
 pub fn gen_rand_fiber_public_key() -> Pubkey {
     gen_rand_secp256k1_public_key().into()
@@ -40,7 +41,13 @@ pub fn gen_rand_secp256k1_public_key() -> PublicKey {
 }
 
 pub fn gen_rand_secp256k1_keypair() -> Keypair {
-    Keypair::new(SECP256K1, &mut rand::thread_rng())
+    let mut rng = rand::rng();
+    loop {
+        let secret_key = SecretKey::from_byte_array(&rng.random());
+        if let Ok(secret_key) = secret_key {
+            return Keypair::from_secret_key(SECP256K1, &secret_key);
+        }
+    }
 }
 
 pub fn gen_rand_secp256k1_keypair_tuple() -> (SecretKey, PublicKey) {
