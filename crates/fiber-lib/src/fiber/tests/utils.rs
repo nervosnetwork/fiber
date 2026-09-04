@@ -88,6 +88,39 @@ fn test_is_addr_reachable_with_private_ipv6_quic_address() {
 }
 
 #[test]
+fn test_is_addr_reachable_rejects_bare_ipv4_udp_address() {
+    let bare_udp_addr =
+        Multiaddr::from_str("/ip4/1.1.1.1/udp/8228").expect("valid bare IPv4 UDP multiaddr");
+
+    assert!(
+        !is_addr_reachable(&bare_udp_addr),
+        "bare IPv4 UDP address should be rejected because Tentacle cannot dial it"
+    );
+}
+
+#[test]
+fn test_is_addr_reachable_rejects_bare_ipv6_udp_address() {
+    let bare_udp_addr = Multiaddr::from_str("/ip6/2606:4700:4700::1111/udp/8228")
+        .expect("valid bare IPv6 UDP multiaddr");
+
+    assert!(
+        !is_addr_reachable(&bare_udp_addr),
+        "bare IPv6 UDP address should be rejected because Tentacle cannot dial it"
+    );
+}
+
+#[test]
+fn test_is_addr_reachable_rejects_bare_dns_udp_address() {
+    let bare_udp_addr =
+        Multiaddr::from_str("/dns4/example.com/udp/8228").expect("valid bare DNS UDP multiaddr");
+
+    assert!(
+        !is_addr_reachable(&bare_udp_addr),
+        "bare DNS UDP address should be rejected because Tentacle cannot dial it"
+    );
+}
+
+#[test]
 fn test_is_addr_reachable_rejects_dns_quic_address() {
     let dns_quic_addr = Multiaddr::from_str("/dns4/example.com/udp/8228/quic-v1")
         .expect("syntactically valid DNS QUIC multiaddr");
