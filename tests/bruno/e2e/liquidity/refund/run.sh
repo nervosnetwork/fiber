@@ -17,10 +17,15 @@ repo_root="$(cd -- "$script_dir/../../../../.." &>/dev/null && pwd)"
 mutator_dir="$repo_root/tests/liquidity-lock-mutator"
 binary="$mutator_dir/target/debug/liquidity-lock-mutator"
 
+# Export the actual node RPC URLs for the failure diagnostics collector: CI
+# provisioning randomizes the node ports and records them in
+# tests/nodes/.ports; without that record the collector keeps its own local
+# defaults.
+source "$repo_root/tests/bruno/scripts/resolve-node-urls.sh"
+
 CKB_RPC_URL="${CKB_RPC_URL:-http://127.0.0.1:8114}"
 MUTATOR_PORT="${MUTATOR_PORT:-38117}"
 MUTATOR_URL="http://127.0.0.1:${MUTATOR_PORT}"
-MUTATOR_PRIVKEY_PATH="${MUTATOR_PRIVKEY_PATH:-$repo_root/tests/nodes/1/ckb/plain_key}"
 
 mutator_pid=""
 
@@ -52,7 +57,9 @@ if ! curl -sf -X POST "$CKB_RPC_URL" -H 'Content-Type: application/json' \
 fi
 
 echo "starting the liquidity-lock-mutator sidecar on $MUTATOR_URL"
-"$binary" --serve "$MUTATOR_PORT" --rpc-url "$CKB_RPC_URL" --privkey-path "$MUTATOR_PRIVKEY_PATH" &
+# Refund requests need no wallet key, so unlike the rejection runner this
+# sidecar is started without --privkey-path.
+"$binary" --serve "$MUTATOR_PORT" --rpc-url "$CKB_RPC_URL" &
 mutator_pid=$!
 
 ready="0"

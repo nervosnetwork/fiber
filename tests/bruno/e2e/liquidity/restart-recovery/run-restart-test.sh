@@ -378,6 +378,13 @@ provision_dev_chain() {
   ensure_liquidity_module_enabled
 }
 
+resolve_node_endpoints() {
+  # CI provisioning may randomize node ports; use the record generated with
+  # the node configs before any readiness or RPC checks run.
+  source "$bruno_dir/scripts/resolve-node-urls.sh"
+  log "resolved node endpoints: node1 rpc=$NODE1_RPC_URL p2p=$NODE1_P2P_PORT, node2 rpc=$NODE2_RPC_URL p2p=$NODE2_P2P_PORT"
+}
+
 wait_provisioning_ports_released() {
   local port
   for port in "$CKB_PORT" "$NODE1_P2P_PORT" "$NODE2_P2P_PORT" 21714 21715; do
@@ -498,6 +505,7 @@ main() {
   check_ports_free
   build_binaries
   provision_dev_chain
+  resolve_node_endpoints
   # The fresh-chain path runs a temporary CKB during initialization; wait for
   # it to release its ports instead of sleeping a fixed interval.
   wait_provisioning_ports_released

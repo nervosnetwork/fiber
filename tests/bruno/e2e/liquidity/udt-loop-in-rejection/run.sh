@@ -20,6 +20,10 @@ MUTATOR_PORT="${MUTATOR_PORT:-38117}"
 MUTATOR_URL="http://127.0.0.1:${MUTATOR_PORT}"
 MUTATOR_PRIVKEY_PATH="${MUTATOR_PRIVKEY_PATH:-$repo_root/tests/nodes/1/ckb/plain_key}"
 
+# Export the actual node RPC URLs for failure diagnostics when CI generated
+# randomized ports and recorded them in tests/nodes/.ports.
+source "$repo_root/tests/bruno/scripts/resolve-node-urls.sh"
+
 mutator_pid=""
 
 cleanup() {

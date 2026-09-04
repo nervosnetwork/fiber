@@ -103,7 +103,7 @@ reasoning as `udt-loop-in`).
    (the RPC message wraps them in `chain operation failed:` prefixes, so the
    suite asserts with `includes`).
 
-   Mutation semantics that keep the funding transactions commitable:
+   Mutation semantics that keep the funding transactions committable:
    - the type-script case gives the lock cell a different UDT script hash
      with empty data and conserves the full gross amount in a change output
      under the real UDT script (the type script comparison fires before the
