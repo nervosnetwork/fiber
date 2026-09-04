@@ -15,6 +15,8 @@ pub enum TransportType {
     Ws,
     /// WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
     Wss,
+    /// QUIC v1 transport (e.g. /ip4/1.2.3.4/udp/8228/quic-v1)
+    QuicV1,
 }
 
 /// Parameters for connecting to a peer.
@@ -30,8 +32,9 @@ pub struct ConnectPeerParams {
     /// Whether to save the peer address to the peer store.
     pub save: Option<bool>,
     /// Filter addresses by transport type when connecting by pubkey.
-    /// If not specified, the node uses target-specific defaults:
-    /// native builds choose from `tcp` addresses only, while wasm builds choose from `ws`/`wss`.
+    /// If not specified, the node prefers the transport that is native to the current build
+    /// (`tcp` on native builds, `ws`/`wss` on wasm builds) and falls back to any other
+    /// dialable transport published by the peer.
     pub addr_type: Option<TransportType>,
 }
 

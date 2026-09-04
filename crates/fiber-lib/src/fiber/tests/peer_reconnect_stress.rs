@@ -144,7 +144,7 @@ async fn exercise_peer_reconnects(
 ) -> (NetworkNode, usize) {
     let reconnect_deadline = Instant::now() + duration;
     let node_c_pubkey = node_c.pubkey;
-    let node_c_addr = node_c.listening_addrs[0].clone();
+    let node_c_addr = node_c.announced_addrs[0].clone();
     let mut reconnect_cycles = 0;
 
     while Instant::now() < reconnect_deadline {
