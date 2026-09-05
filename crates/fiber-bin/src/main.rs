@@ -28,6 +28,7 @@ use jsonrpsee::ws_client::{HeaderMap, HeaderValue};
 use ractor::{port::OutputPortSubscriberTrait as _, Actor, ActorRef, OutputPort};
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 const ASSUME_WATCHTOWER_ACTOR_ALIVE: &str = "watchtower actor must be alive";
+const LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn cli_confirm(plan: MigrationPlan) -> bool {
     eprintln!("{}", plan.message);
@@ -177,6 +179,111 @@ async fn run() -> Result<(), ExitMessage> {
         run_node(store, Some(port), config).await
     } else {
         run_node(raw_store, None, config).await
+    }
+}
+
+#[cfg(test)]
+mod dev_genesis_tests {
+    use ckb_types::{
+        core::{DepType, ScriptHashType},
+        packed::CellOutput,
+        prelude::Unpack,
+        H256,
+    };
+    use fnn::ckb::contracts::{Contract, ContractsContext, ScriptCellDep};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn dev_genesis_resolves_liquidity_lock_at_index_10() {
+        let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dev_spec_path = workspace_dir.join("tests/nodes/deployer/dev.toml");
+        let artifact_path = workspace_dir.join("tests/deploy/contracts/liquidity-lock");
+        let chain_spec = ChainSpec::load_from(&Resource::file_system(dev_spec_path))
+            .expect("load checked-in dev chain spec");
+        let genesis_block = chain_spec.build_genesis().expect("build dev genesis block");
+        let genesis_tx = genesis_block
+            .transaction(0)
+            .expect("genesis block transaction #0 should exist");
+
+        for (index, artifact_name, expected_hash) in [
+            (
+                8,
+                "simple_udt",
+                "e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",
+            ),
+            (
+                9,
+                "xudt_rce",
+                "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+            ),
+        ] {
+            let output_data = genesis_tx
+                .outputs_data()
+                .get(index)
+                .expect("UDT genesis output should exist")
+                .raw_data();
+            let artifact = std::fs::read(
+                workspace_dir
+                    .join("tests/deploy/contracts")
+                    .join(artifact_name),
+            )
+            .expect("read UDT artifact");
+            let data_hash = H256::from(CellOutput::calc_data_hash(&output_data));
+
+            assert_eq!(output_data.as_ref(), artifact);
+            assert_eq!(
+                data_hash,
+                expected_hash.parse::<H256>().expect("valid UDT data hash")
+            );
+        }
+
+        let output_data = genesis_tx
+            .outputs_data()
+            .get(10)
+            .expect("liquidity lock should be genesis transaction #0 output #10")
+            .raw_data();
+        let artifact = std::fs::read(artifact_path).expect("read liquidity-lock artifact");
+
+        assert!(!artifact.is_empty());
+        assert_eq!(output_data.as_ref(), artifact);
+        assert_eq!(
+            H256::from(CellOutput::calc_data_hash(&output_data)),
+            "70734e0c3b5109538b9801682cc8ef3effc5b5c8214900e91f19799719d7620f"
+                .parse::<H256>()
+                .expect("valid liquidity-lock data hash")
+        );
+
+        let context = ContractsContext::try_new(genesis_block, vec![], Default::default(), None)
+            .await
+            .expect("create contracts context from dev genesis");
+        let script = context
+            .contracts
+            .contract_default_scripts
+            .get(&Contract::LiquidityLock)
+            .expect("liquidity lock script should resolve");
+        let code_hash: H256 = script.code_hash().unpack();
+        assert_eq!(
+            code_hash,
+            "70734e0c3b5109538b9801682cc8ef3effc5b5c8214900e91f19799719d7620f"
+                .parse::<H256>()
+                .expect("valid liquidity-lock code hash")
+        );
+        assert_eq!(script.hash_type(), ScriptHashType::Data2.into());
+
+        let deps = context
+            .contracts
+            .script_cell_deps
+            .get(&Contract::LiquidityLock)
+            .expect("liquidity lock cell deps should resolve");
+        assert!(!deps.is_empty());
+        let [ScriptCellDep::CellDep(cell_dep)] = deps.as_slice() else {
+            panic!("liquidity lock should have exactly one concrete cell dep");
+        };
+        let dep_index: u32 = cell_dep.out_point().index().unpack();
+        assert_eq!(cell_dep.dep_type(), DepType::Code.into());
+        assert_eq!(cell_dep.out_point().tx_hash(), genesis_tx.hash());
+        assert_eq!(dep_index, 10);
     }
 }
 
@@ -530,7 +637,6 @@ async fn run_node(
                 network_graph,
                 root_actor.get_cell(),
                 store_change_port,
-                #[cfg(debug_assertions)]
                 ckb_chain_actor,
                 #[cfg(debug_assertions)]
                 rpc_dev_module_commitment_txs,
@@ -547,15 +653,41 @@ async fn run_node(
     };
 
     signal_listener().await;
-    if let Some((handle, _)) = rpc_server_handle {
-        handle
-            .stop()
-            .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
-        handle.stopped().await;
-    }
-    cancel_tasks_and_wait_for_completion().await;
+    let actor_shutdown = async {
+        if let Some((handle, _, liquidity_actor)) = rpc_server_handle {
+            handle
+                .stop()
+                .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
+            handle.stopped().await;
+            if let Some(actor) = liquidity_actor {
+                actor.stop(Some("stopping liquidity actor".to_string()));
+                actor
+                    .wait(Some(LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT))
+                    .await
+                    .map_err(|err| {
+                        ExitMessage(format!(
+                            "liquidity actor did not stop within {LIQUIDITY_ACTOR_SHUTDOWN_TIMEOUT:?}: \
+                             {err}"
+                        ))
+                    })?;
+            }
+        }
+        Ok(())
+    };
 
-    Ok(())
+    finish_shutdown(actor_shutdown, cancel_tasks_and_wait_for_completion()).await
+}
+
+/// Sequence production shutdown so the global task cancellation/drain always runs,
+/// even when the liquidity actor wait reports a timeout error. The actor shutdown
+/// error (if any) is returned only after the drain future has completed.
+async fn finish_shutdown(
+    actor_shutdown: impl Future<Output = Result<(), ExitMessage>>,
+    drain: impl Future<Output = ()>,
+) -> Result<(), ExitMessage> {
+    let actor_result = actor_shutdown.await;
+    drain.await;
+    actor_result
 }
 
 fn forward_event_to_actor(
@@ -664,4 +796,29 @@ async fn signal_listener() {
         .await
         .expect("listen for Ctrl-c signal");
     tracing::info!("Ctrl-c received, shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_error_is_returned_after_global_task_drain() {
+        let drained = Arc::new(AtomicBool::new(false));
+        let drained_by_shutdown = drained.clone();
+
+        let result = finish_shutdown(
+            async { Err(ExitMessage("liquidity shutdown timed out".to_string())) },
+            async move {
+                drained_by_shutdown.store(true, Ordering::SeqCst);
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(drained.load(Ordering::SeqCst));
+    }
 }

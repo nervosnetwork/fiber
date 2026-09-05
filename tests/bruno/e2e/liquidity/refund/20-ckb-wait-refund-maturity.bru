@@ -1,0 +1,47 @@
+meta {
+  name: ckb rpc verify refund maturity
+  type: http
+  seq: 20
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_tip_header",
+    "params": []
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const { waitRefundMaturity } = require(process.cwd() + "/scripts/refund-tx");
+
+  // Advancing is bounded and verified through CKB RPC: poll the tip header
+  // timestamp and `get_block_median_time`, generating single epochs only
+  // while the median of the past 37 block timestamps is still below the
+  // encoded refund maturity. No fixed sleep stands in for the maturity.
+  const maturity = await waitRefundMaturity({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    maturitySeconds: bru.getVar("MATURITY_SECONDS"),
+  });
+  console.log(
+    "refund maturity reached: median", maturity.medianSeconds,
+    "tip", maturity.tip.timestamp,
+    "generated epochs", maturity.generatedEpochs,
+  );
+}

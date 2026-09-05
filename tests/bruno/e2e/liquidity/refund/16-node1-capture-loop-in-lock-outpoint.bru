@@ -1,0 +1,75 @@
+meta {
+  name: node1 capture loop in lock outpoint
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const { decodeOutpoint } = require(process.cwd() + "/scripts/molecule-script");
+
+  // The client lock transaction is broadcast by loop_in; poll until the
+  // client records it with a watchable status and a persisted outpoint.
+  const findLock = (result) =>
+    (result.transactions || []).find(
+      (tx) =>
+        tx.role === "loop_in_lock"
+        && (tx.status === "broadcast" || tx.status === "confirmed")
+        && typeof tx.outpoint === "string",
+    );
+
+  let lock = findLock(res.body.result);
+  if (!lock) {
+    const waited = await waitLiquidityState({
+      rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+      method: "list_liquidity_chain_transactions",
+      params: [{ swap_id: bru.getVar("QUOTE_ID") }],
+      expectedState: "lock-present",
+      getState: (result) => (findLock(result) ? "lock-present" : "lock-missing"),
+      maxAttempts: 30,
+      intervalMs: 1000,
+      deadlineMs: 30000,
+    });
+    lock = findLock(waited.result);
+  }
+  if (!lock) {
+    throw new Error(`client loop in lock transaction was not recorded: ${JSON.stringify(res.body)}`);
+  }
+  if (lock.failure_reason) {
+    throw new Error(`client loop in lock recorded a failure reason: ${lock.failure_reason}`);
+  }
+
+  // A molecule OutPoint hex is tx_hash (32 bytes) followed by a LE u32 index.
+  const outpoint = decodeOutpoint(lock.outpoint);
+  if (outpoint.txHash !== lock.tx_hash) {
+    throw new Error(`client lock outpoint tx_hash mismatch: ${lock.outpoint} vs ${lock.tx_hash}`);
+  }
+
+  bru.setVar("LOCK_TX_HASH", outpoint.txHash);
+  bru.setVar("LOCK_INDEX", String(outpoint.index));
+  console.log("loop in lock outpoint:", lock.outpoint);
+}

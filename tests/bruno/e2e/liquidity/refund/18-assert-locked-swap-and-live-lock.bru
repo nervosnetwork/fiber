@@ -1,0 +1,151 @@
+meta {
+  name: assert locked swap state and live lock cell
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { waitCkbLiveCell, waitLiquidityState, waitSwapState } = require(
+    process.cwd() + "/scripts/wait-liquidity-state",
+  );
+  const { decodeLiquidityLockArgs, decodeUdtAmount } = require(
+    process.cwd() + "/scripts/liquidity-lock-args",
+  );
+
+  // The client lock transaction must be confirmed before the maturity clock
+  // starts mattering: the swap leaves OnchainLockPending for OnchainLocked
+  // and the lock cell becomes live with the exact quote terms.
+  await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    method: "list_liquidity_chain_transactions",
+    params: [{ swap_id: bru.getVar("QUOTE_ID") }],
+    expectedState: "lock-confirmed",
+    getState: (result) => {
+      const lock = (result.transactions || []).find((tx) => tx.role === "loop_in_lock");
+      return lock && lock.status === "confirmed" ? "lock-confirmed" : `lock-${lock ? lock.status : "missing"}`;
+    },
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  });
+
+  const client = await waitSwapState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "onchain_locked",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+
+  const record = client.result;
+  if (record.swap_kind !== "loop_in") {
+    throw new Error(`client swap_kind must be loop_in: ${JSON.stringify(record)}`);
+  }
+  if (record.asset_id !== bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID")) {
+    throw new Error(`client swap asset_id mismatch: ${record.asset_id}`);
+  }
+  if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+    throw new Error(`client swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
+  }
+  if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`client swap payment_hash mismatch: ${record.payment_hash}`);
+  }
+  // The persisted JSON swap record does not surface refund_after_lock_time;
+  // the exact encoded since is instead asserted twice below: on the live
+  // lock cell args (the chain source of truth) and against the quote
+  // envelope captured in request 13.
+
+  // The confirmed lock cell must still be live: the provider never accepted
+  // the swap, so nothing claims the cell before the refund.
+  const lockOutpoint = {
+    tx_hash: bru.getVar("LOCK_TX_HASH"),
+    index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+  };
+  const liveCell = await waitCkbLiveCell({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    outPoint: lockOutpoint,
+    expectedStatus: "live",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  const cell = liveCell.result && liveCell.result.cell;
+  if (!cell || !cell.output) {
+    throw new Error(`lock live cell response is missing the cell output: ${JSON.stringify(liveCell.result)}`);
+  }
+
+  // CKB capacity: exactly the quoted operational capacity (1000 shannons).
+  const expectedCapacity = BigInt(bru.getVar("QUOTE_CAPACITY_CKB"));
+  if (BigInt(cell.output.capacity) !== expectedCapacity) {
+    throw new Error(`lock cell capacity must equal the udt capacity requirement ${expectedCapacity}, got: ${cell.output.capacity}`);
+  }
+
+  // UDT cell data: the gross UDT amount as a 16-byte little-endian u128.
+  const gross = BigInt(bru.getVar("QUOTE_GROSS_UDT"));
+  if (decodeUdtAmount(cell.data.content) !== gross) {
+    throw new Error(`lock cell UDT data must decode to the gross amount ${bru.getVar("QUOTE_GROSS_UDT")}, got: ${cell.data.content}`);
+  }
+
+  // Type script: exactly the generated simple UDT script.
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+  const typeScript = cell.output.type_;
+  if (!typeScript
+    || typeScript.code_hash !== expectedScript.code_hash
+    || typeScript.hash_type !== expectedScript.hash_type
+    || typeScript.args !== expectedScript.args) {
+    throw new Error(`lock cell type script must be the simple UDT script: ${JSON.stringify(typeScript)}`);
+  }
+
+  // Lock: the deployed liquidity-lock contract whose 152-byte args carry the
+  // exact refund since; the refund transaction will spend this cell after
+  // that maturity (verified through CKB RPC in request 20).
+  const expectedAssetTypeHash = bru.getEnvVar("SIMPLE_UDT_SCRIPT_HASH");
+  const lock = cell.output.lock;
+  if (lock.code_hash !== bru.getEnvVar("LIQUIDITY_LOCK_CODE_HASH")
+    || lock.hash_type !== bru.getEnvVar("LIQUIDITY_LOCK_HASH_TYPE")) {
+    throw new Error(`lock cell must use the deployed liquidity-lock script: ${JSON.stringify(lock)}`);
+  }
+  const args = decodeLiquidityLockArgs(lock.args);
+  if (args.paymentHash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`lock args payment_hash mismatch: ${args.paymentHash}`);
+  }
+  if (args.refundAfterLockTime !== BigInt(bru.getVar("QUOTE_REFUND_AFTER_LOCK_TIME"))) {
+    throw new Error(`lock args refund_after_lock_time mismatch: ${args.refundAfterLockTime}`);
+  }
+  if (args.amount !== gross) {
+    throw new Error(`lock args amount must be the gross UDT amount ${bru.getVar("QUOTE_GROSS_UDT")}, got: ${args.amount}`);
+  }
+  if (args.assetTypeHash !== expectedAssetTypeHash) {
+    throw new Error(`lock args asset_type_hash must be the simple UDT script hash ${expectedAssetTypeHash}, got: ${args.assetTypeHash}`);
+  }
+  console.log("lock cell live: capacity", cell.output.capacity, "udt amount", args.amount, "since", args.refundAfterLockTime);
+}

@@ -180,6 +180,26 @@ impl InvoiceStore for MockStore {
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
         self.invoice_statuses.borrow().get(id).cloned()
     }
+
+    fn ensure_invoice_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<CkbInvoiceStatus, crate::invoice::EnsureInvoicePreimageError> {
+        let status = self
+            .get_invoice_status(&payment_hash)
+            .ok_or(crate::invoice::EnsureInvoicePreimageError::InvoiceNotFound)?;
+        match self.get_preimage(&payment_hash) {
+            Some(existing) if existing != preimage => {
+                Err(crate::invoice::EnsureInvoicePreimageError::ConflictingPreimage)
+            }
+            Some(_) => Ok(status),
+            None => {
+                self.insert_preimage(payment_hash, preimage);
+                Ok(status)
+            }
+        }
+    }
 }
 
 impl PreimageStore for MockStore {

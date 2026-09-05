@@ -1,0 +1,101 @@
+meta {
+  name: node1 wait for lock confirmation
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitCkbLiveCell, waitLiquidityState, waitSwapState } = require(
+    process.cwd() + "/scripts/wait-liquidity-state",
+  );
+
+  // The client lock transaction must be confirmed before the provider can
+  // accept it, so wait for the persisted chain record to flip to confirmed.
+  await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    method: "list_liquidity_chain_transactions",
+    params: [{ swap_id: bru.getVar("QUOTE_ID") }],
+    expectedState: "lock-confirmed",
+    getState: (result) => {
+      const lock = (result.transactions || []).find((tx) => tx.role === "loop_in_lock");
+      return lock && lock.status === "confirmed" ? "lock-confirmed" : `lock-${lock ? lock.status : "missing"}`;
+    },
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  });
+
+  // Once the lock confirms, the client swap leaves OnchainLockPending for
+  // OnchainLocked.
+  const client = await waitSwapState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "onchain_locked",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+
+  const record = client.result;
+  if (record.swap_kind !== "loop_in") {
+    throw new Error(`client swap_kind must be loop_in: ${JSON.stringify(record)}`);
+  }
+  if (record.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID")) {
+    throw new Error(`client swap asset_id mismatch: ${record.asset_id}`);
+  }
+  if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+    throw new Error(`client swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
+  }
+  if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`client swap payment_hash mismatch: ${record.payment_hash}`);
+  }
+
+  // The confirmed lock cell must still be live (the provider only claims it
+  // later) and hold exactly the gross on-chain amount (swap amount + provider
+  // fee), which the quote advertised as capacity_requirement_ckb. The CKB
+  // outpoint JSON carries the index as a hex quantity.
+  const lockOutpoint = {
+    tx_hash: bru.getVar("LOCK_TX_HASH"),
+    index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+  };
+  const liveCell = await waitCkbLiveCell({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    outPoint: lockOutpoint,
+    expectedStatus: "live",
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  const capacity =
+    liveCell.result && liveCell.result.cell && liveCell.result.cell.output
+      ? liveCell.result.cell.output.capacity
+      : undefined;
+  if (BigInt(capacity) !== BigInt(bru.getVar("QUOTE_GROSS_ONCHAIN"))) {
+    throw new Error(`lock cell capacity must equal the gross on-chain amount ${bru.getVar("QUOTE_GROSS_ONCHAIN")}, got: ${capacity}`);
+  }
+  console.log("lock cell live with capacity:", capacity);
+}

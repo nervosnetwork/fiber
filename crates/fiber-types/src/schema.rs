@@ -20,6 +20,15 @@
 //! | 232          | Payment_hash         | CchOrder                    |
 //! | 233          | Payment_hash         | CchReceiveBtcOrderCreation  |
 //! | 234          | Payment_hash         | CchSendBtcOrderCreation    |
+//! | 240          | Hash256              | LiquiditySwap               |
+//! | 241          | LiquiditySwapState   | LiquiditySwapStateIndex     |
+//! | 242          | String               | LiquiditySwapAssetIndex     |
+//! | 243          | String               | LiquidityAsset              |
+//! | 244          | Hash256              | LiquidityLoopOutQuote       |
+//! | 245          | Hash256 | role       | LiquidityChainTxRecord      |
+//! | 246          | status | Hash256 | role | ()                       |
+//! | 247          | Hash256 | role       | LiquidityChainTxSignedTx    |
+//! | 248          | Hash256 | Hash256    | PayoutValidationProvenance |
 //! +--------------+----------------------+-----------------------------+
 
 pub const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
@@ -57,3 +66,12 @@ pub const CCH_ORDER_PREFIX: u8 = 232;
 pub const CCH_RECEIVE_BTC_ORDER_CREATION_PREFIX: u8 = 233;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CCH_SEND_BTC_ORDER_CREATION_PREFIX: u8 = 234;
+pub const LIQUIDITY_SWAP_PREFIX: u8 = 240;
+pub const LIQUIDITY_SWAP_STATE_PREFIX: u8 = 241;
+pub const LIQUIDITY_SWAP_ASSET_PREFIX: u8 = 242;
+pub const LIQUIDITY_ASSET_PREFIX: u8 = 243;
+pub const LIQUIDITY_LOOP_OUT_QUOTE_PREFIX: u8 = 244;
+pub const LIQUIDITY_CHAIN_TX_PREFIX: u8 = 245;
+pub const LIQUIDITY_CHAIN_TX_STATUS_PREFIX: u8 = 246;
+pub const LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX: u8 = 247;
+pub const LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX: u8 = 248;

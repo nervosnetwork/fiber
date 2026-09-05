@@ -1,0 +1,61 @@
+meta {
+  name: node1 assert final channel balances
+  type: http
+  seq: 31
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE2_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // The provider pays the client invoice for exactly the raw swap amount; the
+  // provider fee is not charged through the channel but on-chain via the lock
+  // cell (the client funded the gross amount and the provider claims it).
+  const amount = BigInt(bru.getVar("QUOTE_AMOUNT"));
+  const channel = (res.body.result.channels || []).find(
+    (item) => item.channel_id === bru.getVar("CHANNEL_ID"),
+  );
+  if (!channel) {
+    throw new Error(`channel ${bru.getVar("CHANNEL_ID")} not found on node1`);
+  }
+
+  const expectedLocal = BigInt(bru.getVar("CLIENT_LOCAL_BEFORE")) + amount;
+  const expectedRemote = BigInt(bru.getVar("CLIENT_REMOTE_BEFORE")) - amount;
+  if (BigInt(channel.local_balance) !== expectedLocal) {
+    throw new Error(`client local_balance must have increased by the swap amount: expected ${expectedLocal}, got ${channel.local_balance}`);
+  }
+  if (BigInt(channel.remote_balance) !== expectedRemote) {
+    throw new Error(`client remote_balance must have decreased by the swap amount: expected ${expectedRemote}, got ${channel.remote_balance}`);
+  }
+  if (channel.offered_tlc_balance !== "0x0" || channel.received_tlc_balance !== "0x0") {
+    throw new Error(`client channel must end with no outstanding TLC balances: ${JSON.stringify(channel)}`);
+  }
+  if (!Array.isArray(channel.pending_tlcs) || channel.pending_tlcs.length !== 0) {
+    throw new Error(`client channel must end with no pending TLCs: ${JSON.stringify(channel.pending_tlcs)}`);
+  }
+}

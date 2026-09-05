@@ -1,0 +1,138 @@
+meta {
+  name: liquidity lock args decoder round trip
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const { ARGS_LENGTH, UDT_DATA_LENGTH, decodeLiquidityLockArgs, decodeUdtAmount } = require(
+    process.cwd() + "/scripts/liquidity-lock-args",
+  );
+
+  const repeat = (pattern, count) => pattern.repeat(count);
+
+  // Known-bytes check for the 152-byte liquidity-lock args layout: payment
+  // hash (32), blake2b claimant lock (32), blake2b refund lock (32),
+  // refund_after_lock_time LE u64 (8), amount LE u128 (16), asset type hash
+  // (32). Mirrors build_liquidity_lock_args in crates/fiber-lib.
+  const ckbArgs =
+    "0x"
+    + repeat("11", 32)
+    + repeat("22", 32)
+    + repeat("33", 32)
+    + "2a00000000000000"
+    + "e8030000000000000000000000000000"
+    + repeat("00", 32);
+  const decodedCkb = decodeLiquidityLockArgs(ckbArgs);
+  if (decodedCkb.paymentHash !== "0x" + repeat("11", 32)) {
+    throw new Error(`payment_hash decode mismatch: ${decodedCkb.paymentHash}`);
+  }
+  if (decodedCkb.claimantLockHash !== "0x" + repeat("22", 32)) {
+    throw new Error(`claimant lock hash decode mismatch: ${decodedCkb.claimantLockHash}`);
+  }
+  if (decodedCkb.refundLockHash !== "0x" + repeat("33", 32)) {
+    throw new Error(`refund lock hash decode mismatch: ${decodedCkb.refundLockHash}`);
+  }
+  if (decodedCkb.refundAfterLockTime !== BigInt(42)) {
+    throw new Error(`refund_after_lock_time decode mismatch: ${decodedCkb.refundAfterLockTime}`);
+  }
+  if (decodedCkb.amount !== BigInt(1000)) {
+    throw new Error(`amount decode mismatch: ${decodedCkb.amount}`);
+  }
+  if (decodedCkb.assetTypeHash !== "0x" + repeat("00", 32)) {
+    throw new Error(`CKB asset_type_hash must decode to the zero hash: ${decodedCkb.assetTypeHash}`);
+  }
+
+  // UDT swaps stamp the blake2b hash of the UDT type script into the trailing
+  // asset_type_hash field (liquidity_lock_args_include_udt_type_script_hash).
+  const udtArgs =
+    "0x"
+    + repeat("11", 32)
+    + repeat("22", 32)
+    + repeat("33", 32)
+    + "2a00000000000000"
+    + "e8030000000000000000000000000000"
+    + repeat("44", 32);
+  const decodedUdt = decodeLiquidityLockArgs(udtArgs);
+  if (decodedUdt.assetTypeHash !== "0x" + repeat("44", 32)) {
+    throw new Error(`UDT asset_type_hash decode mismatch: ${decodedUdt.assetTypeHash}`);
+  }
+
+  // Max u128 amount round trips through the little-endian field.
+  const maxU128 = BigInt("340282366920938463463374607431768211455");
+  const maxAmountArgs =
+    "0x"
+    + repeat("00", 104)
+    + repeat("ff", 16)
+    + repeat("00", 32);
+  if (decodeLiquidityLockArgs(maxAmountArgs).amount !== maxU128) {
+    throw new Error("max u128 amount decode mismatch");
+  }
+
+  // UDT cell data is a 16-byte little-endian u128 token amount.
+  if (decodeUdtAmount("0xe9030000000000000000000000000000") !== BigInt(1001)) {
+    throw new Error("UDT amount decode mismatch");
+  }
+  if (decodeUdtAmount("0x" + repeat("ff", 16)) !== maxU128) {
+    throw new Error("max UDT amount decode mismatch");
+  }
+
+  if (ARGS_LENGTH !== 152 || UDT_DATA_LENGTH !== 16) {
+    throw new Error("unexpected layout constants");
+  }
+
+  // Malformed inputs must be rejected: wrong byte length, odd hex, non-hex.
+  const invalidCases = [
+    () => decodeLiquidityLockArgs("0x" + repeat("00", 151)),
+    () => decodeLiquidityLockArgs("0x" + repeat("00", 153)),
+    () => decodeLiquidityLockArgs("0x123"),
+    () => decodeLiquidityLockArgs("0xzz"),
+    () => decodeUdtAmount("0x" + repeat("00", 15)),
+    () => decodeUdtAmount("0x" + repeat("00", 17)),
+  ];
+  for (const run of invalidCases) {
+    let failed = false;
+    try {
+      run();
+    } catch (_) {
+      failed = true;
+    }
+    if (!failed) {
+      throw new Error("malformed liquidity lock args input must be rejected");
+    }
+  }
+
+  bru.setVar("LIQUIDITY_LOCK_ARGS_HELPER_OK", true);
+}
+
+tests {
+  test("liquidity lock args decoder round trips and rejects malformed input", function() {
+    expect(bru.getVar("LIQUIDITY_LOCK_ARGS_HELPER_OK")).to.equal(true);
+  });
+}

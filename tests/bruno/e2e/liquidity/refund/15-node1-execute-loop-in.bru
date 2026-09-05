@@ -1,0 +1,54 @@
+meta {
+  name: node1 execute loop in
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "loop_in",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}",
+        "funding_tx": "local-wallet"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // "local-wallet" is the only funding_tx descriptor accepted by the loop in
+  // runtime: the client funds the liquidity-lock cell from its local wallet.
+  const response = res.body.result;
+  if (!response || response.swap_id !== bru.getVar("QUOTE_ID")) {
+    throw new Error(`client loop_in swap_id must equal the quote_id: ${JSON.stringify(res.body)}`);
+  }
+  if (response.state !== "OnchainLockPending") {
+    throw new Error(`client loop_in must start in OnchainLockPending, got: ${response.state}`);
+  }
+  if (response.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`client loop_in payment_hash mismatch: ${response.payment_hash}`);
+  }
+  // Loop In swaps never surface a payout outpoint in the swap response; the
+  // client lock transaction is tracked as the loop_in_lock chain record.
+  if (response.payout_outpoint !== undefined) {
+    throw new Error(`client loop_in must not return a payout_outpoint: ${JSON.stringify(response.payout_outpoint)}`);
+  }
+}

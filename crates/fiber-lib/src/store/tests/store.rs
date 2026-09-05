@@ -24,13 +24,19 @@ use crate::gen_rand_fiber_public_key;
 use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
+use crate::liquidity::store::{
+    LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapFilter,
+    LiquiditySwapKind, LiquiditySwapRecord, LiquiditySwapRole, LiquiditySwapUpdate,
+};
+use crate::liquidity::types::LoopOutQuoteTerms;
 use crate::now_timestamp_as_millis_u64;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::store::open_store;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+use crate::store::store_impl::{KeyValue, StoreKeyValue};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::{check_validate, open_store};
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -46,17 +52,25 @@ use fiber_store::backend::StorageBackend;
 use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
+use fiber_types::schema::{
+    LIQUIDITY_ASSET_PREFIX, LIQUIDITY_LOOP_OUT_QUOTE_PREFIX, LIQUIDITY_SWAP_PREFIX,
+    LIQUIDITY_SWAP_STATE_PREFIX,
+};
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
     SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
-    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
+    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, LiquidityAsset, LiquidityAssetError,
+    LiquidityAssetKind, LiquiditySwapState, PaymentHopData, RouterHop, SessionRoute,
 };
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
 use musig2::SecNonce;
+use secp256k1::SecretKey;
+use secp256k1::SECP256K1;
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use tentacle::secio::PeerId;
@@ -137,6 +151,1137 @@ fn test_store_invoice() {
     let status = CkbInvoiceStatus::Paid;
     store.update_invoice_status(hash, status).unwrap();
     assert_eq!(store.get_invoice_status(hash), Some(status));
+}
+
+fn mock_liquidity_swap(seed: u8, state: LiquiditySwapState, asset_id: &str) -> LiquiditySwapRecord {
+    LiquiditySwapRecord {
+        swap_id: [seed; 32].into(),
+        quote_id: [seed.wrapping_add(1); 32].into(),
+        role: LiquiditySwapRole::Client,
+        swap_kind: LiquiditySwapKind::LoopOut,
+        asset_id: asset_id.to_string(),
+        state,
+        payment_hash: [seed.wrapping_add(2); 32].into(),
+        payment_preimage: None,
+        amount: u128::from(seed) + 1000,
+        onchain_outpoint: None,
+        payout_deadline: Some(10_000 + u64::from(seed)),
+        refund_after_lock_time: 20_000 + u64::from(seed),
+        expires_at: 30_000 + u64::from(seed),
+        failure_reason: None,
+        created_at: 40_000 + u64::from(seed),
+        updated_at: 50_000 + u64::from(seed),
+    }
+}
+
+fn mock_liquidity_asset(asset_id: &str) -> LiquidityAsset {
+    LiquidityAsset {
+        asset_id: asset_id.to_string(),
+        kind: LiquidityAssetKind::Ckb,
+        udt_type_script: None,
+        min_amount: 1_000,
+        max_amount: 1_000_000,
+        available_capacity: 500_000,
+        base_fee: 100,
+        proportional_fee_ppm: 1_000,
+        enabled: true,
+    }
+}
+
+fn mock_script(args: &'static str) -> Script {
+    Script::new_builder()
+        .args(ckb_types::bytes::Bytes::from(args).pack())
+        .build()
+}
+
+fn mock_loop_out_quote(seed: u8) -> LoopOutQuoteTerms {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    LoopOutQuoteTerms {
+        quote_id: [seed; 32].into(),
+        swap_kind: LiquiditySwapKind::LoopOut,
+        provider: Pubkey::from(sk.public_key(SECP256K1)),
+        asset: mock_liquidity_asset("ckb"),
+        amount: 10_000,
+        provider_fee: 100,
+        routing_fee_limit: 50,
+        onchain_fee_estimate_ckb: 1_000,
+        capacity_requirement_ckb: 10_000,
+        payment_hash: [seed.wrapping_add(1); 32].into(),
+        payment_preimage: None,
+        expires_at: 20_000,
+        payout_deadline: 30_000,
+        refund_after_lock_time: 40_000,
+        claimant_lock: mock_script("claimant-store-round-trip"),
+        refund_lock: mock_script("refund-store-round-trip"),
+        client_invoice: None,
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_loop_out_quote_insert_get_and_missing() {
+    let (store, _dir) = generate_store();
+    let quote = mock_loop_out_quote(77);
+
+    store.insert_loop_out_quote(quote.clone(), 1_000).unwrap();
+
+    assert_eq!(
+        store.get_loop_out_quote(&quote.quote_id).unwrap(),
+        Some(quote)
+    );
+    assert_eq!(store.get_loop_out_quote(&[99u8; 32].into()).unwrap(), None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_quote_kind_round_trips() {
+    let (store, _dir) = generate_store();
+    let quote = LoopOutQuoteTerms {
+        swap_kind: LiquiditySwapKind::LoopIn,
+        ..mock_loop_out_quote(78)
+    };
+
+    store.insert_loop_out_quote(quote.clone(), 1_000).unwrap();
+
+    assert_eq!(
+        store
+            .get_loop_out_quote(&quote.quote_id)
+            .unwrap()
+            .unwrap()
+            .swap_kind,
+        LiquiditySwapKind::LoopIn
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_asset_upsert_get_list() {
+    let (store, _dir) = generate_store();
+    let asset_b = mock_liquidity_asset("ckb-b");
+    let asset_a = mock_liquidity_asset("ckb-a");
+    let mut updated_asset_b = asset_b.clone();
+    updated_asset_b.available_capacity = 750_000;
+    updated_asset_b.enabled = false;
+
+    store.upsert_liquidity_asset(asset_b.clone()).unwrap();
+    store.upsert_liquidity_asset(asset_a.clone()).unwrap();
+    store
+        .upsert_liquidity_asset(updated_asset_b.clone())
+        .unwrap();
+
+    assert_eq!(
+        store.get_liquidity_asset(&asset_b.asset_id).unwrap(),
+        Some(updated_asset_b.clone())
+    );
+    assert_eq!(store.get_liquidity_asset("missing").unwrap(), None);
+    assert_eq!(
+        store.list_liquidity_assets().unwrap(),
+        vec![asset_a, updated_asset_b]
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_asset_validation_rejects_invalid_asset() {
+    let (store, _dir) = generate_store();
+    let mut asset = mock_liquidity_asset("ckb");
+    asset.min_amount = asset.max_amount + 1;
+
+    let result = store.upsert_liquidity_asset(asset.clone());
+
+    assert!(matches!(
+        result,
+        Err(crate::liquidity::store::LiquidityStoreError::InvalidAsset(
+            LiquidityAssetError::InvalidAmountRange
+        ))
+    ));
+    assert_eq!(store.get_liquidity_asset(&asset.asset_id).unwrap(), None);
+    assert!(store.list_liquidity_assets().unwrap().is_empty());
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_insert_get() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(1, LiquiditySwapState::Created, "ckb");
+
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
+    assert_eq!(store.get_liquidity_swap(&[99u8; 32].into()).unwrap(), None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_duplicate_insert_is_rejected() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(19, LiquiditySwapState::Created, "ckb");
+
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    let result = store.insert_liquidity_swap(swap.clone());
+
+    assert!(matches!(
+        result,
+        Err(crate::liquidity::store::LiquidityStoreError::Backend(_))
+    ));
+    assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_records_survive_reopen() {
+    let dir = TempDir::new("test-liquidity-store-reopen");
+    let asset = mock_liquidity_asset("ckb");
+    let swap = mock_liquidity_swap(20, LiquiditySwapState::Created, &asset.asset_id);
+
+    {
+        let store = open_store(dir.as_ref()).expect("create store failed");
+        store.upsert_liquidity_asset(asset.clone()).unwrap();
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let reopened = open_store(dir.as_ref()).expect("reopen store failed");
+    assert_eq!(
+        reopened.get_liquidity_asset(&asset.asset_id).unwrap(),
+        Some(asset)
+    );
+    assert_eq!(
+        reopened.get_liquidity_swap(&swap.swap_id).unwrap(),
+        Some(swap.clone())
+    );
+    assert_eq!(
+        reopened
+            .list_liquidity_swaps(LiquiditySwapFilter {
+                state: Some(LiquiditySwapState::Created),
+                asset_id: Some("ckb".to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+            .swaps,
+        vec![swap]
+    );
+}
+
+#[test]
+fn test_store_lists_liquidity_swaps_by_states_and_kind() {
+    let (store, _dir) = generate_store();
+    let payout_pending = mock_liquidity_swap(200, LiquiditySwapState::PayoutPending, "ckb");
+    let payment_settled = mock_liquidity_swap(201, LiquiditySwapState::PaymentSettled, "ckb");
+    let success = mock_liquidity_swap(202, LiquiditySwapState::Success, "ckb");
+    let mut loop_in = mock_liquidity_swap(203, LiquiditySwapState::PayoutPending, "ckb");
+    loop_in.swap_kind = LiquiditySwapKind::LoopIn;
+    store.insert_liquidity_swap(payout_pending.clone()).unwrap();
+    store
+        .insert_liquidity_swap(payment_settled.clone())
+        .unwrap();
+    store.insert_liquidity_swap(success).unwrap();
+    store.insert_liquidity_swap(loop_in).unwrap();
+
+    let mut swaps = store
+        .list_liquidity_swaps_by_states(
+            &[
+                LiquiditySwapState::PayoutPending,
+                LiquiditySwapState::PaymentSettled,
+            ],
+            LiquiditySwapKind::LoopOut,
+        )
+        .unwrap();
+    swaps.sort_by_key(|swap| swap.created_at);
+
+    assert_eq!(swaps, vec![payout_pending, payment_settled]);
+}
+
+#[test]
+fn test_store_liquidity_chain_tx_insert_get_update_and_list() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [1u8; 32].into();
+    let tx_hash: fiber_types::Hash256 = [2u8; 32].into();
+    let outpoint = ckb_types::packed::OutPoint::new(
+        ckb_types::packed::Byte32::from_slice(&[3u8; 32]).unwrap(),
+        0,
+    );
+
+    let record = fiber_types::LiquidityChainTxRecord {
+        swap_id,
+        role: fiber_types::LiquidityChainTxRole::Payout,
+        tx_hash,
+        outpoint: Some(outpoint.clone()),
+        status: fiber_types::LiquidityChainTxStatus::Planned,
+        failure_reason: None,
+        created_at: 10,
+        updated_at: 10,
+    };
+
+    store.insert_liquidity_chain_tx(record.clone()).unwrap();
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap_id, fiber_types::LiquidityChainTxRole::Payout)
+            .unwrap(),
+        Some(record.clone())
+    );
+
+    store
+        .update_liquidity_chain_tx_status(
+            &swap_id,
+            fiber_types::LiquidityChainTxRole::Payout,
+            fiber_types::LiquidityChainTxStatus::Broadcast,
+            None,
+            11,
+        )
+        .unwrap();
+
+    let updated = store
+        .get_liquidity_chain_tx(&swap_id, fiber_types::LiquidityChainTxRole::Payout)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status,
+        fiber_types::LiquidityChainTxStatus::Broadcast
+    );
+    assert_eq!(updated.outpoint, Some(outpoint));
+
+    let planned = store
+        .list_liquidity_chain_txs_by_status(&[fiber_types::LiquidityChainTxStatus::Planned])
+        .unwrap();
+    assert!(planned.is_empty());
+
+    let active = store
+        .list_liquidity_chain_txs_by_status(&[fiber_types::LiquidityChainTxStatus::Broadcast])
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].tx_hash, tx_hash);
+}
+
+#[test]
+fn test_store_liquidity_chain_tx_rejects_duplicate_role_for_swap() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [4u8; 32].into();
+
+    let record = fiber_types::LiquidityChainTxRecord {
+        swap_id,
+        role: fiber_types::LiquidityChainTxRole::Claim,
+        tx_hash: [5u8; 32].into(),
+        outpoint: None,
+        status: fiber_types::LiquidityChainTxStatus::Planned,
+        failure_reason: None,
+        created_at: 10,
+        updated_at: 10,
+    };
+
+    store.insert_liquidity_chain_tx(record.clone()).unwrap();
+    assert!(store.insert_liquidity_chain_tx(record).is_err());
+}
+
+#[test]
+fn test_store_liquidity_chain_tx_signed_tx_round_trips_for_payout_role() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [8u8; 32].into();
+    let tx = Transaction::default().as_advanced_builder().build().data();
+
+    // Only the Payout role (also reused by the Loop In lock) keeps signed-tx
+    // persistence; Claim and Refund are deterministically rebuilt and
+    // hash-verified against their persisted records, so their signed bytes are
+    // never persisted.
+    let role = fiber_types::LiquidityChainTxRole::Payout;
+    store
+        .insert_liquidity_chain_tx_signed_tx(&swap_id, role, tx.clone())
+        .unwrap();
+    let loaded = store
+        .get_liquidity_chain_tx_signed_tx(&swap_id, role)
+        .unwrap()
+        .expect("signed tx bytes are persisted for the payout role");
+    assert_eq!(loaded.as_slice(), tx.as_slice());
+}
+
+#[test]
+fn test_store_liquidity_chain_tx_list_by_swap_returns_all_roles_and_empty_for_unknown() {
+    let (store, _dir) = generate_store();
+    let swap_id: fiber_types::Hash256 = [7u8; 32].into();
+    let other_swap_id: fiber_types::Hash256 = [8u8; 32].into();
+
+    let records = [
+        fiber_types::LiquidityChainTxRecord {
+            swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: [1u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Planned,
+            failure_reason: None,
+            created_at: 10,
+            updated_at: 10,
+        },
+        fiber_types::LiquidityChainTxRecord {
+            swap_id,
+            role: fiber_types::LiquidityChainTxRole::Claim,
+            tx_hash: [2u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Broadcast,
+            failure_reason: None,
+            created_at: 11,
+            updated_at: 11,
+        },
+        fiber_types::LiquidityChainTxRecord {
+            swap_id,
+            role: fiber_types::LiquidityChainTxRole::Refund,
+            tx_hash: [3u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 12,
+            updated_at: 12,
+        },
+        fiber_types::LiquidityChainTxRecord {
+            swap_id: other_swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: [4u8; 32].into(),
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Planned,
+            failure_reason: None,
+            created_at: 13,
+            updated_at: 13,
+        },
+    ];
+
+    for record in records {
+        store.insert_liquidity_chain_tx(record).unwrap();
+    }
+
+    let listed = store.list_liquidity_chain_txs_by_swap(&swap_id).unwrap();
+    assert_eq!(listed.len(), 3);
+    assert!(listed
+        .iter()
+        .any(|record| record.role == fiber_types::LiquidityChainTxRole::Payout));
+    assert!(listed
+        .iter()
+        .any(|record| record.role == fiber_types::LiquidityChainTxRole::Claim));
+    assert!(listed
+        .iter()
+        .any(|record| record.role == fiber_types::LiquidityChainTxRole::Refund));
+
+    assert!(store
+        .list_liquidity_chain_txs_by_swap(&[99u8; 32].into())
+        .unwrap()
+        .is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_check_validate_rejects_corrupt_records() {
+    let dir = TempDir::new("test-liquidity-store-check-validate");
+    let store = open_store(dir.as_ref()).expect("create store failed");
+
+    store.put([LIQUIDITY_SWAP_PREFIX], [0]);
+    store.put([LIQUIDITY_ASSET_PREFIX], [0]);
+    store.put([LIQUIDITY_LOOP_OUT_QUOTE_PREFIX], [0]);
+    drop(store);
+
+    let error = check_validate(dir.as_ref()).expect_err("corrupt liquidity records must fail");
+
+    assert!(error.contains("LIQUIDITY_SWAP_PREFIX"));
+    assert!(error.contains("LIQUIDITY_ASSET_PREFIX"));
+    assert!(error.contains("LIQUIDITY_LOOP_OUT_QUOTE_PREFIX"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swap_get_returns_backend_error_on_corrupt_record() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(21, LiquiditySwapState::Created, "ckb");
+    let key = KeyValue::LiquiditySwap(swap.swap_id, swap.clone()).key();
+
+    store.put(key, [0]);
+
+    assert!(matches!(
+        store.get_liquidity_swap(&swap.swap_id),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_index_scan_returns_backend_error_on_corrupt_record() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(22, LiquiditySwapState::Created, "ckb");
+    let primary_key = KeyValue::LiquiditySwap(swap.swap_id, swap.clone()).key();
+    let state_index_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
+
+    store.put(primary_key, [0]);
+    store.put(state_index_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_malformed_key() {
+    let (store, _dir) = generate_store();
+    let state = LiquiditySwapState::Created;
+    let mut malformed_key = KeyValue::LiquiditySwapStateIndex((state, [23u8; 32].into())).key();
+    assert_eq!(malformed_key[0], LIQUIDITY_SWAP_STATE_PREFIX);
+    malformed_key.truncate(malformed_key.len() - 1);
+
+    store.put(malformed_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(state),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_extra_byte_before_swap_id() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(27, LiquiditySwapState::Created, "ckb");
+    let mut malformed_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
+    malformed_key.insert(2, 0xff);
+
+    store.insert_liquidity_swap(swap).unwrap();
+    store.put(malformed_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_asset_index_scan_rejects_extra_byte_before_swap_id() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(28, LiquiditySwapState::Created, "ckb");
+    let mut malformed_key =
+        KeyValue::LiquiditySwapAssetIndex((swap.asset_id.clone(), swap.swap_id)).key();
+    malformed_key.insert(malformed_key.len() - 32, 0xff);
+
+    store.insert_liquidity_swap(swap).unwrap();
+    store.put(malformed_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_missing_primary_record() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(24, LiquiditySwapState::Created, "ckb");
+    let state_index_key = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id)).key();
+
+    store.put(state_index_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_state_index_scan_rejects_stale_state_index() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(25, LiquiditySwapState::Quoted, "ckb");
+    let stale_state_index_key =
+        KeyValue::LiquiditySwapStateIndex((LiquiditySwapState::Created, swap.swap_id)).key();
+
+    store.insert_liquidity_swap(swap).unwrap();
+    store.put(stale_state_index_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_swaps_asset_index_scan_rejects_stale_asset_index() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(26, LiquiditySwapState::Created, "udt");
+    let stale_asset_index_key =
+        KeyValue::LiquiditySwapAssetIndex(("ckb".to_string(), swap.swap_id)).key();
+
+    store.insert_liquidity_swap(swap).unwrap();
+    store.put(stale_asset_index_key, []);
+
+    assert!(matches!(
+        store.list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        }),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_liquidity_asset_reads_return_backend_error_on_corrupt_record() {
+    let (store, _dir) = generate_store();
+    let asset = mock_liquidity_asset("ckb");
+    let key = KeyValue::LiquidityAsset(asset.asset_id.clone(), asset.clone()).key();
+
+    store.put(key, [0]);
+
+    assert!(matches!(
+        store.get_liquidity_asset(&asset.asset_id),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+    assert!(matches!(
+        store.list_liquidity_assets(),
+        Err(LiquidityStoreError::Backend(_))
+    ));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_valid_transition_updates_state_index() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(2, LiquiditySwapState::Created, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    store
+        .update_liquidity_swap_state(
+            &swap.swap_id,
+            LiquidityStateTransition {
+                state: LiquiditySwapState::Quoted,
+                updated_at: 99,
+                reason: Some("quote accepted".to_string()),
+            },
+        )
+        .unwrap();
+
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.state, LiquiditySwapState::Quoted);
+    assert_eq!(updated.updated_at, 99);
+    assert_eq!(updated.failure_reason, None);
+
+    let created = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            ..Default::default()
+        })
+        .unwrap();
+    let quoted = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Quoted),
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert!(created.swaps.is_empty());
+    assert_eq!(quoted.swaps, vec![updated]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_failed_transition_stores_failure_reason() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(4, LiquiditySwapState::PaymentInFlight, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    store
+        .update_liquidity_swap_state(
+            &swap.swap_id,
+            LiquidityStateTransition {
+                state: LiquiditySwapState::Failed,
+                updated_at: 101,
+                reason: Some("payment failed".to_string()),
+            },
+        )
+        .unwrap();
+
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.state, LiquiditySwapState::Failed);
+    assert_eq!(updated.updated_at, 101);
+    assert_eq!(updated.failure_reason, Some("payment failed".to_string()));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_invalid_transition_is_rejected() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(3, LiquiditySwapState::PaymentSettled, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    let result = store.update_liquidity_swap_state(
+        &swap.swap_id,
+        LiquidityStateTransition {
+            state: LiquiditySwapState::Success,
+            updated_at: 99,
+            reason: Some("skip claim".to_string()),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::liquidity::store::LiquidityStoreError::InvalidStateTransition { .. })
+    ));
+    assert_eq!(store.get_liquidity_swap(&swap.swap_id).unwrap(), Some(swap));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swap_update_preserves_none_fields() {
+    let (store, _dir) = generate_store();
+    let mut swap = mock_liquidity_swap(5, LiquiditySwapState::PaymentInFlight, "ckb");
+    let payment_preimage = [6u8; 32].into();
+    let onchain_outpoint = OutPoint::new_builder()
+        .tx_hash([7u8; 32].pack())
+        .index(1u32)
+        .build();
+    swap.payment_preimage = Some(payment_preimage);
+    swap.onchain_outpoint = Some(onchain_outpoint.clone());
+    swap.failure_reason = Some("existing failure".to_string());
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+
+    store
+        .update_liquidity_swap(
+            &swap.swap_id,
+            LiquiditySwapUpdate {
+                payment_preimage: None,
+                onchain_outpoint: None,
+                failure_reason: None,
+                updated_at: 123,
+            },
+        )
+        .unwrap();
+
+    let updated = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    assert_eq!(updated.payment_preimage, Some(payment_preimage));
+    assert_eq!(updated.onchain_outpoint, Some(onchain_outpoint));
+    assert_eq!(updated.failure_reason, Some("existing failure".to_string()));
+    assert_eq!(updated.updated_at, 123);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_clears_matching_payout_validation_failure_context() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(6, LiquiditySwapState::PayoutLocked, "ckb");
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    let payout_tx_id: fiber_types::Hash256 = [7u8; 32].into();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "payout validation failed".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Definitive,
+            124,
+        )
+        .unwrap();
+    assert!(store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 125)
+        .unwrap());
+
+    let updated_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    let updated_payout = store
+        .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+        .unwrap();
+    assert_eq!(updated_swap.failure_reason, None);
+    assert_eq!(updated_swap.updated_at, 125);
+    assert_eq!(updated_payout.unwrap().failure_reason, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_transient_validation_preserves_owned_definitive_context() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(12, LiquiditySwapState::PayoutLocked, "ckb");
+    let payout_tx_id: fiber_types::Hash256 = [13u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "definitive validation failure".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Definitive,
+            124,
+        )
+        .unwrap();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "transient validation failure".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Transient,
+            125,
+        )
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_liquidity_swap(&swap.swap_id)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("definitive validation failure")
+    );
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("transient validation failure")
+    );
+
+    assert!(store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 126)
+        .unwrap());
+
+    assert_eq!(
+        store
+            .get_liquidity_swap(&swap.swap_id)
+            .unwrap()
+            .unwrap()
+            .failure_reason,
+        None
+    );
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+            .unwrap()
+            .unwrap()
+            .failure_reason,
+        None
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_preserves_equal_looking_unrelated_swap_failure_context() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(7, LiquiditySwapState::PayoutLocked, "ckb");
+    let payout_tx_id: fiber_types::Hash256 = [8u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: None,
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+    let reason = "same visible failure text".to_string();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            reason.clone(),
+            crate::liquidity::store::PayoutValidationFailureKind::Definitive,
+            124,
+        )
+        .unwrap();
+    store
+        .update_liquidity_swap(
+            &swap.swap_id,
+            LiquiditySwapUpdate {
+                failure_reason: Some(reason.clone()),
+                updated_at: 125,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .persist_payout_validation_failure_context(
+            &swap.swap_id,
+            &payout_tx_id,
+            "later transient validation failure".to_string(),
+            crate::liquidity::store::PayoutValidationFailureKind::Transient,
+            126,
+        )
+        .unwrap();
+
+    assert!(store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 127)
+        .unwrap());
+
+    let updated_swap = store.get_liquidity_swap(&swap.swap_id).unwrap().unwrap();
+    let updated_payout = store
+        .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout)
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated_swap.failure_reason, Some(reason));
+    assert_eq!(updated_payout.failure_reason, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_payout_validation_cleanup_ignores_unrelated_payout_and_claim_records() {
+    let (store, _dir) = generate_store();
+    let swap = mock_liquidity_swap(8, LiquiditySwapState::PayoutLocked, "ckb");
+    let payout_tx_id: fiber_types::Hash256 = [9u8; 32].into();
+    let unrelated_tx_id: fiber_types::Hash256 = [10u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    for (role, tx_hash) in [
+        (fiber_types::LiquidityChainTxRole::Payout, payout_tx_id),
+        (fiber_types::LiquidityChainTxRole::Claim, unrelated_tx_id),
+    ] {
+        store
+            .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+                swap_id: swap.swap_id,
+                role,
+                tx_hash,
+                outpoint: None,
+                status: fiber_types::LiquidityChainTxStatus::Confirmed,
+                failure_reason: Some("unrelated chain failure".to_string()),
+                created_at: 123,
+                updated_at: 123,
+            })
+            .unwrap();
+    }
+
+    assert!(!store
+        .clear_payout_validation_failure_context(&swap.swap_id, &unrelated_tx_id, 124)
+        .unwrap());
+
+    for role in [
+        fiber_types::LiquidityChainTxRole::Payout,
+        fiber_types::LiquidityChainTxRole::Claim,
+    ] {
+        assert_eq!(
+            store
+                .get_liquidity_chain_tx(&swap.swap_id, role)
+                .unwrap()
+                .unwrap()
+                .failure_reason
+                .as_deref(),
+            Some("unrelated chain failure")
+        );
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_payout_validation_cleanup_without_provenance_is_noop() {
+    let (store, _dir) = generate_store();
+    let mut swap = mock_liquidity_swap(9, LiquiditySwapState::PayoutLocked, "ckb");
+    swap.failure_reason = Some("legacy equal-looking reason".to_string());
+    let payout_tx_id: fiber_types::Hash256 = [11u8; 32].into();
+    store.insert_liquidity_swap(swap.clone()).unwrap();
+    store
+        .insert_liquidity_chain_tx(fiber_types::LiquidityChainTxRecord {
+            swap_id: swap.swap_id,
+            role: fiber_types::LiquidityChainTxRole::Payout,
+            tx_hash: payout_tx_id,
+            outpoint: None,
+            status: fiber_types::LiquidityChainTxStatus::Confirmed,
+            failure_reason: Some("legacy equal-looking reason".to_string()),
+            created_at: 123,
+            updated_at: 123,
+        })
+        .unwrap();
+
+    assert!(!store
+        .clear_payout_validation_failure_context(&swap.swap_id, &payout_tx_id, 124)
+        .unwrap());
+    assert_eq!(
+        store.get_liquidity_swap(&swap.swap_id).unwrap(),
+        Some(swap.clone())
+    );
+    assert_eq!(
+        store
+            .get_liquidity_chain_tx(&swap.swap_id, fiber_types::LiquidityChainTxRole::Payout,)
+            .unwrap()
+            .unwrap()
+            .failure_reason
+            .as_deref(),
+        Some("legacy equal-looking reason")
+    );
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_filter_by_asset_and_state() {
+    let (store, _dir) = generate_store();
+    let ckb_created = mock_liquidity_swap(6, LiquiditySwapState::Created, "ckb");
+    let udt_created = mock_liquidity_swap(7, LiquiditySwapState::Created, "udt1");
+    let ckb_quoted = mock_liquidity_swap(8, LiquiditySwapState::Quoted, "ckb");
+    let udt_quoted = mock_liquidity_swap(9, LiquiditySwapState::Quoted, "udt1");
+
+    for swap in [&ckb_created, &udt_created, &ckb_quoted, &udt_quoted] {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let ckb_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        ckb_swaps.swaps,
+        vec![ckb_created.clone(), ckb_quoted.clone()]
+    );
+    assert_eq!(ckb_swaps.next_cursor, None);
+
+    let udt_created_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            asset_id: Some("udt1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(udt_created_swaps.swaps, vec![udt_created]);
+    assert_eq!(udt_created_swaps.next_cursor, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_asset_filter_does_not_overlap_embedded_nul_asset_ids() {
+    let (store, _dir) = generate_store();
+    let ckb = mock_liquidity_swap(16, LiquiditySwapState::Created, "ckb");
+    let ckb_udt = mock_liquidity_swap(17, LiquiditySwapState::Created, "ckb\0udt");
+    let ckb_udt_suffix = mock_liquidity_swap(18, LiquiditySwapState::Created, "ckb\0udt\0suffix");
+
+    for swap in [&ckb, &ckb_udt, &ckb_udt_suffix] {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let ckb_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ckb_swaps.swaps, vec![ckb]);
+
+    let ckb_udt_swaps = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb\0udt".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ckb_udt_swaps.swaps, vec![ckb_udt]);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_paginate_without_duplicates() {
+    let (store, _dir) = generate_store();
+    let swaps = vec![
+        mock_liquidity_swap(10, LiquiditySwapState::Created, "ckb"),
+        mock_liquidity_swap(11, LiquiditySwapState::Created, "ckb"),
+        mock_liquidity_swap(12, LiquiditySwapState::Created, "ckb"),
+    ];
+
+    for swap in &swaps {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let first_page = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            limit: Some(2),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(first_page.swaps, swaps[..2]);
+    let cursor = first_page
+        .next_cursor
+        .expect("first page should have a next cursor");
+
+    let second_page = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            asset_id: Some("ckb".to_string()),
+            limit: Some(2),
+            cursor: Some(cursor),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(second_page.swaps, swaps[2..]);
+    assert_eq!(second_page.next_cursor, None);
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_liquidity_swaps_paginate_after_state_asset_filtering() {
+    let (store, _dir) = generate_store();
+    let other_asset = mock_liquidity_swap(13, LiquiditySwapState::Created, "udt1");
+    let first_ckb = mock_liquidity_swap(14, LiquiditySwapState::Created, "ckb");
+    let second_ckb = mock_liquidity_swap(15, LiquiditySwapState::Created, "ckb");
+
+    for swap in [&other_asset, &first_ckb, &second_ckb] {
+        store.insert_liquidity_swap(swap.clone()).unwrap();
+    }
+
+    let first_page = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            asset_id: Some("ckb".to_string()),
+            limit: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(first_page.swaps, vec![first_ckb.clone()]);
+    let cursor = first_page
+        .next_cursor
+        .expect("first filtered page should have a next cursor");
+
+    let second_page = store
+        .list_liquidity_swaps(LiquiditySwapFilter {
+            state: Some(LiquiditySwapState::Created),
+            asset_id: Some("ckb".to_string()),
+            limit: Some(1),
+            cursor: Some(cursor),
+        })
+        .unwrap();
+    assert_eq!(second_page.swaps, vec![second_ckb]);
+    assert_eq!(second_page.next_cursor, None);
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]

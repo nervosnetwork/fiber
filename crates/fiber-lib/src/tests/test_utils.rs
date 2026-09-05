@@ -1,7 +1,11 @@
 use crate::ckb::client::CkbChainClient;
 use crate::ckb::tests::test_utils::MockChainActorMiddleware;
+#[cfg(test)]
+use crate::ckb::tests::test_utils::MockChainController;
 use crate::ckb::CkbConfig;
 use crate::ckb::GetTxResponse;
+#[cfg(test)]
+use crate::ckb::{CkbTxTracer, CkbTxTracingMask};
 use crate::fiber::channel::*;
 use crate::fiber::config::CKB_SHANNONS;
 use crate::fiber::gossip::get_gossip_actor_name;
@@ -22,16 +26,26 @@ use crate::fiber::{
 use crate::gen_rand_secp256k1_keypair_tuple;
 use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::liquidity::actor::LiquidityActorMessage;
 use crate::rpc::config::RpcConfig;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::invoice::{InvoiceResult, NewInvoiceParams};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc::server::start_rpc;
+use aes_gcm::aead::OsRng;
 use ckb_sdk::core::TransactionBuilder;
+#[cfg(test)]
+use ckb_types::bytes::Bytes;
 use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{tx_pool::TxStatus, TransactionView},
     packed::{OutPoint, Script},
+};
+#[cfg(test)]
+use ckb_types::{
+    packed::CellOutput,
+    prelude::{Builder, Entity, Pack},
 };
 use fiber_types::TLCId;
 use fiber_types::TlcInfo;
@@ -205,6 +219,12 @@ pub fn gen_rpc_config() -> RpcConfig {
     }
 }
 
+pub fn gen_liquidity_rpc_config() -> RpcConfig {
+    let mut config = gen_rpc_config();
+    config.enabled_modules.push("liquidity".to_string());
+    config
+}
+
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
 pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
@@ -272,16 +292,20 @@ pub struct NetworkNode {
     pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: MockCkbChainClient,
+    pub mock_chain_state: Arc<std::sync::RwLock<MockChainState>>,
     pub mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
     #[allow(dead_code)]
     pub(crate) gossip_actor: Option<ActorRef<GossipActorMessage>>,
     pub private_key: Privkey,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
+    event_forwarder_task: Option<tokio::task::JoinHandle<()>>,
     pub pubkey: Pubkey,
     pub unexpected_events: Arc<TokioRwLock<HashSet<String>>>,
     pub triggered_unexpected_events: Arc<TokioRwLock<Vec<String>>>,
     #[cfg(not(target_arch = "wasm32"))]
     pub rpc_server: Option<(ServerHandle, SocketAddr)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub liquidity_actor: Option<ActorRef<LiquidityActorMessage>>,
     pub auth_token: Option<String>,
 }
 
@@ -292,6 +316,7 @@ pub struct NetworkNodeConfig {
     fiber_config: FiberConfig,
     rpc_config: Option<RpcConfig>,
     ckb_config: Option<CkbConfig>,
+    mock_chain_state: Arc<std::sync::RwLock<MockChainState>>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
@@ -309,6 +334,7 @@ pub struct NetworkNodeConfigBuilder {
     // but allow user to override it.
     #[allow(clippy::type_complexity)]
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+    mock_chain_state: Option<Arc<std::sync::RwLock<MockChainState>>>,
     mock_chain_actor_middleware: Option<Box<dyn MockChainActorMiddleware>>,
 }
 
@@ -325,6 +351,7 @@ impl NetworkNodeConfigBuilder {
             node_name: None,
             rpc_config: None,
             fiber_config_updater: None,
+            mock_chain_state: None,
             mock_chain_actor_middleware: None,
         }
     }
@@ -364,6 +391,11 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
+    pub fn mock_chain_state(mut self, state: Arc<std::sync::RwLock<MockChainState>>) -> Self {
+        self.mock_chain_state = Some(state);
+        self
+    }
+
     pub fn build(self) -> NetworkNodeConfig {
         let base_dir = self
             .base_dir
@@ -388,6 +420,7 @@ impl NetworkNodeConfigBuilder {
                 funding_tx_shell_builder: None,
                 #[cfg(target_arch = "wasm32")]
                 wasm_secret_key: None,
+                test_secret_key: Some(SECP256K1.generate_keypair(&mut OsRng).0),
             })
         } else {
             None
@@ -400,6 +433,9 @@ impl NetworkNodeConfigBuilder {
             store,
             fiber_config,
             rpc_config,
+            mock_chain_state: self
+                .mock_chain_state
+                .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(MockChainState::new()))),
             mock_chain_actor_middleware: self.mock_chain_actor_middleware,
         };
 
@@ -1636,6 +1672,7 @@ impl NetworkNode {
             fiber_config,
             rpc_config,
             ckb_config,
+            mock_chain_state,
             mock_chain_actor_middleware,
         } = config;
 
@@ -1644,18 +1681,20 @@ impl NetworkNode {
         let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
-        let shared_state = Arc::new(std::sync::RwLock::new(MockChainState::new()));
         let chain_actor = Actor::spawn_linked(
             None,
             MockChainActor::new(),
-            (mock_chain_actor_middleware.clone(), shared_state.clone()),
+            (
+                mock_chain_actor_middleware.clone(),
+                mock_chain_state.clone(),
+            ),
             root.get_cell(),
         )
         .await
         .expect("start mock chain actor")
         .0;
 
-        let chain_client = MockCkbChainClient::new(shared_state);
+        let chain_client = MockCkbChainClient::new(mock_chain_state.clone());
 
         let private_key: Privkey = fiber_config
             .read_or_generate_secret_key()
@@ -1721,7 +1760,7 @@ impl NetworkNode {
         let unexpected_events_clone = unexpected_events.clone();
         let triggered_unexpected_events_clone = triggered_unexpected_events.clone();
         // spawn a new thread to collect all the events from event_receiver
-        tokio::spawn(async move {
+        let event_forwarder_task = tokio::spawn(async move {
             while let Some(event) = event_receiver.recv().await {
                 if self_event_sender.send(event.clone()).await.is_err() {
                     debug!("event receiver dropped, stopping event forwarder task");
@@ -1749,29 +1788,27 @@ impl NetworkNode {
         let gossip_actor =
             ractor::registry::where_is(get_gossip_actor_name(&started_pubkey)).map(Into::into);
         #[cfg(not(target_arch = "wasm32"))]
-        let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
-            Some(
-                start_rpc(
-                    rpc_config,
-                    ckb_config.clone(),
-                    Some(fiber_config.clone()),
-                    Some(network_actor.clone()),
-                    None,
-                    store.clone(),
-                    None,
-                    Some(network_graph.clone()),
-                    root.get_cell(),
-                    None,
-                    #[cfg(debug_assertions)]
-                    None,
-                    #[cfg(debug_assertions)]
-                    None,
-                )
-                .await
-                .unwrap(),
+        let (rpc_server, liquidity_actor) = if let Some(rpc_config) = rpc_config.clone() {
+            let (server, address, liquidity_actor) = start_rpc(
+                rpc_config,
+                ckb_config.clone(),
+                Some(fiber_config.clone()),
+                Some(network_actor.clone()),
+                None,
+                store.clone(),
+                None,
+                Some(network_graph.clone()),
+                root.get_cell(),
+                None,
+                Some(chain_actor.clone()),
+                #[cfg(debug_assertions)]
+                None,
             )
+            .await
+            .unwrap();
+            (Some((server, address)), liquidity_actor)
         } else {
-            None
+            (None, None)
         };
 
         Self {
@@ -1785,17 +1822,21 @@ impl NetworkNode {
             listening_addrs: announced_addrs,
             network_actor,
             chain_client,
+            mock_chain_state,
             mock_chain_actor_middleware,
             network_graph,
             chain_actor,
             gossip_actor,
             private_key,
             event_emitter: self_event_receiver,
+            event_forwarder_task: Some(event_forwarder_task),
             pubkey,
             unexpected_events,
             triggered_unexpected_events,
             #[cfg(not(target_arch = "wasm32"))]
             rpc_server,
+            #[cfg(not(target_arch = "wasm32"))]
+            liquidity_actor,
             auth_token: None,
         }
     }
@@ -1808,6 +1849,7 @@ impl NetworkNode {
             ckb_config: self.ckb_config.clone(),
             fiber_config: self.fiber_config.clone(),
             rpc_config: self.rpc_config.clone(),
+            mock_chain_state: self.mock_chain_state.clone(),
             mock_chain_actor_middleware: self.mock_chain_actor_middleware.clone(),
         }
     }
@@ -1861,6 +1903,19 @@ impl NetworkNode {
     }
 
     pub async fn stop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((rpc_server, _)) = self.rpc_server.take() {
+            rpc_server.stop().expect("stop RPC server");
+            rpc_server.stopped().await;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(liquidity_actor) = self.liquidity_actor.take() {
+            liquidity_actor.stop(Some("stopping liquidity actor on request".to_string()));
+            liquidity_actor
+                .wait(Some(event_wait_timeout()))
+                .await
+                .expect("timed out stopping liquidity actor");
+        }
         self.network_actor
             .stop(Some("stopping actor on request".to_string()));
         let my_pubkey = self.pubkey;
@@ -1868,6 +1923,22 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_pubkey),
         )
         .await;
+        self.network_actor
+            .wait(Some(event_wait_timeout()))
+            .await
+            .expect("timed out stopping network actor");
+        if let Some(event_forwarder_task) = self.event_forwarder_task.take() {
+            tokio::time::timeout(event_wait_timeout(), event_forwarder_task)
+                .await
+                .expect("timed out stopping event forwarder task")
+                .expect("event forwarder task panicked");
+        }
+        self.chain_actor
+            .stop(Some("stopping chain actor on request".to_string()));
+        self.chain_actor
+            .wait(Some(event_wait_timeout()))
+            .await
+            .expect("timed out stopping chain actor");
     }
 
     pub async fn restart(&mut self) {
@@ -2407,4 +2478,277 @@ async fn test_connect_to_other_node() {
 async fn test_restart_network_node() {
     let mut node = NetworkNode::new().await;
     node.restart().await;
+}
+
+#[tokio::test]
+async fn shared_mock_chain_exposes_committed_cells_to_both_nodes() {
+    let controller = MockChainController::new();
+    let shared_state = controller.shared_state();
+    let node_a = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("shared-chain-a".to_string()))
+            .mock_chain_state(shared_state.clone())
+            .build(),
+    )
+    .await;
+    let node_b = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some("shared-chain-b".to_string()))
+            .mock_chain_state(shared_state)
+            .build(),
+    )
+    .await;
+
+    let output = CellOutput::new_builder().capacity(100u64).build();
+    let data = Bytes::from_static(b"shared-chain-cell-data");
+    let tx = TransactionView::new_advanced_builder()
+        .output(output.clone())
+        .output_data(data.pack())
+        .build();
+    let tx_hash = tx.hash().into();
+    let outpoint = tx.output_pts_iter().next().expect("one output");
+
+    call!(node_a.chain_actor, CkbChainMessage::SendTx, tx)
+        .expect("node A chain actor alive")
+        .expect("pending transaction accepted");
+    assert!(matches!(
+        controller.transaction_status(tx_hash),
+        Some(TxStatus::Pending)
+    ));
+
+    let pending_cell = call!(
+        node_b.chain_actor,
+        CkbChainMessage::GetLiveCell,
+        outpoint.clone()
+    )
+    .expect("node B chain actor alive")
+    .expect("live-cell query succeeds");
+    assert!(pending_cell.is_none());
+
+    let (tracer_tx, tracer_rx) = oneshot::channel();
+    node_b
+        .chain_actor
+        .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
+            tx_hash,
+            confirmations: 1,
+            mask: CkbTxTracingMask::Committed,
+            callback: tracer_tx.into(),
+        }))
+        .expect("node B chain actor alive");
+
+    controller
+        .commit(tx_hash)
+        .expect("commit pending transaction");
+    let traced = tokio::time::timeout(event_wait_timeout(), tracer_rx)
+        .await
+        .expect("committed tracer notification timeout")
+        .expect("committed tracer callback dropped");
+    assert!(matches!(traced.tx_status, TxStatus::Committed(..)));
+
+    let committed_cell = call!(node_b.chain_actor, CkbChainMessage::GetLiveCell, outpoint)
+        .expect("node B chain actor alive")
+        .expect("live-cell query succeeds")
+        .expect("committed output is visible");
+    assert_eq!(committed_cell.output, output);
+    assert_eq!(committed_cell.data.raw_data(), data);
+}
+
+#[tokio::test]
+async fn shared_mock_chain_tracer_waits_for_requested_resolution() {
+    let controller = MockChainController::new();
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .mock_chain_state(controller.shared_state())
+            .build(),
+    )
+    .await;
+    let tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(100u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let tx_hash = tx.hash().into();
+    let outpoint = tx.output_pts_iter().next().expect("one output");
+    call!(node.chain_actor, CkbChainMessage::SendTx, tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+
+    let (tracer_tx, tracer_rx) = oneshot::channel();
+    node.chain_actor
+        .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
+            tx_hash,
+            confirmations: 1,
+            mask: CkbTxTracingMask::Rejected,
+            callback: tracer_tx.into(),
+        }))
+        .expect("chain actor alive");
+    let _ = call!(node.chain_actor, CkbChainMessage::GetLiveCell, outpoint)
+        .expect("chain actor alive")
+        .expect("live-cell query succeeds");
+
+    controller
+        .reject(tx_hash, "controlled rejection")
+        .expect("reject pending transaction");
+    let traced = tracer_rx.await.expect("rejected tracer callback dropped");
+    assert_eq!(
+        traced.tx_status,
+        TxStatus::Rejected("controlled rejection".to_string())
+    );
+}
+
+#[tokio::test]
+async fn shared_mock_chain_tracer_cannot_miss_resolution_during_registration() {
+    let controller = MockChainController::new();
+    let node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .mock_chain_state(controller.shared_state())
+            .build(),
+    )
+    .await;
+    let tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(100u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let tx_hash = tx.hash().into();
+    call!(node.chain_actor, CkbChainMessage::SendTx, tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+
+    let registration = controller.pause_next_tracer_registration();
+    let (tracer_tx, tracer_rx) = oneshot::channel();
+    node.chain_actor
+        .send_message(CkbChainMessage::CreateTxTracer(CkbTxTracer {
+            tx_hash,
+            confirmations: 1,
+            mask: CkbTxTracingMask::Committed,
+            callback: tracer_tx.into(),
+        }))
+        .expect("chain actor alive");
+    tokio::time::timeout(event_wait_timeout(), registration.wait_until_paused())
+        .await
+        .expect("tracer registration did not pause");
+
+    controller
+        .commit(tx_hash)
+        .expect("commit while tracer registration is paused");
+    registration.resume();
+
+    let traced = tokio::time::timeout(event_wait_timeout(), tracer_rx)
+        .await
+        .expect("tracer notification timeout")
+        .expect("tracer callback dropped");
+    assert!(matches!(traced.tx_status, TxStatus::Committed(..)));
+}
+
+#[tokio::test]
+async fn shared_mock_chain_restart_stops_old_chain_actor_and_preserves_backend() {
+    let controller = MockChainController::new();
+    let shared_state = controller.shared_state();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .mock_chain_state(shared_state.clone())
+            .build(),
+    )
+    .await;
+    let pending_tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(100u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let pending_hash = pending_tx.hash().into();
+    call!(node.chain_actor, CkbChainMessage::SendTx, pending_tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+    let old_chain_actor = node.chain_actor.clone();
+
+    node.restart().await;
+
+    assert_eq!(old_chain_actor.get_status(), ractor::ActorStatus::Stopped);
+    assert!(Arc::ptr_eq(&node.mock_chain_state, &shared_state));
+    assert!(matches!(
+        controller.transaction_status(pending_hash),
+        Some(TxStatus::Pending)
+    ));
+
+    let stale_tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(101u64).build())
+        .output_data(Bytes::new().pack())
+        .build();
+    let stale_hash = stale_tx.hash().into();
+    assert!(
+        call!(old_chain_actor, CkbChainMessage::SendTx, stale_tx).is_err(),
+        "stopped chain actor must reject stale requests"
+    );
+    assert!(controller.transaction_status(stale_hash).is_none());
+}
+
+#[tokio::test]
+async fn shared_mock_chain_controller_orders_and_repeats_resolutions_safely() {
+    let controller = MockChainController::new();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .mock_chain_state(controller.shared_state())
+            .build(),
+    )
+    .await;
+    let committed_tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(100u64).build())
+        .output_data(Bytes::from_static(b"committed").pack())
+        .build();
+    let committed_hash = committed_tx.hash().into();
+    let rejected_tx = TransactionView::new_advanced_builder()
+        .output(CellOutput::new_builder().capacity(200u64).build())
+        .output_data(Bytes::from_static(b"rejected").pack())
+        .build();
+    let rejected_hash = rejected_tx.hash().into();
+    let rejected_outpoint = rejected_tx.output_pts_iter().next().expect("one output");
+
+    call!(node.chain_actor, CkbChainMessage::SendTx, committed_tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+    call!(node.chain_actor, CkbChainMessage::SendTx, rejected_tx)
+        .expect("chain actor alive")
+        .expect("pending transaction accepted");
+    let pending = controller
+        .pending_transactions()
+        .into_iter()
+        .map(|tx| Hash256::from(tx.hash()))
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.contains(&committed_hash));
+    assert!(pending.contains(&rejected_hash));
+
+    controller.commit(committed_hash).expect("first commit");
+    controller.commit(committed_hash).expect("repeated commit");
+    assert!(controller
+        .reject(committed_hash, "too late")
+        .expect_err("reject after commit must conflict")
+        .contains("already committed"));
+
+    controller
+        .reject(rejected_hash, "policy rejection")
+        .expect("first rejection");
+    controller
+        .reject(rejected_hash, "policy rejection")
+        .expect("repeated rejection");
+    assert!(controller
+        .commit(rejected_hash)
+        .expect_err("commit after rejection must conflict")
+        .contains("already rejected"));
+    assert!(controller.pending_transactions().is_empty());
+
+    let rejected_cell = call!(
+        node.chain_actor,
+        CkbChainMessage::GetLiveCell,
+        rejected_outpoint
+    )
+    .expect("chain actor alive")
+    .expect("live-cell query succeeds");
+    assert!(rejected_cell.is_none());
+
+    let state_before_restart = node.mock_chain_state.clone();
+    node.restart().await;
+    assert!(Arc::ptr_eq(&state_before_restart, &node.mock_chain_state));
+    assert!(matches!(
+        controller.transaction_status(committed_hash),
+        Some(TxStatus::Committed(..))
+    ));
 }

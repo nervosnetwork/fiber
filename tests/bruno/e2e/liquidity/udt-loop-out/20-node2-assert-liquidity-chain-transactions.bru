@@ -1,0 +1,68 @@
+meta {
+  name: node2 assert liquidity chain transactions
+  type: http
+  seq: 20
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { decodeOutpoint } = require(process.cwd() + "/scripts/molecule-script");
+
+  const transactions = res.body.result.transactions || [];
+  const payout = transactions.find((tx) => tx.role === "payout");
+  if (!payout) {
+    throw new Error(`provider must record the payout transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (payout.status !== "confirmed") {
+    throw new Error(`provider payout record must be confirmed, got: ${payout.status}`);
+  }
+  if (payout.tx_hash !== bru.getVar("PAYOUT_TX_HASH")) {
+    throw new Error(`provider payout tx_hash mismatch: ${payout.tx_hash}`);
+  }
+  const payoutOutpoint = decodeOutpoint(payout.outpoint);
+  if (payoutOutpoint.txHash !== bru.getVar("PAYOUT_TX_HASH")) {
+    throw new Error(`provider payout outpoint tx_hash mismatch: ${payout.outpoint}`);
+  }
+  if (BigInt(payoutOutpoint.index) !== BigInt(bru.getVar("PAYOUT_INDEX"))) {
+    throw new Error(`provider payout outpoint index mismatch: ${payout.outpoint}`);
+  }
+
+  // The provider observes the client claim through an outpoint spend tracer;
+  // the client payment cannot settle in the covered prefix (see README), so
+  // the provider must not record a claim or a refund here either.
+  const claim = transactions.find((tx) => tx.role === "claim");
+  if (claim) {
+    throw new Error(`provider must not record a claim transaction: ${JSON.stringify(claim)}`);
+  }
+  const refund = transactions.find((tx) => tx.role === "refund");
+  if (refund) {
+    throw new Error(`udt loop out prefix must not record a refund: ${JSON.stringify(refund)}`);
+  }
+}

@@ -1,0 +1,53 @@
+meta {
+  name: node1 assert client swap terminal onchain locked
+  type: http
+  seq: 37
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // M0 note: the client loop-in swap ends at OnchainLocked (reached while the
+  // provider mode was disabled, request 24); there is no invoice-paid hook
+  // advancing the client swap, so OnchainLocked stays its terminal state even
+  // after the provider payment and claim complete.
+  const record = res.body.result;
+  if (!record) {
+    throw new Error(`client swap for ${bru.getVar("QUOTE_ID")} not found: ${JSON.stringify(res.body)}`);
+  }
+  if (record.state !== "onchain_locked") {
+    throw new Error(`client swap must remain terminal at onchain_locked, got: ${record.state}`);
+  }
+  if (record.swap_kind !== "loop_in") {
+    throw new Error(`client swap_kind must be loop_in: ${JSON.stringify(record)}`);
+  }
+  if (record.asset_id !== bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID")) {
+    throw new Error(`client swap asset_id mismatch: ${record.asset_id}`);
+  }
+}

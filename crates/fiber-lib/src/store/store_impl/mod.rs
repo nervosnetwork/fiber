@@ -16,6 +16,12 @@ use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 #[cfg(feature = "watchtower")]
 use crate::fiber::onchain_tlc_reconcile::{LegacyOnChainTlcSettlement, OnChainTlcSettlement};
 use crate::fiber::types::HoldTlc;
+use crate::liquidity::store::{
+    loop_out_quote_record_from_bytes, loop_out_quote_record_from_terms,
+    loop_out_quote_terms_from_record, LiquidityStateTransition, LiquidityStore,
+    LiquidityStoreError, LiquiditySwapFilter, LiquiditySwapPage, LiquiditySwapRecord,
+    LiquiditySwapUpdate, PayoutValidationFailureKind,
+};
 #[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{
@@ -25,7 +31,10 @@ use crate::{
         network::NetworkActorStateStore,
         payment::PaymentSessionExt,
     },
-    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore},
+    invoice::{
+        CkbInvoice, CkbInvoiceStatus, EnsureInvoicePreimageError, InvoiceError, InvoiceStore,
+        PreimageStore,
+    },
 };
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
@@ -36,14 +45,17 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
+    Cursor, Direction, Hash256, LiquidityAsset, LiquidityChainTxRecord, LiquidityChainTxRole,
+    LiquidityChainTxStatus, LiquiditySwapKind, LiquiditySwapState, LoopOutQuoteRecord,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey,
+    TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
 use fiber_types::{ChannelData, NodeId, Privkey, RevocationData, SettlementData};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
@@ -62,10 +74,18 @@ use tracing::warn;
 pub struct Store {
     inner: fiber_store::Store,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
+    invoice_write_lock: Arc<parking_lot::Mutex<()>>,
+    liquidity_write_lock: Arc<parking_lot::Mutex<()>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
     #[cfg(feature = "watchtower")]
     onchain_tlc_settlement_write_lock: Arc<parking_lot::Mutex<()>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+struct PayoutValidationProvenance {
+    payout_tx_id: Hash256,
+    owns_swap_failure_context: bool,
 }
 
 #[cfg(feature = "watchtower")]
@@ -120,6 +140,218 @@ impl Store {
             .entry(node_id.clone())
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone()
+    }
+
+    fn liquidity_swap_key(swap_id: &Hash256) -> Vec<u8> {
+        [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat()
+    }
+
+    fn loop_out_quote_key(quote_id: &Hash256) -> Vec<u8> {
+        [&[LIQUIDITY_LOOP_OUT_QUOTE_PREFIX], quote_id.as_ref()].concat()
+    }
+
+    fn liquidity_chain_tx_key(swap_id: &Hash256, role: LiquidityChainTxRole) -> Vec<u8> {
+        [
+            &[LIQUIDITY_CHAIN_TX_PREFIX],
+            swap_id.as_ref(),
+            &[liquidity_chain_tx_role_key(role)],
+        ]
+        .concat()
+    }
+
+    fn liquidity_chain_tx_signed_tx_key(swap_id: &Hash256, role: LiquidityChainTxRole) -> Vec<u8> {
+        [
+            &[LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX],
+            swap_id.as_ref(),
+            &[liquidity_chain_tx_role_key(role)],
+        ]
+        .concat()
+    }
+
+    fn payout_validation_provenance_key(swap_id: &Hash256, payout_tx_id: &Hash256) -> Vec<u8> {
+        [
+            &[LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX],
+            swap_id.as_ref(),
+            payout_tx_id.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn get_payout_validation_provenance(
+        &self,
+        swap_id: &Hash256,
+        payout_tx_id: &Hash256,
+    ) -> Result<Option<PayoutValidationProvenance>, LiquidityStoreError> {
+        self.get(Self::payout_validation_provenance_key(
+            swap_id,
+            payout_tx_id,
+        ))
+        .map(|value| deserialize_liquidity(&value, "PayoutValidationProvenance"))
+        .transpose()
+    }
+
+    fn liquidity_chain_tx_status_index_key(
+        status: LiquidityChainTxStatus,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+    ) -> Vec<u8> {
+        [
+            &[LIQUIDITY_CHAIN_TX_STATUS_PREFIX],
+            &[liquidity_chain_tx_status_key(status)],
+            swap_id.as_ref(),
+            &[liquidity_chain_tx_role_key(role)],
+        ]
+        .concat()
+    }
+
+    fn liquidity_swap_state_index_key(state: LiquiditySwapState, swap_id: &Hash256) -> Vec<u8> {
+        [
+            &[LIQUIDITY_SWAP_STATE_PREFIX],
+            &[liquidity_state_key(state)],
+            swap_id.as_ref(),
+        ]
+        .concat()
+    }
+
+    fn liquidity_swap_asset_index_prefix(asset_id: &str) -> Vec<u8> {
+        let asset_id_bytes = asset_id.as_bytes();
+        let mut key = Vec::with_capacity(1 + 4 + asset_id_bytes.len());
+        key.push(LIQUIDITY_SWAP_ASSET_PREFIX);
+        key.extend_from_slice(&(asset_id_bytes.len() as u32).to_be_bytes());
+        key.extend_from_slice(asset_id_bytes);
+        key
+    }
+
+    fn cursor_to_key(cursor: &Option<String>) -> Result<Option<Vec<u8>>, LiquidityStoreError> {
+        cursor
+            .as_ref()
+            .map(|cursor| {
+                hex::decode(cursor).map_err(|err| {
+                    LiquidityStoreError::Backend(format!(
+                        "invalid liquidity swap cursor {cursor}: {err}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn key_to_cursor(key: &[u8]) -> String {
+        hex::encode(key)
+    }
+
+    fn parse_liquidity_swap_id_from_index(
+        key: &[u8],
+        expected_state: Option<LiquiditySwapState>,
+        expected_asset_id: Option<&str>,
+    ) -> Option<Hash256> {
+        let offset = if let Some(state) = expected_state {
+            if key.len() != 34
+                || key.first() != Some(&LIQUIDITY_SWAP_STATE_PREFIX)
+                || key.get(1) != Some(&liquidity_state_key(state))
+            {
+                return None;
+            }
+            2
+        } else if let Some(asset_id) = expected_asset_id {
+            let prefix = Self::liquidity_swap_asset_index_prefix(asset_id);
+            if key.len() != prefix.len() + 32 || !key.starts_with(&prefix) {
+                return None;
+            }
+            prefix.len()
+        } else {
+            key.len().checked_sub(32)?
+        };
+        let bytes: [u8; 32] = key.get(offset..)?.try_into().ok()?;
+        Some(bytes.into())
+    }
+
+    fn get_liquidity_swap_from_index(
+        &self,
+        key: &[u8],
+        expected_state: Option<LiquiditySwapState>,
+        expected_asset_id: Option<&str>,
+    ) -> Result<LiquiditySwapRecord, LiquidityStoreError> {
+        let swap_id =
+            Self::parse_liquidity_swap_id_from_index(key, expected_state, expected_asset_id)
+                .ok_or_else(|| {
+                    LiquidityStoreError::Backend(format!(
+                        "invalid liquidity swap index key: {}",
+                        hex::encode(key)
+                    ))
+                })?;
+
+        let swap = self.get_liquidity_swap(&swap_id)?.ok_or_else(|| {
+            LiquidityStoreError::Backend(format!(
+                "liquidity swap index points to missing record: {:?}",
+                swap_id
+            ))
+        })?;
+
+        if expected_state.is_some_and(|state| swap.state != state) {
+            return Err(LiquidityStoreError::Backend(format!(
+                "stale liquidity swap state index: key {} points to swap {:?} with state {:?}",
+                hex::encode(key),
+                swap_id,
+                swap.state
+            )));
+        }
+
+        if expected_asset_id.is_some_and(|asset_id| swap.asset_id != asset_id) {
+            return Err(LiquidityStoreError::Backend(format!(
+                "stale liquidity swap asset index: key {} points to swap {:?} with asset_id {}",
+                hex::encode(key),
+                swap_id,
+                swap.asset_id
+            )));
+        }
+
+        Ok(swap)
+    }
+
+    fn parse_liquidity_chain_tx_index_key(
+        key: &[u8],
+        expected_status: LiquidityChainTxStatus,
+    ) -> Option<(Hash256, LiquidityChainTxRole)> {
+        if key.len() != 35
+            || key.first() != Some(&LIQUIDITY_CHAIN_TX_STATUS_PREFIX)
+            || key.get(1) != Some(&liquidity_chain_tx_status_key(expected_status))
+        {
+            return None;
+        }
+        let swap_id: [u8; 32] = key.get(2..34)?.try_into().ok()?;
+        let role = liquidity_chain_tx_role_from_key(*key.get(34)?)?;
+        Some((swap_id.into(), role))
+    }
+
+    fn get_liquidity_chain_tx_from_status_index(
+        &self,
+        key: &[u8],
+        expected_status: LiquidityChainTxStatus,
+    ) -> Result<LiquidityChainTxRecord, LiquidityStoreError> {
+        let (swap_id, role) = Self::parse_liquidity_chain_tx_index_key(key, expected_status)
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "invalid liquidity chain tx status index key: {}",
+                    hex::encode(key)
+                ))
+            })?;
+        let record = self
+            .get_liquidity_chain_tx(&swap_id, role)?
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "liquidity chain tx status index points to missing record: {:?}",
+                    swap_id
+                ))
+            })?;
+        if record.status != expected_status {
+            return Err(LiquidityStoreError::Backend(format!(
+                "stale liquidity chain tx status index: key {} points to tx {:?} with status {:?}",
+                hex::encode(key),
+                swap_id,
+                record.status
+            )));
+        }
+        Ok(record)
     }
 }
 
@@ -182,6 +414,15 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
+fn deserialize_liquidity<T: DeserializeOwned>(
+    value: &[u8],
+    field_name: &str,
+) -> Result<T, LiquidityStoreError> {
+    bincode::deserialize(value).map_err(|err| {
+        LiquidityStoreError::Backend(format!("deserialization of {field_name} failed: {err}"))
+    })
+}
+
 /// Open a store at `path`, running auto-migration with auto-confirm.
 /// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
@@ -200,6 +441,8 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
     Ok(Store {
         inner: db,
         watcher: None,
+        invoice_write_lock: Arc::new(parking_lot::Mutex::new(())),
+        liquidity_write_lock: Arc::new(parking_lot::Mutex::new(())),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -224,6 +467,8 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let store = Store {
         inner: db,
         watcher: None,
+        invoice_write_lock: Arc::new(parking_lot::Mutex::new(())),
+        liquidity_write_lock: Arc::new(parking_lot::Mutex::new(())),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -309,6 +554,52 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                 check_deserialization::<PaymentCustomRecords>(
                     &value,
                     "PAYMENT_CUSTOM_RECORD_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_SWAP_PREFIX => {
+                check_deserialization::<LiquiditySwapRecord>(
+                    &value,
+                    "LIQUIDITY_SWAP_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_SWAP_STATE_PREFIX => {}
+            LIQUIDITY_SWAP_ASSET_PREFIX => {}
+            LIQUIDITY_ASSET_PREFIX => {
+                check_deserialization::<LiquidityAsset>(
+                    &value,
+                    "LIQUIDITY_ASSET_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_LOOP_OUT_QUOTE_PREFIX => {
+                if let Err(e) = loop_out_quote_record_from_bytes(&value) {
+                    errors.insert(format!(
+                        "Failed to deserialize LIQUIDITY_LOOP_OUT_QUOTE_PREFIX: {:?}",
+                        e
+                    ));
+                }
+            }
+            LIQUIDITY_CHAIN_TX_PREFIX => {
+                check_deserialization::<LiquidityChainTxRecord>(
+                    &value,
+                    "LIQUIDITY_CHAIN_TX_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_CHAIN_TX_STATUS_PREFIX => {}
+            LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX => {
+                check_deserialization::<Vec<u8>>(
+                    &value,
+                    "LIQUIDITY_CHAIN_TX_SIGNED_TX_PREFIX",
+                    &mut errors,
+                );
+            }
+            LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX => {
+                check_deserialization::<PayoutValidationProvenance>(
+                    &value,
+                    "LIQUIDITY_PAYOUT_VALIDATION_PROVENANCE_PREFIX",
                     &mut errors,
                 );
             }
@@ -416,6 +707,50 @@ fn parse_hold_tlc(key: &[u8], value: &[u8]) -> (Hash256, HoldTlc) {
     (payment_hash.into(), hold_tlc)
 }
 
+fn liquidity_state_key(state: LiquiditySwapState) -> u8 {
+    match state {
+        LiquiditySwapState::Created => 0,
+        LiquiditySwapState::Quoted => 1,
+        LiquiditySwapState::OnchainLockPending => 2,
+        LiquiditySwapState::OnchainLocked => 3,
+        LiquiditySwapState::PayoutPending => 4,
+        LiquiditySwapState::PayoutLocked => 5,
+        LiquiditySwapState::PaymentInFlight => 6,
+        LiquiditySwapState::PaymentSettled => 7,
+        LiquiditySwapState::ClaimPending => 8,
+        LiquiditySwapState::RefundPending => 9,
+        LiquiditySwapState::Success => 10,
+        LiquiditySwapState::Failed => 11,
+        LiquiditySwapState::Refunded => 12,
+    }
+}
+
+fn liquidity_chain_tx_role_key(role: LiquidityChainTxRole) -> u8 {
+    match role {
+        LiquidityChainTxRole::Payout => 0,
+        LiquidityChainTxRole::Claim => 1,
+        LiquidityChainTxRole::Refund => 2,
+    }
+}
+
+fn liquidity_chain_tx_role_from_key(key: u8) -> Option<LiquidityChainTxRole> {
+    match key {
+        0 => Some(LiquidityChainTxRole::Payout),
+        1 => Some(LiquidityChainTxRole::Claim),
+        2 => Some(LiquidityChainTxRole::Refund),
+        _ => None,
+    }
+}
+
+fn liquidity_chain_tx_status_key(status: LiquidityChainTxStatus) -> u8 {
+    match status {
+        LiquidityChainTxStatus::Planned => 0,
+        LiquidityChainTxStatus::Broadcast => 1,
+        LiquidityChainTxStatus::Confirmed => 2,
+        LiquidityChainTxStatus::Rejected => 3,
+    }
+}
+
 pub enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
@@ -449,6 +784,14 @@ pub enum KeyValue {
     #[cfg(not(target_arch = "wasm32"))]
     CchSendBtcOrderCreation(Hash256, CchSendBtcOrderCreation),
     ChannelOpenRecord(Hash256, ChannelOpenRecord),
+    LiquiditySwap(Hash256, LiquiditySwapRecord),
+    LiquiditySwapStateIndex((LiquiditySwapState, Hash256)),
+    LiquiditySwapAssetIndex((String, Hash256)),
+    LiquidityAsset(String, LiquidityAsset),
+    LoopOutQuote(Hash256, LoopOutQuoteRecord),
+    LiquidityChainTx((Hash256, LiquidityChainTxRole), LiquidityChainTxRecord),
+    LiquidityChainTxStatusIndex((LiquidityChainTxStatus, Hash256, LiquidityChainTxRole)),
+    LiquidityChainTxSignedTx((Hash256, LiquidityChainTxRole), Vec<u8>),
 }
 
 /// Recorded store changes.
@@ -588,6 +931,33 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelOpenRecord(channel_id, _) => {
                 [&[CHANNEL_OPEN_RECORD_PREFIX], channel_id.as_ref()].concat()
             }
+            KeyValue::LiquiditySwap(swap_id, _) => {
+                [&[LIQUIDITY_SWAP_PREFIX], swap_id.as_ref()].concat()
+            }
+            KeyValue::LiquiditySwapStateIndex((state, swap_id)) => [
+                &[LIQUIDITY_SWAP_STATE_PREFIX],
+                &[liquidity_state_key(*state)],
+                swap_id.as_ref(),
+            ]
+            .concat(),
+            KeyValue::LiquiditySwapAssetIndex((asset_id, swap_id)) => {
+                let mut key = Store::liquidity_swap_asset_index_prefix(asset_id);
+                key.extend_from_slice(swap_id.as_ref());
+                key
+            }
+            KeyValue::LiquidityAsset(asset_id, _) => {
+                [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat()
+            }
+            KeyValue::LoopOutQuote(quote_id, _) => Store::loop_out_quote_key(quote_id),
+            KeyValue::LiquidityChainTx((swap_id, role), _) => {
+                Store::liquidity_chain_tx_key(swap_id, *role)
+            }
+            KeyValue::LiquidityChainTxStatusIndex((status, swap_id, role)) => {
+                Store::liquidity_chain_tx_status_index_key(*status, swap_id, *role)
+            }
+            KeyValue::LiquidityChainTxSignedTx((swap_id, role), _) => {
+                Store::liquidity_chain_tx_signed_tx_key(swap_id, *role)
+            }
         }
     }
 
@@ -638,6 +1008,18 @@ impl StoreKeyValue for KeyValue {
                 serialize_to_vec(creation, "CchSendBtcOrderCreation")
             }
             KeyValue::ChannelOpenRecord(_, record) => serialize_to_vec(record, "ChannelOpenRecord"),
+            KeyValue::LiquiditySwap(_, swap) => serialize_to_vec(swap, "LiquiditySwapRecord"),
+            KeyValue::LiquiditySwapStateIndex(_) => Vec::new(),
+            KeyValue::LiquiditySwapAssetIndex(_) => Vec::new(),
+            KeyValue::LiquidityAsset(_, asset) => serialize_to_vec(asset, "LiquidityAsset"),
+            KeyValue::LoopOutQuote(_, quote) => serialize_to_vec(quote, "LoopOutQuoteRecord"),
+            KeyValue::LiquidityChainTx(_, record) => {
+                serialize_to_vec(record, "LiquidityChainTxRecord")
+            }
+            KeyValue::LiquidityChainTxStatusIndex(_) => Vec::new(),
+            KeyValue::LiquidityChainTxSignedTx(_, bytes) => {
+                serialize_to_vec(bytes, "LiquidityChainTxSignedTx")
+            }
         }
     }
 }
@@ -1212,6 +1594,566 @@ impl ChannelOpenRecordStore for Store {
     }
 }
 
+impl LiquidityStore for Store {
+    fn insert_loop_out_quote(
+        &self,
+        quote: crate::liquidity::types::LoopOutQuoteTerms,
+        created_at: u64,
+    ) -> Result<(), LiquidityStoreError> {
+        let record = loop_out_quote_record_from_terms(quote, created_at);
+        let mut batch = self.batch();
+        let quote = KeyValue::LoopOutQuote(record.quote_id, record);
+        batch.put(quote.key(), quote.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_loop_out_quote(
+        &self,
+        quote_id: &Hash256,
+    ) -> Result<Option<crate::liquidity::types::LoopOutQuoteTerms>, LiquidityStoreError> {
+        let key = Self::loop_out_quote_key(quote_id);
+        self.get(key)
+            .map(|value| loop_out_quote_record_from_bytes(value.as_ref()))
+            .transpose()
+            .map(|record| record.map(loop_out_quote_terms_from_record))
+    }
+
+    fn insert_liquidity_swap(&self, swap: LiquiditySwapRecord) -> Result<(), LiquidityStoreError> {
+        if self.get_liquidity_swap(&swap.swap_id)?.is_some() {
+            return Err(LiquidityStoreError::Backend(format!(
+                "liquidity swap already exists: {:?}",
+                swap.swap_id
+            )));
+        }
+
+        let mut batch = self.batch();
+        let primary = KeyValue::LiquiditySwap(swap.swap_id, swap.clone());
+        let state_index = KeyValue::LiquiditySwapStateIndex((swap.state, swap.swap_id));
+        let asset_index = KeyValue::LiquiditySwapAssetIndex((swap.asset_id.clone(), swap.swap_id));
+        batch.put(primary.key(), primary.value());
+        batch.put(state_index.key(), state_index.value());
+        batch.put(asset_index.key(), asset_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_swap(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<Option<LiquiditySwapRecord>, LiquidityStoreError> {
+        let key = Self::liquidity_swap_key(swap_id);
+        self.get(key)
+            .map(|value| deserialize_liquidity(value.as_ref(), "LiquiditySwapRecord"))
+            .transpose()
+    }
+
+    fn list_liquidity_swaps(
+        &self,
+        filter: LiquiditySwapFilter,
+    ) -> Result<LiquiditySwapPage, LiquidityStoreError> {
+        let Some(limit) = filter.limit.map(|limit| limit as usize) else {
+            let cursor_key = Self::cursor_to_key(&filter.cursor)?;
+            let prefix = match (&filter.state, &filter.asset_id) {
+                (Some(state), _) => vec![LIQUIDITY_SWAP_STATE_PREFIX, liquidity_state_key(*state)],
+                (None, Some(asset_id)) => Self::liquidity_swap_asset_index_prefix(asset_id),
+                (None, None) => vec![LIQUIDITY_SWAP_PREFIX],
+            };
+            let mut options = PrefixIterOptions::new();
+            if let Some(cursor_key) = cursor_key.as_ref() {
+                options = options.start_key(cursor_key).start_key_exclusive();
+            }
+            let rows = self.collect_by_prefix_with(&prefix, options);
+            let mut swaps = Vec::new();
+            for kv in rows {
+                let swap = if prefix[0] == LIQUIDITY_SWAP_PREFIX {
+                    deserialize_liquidity(kv.value.as_ref(), "LiquiditySwapRecord")?
+                } else if let Some(state) = filter.state {
+                    self.get_liquidity_swap_from_index(&kv.key, Some(state), None)?
+                } else {
+                    self.get_liquidity_swap_from_index(&kv.key, None, filter.asset_id.as_deref())?
+                };
+                match filter.asset_id.as_ref() {
+                    Some(asset_id) if filter.state.is_some() && swap.asset_id != *asset_id => {}
+                    _ => swaps.push(swap),
+                }
+            }
+
+            return Ok(LiquiditySwapPage {
+                swaps,
+                next_cursor: None,
+            });
+        };
+
+        if limit == 0 {
+            return Ok(LiquiditySwapPage::default());
+        }
+
+        let cursor_key = Self::cursor_to_key(&filter.cursor)?;
+        let prefix = match (&filter.state, &filter.asset_id) {
+            (Some(state), _) => vec![LIQUIDITY_SWAP_STATE_PREFIX, liquidity_state_key(*state)],
+            (None, Some(asset_id)) => Self::liquidity_swap_asset_index_prefix(asset_id),
+            (None, None) => vec![LIQUIDITY_SWAP_PREFIX],
+        };
+        let combined_state_asset_filter = filter.state.is_some() && filter.asset_id.is_some();
+        let mut options = PrefixIterOptions::new().limit(limit + 1);
+        if let Some(cursor_key) = cursor_key.as_ref() {
+            options = options.start_key(cursor_key).start_key_exclusive();
+        }
+        let mut returned: Vec<(LiquiditySwapRecord, Vec<u8>)> = Vec::new();
+        let mut next_cursor = None;
+
+        if combined_state_asset_filter {
+            let raw_batch_size = (limit + 1).max(128);
+            let mut scan_cursor = cursor_key;
+            loop {
+                let mut options = PrefixIterOptions::new().limit(raw_batch_size);
+                if let Some(scan_cursor) = scan_cursor.as_ref() {
+                    options = options.start_key(scan_cursor).start_key_exclusive();
+                }
+                let rows = self.collect_by_prefix_with(&prefix, options);
+                let fetched_rows = rows.len();
+                if rows.is_empty() {
+                    break;
+                }
+
+                for kv in rows {
+                    let key = kv.key;
+                    scan_cursor = Some(key.clone());
+                    let swap = self.get_liquidity_swap_from_index(&key, filter.state, None)?;
+
+                    if filter
+                        .asset_id
+                        .as_ref()
+                        .is_some_and(|asset_id| swap.asset_id != *asset_id)
+                    {
+                        continue;
+                    }
+
+                    if returned.len() == limit {
+                        next_cursor = returned.last().map(|(_, key)| Self::key_to_cursor(key));
+                        break;
+                    }
+
+                    returned.push((swap, key));
+                }
+
+                if next_cursor.is_some() || fetched_rows < raw_batch_size {
+                    break;
+                }
+            }
+        } else {
+            let rows = self.collect_by_prefix_with(&prefix, options);
+            for kv in rows {
+                let swap = if prefix[0] == LIQUIDITY_SWAP_PREFIX {
+                    deserialize_liquidity(kv.value.as_ref(), "LiquiditySwapRecord")?
+                } else if let Some(state) = filter.state {
+                    self.get_liquidity_swap_from_index(&kv.key, Some(state), None)?
+                } else {
+                    self.get_liquidity_swap_from_index(&kv.key, None, filter.asset_id.as_deref())?
+                };
+
+                if returned.len() == limit {
+                    next_cursor = returned.last().map(|(_, key)| Self::key_to_cursor(key));
+                    break;
+                }
+
+                returned.push((swap, kv.key));
+            }
+        }
+
+        let swaps = returned.into_iter().map(|(swap, _)| swap).collect();
+
+        Ok(LiquiditySwapPage { swaps, next_cursor })
+    }
+
+    fn list_liquidity_swaps_by_states(
+        &self,
+        states: &[LiquiditySwapState],
+        swap_kind: LiquiditySwapKind,
+    ) -> Result<Vec<LiquiditySwapRecord>, LiquidityStoreError> {
+        let mut swaps = Vec::new();
+        for state in states {
+            swaps.extend(
+                self.list_liquidity_swaps(LiquiditySwapFilter {
+                    state: Some(*state),
+                    ..Default::default()
+                })?
+                .swaps
+                .into_iter()
+                .filter(|swap| swap.swap_kind == swap_kind),
+            );
+        }
+        Ok(swaps)
+    }
+
+    fn update_liquidity_swap_state(
+        &self,
+        swap_id: &Hash256,
+        transition: LiquidityStateTransition,
+    ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let mut swap = self
+            .get_liquidity_swap(swap_id)?
+            .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+        if !swap.state.can_transition_to(transition.state) {
+            return Err(LiquidityStoreError::InvalidStateTransition {
+                from: swap.state,
+                to: transition.state,
+            });
+        }
+
+        let old_state = swap.state;
+        swap.state = transition.state;
+        swap.updated_at = transition.updated_at;
+        if transition.state == LiquiditySwapState::Failed {
+            swap.failure_reason = transition.reason;
+        }
+
+        let mut batch = self.batch();
+        if transition.state == LiquiditySwapState::Failed {
+            if let Some(payout) =
+                self.get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            {
+                let key = Self::payout_validation_provenance_key(swap_id, &payout.tx_hash);
+                if let Some(mut provenance) =
+                    self.get_payout_validation_provenance(swap_id, &payout.tx_hash)?
+                {
+                    provenance.owns_swap_failure_context = false;
+                    batch.put(
+                        key,
+                        serialize_to_vec(&provenance, "PayoutValidationProvenance"),
+                    );
+                }
+            }
+        }
+        batch.delete(Self::liquidity_swap_state_index_key(old_state, swap_id));
+        let primary = KeyValue::LiquiditySwap(*swap_id, swap.clone());
+        let state_index = KeyValue::LiquiditySwapStateIndex((swap.state, *swap_id));
+        batch.put(primary.key(), primary.value());
+        batch.put(state_index.key(), state_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn update_liquidity_swap(
+        &self,
+        swap_id: &Hash256,
+        update: LiquiditySwapUpdate,
+    ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let overwrites_failure_context = update.failure_reason.is_some();
+        let mut swap = self
+            .get_liquidity_swap(swap_id)?
+            .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+
+        if let Some(payment_preimage) = update.payment_preimage {
+            swap.payment_preimage = Some(payment_preimage);
+        }
+        if let Some(onchain_outpoint) = update.onchain_outpoint {
+            swap.onchain_outpoint = Some(onchain_outpoint);
+        }
+        if let Some(failure_reason) = update.failure_reason {
+            swap.failure_reason = Some(failure_reason);
+        }
+        swap.updated_at = update.updated_at;
+
+        let mut batch = self.batch();
+        if overwrites_failure_context {
+            if let Some(payout) =
+                self.get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            {
+                let key = Self::payout_validation_provenance_key(swap_id, &payout.tx_hash);
+                if let Some(mut provenance) =
+                    self.get_payout_validation_provenance(swap_id, &payout.tx_hash)?
+                {
+                    provenance.owns_swap_failure_context = false;
+                    batch.put(
+                        key,
+                        serialize_to_vec(&provenance, "PayoutValidationProvenance"),
+                    );
+                }
+            }
+        }
+        let primary = KeyValue::LiquiditySwap(*swap_id, swap);
+        batch.put(primary.key(), primary.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn persist_payout_validation_failure_context(
+        &self,
+        swap_id: &Hash256,
+        payout_tx_id: &Hash256,
+        reason: String,
+        kind: PayoutValidationFailureKind,
+        updated_at: u64,
+    ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let mut payout = self
+            .get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "payout chain tx not found for swap {swap_id:?}"
+                ))
+            })?;
+        if payout.tx_hash != *payout_tx_id || payout.status != LiquidityChainTxStatus::Confirmed {
+            return Err(LiquidityStoreError::Backend(format!(
+                "payout validation context requires matching confirmed payout tx for swap {swap_id:?}"
+            )));
+        }
+
+        let owns_swap_failure_context = kind == PayoutValidationFailureKind::Definitive
+            || self
+                .get_payout_validation_provenance(swap_id, payout_tx_id)?
+                .is_some_and(|provenance| {
+                    provenance.payout_tx_id == *payout_tx_id && provenance.owns_swap_failure_context
+                });
+        payout.failure_reason = Some(reason.clone());
+        payout.updated_at = updated_at;
+        let provenance = PayoutValidationProvenance {
+            payout_tx_id: *payout_tx_id,
+            owns_swap_failure_context,
+        };
+        let mut batch = self.batch();
+        let payout = KeyValue::LiquidityChainTx((*swap_id, LiquidityChainTxRole::Payout), payout);
+        batch.put(payout.key(), payout.value());
+        if kind == PayoutValidationFailureKind::Definitive {
+            let mut swap = self
+                .get_liquidity_swap(swap_id)?
+                .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+            swap.failure_reason = Some(reason);
+            swap.updated_at = updated_at;
+            let swap = KeyValue::LiquiditySwap(*swap_id, swap);
+            batch.put(swap.key(), swap.value());
+        }
+        batch.put(
+            Self::payout_validation_provenance_key(swap_id, payout_tx_id),
+            serialize_to_vec(&provenance, "PayoutValidationProvenance"),
+        );
+        batch.commit();
+        Ok(())
+    }
+
+    fn clear_payout_validation_failure_context(
+        &self,
+        swap_id: &Hash256,
+        payout_tx_id: &Hash256,
+        updated_at: u64,
+    ) -> Result<bool, LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let Some(provenance) = self.get_payout_validation_provenance(swap_id, payout_tx_id)? else {
+            return Ok(false);
+        };
+        let mut payout = self
+            .get_liquidity_chain_tx(swap_id, LiquidityChainTxRole::Payout)?
+            .ok_or_else(|| {
+                LiquidityStoreError::Backend(format!(
+                    "payout chain tx not found for swap {swap_id:?}"
+                ))
+            })?;
+        if provenance.payout_tx_id != *payout_tx_id
+            || payout.tx_hash != *payout_tx_id
+            || payout.status != LiquidityChainTxStatus::Confirmed
+        {
+            return Ok(false);
+        }
+
+        payout.failure_reason = None;
+        payout.updated_at = updated_at;
+        let mut batch = self.batch();
+        let payout = KeyValue::LiquidityChainTx((*swap_id, LiquidityChainTxRole::Payout), payout);
+        batch.put(payout.key(), payout.value());
+        if provenance.owns_swap_failure_context {
+            let mut swap = self
+                .get_liquidity_swap(swap_id)?
+                .ok_or(LiquidityStoreError::SwapNotFound(*swap_id))?;
+            swap.failure_reason = None;
+            swap.updated_at = updated_at;
+            let swap = KeyValue::LiquiditySwap(*swap_id, swap);
+            batch.put(swap.key(), swap.value());
+        }
+        batch.delete(Self::payout_validation_provenance_key(
+            swap_id,
+            payout_tx_id,
+        ));
+        batch.commit();
+        Ok(true)
+    }
+
+    fn insert_liquidity_chain_tx(
+        &self,
+        record: LiquidityChainTxRecord,
+    ) -> Result<(), LiquidityStoreError> {
+        if self
+            .get_liquidity_chain_tx(&record.swap_id, record.role)?
+            .is_some()
+        {
+            return Err(LiquidityStoreError::Backend(format!(
+                "liquidity chain tx already exists for swap {:?} role {:?}",
+                record.swap_id, record.role
+            )));
+        }
+
+        let mut batch = self.batch();
+        let primary = KeyValue::LiquidityChainTx((record.swap_id, record.role), record.clone());
+        let status_index =
+            KeyValue::LiquidityChainTxStatusIndex((record.status, record.swap_id, record.role));
+        batch.put(primary.key(), primary.value());
+        batch.put(status_index.key(), status_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_chain_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+    ) -> Result<Option<LiquidityChainTxRecord>, LiquidityStoreError> {
+        let key = Self::liquidity_chain_tx_key(swap_id, role);
+        self.get(key)
+            .map(|value| deserialize_liquidity(value.as_ref(), "LiquidityChainTxRecord"))
+            .transpose()
+    }
+
+    fn insert_liquidity_chain_tx_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+        tx: ckb_types::packed::Transaction,
+    ) -> Result<(), LiquidityStoreError> {
+        let mut batch = self.batch();
+        let kv = KeyValue::LiquidityChainTxSignedTx((*swap_id, role), tx.as_slice().to_vec());
+        batch.put(kv.key(), kv.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_chain_tx_signed_tx(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+    ) -> Result<Option<ckb_types::packed::Transaction>, LiquidityStoreError> {
+        let key = Self::liquidity_chain_tx_signed_tx_key(swap_id, role);
+        self.get(key)
+            .map(|value| {
+                let bytes: Vec<u8> =
+                    deserialize_liquidity(value.as_ref(), "LiquidityChainTxSignedTx")?;
+                ckb_types::packed::Transaction::from_slice(&bytes).map_err(|error| {
+                    LiquidityStoreError::Backend(format!(
+                        "deserialization of LiquidityChainTxSignedTx failed: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    fn update_liquidity_chain_tx_status(
+        &self,
+        swap_id: &Hash256,
+        role: LiquidityChainTxRole,
+        status: LiquidityChainTxStatus,
+        failure_reason: Option<String>,
+        updated_at: u64,
+    ) -> Result<(), LiquidityStoreError> {
+        let _guard = self.liquidity_write_lock.lock();
+        let mut record = self.get_liquidity_chain_tx(swap_id, role)?.ok_or_else(|| {
+            LiquidityStoreError::Backend(format!(
+                "liquidity chain tx not found for swap {:?} role {:?}",
+                swap_id, role
+            ))
+        })?;
+        let old_status = record.status;
+        record.status = status;
+        record.failure_reason = failure_reason;
+        record.updated_at = updated_at;
+
+        let mut batch = self.batch();
+        if role == LiquidityChainTxRole::Payout {
+            batch.delete(Self::payout_validation_provenance_key(
+                swap_id,
+                &record.tx_hash,
+            ));
+        }
+        batch.delete(Self::liquidity_chain_tx_status_index_key(
+            old_status, swap_id, role,
+        ));
+        let primary = KeyValue::LiquidityChainTx((*swap_id, role), record.clone());
+        let status_index = KeyValue::LiquidityChainTxStatusIndex((status, *swap_id, role));
+        batch.put(primary.key(), primary.value());
+        batch.put(status_index.key(), status_index.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn list_liquidity_chain_txs_by_status(
+        &self,
+        statuses: &[LiquidityChainTxStatus],
+    ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+        let mut records = Vec::new();
+        for status in statuses {
+            let prefix = vec![
+                LIQUIDITY_CHAIN_TX_STATUS_PREFIX,
+                liquidity_chain_tx_status_key(*status),
+            ];
+            for kv in self.collect_by_prefix(&prefix) {
+                records.push(self.get_liquidity_chain_tx_from_status_index(&kv.key, *status)?);
+            }
+        }
+        Ok(records)
+    }
+
+    fn list_liquidity_chain_txs_by_swap(
+        &self,
+        swap_id: &Hash256,
+    ) -> Result<Vec<LiquidityChainTxRecord>, LiquidityStoreError> {
+        let prefix = [&[LIQUIDITY_CHAIN_TX_PREFIX], swap_id.as_ref()].concat();
+        self.collect_by_prefix(&prefix)
+            .into_iter()
+            .map(|kv| deserialize_liquidity(kv.value.as_ref(), "LiquidityChainTxRecord"))
+            .collect()
+    }
+
+    fn upsert_liquidity_asset(&self, asset: LiquidityAsset) -> Result<(), LiquidityStoreError> {
+        asset.validate()?;
+
+        let mut batch = self.batch();
+        let asset = KeyValue::LiquidityAsset(asset.asset_id.clone(), asset);
+        batch.put(asset.key(), asset.value());
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_liquidity_asset(
+        &self,
+        asset_id: &str,
+    ) -> Result<Option<LiquidityAsset>, LiquidityStoreError> {
+        let key = [&[LIQUIDITY_ASSET_PREFIX], asset_id.as_bytes()].concat();
+        self.get(key)
+            .map(|value| deserialize_liquidity(value.as_ref(), "LiquidityAsset"))
+            .transpose()
+    }
+
+    fn list_liquidity_assets(&self) -> Result<Vec<LiquidityAsset>, LiquidityStoreError> {
+        self.collect_by_prefix(&[LIQUIDITY_ASSET_PREFIX])
+            .into_iter()
+            .map(|kv| deserialize_liquidity(kv.value.as_ref(), "LiquidityAsset"))
+            .collect()
+    }
+
+    fn set_provider_mode(&self, enabled: bool) -> Result<(), LiquidityStoreError> {
+        self.put(
+            b"liquidity-provider-mode",
+            [if enabled { 1u8 } else { 0u8 }],
+        );
+        Ok(())
+    }
+
+    fn get_provider_mode(&self) -> Result<bool, LiquidityStoreError> {
+        Ok(self.get(b"liquidity-provider-mode").as_deref() == Some(&[1u8]))
+    }
+}
+
 impl InvoiceStore for Store {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
         let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
@@ -1223,6 +2165,7 @@ impl InvoiceStore for Store {
         invoice: CkbInvoice,
         preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
+        let _guard = self.invoice_write_lock.lock();
         let payment_hash = *invoice.payment_hash();
         if self.get_invoice(&payment_hash).is_some() {
             return Err(InvoiceError::DuplicatedInvoice(payment_hash.to_string()));
@@ -1238,6 +2181,7 @@ impl InvoiceStore for Store {
             batch.put(kv.key(), kv.value());
         }
         batch.commit();
+        drop(_guard);
         self.notify(StoreChange::PutCkbInvoiceStatus {
             payment_hash,
             invoice_status: CkbInvoiceStatus::Open,
@@ -1256,11 +2200,13 @@ impl InvoiceStore for Store {
         id: &Hash256,
         status: crate::invoice::CkbInvoiceStatus,
     ) -> Result<(), InvoiceError> {
+        let _guard = self.invoice_write_lock.lock();
         self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
         let mut batch = self.batch();
         let kv = KeyValue::CkbInvoiceStatus(*id, status);
         batch.put(kv.key(), kv.value());
         batch.commit();
+        drop(_guard);
         self.notify(StoreChange::PutCkbInvoiceStatus {
             payment_hash: *id,
             invoice_status: status,
@@ -1273,10 +2219,64 @@ impl InvoiceStore for Store {
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
     }
+
+    fn ensure_invoice_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<CkbInvoiceStatus, EnsureInvoicePreimageError> {
+        let _guard = self.invoice_write_lock.lock();
+        let invoice = self
+            .get_invoice(&payment_hash)
+            .ok_or(EnsureInvoicePreimageError::InvoiceNotFound)?;
+        let hash_algorithm = invoice.hash_algorithm().copied().unwrap_or_default();
+        if hash_algorithm.hash(preimage).as_slice() != payment_hash.as_ref() {
+            return Err(EnsureInvoicePreimageError::HashMismatch);
+        }
+        let status = self
+            .get_invoice_status(&payment_hash)
+            .ok_or(EnsureInvoicePreimageError::InvoiceNotFound)?;
+        let status = match status {
+            CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+            status => status,
+        };
+        let key_value = KeyValue::Preimage(payment_hash, preimage);
+        let key = key_value.key();
+        let existing = self
+            .get(&key)
+            .map(|value| deserialize_from::<Hash256>(value.as_ref(), "Preimage"));
+        if existing.is_some_and(|existing| existing != preimage) {
+            return Err(EnsureInvoicePreimageError::ConflictingPreimage);
+        }
+
+        match (status, existing) {
+            (CkbInvoiceStatus::Open | CkbInvoiceStatus::Received, None) => {
+                let mut batch = self.batch();
+                batch.put(key, key_value.value());
+                batch.commit();
+            }
+            (CkbInvoiceStatus::Open | CkbInvoiceStatus::Received, Some(_))
+            | (CkbInvoiceStatus::Paid, Some(_)) => {}
+            (CkbInvoiceStatus::Paid, None) => {
+                drop(_guard);
+                return Ok(status);
+            }
+            (CkbInvoiceStatus::Cancelled | CkbInvoiceStatus::Expired, _) => {
+                return Err(EnsureInvoicePreimageError::InvoiceNotUsable(status));
+            }
+        }
+        drop(_guard);
+        self.notify(StoreChange::PutPreimage {
+            payment_hash,
+            payment_preimage: preimage,
+        });
+        Ok(status)
+    }
 }
 
 impl PreimageStore for Store {
     fn insert_preimage(&self, payment_hash: Hash256, preimage: Hash256) {
+        let _guard = self.invoice_write_lock.lock();
         let kv = KeyValue::Preimage(payment_hash, preimage);
         let key = kv.key();
         if let Some(existing) = self
@@ -1286,6 +2286,7 @@ impl PreimageStore for Store {
             if existing == preimage {
                 // Watchers are in-memory. Replaying the same persisted preimage after restart must
                 // still emit PutPreimage so CCH/payment tracking can recover success events.
+                drop(_guard);
                 self.notify(StoreChange::PutPreimage {
                     payment_hash,
                     payment_preimage: preimage,
@@ -1301,6 +2302,7 @@ impl PreimageStore for Store {
         let mut batch = self.batch();
         batch.put(key, kv.value());
         batch.commit();
+        drop(_guard);
         self.notify(StoreChange::PutPreimage {
             payment_hash,
             payment_preimage: preimage,
@@ -1308,6 +2310,7 @@ impl PreimageStore for Store {
     }
 
     fn remove_preimage(&self, payment_hash: &Hash256) {
+        let _guard = self.invoice_write_lock.lock();
         let mut batch = self.batch();
         batch.delete([&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
         batch.commit();

@@ -1,0 +1,72 @@
+meta {
+  name: node2 capture provider balances before loop in
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+  const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
+  const routingCap = BigInt(bru.getVar("MAX_ROUTING_FEE_HEX"));
+
+  const channel = (res.body.result.channels || []).find(
+    (item) => item.channel_id === bru.getVar("CHANNEL_ID"),
+  );
+  if (!channel) {
+    throw new Error(`channel ${bru.getVar("CHANNEL_ID")} not found on node2`);
+  }
+  if (channel.state.state_name !== "ChannelReady") {
+    throw new Error(`channel must be ChannelReady, got: ${channel.state.state_name}`);
+  }
+  if (!channel.funding_udt_type_script
+    || channel.funding_udt_type_script.code_hash !== expectedScript.code_hash
+    || channel.funding_udt_type_script.hash_type !== expectedScript.hash_type
+    || channel.funding_udt_type_script.args !== expectedScript.args) {
+    throw new Error(`loop in channel must be funded with the simple UDT type script: ${JSON.stringify(channel.funding_udt_type_script)}`);
+  }
+
+  // The provider pays the client invoice through this channel once the
+  // lock confirms, so its outbound (local) UDT balance must cover the
+  // payment amount plus the accepted routing fee budget.
+  const providerLocal = BigInt(channel.local_balance);
+  if (providerLocal < amount + routingCap) {
+    throw new Error(`provider local balance ${channel.local_balance} cannot pay the loop in invoice plus the routing fee cap`);
+  }
+  if (channel.offered_tlc_balance !== "0x0" || channel.received_tlc_balance !== "0x0") {
+    throw new Error(`provider channel must start with no outstanding TLC balances: ${JSON.stringify(channel)}`);
+  }
+  if (!Array.isArray(channel.pending_tlcs) || channel.pending_tlcs.length !== 0) {
+    throw new Error("provider channel must start with no pending TLCs");
+  }
+
+  bru.setVar("PROVIDER_LOCAL_BEFORE", channel.local_balance);
+  bru.setVar("PROVIDER_REMOTE_BEFORE", channel.remote_balance);
+}

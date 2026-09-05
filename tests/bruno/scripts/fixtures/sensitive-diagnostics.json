@@ -1,0 +1,59 @@
+{
+  "rpc_url": "request failed before https://encoded%40user:p%40ss@example.test/rpc?safe=visible&token=query-token-value&api_key=query-api-key-value&key=query-key-value&secret=query-secret-value&password=query-password-value&payment_secret=query-payment-secret&preimage=query-preimage&invoice=query-invoice&access_token=encoded%2Daccess%2Dvalue&refresh_token=encoded%2Drefresh%2Dvalue&bearer=encoded%2Dbearer%2Dvalue&api_token=encoded%2Dapi%2Dvalue and after",
+  "get_invoice": {
+    "invoice_address": "invoice-address-secret",
+    "invoice": {
+      "currency": "Fibd",
+      "amount": "0x64",
+      "signature": "invoice-object-secret",
+      "data": {
+        "payment_hash": "0xpublic-invoice-hash",
+        "attrs": [
+          {
+            "payment_secret": "payment-secret-value"
+          }
+        ]
+      }
+    },
+    "status": "Open"
+  },
+  "get_payment": {
+    "payment_hash": "0xpublic-payment-hash",
+    "payment_preimage": "payment-preimage-secret",
+    "status": "Success",
+    "created_at": "0x1",
+    "last_updated_at": "0x2",
+    "failed_error": null,
+    "fee": "0x0",
+    "custom_records": null
+  },
+  "nested": [
+    {
+      "generic_url": "prefix ftp://username@example.test/file suffix",
+      "private_key": "private-key-value",
+      "passphrase": "passphrase-value",
+      "Authorization": "authorization-value",
+      "auth_header": "auth-header-value",
+      "access_token": "access-token-value",
+      "refresh_token": "refresh-token-value",
+      "bearer": "bearer-value",
+      "api_token": "api-token-value",
+      "x-api-key": "api-key-value",
+      "message_one": "upstream Authorization: Bearer header-secret rejected",
+      "message_two": "before Bearer standalone-bearer-secret after",
+      "message_three": "upstream Authorization: Basic basic-secret rejected",
+      "message_four": "upstream Authorization: Token token-scheme-secret rejected",
+      "message_five": "before Basic standalone-basic-secret after",
+      "message_six": "before Token standalone-token-secret after",
+      "message_seven": "before ApiKey standalone-api-secret after",
+      "message_eight": "upstream X-API-Key: free-api-credential rejected",
+      "message_nine": "before Bearer \"double-quoted-bearer-secret\" after",
+      "message_ten": "upstream Authorization: Basic \"double-quoted-basic-secret\" rejected",
+      "message_eleven": "before Bearer 'single-quoted-bearer-secret' after",
+      "message_twelve": "upstream Authorization: Token 'single-quoted-token-secret' rejected",
+      "seed": "seed-value",
+      "mnemonic": "mnemonic-value",
+      "custom_secret": "suffix-secret-value"
+    }
+  ]
+}

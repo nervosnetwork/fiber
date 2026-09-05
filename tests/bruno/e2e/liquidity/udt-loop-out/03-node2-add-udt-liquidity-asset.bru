@@ -1,0 +1,78 @@
+meta {
+  name: node2 add udt liquidity asset
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "add_liquidity_asset",
+    "params": [
+      {
+        "asset": {
+          "asset_id": "{{LIQUIDITY_SIMPLE_UDT_ASSET_ID}}",
+          "kind": "udt",
+          "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+          "min_amount": "0x1",
+          "max_amount": "0xf4240",
+          "available_capacity": "0xf4240",
+          "base_fee": "0x1",
+          "proportional_fee_ppm": "0x0",
+          "enabled": true
+        }
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+
+  const assertUdtScript = (actual) => {
+    if (!actual) {
+      throw new Error("udt asset must carry a udt_type_script");
+    }
+    if (actual.code_hash !== expectedScript.code_hash || actual.hash_type !== expectedScript.hash_type || actual.args !== expectedScript.args) {
+      throw new Error(`udt_type_script must be the generated simple UDT script ${JSON.stringify(expectedScript)}, got: ${JSON.stringify(actual)}`);
+    }
+  };
+
+  if (res.body.error) {
+    // Re-runs against an already-initialized provider must not fail: the
+    // registry entry is immutable via add, so "already exists" is accepted.
+    if (!String(res.body.error.message).includes("already exists")) {
+      throw new Error(`add_liquidity_asset failed: ${res.body.error.message}`);
+    }
+    console.log("udt liquidity asset already registered (idempotent re-run)");
+    return;
+  }
+
+  const asset = res.body.result;
+  const expectedAssetId = bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID");
+  if (asset.asset_id !== expectedAssetId) {
+    throw new Error(`asset_id must be the simple UDT asset id ${expectedAssetId}, got: ${asset.asset_id}`);
+  }
+  if (asset.kind !== "udt") {
+    throw new Error(`asset kind must be udt, got: ${asset.kind}`);
+  }
+  assertUdtScript(asset.udt_type_script);
+  if (asset.enabled !== true) {
+    throw new Error("udt asset must be enabled");
+  }
+  if (asset.min_amount !== "0x1" || asset.base_fee !== "0x1" || asset.proportional_fee_ppm !== "0x0") {
+    throw new Error(`unexpected udt asset fee parameters: ${JSON.stringify(asset)}`);
+  }
+}

@@ -1,0 +1,75 @@
+meta {
+  name: node2 assert liquidity chain transactions
+  type: http
+  seq: 30
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { decodeOutpoint } = require(process.cwd() + "/scripts/molecule-script");
+
+  const transactions = res.body.result.transactions || [];
+  const lock = transactions.find((tx) => tx.role === "loop_in_lock");
+  if (!lock) {
+    throw new Error(`provider must record the observed loop in lock transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (lock.status !== "confirmed") {
+    throw new Error(`provider loop in lock record must be confirmed, got: ${lock.status}`);
+  }
+  if (lock.tx_hash !== bru.getVar("LOCK_TX_HASH")) {
+    throw new Error(`provider lock tx_hash mismatch: ${lock.tx_hash}`);
+  }
+  const outpoint = decodeOutpoint(lock.outpoint);
+  if (outpoint.txHash !== bru.getVar("LOCK_TX_HASH")) {
+    throw new Error(`provider lock outpoint tx_hash mismatch: ${lock.outpoint}`);
+  }
+  if (BigInt(outpoint.index) !== BigInt(bru.getVar("LOCK_INDEX"))) {
+    throw new Error(`provider lock outpoint index mismatch: ${lock.outpoint}`);
+  }
+
+  // Unlike Loop Out, the provider drives the Loop In claim itself: it spends
+  // the client lock after its channel payment settles and reveals the
+  // preimage in the claim witness.
+  const claim = transactions.find((tx) => tx.role === "claim");
+  if (!claim) {
+    throw new Error(`provider must record the claim transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (claim.status !== "confirmed") {
+    throw new Error(`provider claim record must be confirmed, got: ${claim.status}`);
+  }
+  if (typeof claim.tx_hash !== "string" || claim.tx_hash.length !== 66) {
+    throw new Error(`provider claim tx_hash must be a 32-byte hex: ${JSON.stringify(claim)}`);
+  }
+
+  const refund = transactions.find((tx) => tx.role === "refund");
+  if (refund) {
+    throw new Error(`successful loop in must not record a refund: ${JSON.stringify(refund)}`);
+  }
+}

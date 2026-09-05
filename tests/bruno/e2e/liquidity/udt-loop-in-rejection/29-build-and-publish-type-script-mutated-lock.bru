@@ -1,0 +1,52 @@
+meta {
+  name: node1 build and publish type-script-mutated loop in lock
+  type: http
+  seq: 29
+}
+
+post {
+  url: {{CKB_MUTATOR_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "payment_hash": "{{PAYMENT_HASH}}",
+    "claimant_lock": "{{PROVIDER_FUNDING_LOCK}}",
+    "refund_lock": "{{REFUND_LOCK}}",
+    "refund_after_lock_time": "{{QUOTE_REFUND_AFTER_LOCK_TIME}}",
+    "gross_amount": "{{QUOTE_GROSS_UDT}}",
+    "capacity_ckb": "{{QUOTE_CAPACITY_CKB}}",
+    "liquidity_lock_code_hash": "{{LIQUIDITY_LOCK_CODE_HASH}}",
+    "liquidity_lock_hash_type": "{{LIQUIDITY_LOCK_HASH_TYPE}}",
+    "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+    "mutation": { "kind": "type_script" }
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.tx: isDefined
+}
+
+script:post-response {
+  const { publishSignedLockTx } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
+
+  // The helper (tests/liquidity-lock-mutator) funds a real liquidity-lock
+  // output from the node1 dev wallet with the type script mutated and signs the
+  // funding transaction. The suite submits it through the CKB JSON-RPC,
+  // mines it and waits (bounded) for the mutated cell to commit.
+  const published = await publishSignedLockTx({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    built: res.body,
+  });
+  bru.setVar("MUTATION_TX_HASH", published.txHash);
+  bru.setVar("MUTATION_OUTPOINT_INDEX", "0");
+  console.log("type-script-mutated lock committed:", published.txHash, "after", published.attempts, "polls");
+}

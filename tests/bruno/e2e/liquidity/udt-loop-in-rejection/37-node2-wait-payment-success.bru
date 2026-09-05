@@ -1,0 +1,65 @@
+meta {
+  name: node2 wait for payment success
+  type: http
+  seq: 37
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { rpc, waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // After the lock confirms, the provider pays the client invoice through the
+  // channel. Poll the provider payment record from its creation to success.
+  await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    method: "get_payment",
+    params: [{ payment_hash: bru.getVar("PAYMENT_HASH") }],
+    expectedState: "Success",
+    getState: (result) => result && result.status,
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  });
+
+  // The helper redacts preimages in its polling diagnostics, so re-fetch the
+  // settled record through rpc(), which returns the raw JSON-RPC result.
+  const { result: record } = await rpc(
+    bru.getEnvVar("NODE2_RPC_URL"),
+    "get_payment",
+    [{ payment_hash: bru.getVar("PAYMENT_HASH") }],
+  );
+  if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`provider payment_hash mismatch: ${record.payment_hash}`);
+  }
+  if (record.status !== "Success") {
+    throw new Error(`provider payment must be Success, got: ${record.status}`);
+  }
+  if (typeof record.payment_preimage !== "string" || record.payment_preimage.length !== 66) {
+    throw new Error(`settled provider payment must expose the revealed preimage: ${JSON.stringify(record)}`);
+  }
+  // Length-only logging: the preimage value itself is a secret.
+  console.log("provider payment settled, preimage length:", record.payment_preimage.length);
+}

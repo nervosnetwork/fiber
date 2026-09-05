@@ -1,0 +1,43 @@
+meta {
+  name: node2 provider accept loop out rejected while disabled
+  type: http
+  seq: 19
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_accept_loop_out",
+    "params": [
+      {
+        "quote_id": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  // handle_provider_accept_loop_out runs ensure_provider_mode before the quote
+  // lookup, so the all-zero quote id must be rejected with the mode error and
+  // not with a quote-not-found error.
+  const message = String(res.body.error && res.body.error.message);
+  if (!message.includes("provider mode is disabled")) {
+    throw new Error(`provider_accept_loop_out must be rejected while provider mode is disabled, got: ${message}`);
+  }
+}

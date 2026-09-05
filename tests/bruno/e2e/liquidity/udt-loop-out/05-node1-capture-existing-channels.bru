@@ -1,0 +1,41 @@
+meta {
+  name: node1 capture pre-existing channels to node2
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE2_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  // Remember channels that already exist between node1 and node2 so the
+  // freshly opened loop-out channel can be identified uniquely on re-runs.
+  const existingIds = (res.body.result.channels || []).map((channel) => channel.channel_id);
+  bru.setVar("EXISTING_CHANNEL_IDS", JSON.stringify(existingIds));
+}
