@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ckb_types::packed::Script;
 use fiber_types::{Hash256, HashAlgorithm, PaymentStatus, Pubkey};
 use ractor::{call, ActorRef};
 
@@ -27,6 +28,8 @@ pub struct LoopOutPaymentRequest {
     pub amount: u128,
     /// Maximum Fiber routing fee the client accepts for this payment.
     pub max_fee_amount: u128,
+    /// UDT type script for UDT payments, absent for CKB payments.
+    pub udt_type_script: Option<Script>,
 }
 
 impl LoopOutPaymentRequest {
@@ -38,6 +41,25 @@ impl LoopOutPaymentRequest {
         provider_fee: u128,
         routing_fee_limit: u128,
     ) -> Result<Self, LiquidityLoopOutError> {
+        Self::new_with_asset(
+            payment_hash,
+            target_pubkey,
+            amount,
+            provider_fee,
+            routing_fee_limit,
+            None,
+        )
+    }
+
+    /// Build a Loop Out payment request with an optional UDT asset type script.
+    pub fn new_with_asset(
+        payment_hash: Hash256,
+        target_pubkey: Pubkey,
+        amount: u128,
+        provider_fee: u128,
+        routing_fee_limit: u128,
+        udt_type_script: Option<Script>,
+    ) -> Result<Self, LiquidityLoopOutError> {
         loop_out_gross_payment_amount(amount, provider_fee, routing_fee_limit)?;
         Ok(Self {
             payment_hash,
@@ -45,6 +67,7 @@ impl LoopOutPaymentRequest {
             invoice: None,
             amount: loop_out_payment_principal(amount, provider_fee)?,
             max_fee_amount: routing_fee_limit,
+            udt_type_script,
         })
     }
 
@@ -61,6 +84,7 @@ impl LoopOutPaymentRequest {
             invoice: Some(invoice),
             amount,
             max_fee_amount,
+            udt_type_script: None,
         }
     }
 }
@@ -209,7 +233,7 @@ impl LoopOutPaymentAdapter for NetworkLoopOutPaymentAdapter {
                     max_fee_rate: None,
                     max_parts: None,
                     keysend: Some(false),
-                    udt_type_script: None,
+                    udt_type_script: request.udt_type_script,
                     allow_self_payment: false,
                     custom_records: None,
                     hop_hints: None,
@@ -473,6 +497,31 @@ mod tests {
         assert_eq!(command.custom_records, None);
         assert!(command.hop_hints.is_none());
         assert!(!command.dry_run);
+    }
+
+    #[tokio::test]
+    async fn network_loop_out_payment_adapter_propagates_udt_type_script() {
+        let network = spawn_payment_mock(NetworkPaymentMockMode::Settle([7u8; 32].into())).await;
+        let mut adapter = NetworkLoopOutPaymentAdapter::new(network.actor.clone());
+        let udt_type_script = test_script(9);
+
+        adapter
+            .send_loop_out_payment(
+                LoopOutPaymentRequest::new_with_asset(
+                    [3u8; 32].into(),
+                    test_pubkey(),
+                    100,
+                    2,
+                    5,
+                    Some(udt_type_script.clone()),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let command = network.take_send_commands().pop().unwrap();
+        assert_eq!(command.udt_type_script, Some(udt_type_script));
     }
 
     #[tokio::test]
