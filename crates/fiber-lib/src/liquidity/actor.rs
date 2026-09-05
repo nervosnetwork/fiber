@@ -87,12 +87,13 @@ struct AuthorizedClientPayout {
 
 impl AuthorizedClientPayout {
     fn new(quote: &LoopOutQuoteTerms) -> Result<Self, LiquidityLoopOutError> {
-        let request = crate::liquidity::payment::LoopOutPaymentRequest::new(
+        let request = crate::liquidity::payment::LoopOutPaymentRequest::new_with_asset(
             quote.payment_hash,
             quote.provider,
             quote.amount,
             quote.provider_fee,
             quote.routing_fee_limit,
+            quote.asset.udt_type_script.clone().map(Into::into),
         )?;
         Ok(Self {
             swap_id: quote.quote_id,

@@ -2,7 +2,9 @@ use ckb_sdk::{Since, SinceType};
 use ckb_types::packed::Script;
 use ckb_types::prelude::Entity;
 use fiber_json_types::{LiquidityAssetInfo, LiquidityQuoteEnvelope};
-use fiber_types::{Hash256, LiquidityAsset, LiquidityAssetKind, LiquiditySwapKind, Pubkey};
+use fiber_types::{
+    Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquiditySwapKind, Pubkey,
+};
 
 use crate::invoice::CkbInvoice;
 use crate::liquidity::types::{
@@ -136,6 +138,11 @@ fn validate_loop_in_invoice(
         invoice.udt_type_script().cloned().map(Into::into);
     if invoice_udt_type_script.as_ref() != expected_udt_type_script {
         return Err(LiquidityLoopOutError::UdtTypeMismatch);
+    }
+    if invoice.hash_algorithm().copied().unwrap_or_default() != HashAlgorithm::CkbHash {
+        return Err(LiquidityLoopOutError::PaymentFailed(
+            "Loop In invoice hash algorithm must be CkbHash".to_string(),
+        ));
     }
 
     Ok(())
@@ -693,6 +700,21 @@ mod tests {
             .to_string(),
         );
         assert_imported_quote_rejected(udt, "UDT type script");
+
+        let mut hash_algorithm =
+            imported_quote_envelope(fiber_types::LiquiditySwapKind::LoopIn, ckb_asset(true));
+        let (private_key, public_key) = gen_deterministic_secp256k1_keypair_tuple();
+        hash_algorithm.client_invoice = Some(
+            InvoiceBuilder::new(Currency::Fibb)
+                .amount(Some(100))
+                .payment_hash(hash_algorithm.payment_hash.into())
+                .payee_pub_key(public_key)
+                .hash_algorithm(HashAlgorithm::Sha256)
+                .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+                .expect("invoice")
+                .to_string(),
+        );
+        assert_imported_quote_rejected(hash_algorithm, "hash algorithm");
     }
 
     #[test]
