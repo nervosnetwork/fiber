@@ -2016,16 +2016,27 @@ where
                 if let Some(mut record) = state.store.get_channel_open_record(&channel_id) {
                     if record.status != ChannelOpeningStatus::ChannelReady {
                         let failure_detail = match &reason {
-                            StopReason::Abandon => "Channel was abandoned".to_string(),
-                            StopReason::AbortFunding => "Funding transaction aborted".to_string(),
+                            StopReason::Abandon => {
+                                format!("[Channel {}] Channel was abandoned", channel_id)
+                            }
+                            StopReason::AbortFunding => {
+                                format!("[Channel {}] Funding transaction aborted", channel_id)
+                            }
                             StopReason::AbortFundingWithDetail(detail) => detail.clone(),
-                            StopReason::FundingFailed => "Funding transaction failed".to_string(),
+                            StopReason::FundingFailed => {
+                                format!("[Channel {}] Funding transaction failed", channel_id)
+                            }
+                            StopReason::FundingFailedWithDetail(detail) => detail.clone(),
                             StopReason::PeerDisConnected => {
-                                "Peer disconnected during channel opening".to_string()
+                                format!(
+                                    "[Channel {}] Peer disconnected during channel opening",
+                                    channel_id
+                                )
                             }
-                            StopReason::Closed => {
-                                "Channel closed before becoming ready".to_string()
-                            }
+                            StopReason::Closed => format!(
+                                "[Channel {}] Channel closed before becoming ready",
+                                channel_id
+                            ),
                         };
                         if record.failure_detail.is_none() {
                             record.fail(failure_detail);
@@ -4810,7 +4821,13 @@ where
                     },
                 );
                 if should_abort {
-                    state.abort_funding(Either::Left(channel_id)).await;
+                    let detail = format!(
+                        "[Channel {}] Funding failed during NegotiatingFunding phase (fund channel): {}",
+                        channel_id, err
+                    );
+                    state
+                        .abort_funding_with_detail(Either::Left(channel_id), Some(detail))
+                        .await;
                 }
                 return Ok(());
             }
@@ -4907,14 +4924,16 @@ where
                     },
                 );
                 if should_abort {
+                    let detail = format!(
+                        "[Channel {}] Funding failed during SigningCommitment phase (sign funding tx): {}",
+                        channel_id, err
+                    );
                     let abort_msg = FiberMessageWithTarget {
                         target,
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id,
-                                message: format!("Failed to sign funding transaction: {}", err)
-                                    .as_bytes()
-                                    .to_vec(),
+                                message: detail.as_bytes().to_vec(),
                             }),
                         ),
                     };
@@ -4923,7 +4942,9 @@ where
                             NetworkActorCommand::SendFiberMessage(abort_msg),
                         ))
                         .expect("network actor alive");
-                    state.abort_funding(Either::Left(channel_id)).await;
+                    state
+                        .abort_funding_with_detail(Either::Left(channel_id), Some(detail))
+                        .await;
                 }
                 return Ok(());
             }
@@ -5908,6 +5929,15 @@ where
     }
 
     pub async fn abort_funding(&mut self, channel_id_or_outpoint: Either<Hash256, OutPoint>) {
+        self.abort_funding_with_detail(channel_id_or_outpoint, None)
+            .await;
+    }
+
+    pub async fn abort_funding_with_detail(
+        &mut self,
+        channel_id_or_outpoint: Either<Hash256, OutPoint>,
+        detail: Option<String>,
+    ) {
         debug!("abort_funding called with {:?}", channel_id_or_outpoint);
         let channel_id = match channel_id_or_outpoint {
             Either::Left(channel_id) => channel_id,
@@ -5923,10 +5953,15 @@ where
             },
         };
 
+        let stop_reason = match detail {
+            Some(d) => StopReason::FundingFailedWithDetail(d),
+            None => StopReason::FundingFailed,
+        };
+
         self.send_message_to_channel_actor(
             channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::Stop(StopReason::FundingFailed)),
+            ChannelActorMessage::Event(ChannelEvent::Stop(stop_reason)),
         )
         .await;
     }

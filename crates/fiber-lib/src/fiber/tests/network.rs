@@ -1,6 +1,6 @@
 use crate::fiber::channel::{
-    ChannelActorMessage, ChannelCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
+    ChannelActorMessage, ChannelCommand, ChannelOpenRecordStore, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
 };
 use crate::fiber::network::get_chain_hash;
 use crate::fiber::network::onchain_upstream_removed_reason_matches;
@@ -2870,6 +2870,51 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
             )
         })
         .await;
+
+    // Verify diagnostic failure details are stored in ChannelOpenRecord for both nodes
+    let record_a = node_a
+        .store
+        .get_channel_open_record(&channel_id)
+        .expect("node_a record");
+    assert!(record_a.failure_detail.is_some());
+    let detail_a = record_a.failure_detail.unwrap();
+    assert!(
+        detail_a.contains(&format!("{}", channel_id)),
+        "detail_a must contain channel_id: {}",
+        detail_a
+    );
+    assert!(
+        detail_a.contains("SigningCommitment"),
+        "detail_a must contain phase SigningCommitment: {}",
+        detail_a
+    );
+    assert!(
+        detail_a.contains("Mock signing failure for testing"),
+        "detail_a must contain cause: {}",
+        detail_a
+    );
+
+    let record_b = node_b
+        .store
+        .get_channel_open_record(&channel_id)
+        .expect("node_b record");
+    assert!(record_b.failure_detail.is_some());
+    let detail_b = record_b.failure_detail.unwrap();
+    assert!(
+        detail_b.contains(&format!("{}", channel_id)),
+        "detail_b must contain channel_id: {}",
+        detail_b
+    );
+    assert!(
+        detail_b.contains("SigningCommitment") || detail_b.contains("TxAbort"),
+        "detail_b must contain phase or TxAbort: {}",
+        detail_b
+    );
+    assert!(
+        detail_b.contains("Mock signing failure for testing"),
+        "detail_b must contain peer cause: {}",
+        detail_b
+    );
 }
 
 #[tokio::test]
