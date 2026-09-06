@@ -2642,7 +2642,7 @@ dependencies = [
  "parking_lot",
  "pprof",
  "ractor",
- "rand 0.9.4",
+ "rand 0.9.5",
  "regex",
  "scrypt",
  "secp256k1 0.30.0",
@@ -3583,7 +3583,7 @@ checksum = "516893339c97f6011282d5825ac94fc1c7aad5cad26bdc2d0cee068c0bf97f97"
 dependencies = [
  "attohttpc",
  "log",
- "rand 0.9.4",
+ "rand 0.9.5",
  "url",
  "xmltree",
 ]
@@ -3911,7 +3911,7 @@ dependencies = [
  "jsonrpsee-types",
  "parking_lot",
  "pin-project",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -4275,7 +4275,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "metrics",
  "quanta",
- "rand 0.9.4",
+ "rand 0.9.5",
  "rand_xoshiro",
  "rapidhash",
  "sketches-ddsketch",
@@ -5335,9 +5335,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c5af06bb1b7d3216d91932aed5265164bf384dc89cd6ba05cf59a35f5f76ea"
+checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -7279,7 +7279,7 @@ dependencies = [
  "http 1.4.2",
  "httparse",
  "log",
- "rand 0.9.4",
+ "rand 0.9.5",
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
