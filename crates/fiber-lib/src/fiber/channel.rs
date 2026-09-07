@@ -3668,20 +3668,25 @@ where
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
                     }
-                    let abort_detail = state.funding_abort_detail.clone().unwrap_or_else(|| {
-                        format!(
-                            "[Channel {}] Funding aborted during state {:?}",
-                            state.get_id(),
-                            state.state
-                        )
-                    });
+                    // Do not send local diagnostics to the peer. The detailed reason is
+                    // retained for the local RPC/history path, while the wire message is
+                    // deliberately stable and public-safe.
+                    let public_abort_message = match reason {
+                        StopReason::FundingFailed | StopReason::FundingFailedWithDetail(_) => {
+                            "Funding failed"
+                        }
+                        StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_) => {
+                            "Funding aborted"
+                        }
+                        _ => "Funding aborted",
+                    };
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     let abort_message = FiberMessageWithTarget {
                         target: state.get_remote_pubkey(),
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id: state.get_id(),
-                                message: abort_detail.into_bytes(),
+                                message: public_abort_message.as_bytes().to_vec(),
                             }),
                         ),
                     };

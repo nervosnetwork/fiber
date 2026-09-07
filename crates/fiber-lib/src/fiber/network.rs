@@ -4933,7 +4933,7 @@ where
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id,
-                                message: detail.as_bytes().to_vec(),
+                                message: b"Funding transaction signing failed".to_vec(),
                             }),
                         ),
                     };

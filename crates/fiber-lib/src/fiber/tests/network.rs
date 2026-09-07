@@ -2884,13 +2884,8 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
         detail_a
     );
     assert!(
-        detail_a.contains("SigningCommitment"),
-        "detail_a must contain phase SigningCommitment: {}",
-        detail_a
-    );
-    assert!(
-        detail_a.contains("Mock signing failure for testing"),
-        "detail_a must contain cause: {}",
+        detail_a.contains("SigningCommitment") || detail_a.contains("TxAbort"),
+        "detail_a must contain phase or TxAbort: {}",
         detail_a
     );
 
@@ -2910,9 +2905,17 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
         "detail_b must contain phase or TxAbort: {}",
         detail_b
     );
+    let root_cause = "Mock signing failure for testing";
     assert!(
-        detail_b.contains("Mock signing failure for testing"),
-        "detail_b must contain peer cause: {}",
+        detail_a.contains(root_cause) || detail_b.contains(root_cause),
+        "one node must retain the local root cause: detail_a={}, detail_b={}",
+        detail_a,
+        detail_b
+    );
+    assert!(
+        !(detail_a.contains(root_cause) && detail_b.contains(root_cause)),
+        "the local root cause must not be forwarded to both nodes: detail_a={}, detail_b={}",
+        detail_a,
         detail_b
     );
 }
