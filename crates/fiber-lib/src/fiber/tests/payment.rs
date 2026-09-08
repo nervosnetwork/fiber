@@ -7314,6 +7314,12 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
     node_0.wait_until_inflight(payment_hash).await;
     wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
 
+    // The harness does not run Watchtower; capture the signed local snapshot
+    // before closing and supply the recovery record after confirmation.
+    let state_before_close = node_0.get_channel_actor_state(channels[0]);
+    let local_snapshot = state_before_close.build_settlement_data(false).unwrap();
+    let commitment_number = state_before_close.get_current_commitment_number(false);
+
     node_0
         .send_shutdown(channels[0], true)
         .await
@@ -7326,6 +7332,17 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
         )
     })
     .await;
+
+    let closed_state = node_0.get_channel_actor_state(channels[0]);
+    node_0.store.store_shutdown_settlement_record(
+        &channels[0],
+        &fiber_types::ShutdownSettlementRecord {
+            shutdown_tx_hash: closed_state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number,
+            settlement_data: local_snapshot,
+        },
+    );
 
     node_0.node_info().await;
     insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);

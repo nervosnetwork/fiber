@@ -1,43 +1,59 @@
+#[cfg(feature = "watchtower")]
 use std::collections::HashMap;
+#[cfg(feature = "watchtower")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "watchtower")]
 use std::sync::{Arc, Mutex};
 
 use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
-use ckb_types::core::{TransactionBuilder, TransactionView};
-use ckb_types::packed::{CellDep, CellInput, CellOutput, OutPoint, Script};
+use ckb_types::core::TransactionBuilder;
+#[cfg(feature = "watchtower")]
+use ckb_types::core::TransactionView;
+#[cfg(feature = "watchtower")]
+use ckb_types::packed::{CellDep, CellInput, OutPoint};
+use ckb_types::packed::{CellOutput, Script};
 use ckb_types::prelude::*;
+#[cfg(feature = "watchtower")]
+use fiber_types::NodeId;
 use fiber_types::{
     AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
-    Hash256, HashAlgorithm, InboundTlcStatus, NodeId, OutboundTlcStatus, Privkey, Pubkey,
-    RemoveTlcFulfill, RemoveTlcReason, RevocationData, SettlementData, SettlementTlc,
-    ShutdownSettlementRecord, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill,
+    RemoveTlcReason, RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord,
+    TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::Actor;
+#[cfg(feature = "watchtower")]
+use ractor::{ActorProcessingErr, ActorRef};
 
+#[cfg(feature = "watchtower")]
 use crate::ckb::client::{CkbChainClient, GetShutdownTxResponse, GetTxResponse};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::channel::{
     settlement_data_to_witness, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelEvent, ChannelInitializationOperation, ChannelInitializationParameter,
 };
-use crate::fiber::network::{
-    check_channel_shutdown_settlement, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
-};
+use crate::fiber::network::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
 use crate::fiber::onchain_tlc_reconcile::{
     can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
     resolve_onchain_tlc, settlement_data_for_commitment, tracked_settlement_tlcs,
     verify_and_select_settlement_data, LegacyOnChainTlcSettlement, OnChainTimeoutTlcRole,
-    OnChainTlcResolution, OnChainTlcSettlement,
+    OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
 };
+#[cfg(feature = "watchtower")]
+use crate::fiber::{
+    network::check_channel_shutdown_settlement, onchain_tlc_reconcile::OnChainTlcSettlement,
+};
 use crate::store::open_store;
 use crate::tests::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
+// Browser tests disable Watchtower; gate its integration fixtures with the same feature.
+#[cfg(feature = "watchtower")]
 use crate::watchtower::WatchtowerStore;
 use crate::{gen_rand_fiber_public_key, gen_rand_sha256_hash};
 
@@ -58,6 +74,7 @@ async fn wait_for_settlement_completion(node: &NetworkNode, channel_id: Hash256)
     }).await.expect("production reconciliation must complete and clean up the snapshot");
 }
 
+#[cfg(feature = "watchtower")]
 fn trigger_shutdown_check(node: &NetworkNode) {
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
@@ -1590,12 +1607,14 @@ fn test_tracked_settlement_tlcs_extraction() {
 }
 
 #[derive(Clone, Default)]
+#[cfg(feature = "watchtower")]
 struct MockSettlementChainClient {
     transactions: Arc<Mutex<HashMap<ckb_types::H256, Result<GetTxResponse, String>>>>,
     cells: Arc<Mutex<Vec<ckb_sdk::rpc::ckb_indexer::Cell>>>,
     get_tx_call_count: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "watchtower")]
 impl MockSettlementChainClient {
     fn new() -> Self {
         Self::default()
@@ -1624,6 +1643,7 @@ impl MockSettlementChainClient {
 }
 
 #[async_trait::async_trait]
+#[cfg(feature = "watchtower")]
 impl CkbChainClient for MockSettlementChainClient {
     async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
         self.get_tx_call_count.fetch_add(1, Ordering::SeqCst);
@@ -1665,9 +1685,11 @@ impl CkbChainClient for MockSettlementChainClient {
     }
 }
 
+#[cfg(feature = "watchtower")]
 struct MessageCollectorActor(tokio::sync::mpsc::UnboundedSender<NetworkActorMessage>);
 
 #[async_trait::async_trait]
+#[cfg(feature = "watchtower")]
 impl Actor for MessageCollectorActor {
     type Msg = NetworkActorMessage;
     type State = ();
@@ -1726,6 +1748,7 @@ fn create_test_commitment_lock_with_keys(
     get_script_by_contract(Contract::CommitmentLock, &lock_args)
 }
 
+#[cfg(feature = "watchtower")]
 fn create_test_commitment_tx(
     funding_outpoint: OutPoint,
     lock: Script,
@@ -1746,6 +1769,7 @@ fn create_test_commitment_tx(
     builder.build()
 }
 
+#[cfg(feature = "watchtower")]
 async fn assert_confirmed_snapshot_recovery(wrong_direction: bool) {
     let mut node = NetworkNode::new().await;
     let store = node.store.clone();
@@ -1853,16 +1877,19 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool) {
 }
 
 #[tokio::test]
+#[cfg(feature = "watchtower")]
 async fn test_scenario_a_recovers_snapshot_and_clears_flags_when_already_confirmed() {
     assert_confirmed_snapshot_recovery(false).await;
 }
 
 #[tokio::test]
+#[cfg(feature = "watchtower")]
 async fn review_scheduler_recovers_wrong_direction_snapshot() {
     assert_confirmed_snapshot_recovery(true).await;
 }
 
 #[tokio::test]
+#[cfg(feature = "watchtower")]
 async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confirmed() {
     let temp_dir = tempfile::tempdir().unwrap();
     let store = open_store(temp_dir.path()).expect("open store");
@@ -1968,6 +1995,7 @@ async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confir
 }
 
 #[tokio::test]
+#[cfg(feature = "watchtower")]
 async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_tlc_resolved() {
     let temp_dir = tempfile::tempdir().unwrap();
     let store = open_store(temp_dir.path()).expect("open store");
@@ -2102,6 +2130,7 @@ async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_
 }
 
 #[test]
+#[cfg(feature = "watchtower")]
 fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
     let temp_dir = tempfile::tempdir().unwrap();
     let store = open_store(temp_dir.path()).expect("open store");
@@ -2398,6 +2427,7 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
 }
 
 #[tokio::test]
+#[cfg(feature = "watchtower")]
 async fn test_scenario_g_malformed_script_wrong_funding_and_direction_mismatch_stay_waiting() {
     let temp_dir = tempfile::tempdir().unwrap();
     let store = open_store(temp_dir.path()).expect("open store");
