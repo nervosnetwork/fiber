@@ -3199,7 +3199,7 @@ pub fn ensure_client_can_start_payment(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, MutexGuard};
