@@ -1,4 +1,4 @@
-#[cfg(not(any(feature = "bench")))]
+#[cfg(all(not(feature = "bench"), not(target_arch = "wasm32")))]
 mod actor;
 #[cfg(not(any(feature = "bench")))]
 mod config;
