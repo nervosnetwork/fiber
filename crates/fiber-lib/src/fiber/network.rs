@@ -4821,9 +4821,18 @@ where
                     },
                 );
                 if should_abort {
+                    let phase = state
+                        .store
+                        .get_channel_actor_state(&channel_id)
+                        .map(|channel_state| match channel_state.state {
+                            ChannelState::NegotiatingFunding(_) => "NegotiatingFunding",
+                            ChannelState::CollaboratingFundingTx(_) => "CollaboratingFundingTx",
+                            _ => "Unknown",
+                        })
+                        .unwrap_or("Unknown");
                     let detail = format!(
-                        "[Channel {}] Funding failed during NegotiatingFunding phase (fund channel): {}",
-                        channel_id, err
+                        "[Channel {}] Funding failed during {} phase (fund channel): {}",
+                        channel_id, phase, err
                     );
                     state
                         .abort_funding_with_detail(Either::Left(channel_id), Some(detail))
@@ -4925,7 +4934,7 @@ where
                 );
                 if should_abort {
                     let detail = format!(
-                        "[Channel {}] Funding failed during SigningCommitment phase (sign funding tx): {}",
+                        "[Channel {}] Funding failed during AwaitingTxSignatures phase (sign funding tx): {}",
                         channel_id, err
                     );
                     let abort_msg = FiberMessageWithTarget {

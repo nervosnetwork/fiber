@@ -2884,7 +2884,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
         detail_a
     );
     assert!(
-        detail_a.contains("SigningCommitment") || detail_a.contains("TxAbort"),
+        detail_a.contains("AwaitingTxSignatures") || detail_a.contains("TxAbort"),
         "detail_a must contain phase or TxAbort: {}",
         detail_a
     );
@@ -2901,7 +2901,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
         detail_b
     );
     assert!(
-        detail_b.contains("SigningCommitment") || detail_b.contains("TxAbort"),
+        detail_b.contains("AwaitingTxSignatures") || detail_b.contains("TxAbort"),
         "detail_b must contain phase or TxAbort: {}",
         detail_b
     );
