@@ -296,6 +296,12 @@ pub struct NetworkNodeConfig {
 }
 
 impl NetworkNodeConfig {
+    /// Use an existing database, including one reopened by a persistence test.
+    pub fn with_store(mut self, store: Store) -> Self {
+        self.store = store;
+        self
+    }
+
     pub fn builder() -> NetworkNodeConfigBuilder {
         NetworkNodeConfigBuilder::new()
     }

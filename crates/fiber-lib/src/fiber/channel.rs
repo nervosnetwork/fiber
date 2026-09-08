@@ -75,8 +75,9 @@ use fiber_types::{
     OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc,
     PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
     RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData, SettlementTlc,
-    ShutdownInfo, ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket,
-    TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
+    ShutdownInfo, ShutdownSettlementRecord, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER,
+    NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -3341,7 +3342,7 @@ where
         self.maintain_waiting_onchain_settlement_tlcs(state, now);
         let payer_effects_applied = self.settle_onchain_fulfilled_tlcs(state).await;
         self.finalize_onchain_timed_out_received_tlcs(state);
-        payer_effects_applied && !has_unresolved_onchain_tlcs(state)
+        payer_effects_applied && !has_unresolved_onchain_tlcs(state, &self.store)
     }
 
     async fn finalize_onchain_settlement(
@@ -3369,10 +3370,16 @@ where
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
             state.update_state(ChannelState::Closed(flags));
+            self.store.insert_channel_actor_state(state.clone());
+            // Recovery no longer needs this snapshot. Persist completion first so a crash
+            // cannot leave a waiting channel without its snapshot.
+            self.store
+                .delete_shutdown_settlement_record(&state.get_id());
             info!("Channel {:?} on-chain settlement completed", state.get_id());
             myself.stop(Some("OnChainSettlementCompleted".to_string()));
         } else {
             state.update_state(ChannelState::Closed(flags));
+            self.store.insert_channel_actor_state(state.clone());
             info!(
                 "Channel {:?} on-chain settlement reconciliation incomplete; keeping ONCHAIN_SETTLEMENT_CONFIRMED",
                 state.get_id()
@@ -3749,6 +3756,16 @@ where
                 }
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
+                    self.finalize_onchain_settlement(myself, state).await?;
+                }
+            }
+            ChannelEvent::ShutdownSettlementRecovered(record) => {
+                if !state.is_waiting_onchain_settlement()
+                    || !state.matches_shutdown_settlement_record(&record)
+                {
+                    return Ok(());
+                }
+                if state.is_onchain_settlement_confirmed() {
                     self.finalize_onchain_settlement(myself, state).await?;
                 }
             }
@@ -4992,6 +5009,7 @@ pub enum ChannelEvent {
     /// The network actor confirmed that the upstream RemoveTlc for this on-chain-resolved
     /// downstream TLC was delivered or durably queued.
     OnChainTlcRelayConfirmed(TLCId, RemoveTlcReason),
+    ShutdownSettlementRecovered(ShutdownSettlementRecord),
     CheckFundingTimeout,
 }
 
@@ -9982,6 +10000,31 @@ impl ChannelActorState {
         }
     }
 
+    /// Check that a persisted snapshot belongs to this close, including its TLC direction.
+    pub(crate) fn matches_shutdown_settlement_record(
+        &self,
+        record: &ShutdownSettlementRecord,
+    ) -> bool {
+        let ChannelState::Closed(flags) = self.state else {
+            return false;
+        };
+        let local = flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL);
+        let remote = flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE);
+        local != remote
+            && record.for_remote == remote
+            && self.shutdown_transaction_hash.as_ref() == Some(&record.shutdown_tx_hash)
+    }
+
+    /// Load the separately persisted snapshot only when its tx hash and close direction match.
+    pub(crate) fn load_shutdown_settlement_record(
+        &self,
+        store: &impl ChannelActorStateStore,
+    ) -> Option<ShutdownSettlementRecord> {
+        store
+            .get_shutdown_settlement_record(&self.get_id())
+            .filter(|record| self.matches_shutdown_settlement_record(record))
+    }
+
     pub(crate) async fn update_close_transaction_confirmed(
         &mut self,
         tx_hash: H256,
@@ -10020,6 +10063,8 @@ impl ChannelActorState {
         };
         self.update_state(closed_state);
         self.shutdown_transaction_hash.replace(tx_hash);
+        // Recover the immutable snapshot from the confirmed transaction. Current TLC
+        // state may have advanced since the local commitment was signed.
         // Broadcast the channel update message which disables the channel.
         if self.is_public() {
             let update = self.generate_disabled_channel_update();
@@ -10232,6 +10277,27 @@ pub trait ChannelActorStateStore {
 
     /// Delete the pending CommitDiff for a channel
     fn delete_pending_commit_diff(&self, channel_id: &Hash256);
+
+    /// Store shutdown settlement record snapshot for a closed channel
+    fn store_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+        record: &ShutdownSettlementRecord,
+    );
+
+    /// Get the shutdown settlement record snapshot for a closed channel
+    fn get_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<ShutdownSettlementRecord>;
+
+    /// Delete the shutdown settlement record snapshot for a closed channel
+    fn delete_shutdown_settlement_record(&self, channel_id: &Hash256);
+
+    /// Get watched channel data by channel ID for the local node, if available
+    fn get_local_watch_channel(&self, _channel_id: &Hash256) -> Option<fiber_types::ChannelData> {
+        None
+    }
 }
 
 /// Store trait for persisting and querying outbound channel-opening records.

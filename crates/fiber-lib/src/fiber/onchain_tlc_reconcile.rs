@@ -3,14 +3,189 @@
 //! settlement snapshot committed by the force-closed commitment transaction before persisting
 //! a settlement proof for an exact local TLC id and full 32-byte payment hash.
 
-use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
-use ckb_types::prelude::Unpack;
-use fiber_types::{
-    ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus,
-    RemoveTlcReason, SettlementData, TLCId, TlcInfo,
+use crate::fiber::channel::{
+    settlement_data_to_witness, settlement_tlc_to_witness, ChannelActorState,
+    ChannelActorStateStore,
 };
+use ckb_hash::blake2b_256;
+use ckb_sdk::util::blake160;
+use ckb_types::packed::Script;
+use fiber_types::{
+    ChannelData, ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus,
+    OutboundTlcStatus, Pubkey, RemoveTlcReason, SettlementData, TLCId, TlcInfo,
+};
+use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+
+// Used by Watchtower scanning; builds without the watchtower feature may leave it unused.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackedSettlementTlc {
+    pub tlc_id: TLCId,
+    pub payment_hash: Hash256,
+    pub hash_algorithm: HashAlgorithm,
+    pub witness: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedCommitmentLock {
+    pub for_remote: bool,
+    pub commitment_number: u64,
+    pub witness_hash: [u8; 20],
+}
+
+/// Validate the script and funding keys, then extract the commitment direction, number and witness hash.
+pub fn parse_commitment_lock(
+    commitment_lock: &Script,
+    local_funding: &Pubkey,
+    remote_funding: &Pubkey,
+) -> Option<ParsedCommitmentLock> {
+    let expected_commitment_lock = crate::ckb::contracts::get_script_by_contract(
+        crate::ckb::contracts::Contract::CommitmentLock,
+        &[],
+    );
+    if commitment_lock.code_hash() != expected_commitment_lock.code_hash()
+        || commitment_lock.hash_type() != expected_commitment_lock.hash_type()
+    {
+        return None;
+    }
+    let lock_args = commitment_lock.args().raw_data();
+    if lock_args.len() < 56 {
+        return None;
+    }
+    let pubkey_hash = &lock_args[0..20];
+
+    // Aggregated pubkey for remote commitment: [local_funding, remote_funding]
+    let remote_ctx = KeyAggContext::new([*local_funding, *remote_funding]).ok()?;
+    let remote_xonly = remote_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+    let expected_remote_pubkey_hash = &blake2b_256(remote_xonly)[0..20];
+
+    // Aggregated pubkey for local commitment: [remote_funding, local_funding]
+    let local_ctx = KeyAggContext::new([*remote_funding, *local_funding]).ok()?;
+    let local_xonly = local_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+    let expected_local_pubkey_hash = &blake2b_256(local_xonly)[0..20];
+
+    let for_remote = if pubkey_hash == expected_remote_pubkey_hash {
+        true
+    } else if pubkey_hash == expected_local_pubkey_hash {
+        false
+    } else {
+        return None;
+    };
+
+    let commitment_number = u64::from_be_bytes(lock_args[28..36].try_into().ok()?);
+    let witness_hash: [u8; 20] = lock_args[36..56].try_into().ok()?;
+
+    Some(ParsedCommitmentLock {
+        for_remote,
+        commitment_number,
+        witness_hash,
+    })
+}
+
+/// Select a candidate local, preceding remote or pending remote snapshot without verifying its hash.
+pub fn settlement_data_for_commitment(
+    channel_data: &ChannelData,
+    for_remote: bool,
+    commitment_number: u64,
+) -> &SettlementData {
+    if for_remote {
+        if channel_data
+            .revocation_data
+            .as_ref()
+            .and_then(|revocation| {
+                commitment_number
+                    .checked_sub(1)
+                    .map(|previous| revocation.commitment_number == previous)
+            })
+            .unwrap_or(false)
+        {
+            &channel_data.remote_settlement_data
+        } else {
+            &channel_data.pending_remote_settlement_data
+        }
+    } else {
+        &channel_data.local_settlement_data
+    }
+}
+
+/// Wrap the candidate snapshot in Some; this adds no validation and currently has no callers.
+#[allow(dead_code)]
+pub fn select_commitment_settlement_data(
+    channel_data: &ChannelData,
+    for_remote: bool,
+    commitment_number: u64,
+) -> Option<&SettlementData> {
+    Some(settlement_data_for_commitment(
+        channel_data,
+        for_remote,
+        commitment_number,
+    ))
+}
+
+/// Accept a candidate snapshot only when its witness hash matches the on-chain commitment lock.
+pub fn verify_and_select_settlement_data<'a>(
+    channel_data: &'a ChannelData,
+    commitment_lock: &Script,
+) -> Option<(bool, u64, &'a SettlementData)> {
+    let parsed = parse_commitment_lock(
+        commitment_lock,
+        &channel_data.local_funding_pubkey,
+        &channel_data.remote_funding_pubkey,
+    )?;
+    let settlement_data =
+        settlement_data_for_commitment(channel_data, parsed.for_remote, parsed.commitment_number);
+    let settlement_witness = settlement_data_to_witness(
+        settlement_data,
+        parsed.for_remote,
+        channel_data.local_settlement_key.clone(),
+        channel_data.remote_settlement_key,
+    );
+    if blake160(&settlement_witness).as_ref() != parsed.witness_hash {
+        warn!(
+            "Settlement snapshot hash does not match commitment lock for channel {:?}, commitment {}",
+            channel_data.channel_id, parsed.commitment_number
+        );
+        return None;
+    }
+    Some((parsed.for_remote, parsed.commitment_number, settlement_data))
+}
+
+/// Extract TLC identities and witnesses from a verified snapshot for Watchtower scanning,
+/// converting TLC IDs to the local channel's direction.
+#[allow(dead_code)]
+pub fn tracked_settlement_tlcs(
+    commitment_lock: &Script,
+    channel_data: &ChannelData,
+    for_remote: bool,
+) -> Option<Vec<TrackedSettlementTlc>> {
+    let (detected_for_remote, _commitment_number, settlement_data) =
+        verify_and_select_settlement_data(channel_data, commitment_lock)?;
+    if detected_for_remote != for_remote {
+        warn!(
+            "Commitment lock direction mismatch: detected for_remote={}, expected for_remote={}",
+            detected_for_remote, for_remote
+        );
+        return None;
+    }
+    Some(
+        settlement_data
+            .tlcs
+            .iter()
+            .map(|tlc| TrackedSettlementTlc {
+                tlc_id: if for_remote {
+                    tlc.tlc_id
+                } else {
+                    tlc.tlc_id.flip()
+                },
+                payment_hash: tlc.payment_hash,
+                hash_algorithm: tlc.hash_algorithm,
+                witness: settlement_tlc_to_witness(tlc, for_remote),
+            })
+            .collect(),
+    )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnChainTlcSettlement {
@@ -345,79 +520,37 @@ pub(crate) fn has_unresolved_onchain_tlcs_for_snapshot(
             settlement_tlc.tlc_id.flip()
         };
         let Some(tlc) = state.tlc_state.get(&tlc_id) else {
-            return false;
+            // A TLC present in the active settlement snapshot that is missing from local state
+            // must conservatively block settlement.
+            return true;
         };
         can_reconcile_onchain_fulfillment(tlc)
     })
 }
 
-pub(crate) fn has_unresolved_onchain_tlcs(state: &ChannelActorState) -> bool {
-    let local_uncooperative_close = matches!(
-        state.state,
-        ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
-    );
-    let remote_uncooperative_close = matches!(
-        state.state,
-        ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE)
-    );
-
-    if local_uncooperative_close {
-        // On local force-close, check against the local commitment snapshot which omits uncommitted offered TLCs.
-        if let Ok(local_snapshot) = state.build_settlement_data(false) {
-            return has_unresolved_onchain_tlcs_for_snapshot(state, &local_snapshot, false);
-        }
-    } else if remote_uncooperative_close {
-        // Deterministically derive the pending remote commitment tx hash to determine whether
-        // the remote party published the pending commitment (containing LocalAnnounced TLCs)
-        // or the preceding one (omitting them).
-        let pending_commitment_hash = state
-            .build_commitment_tx_and_settlement_data(true)
-            .map(|(tx, _)| tx.hash().unpack())
-            .ok();
-
-        return state.tlc_state.all_tlcs().any(|tlc| {
-            if !can_reconcile_onchain_fulfillment(tlc) {
-                return false;
-            }
-            if tlc.is_offered()
-                && matches!(tlc.outbound_status(), OutboundTlcStatus::LocalAnnounced)
-            {
-                match (&state.shutdown_transaction_hash, &pending_commitment_hash) {
-                    // Confirmed tx matches pending commitment: TLC is on-chain, must wait for settlement.
-                    // Different hash (e.g. preceding commitment broadcasted): TLC was never on-chain, do not block.
-                    (Some(confirmed_hash), Some(pending_hash)) => confirmed_hash == pending_hash,
-                    // Unknown shutdown tx hash: fall back to conservative waiting.
-                    _ => true,
-                }
-            } else {
-                // All other active TLCs on remote force-close must be settled on-chain.
-                true
-            }
-        });
+/// Check the matching shutdown snapshot; a force-close without a valid snapshot must keep waiting.
+pub(crate) fn has_unresolved_onchain_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> bool {
+    if let Some(record) = state.load_shutdown_settlement_record(store) {
+        return has_unresolved_onchain_tlcs_for_snapshot(
+            state,
+            &record.settlement_data,
+            record.for_remote,
+        );
     }
-
-    // Fallback: verify all active committed or inbound announced TLCs when snapshot construction is unavailable.
-
-    state.tlc_state.all_tlcs().any(|tlc| {
-        if !can_reconcile_onchain_fulfillment(tlc) {
-            return false;
-        }
-        if local_uncooperative_close {
-            if tlc.is_offered() {
-                matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
-            } else {
-                matches!(
-                    tlc.inbound_status(),
-                    InboundTlcStatus::RemoteAnnounced
-                        | InboundTlcStatus::AnnounceWaitPrevAck
-                        | InboundTlcStatus::AnnounceWaitAck
-                        | InboundTlcStatus::Committed
-                )
-            }
-        } else {
-            true
-        }
-    })
+    if matches!(state.state, ChannelState::Closed(flags)
+        if flags.intersects(CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE))
+    {
+        // An empty current TLC list is not evidence about the historical commitment.
+        // Keep recovery scheduled until its snapshot is known and verified.
+        return true;
+    }
+    state
+        .tlc_state
+        .all_tlcs()
+        .any(can_reconcile_onchain_fulfillment)
 }
 
 pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {

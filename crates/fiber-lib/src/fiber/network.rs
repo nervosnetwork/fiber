@@ -92,7 +92,8 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainTimeoutTlcRole,
+    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, verify_and_select_settlement_data,
+    OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
@@ -123,8 +124,8 @@ use fiber_types::{
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1350,6 +1351,10 @@ pub enum NetworkActorEvent {
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
+
+    // Wake reconciliation when a missing snapshot becomes available, even if settlement
+    // was already confirmed. Snapshot recovery alone does not mean settlement is complete.
+    ChannelSettlementRecovered(Hash256, ShutdownSettlementRecord),
 }
 
 #[derive(Debug)]
@@ -2064,6 +2069,32 @@ where
                     .await;
                 }
             }
+            NetworkActorEvent::ChannelSettlementRecovered(channel_id, record) => {
+                let Some(current) = self.store.get_channel_actor_state(&channel_id) else {
+                    return Ok(());
+                };
+                if !current.is_waiting_onchain_settlement()
+                    || !current.matches_shutdown_settlement_record(&record)
+                {
+                    return Ok(());
+                }
+
+                if let Some(channel_actor) = state.channels.get(&channel_id) {
+                    let _ = channel_actor.send_message(ChannelActorMessage::Event(
+                        ChannelEvent::ShutdownSettlementRecovered(record),
+                    ));
+                } else if let Some(mut actor_state) =
+                    self.store.get_channel_actor_state(&channel_id)
+                {
+                    self.reconcile_onchain_tlcs_without_live_actor(
+                        state,
+                        &mut actor_state,
+                        now_timestamp_as_millis_u64(),
+                        false,
+                    )
+                    .await;
+                }
+            }
             NetworkActorEvent::ChannelAcceptedForExternalFunding {
                 peer_id,
                 new_channel_id,
@@ -2683,17 +2714,24 @@ where
                         channel_state,
                         ChannelState::Closed(flags)
                             if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-                                && !flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            // Spawn async task for concurrent RPC call
+                            if actor_state.is_onchain_settlement_confirmed()
+                                && actor_state
+                                    .load_shutdown_settlement_record(&self.store)
+                                    .is_some()
+                            {
+                                continue;
+                            }
                             let chain_client = self.chain_client.clone();
                             let myself_clone = myself.clone();
+                            let store = self.store.clone();
                             crate::tasks::spawn(async move {
                                 Self::check_channel_shutdown_settlement(
                                     chain_client,
                                     myself_clone,
                                     actor_state,
+                                    store,
                                 )
                                 .await;
                             });
@@ -3701,7 +3739,7 @@ where
 
         // Keep waiting while any TLC outcome is still unknown. Once the settlement was confirmed
         // and every TLC is terminal, clear the close flags and drop the funding-script cache entry.
-        if !payer_effects_applied || has_unresolved_onchain_tlcs(actor_state) {
+        if !payer_effects_applied || has_unresolved_onchain_tlcs(actor_state, &self.store) {
             if mark_settlement_confirmed {
                 info!(
                     "Channel {channel_id:?} on-chain reconciliation incomplete; CheckChannels will retry"
@@ -3714,7 +3752,14 @@ where
                         | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
                 );
                 actor_state.state = ChannelState::Closed(flags);
-                settlement_state_changed = true;
+                self.store.insert_channel_actor_state(actor_state.clone());
+                self.store.delete_shutdown_settlement_record(&channel_id);
+                if let Some(ref store_actor) = state.store_actor {
+                    if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
+                        error!("Failed to request store backup after on-chain settlement finalization: {err}");
+                    }
+                }
+                settlement_state_changed = false;
                 state.channels_funding_lock_script_cache.remove(&channel_id);
                 info!("Channel {channel_id:?} on-chain settlement completed without a live actor");
             }
@@ -3913,21 +3958,33 @@ where
             }
         }
     }
+}
 
+impl<S, C> NetworkActor<S, C>
+where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
     /// Async version of check_channel_shutdown_settlement that runs in spawned task.
     /// Checks if the commitment transaction outputs have been spent (indicating settlement complete).
-    async fn check_channel_shutdown_settlement(
+    pub(crate) async fn check_channel_shutdown_settlement(
         chain_client: C,
         myself: ActorRef<NetworkActorMessage>,
         state: ChannelActorState,
+        store: S,
     ) {
         let channel_id = state.get_id();
         let ChannelState::Closed(flags) = state.state else {
             return;
         };
-        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-            || flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
-        {
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+            return;
+        }
+
+        let has_valid_snapshot = state.load_shutdown_settlement_record(&store).is_some();
+        let is_confirmed = flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
+
+        if is_confirmed && has_valid_snapshot {
             return;
         }
 
@@ -3958,6 +4015,20 @@ where
             return;
         };
 
+        if let Some(funding_outpoint) = state.get_funding_transaction_outpoint() {
+            let spends_funding = tx
+                .inputs()
+                .into_iter()
+                .any(|input| input.previous_output() == funding_outpoint);
+            if !spends_funding {
+                warn!(
+                    "Commitment tx {:?} does not spend channel {:?} funding outpoint {:?}",
+                    tx_hash, channel_id, funding_outpoint
+                );
+                return;
+            }
+        }
+
         let Some(output) = tx.outputs().get(0) else {
             warn!(
                 "Commitment tx {:?} has no outputs when checking settlement",
@@ -3967,6 +4038,35 @@ where
         };
 
         let lock = output.lock();
+        if !has_valid_snapshot {
+            if let Some(channel_data) = store.get_local_watch_channel(&channel_id) {
+                if let Some((for_remote, commitment_number, settlement_data)) =
+                    verify_and_select_settlement_data(&channel_data, &lock)
+                {
+                    let record = ShutdownSettlementRecord {
+                        shutdown_tx_hash: tx_hash.clone(),
+                        for_remote,
+                        commitment_number,
+                        settlement_data: settlement_data.clone(),
+                    };
+                    if !state.matches_shutdown_settlement_record(&record) {
+                        warn!(
+                            "Commitment direction does not match channel {:?} close flags",
+                            channel_id
+                        );
+                        return;
+                    }
+                    store.store_shutdown_settlement_record(&channel_id, &record);
+                    let _ = myself.send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelSettlementRecovered(channel_id, record),
+                    ));
+                }
+            }
+        }
+
+        if is_confirmed {
+            return;
+        }
         let lock_args = lock.args().raw_data();
         if lock_args.len() < 36 {
             warn!(
@@ -4010,7 +4110,37 @@ where
             }
         }
     }
+}
 
+#[allow(dead_code)]
+pub(crate) async fn check_channel_shutdown_settlement<S, C>(
+    chain_client: C,
+    myself: ActorRef<NetworkActorMessage>,
+    state: ChannelActorState,
+    store: S,
+) where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    NetworkActor::<S, C>::check_channel_shutdown_settlement(chain_client, myself, state, store)
+        .await
+}
+
+impl<S, C> NetworkActor<S, C>
+where
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
     // Check shutdown tx of a channel, shutdown channel if channel is force closed by remote
     async fn handle_remote_channel_shutdown(
         &self,
@@ -4047,6 +4177,21 @@ where
                         let channel_id = state.get_id();
                         let pubkey = state.get_remote_pubkey();
                         let tx_hash = tx.hash();
+                        if let Some(channel_data) = self.store.get_local_watch_channel(&channel_id)
+                        {
+                            if let Some((for_remote, commitment_number, settlement_data)) =
+                                verify_and_select_settlement_data(&channel_data, &output.lock())
+                            {
+                                let record = ShutdownSettlementRecord {
+                                    shutdown_tx_hash: tx_hash.unpack(),
+                                    for_remote,
+                                    commitment_number,
+                                    settlement_data: settlement_data.clone(),
+                                };
+                                self.store
+                                    .store_shutdown_settlement_record(&channel_id, &record);
+                            }
+                        }
                         tracing::debug!("channel {channel_id:?} is shutdown by remote");
                         myself
                             .send_message(NetworkActorMessage::Event(

@@ -39,7 +39,10 @@ use crate::{
         settlement_data_to_witness, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
         XUDT_COMPATIBLE_WITNESS,
     },
-    fiber::onchain_tlc_reconcile::OnChainTlcSettlement,
+    fiber::onchain_tlc_reconcile::{
+        settlement_data_for_commitment, tracked_settlement_tlcs, OnChainTlcSettlement,
+        TrackedSettlementTlc,
+    },
     now_timestamp_as_millis_u64,
     utils::{
         actor::ActorHandleLogGuard,
@@ -55,7 +58,6 @@ use crate::{
 };
 use fiber_types::{
     ChannelData, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
-    TLCId,
 };
 
 use super::WatchtowerStore;
@@ -744,87 +746,9 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TrackedSettlementTlc {
-    tlc_id: TLCId,
-    payment_hash: Hash256,
-    hash_algorithm: HashAlgorithm,
-    witness: Vec<u8>,
-}
-
 struct WatchedSettlementScan {
     witness_input_indices: HashMap<ckb_types::packed::Byte32, usize>,
     tracked_tlcs_by_outpoint: HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
-}
-
-fn settlement_data_for_commitment(
-    channel_data: &ChannelData,
-    for_remote: bool,
-    commitment_number: u64,
-) -> &SettlementData {
-    if for_remote {
-        if channel_data
-            .revocation_data
-            .as_ref()
-            .and_then(|revocation| {
-                commitment_number
-                    .checked_sub(1)
-                    .map(|previous| revocation.commitment_number == previous)
-            })
-            .unwrap_or(false)
-        {
-            &channel_data.remote_settlement_data
-        } else {
-            &channel_data.pending_remote_settlement_data
-        }
-    } else {
-        &channel_data.local_settlement_data
-    }
-}
-
-fn tracked_settlement_tlcs(
-    commitment_lock: &Script,
-    channel_data: &ChannelData,
-    for_remote: bool,
-) -> Option<Vec<TrackedSettlementTlc>> {
-    let lock_args = commitment_lock.args().raw_data();
-    if lock_args.len() < 56 {
-        return None;
-    }
-    let commitment_number = u64::from_be_bytes(lock_args[28..36].try_into().ok()?);
-    let settlement_data =
-        settlement_data_for_commitment(channel_data, for_remote, commitment_number);
-    let committed_witness_hash = &lock_args[36..56];
-    let settlement_witness = settlement_data_to_witness(
-        settlement_data,
-        for_remote,
-        channel_data.local_settlement_key.clone(),
-        channel_data.remote_settlement_key,
-    );
-    if blake160(&settlement_witness).as_ref() != committed_witness_hash {
-        warn!(
-            "Settlement snapshot hash does not match commitment lock for channel {:?}, commitment {}",
-            channel_data.channel_id, commitment_number
-        );
-        return None;
-    }
-
-    Some(
-        settlement_data
-            .tlcs
-            .iter()
-            .map(|tlc| TrackedSettlementTlc {
-                tlc_id: if for_remote {
-                    tlc.tlc_id
-                } else {
-                    tlc.tlc_id.flip()
-                },
-                payment_hash: tlc.payment_hash,
-                hash_algorithm: tlc.hash_algorithm,
-                witness: settlement_tlc_to_witness(tlc, for_remote),
-            })
-            .collect(),
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2334,6 +2258,7 @@ mod tests {
     use std::sync::Mutex;
 
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
+    use fiber_types::TLCId;
 
     use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 

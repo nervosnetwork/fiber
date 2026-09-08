@@ -1,26 +1,92 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use ckb_hash::blake2b_256;
+use ckb_sdk::util::blake160;
+use ckb_types::core::{TransactionBuilder, TransactionView};
+use ckb_types::packed::{CellDep, CellInput, CellOutput, OutPoint, Script};
+use ckb_types::prelude::*;
+use fiber_types::{
+    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
+    Hash256, HashAlgorithm, InboundTlcStatus, NodeId, OutboundTlcStatus, Privkey, Pubkey,
+    RemoveTlcFulfill, RemoveTlcReason, RevocationData, SettlementData, SettlementTlc,
+    ShutdownSettlementRecord, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+};
+use musig2::{secp::Point, CompactSignature, KeyAggContext};
+use ractor::{Actor, ActorProcessingErr, ActorRef};
+
+use crate::ckb::client::{CkbChainClient, GetShutdownTxResponse, GetTxResponse};
+use crate::ckb::contracts::{get_script_by_contract, Contract};
+use crate::fiber::channel::{
+    settlement_data_to_witness, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
+    ChannelCommand, ChannelEvent, ChannelInitializationOperation, ChannelInitializationParameter,
+};
+use crate::fiber::network::{
+    check_channel_shutdown_settlement, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+};
 use crate::fiber::onchain_tlc_reconcile::{
     can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, resolve_onchain_tlc,
-    LegacyOnChainTlcSettlement, OnChainTimeoutTlcRole, OnChainTlcResolution,
+    has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
+    resolve_onchain_tlc, settlement_data_for_commitment, tracked_settlement_tlcs,
+    verify_and_select_settlement_data, LegacyOnChainTlcSettlement, OnChainTimeoutTlcRole,
+    OnChainTlcResolution, OnChainTlcSettlement,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
 };
+use crate::store::open_store;
+use crate::tests::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
+use crate::watchtower::WatchtowerStore;
 use crate::{gen_rand_fiber_public_key, gen_rand_sha256_hash};
 
-use ckb_types::core::TransactionBuilder;
-use ckb_types::packed::CellOutput;
-use ckb_types::prelude::*;
-use fiber_types::{
-    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
-    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey, RemoveTlcFulfill,
-    RemoveTlcReason, RevocationData, SettlementData, SettlementTlc, TLCId, TlcErr, TlcErrPacket,
-    TlcErrorCode, TlcInfo, TlcStatus,
-};
-use musig2::CompactSignature;
-
 const TEST_SHARED_SECRET: [u8; 32] = [7u8; 32];
+
+async fn wait_for_settlement_completion(node: &NetworkNode, channel_id: Hash256) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = node.store.get_channel_actor_state(&channel_id).unwrap();
+            if matches!(state.state, ChannelState::Closed(flags)
+                if !flags.intersects(CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED))
+                && node.store.get_shutdown_settlement_record(&channel_id).is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("production reconciliation must complete and clean up the snapshot");
+}
+
+fn trigger_shutdown_check(node: &NetworkNode) {
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::CheckChannelsShutdown,
+        ))
+        .unwrap();
+}
+
+fn install_unit_snapshot(
+    state: &mut crate::fiber::channel::ChannelActorState,
+    store: &MockStore,
+    for_remote: bool,
+    settlement_data: SettlementData,
+) {
+    let tx_hash = state
+        .shutdown_transaction_hash
+        .clone()
+        .unwrap_or_else(|| gen_rand_sha256_hash().into());
+    state.shutdown_transaction_hash = Some(tx_hash.clone());
+    store.store_shutdown_settlement_record(
+        &state.get_id(),
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: tx_hash,
+            for_remote,
+            commitment_number: 1,
+            settlement_data,
+        },
+    );
+}
 
 fn payment_hash_for(preimage: Hash256, hash_algorithm: HashAlgorithm) -> Hash256 {
     hash_algorithm.hash(preimage).into()
@@ -590,6 +656,7 @@ fn collect_received_timeout_skips_uncommitted_tlc_with_same_hash() {
 
 #[test]
 fn collect_timeout_uses_exact_tlc_identity_for_shared_prefixes() {
+    let snapshot_store = MockStore::new();
     let channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
     let first_hash_bytes = [1u8; 32];
@@ -622,7 +689,7 @@ fn collect_timeout_uses_exact_tlc_identity_for_shared_prefixes() {
     let settled = collect_onchain_timeout_settled_tlcs(&state, &store, 100);
     assert_eq!(settled.len(), 1);
     assert_eq!(settled[0].tlc_id, TLCId::Offered(0));
-    assert!(has_unresolved_onchain_tlcs(&state));
+    assert!(has_unresolved_onchain_tlcs(&state, &snapshot_store));
 }
 
 #[test]
@@ -809,146 +876,6 @@ fn settlement_tlc_for(tlc: &TlcInfo) -> SettlementTlc {
     }
 }
 
-fn settlement_data_for_commitment(
-    channel_data: &ChannelData,
-    for_remote: bool,
-    commitment_number: u64,
-) -> &SettlementData {
-    if for_remote {
-        if channel_data
-            .revocation_data
-            .as_ref()
-            .and_then(|revocation| {
-                commitment_number
-                    .checked_sub(1)
-                    .map(|previous| revocation.commitment_number == previous)
-            })
-            .unwrap_or(false)
-        {
-            &channel_data.remote_settlement_data
-        } else {
-            &channel_data.pending_remote_settlement_data
-        }
-    } else {
-        &channel_data.local_settlement_data
-    }
-}
-
-#[test]
-fn settlement_data_for_commitment_distinguishes_pending_and_preceding_remote_commitments() {
-    let channel_id = gen_rand_sha256_hash();
-    let preimage = gen_rand_sha256_hash();
-    let payment_hash = payment_hash_for(preimage, HashAlgorithm::CkbHash);
-    let tlc = tlc_info(
-        TLCId::Offered(0),
-        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        payment_hash,
-        HashAlgorithm::CkbHash,
-    );
-
-    let preceding_remote_settlement = SettlementData {
-        local_amount: 1000,
-        remote_amount: 1000,
-        tlcs: vec![],
-    };
-    let pending_remote_settlement = SettlementData {
-        local_amount: 0,
-        remote_amount: 1000,
-        tlcs: vec![settlement_tlc_for(&tlc)],
-    };
-    let local_settlement = SettlementData {
-        local_amount: 1000,
-        remote_amount: 1000,
-        tlcs: vec![],
-    };
-
-    let channel_data = ChannelData {
-        channel_id,
-        funding_udt_type_script: None,
-        local_settlement_key: Privkey::from([1u8; 32]),
-        remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
-        local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
-        remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
-        remote_settlement_data: preceding_remote_settlement.clone(),
-        pending_remote_settlement_data: pending_remote_settlement.clone(),
-        local_settlement_data: local_settlement.clone(),
-        revocation_data: Some(RevocationData {
-            commitment_number: 5,
-            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
-            output: CellOutput::default(),
-            output_data: Default::default(),
-        }),
-    };
-
-    // Commitment 6 is the preceding unrevoked remote commitment (revocation.commitment_number == 6 - 1)
-    let selected_preceding = settlement_data_for_commitment(&channel_data, true, 6);
-    assert_eq!(selected_preceding.tlcs.len(), 0);
-
-    // Commitment 7 is the pending remote commitment
-    let selected_pending = settlement_data_for_commitment(&channel_data, true, 7);
-    assert_eq!(selected_pending.tlcs.len(), 1);
-    assert_eq!(selected_pending.tlcs[0].tlc_id, TLCId::Offered(0));
-
-    // Local commitment
-    let selected_local = settlement_data_for_commitment(&channel_data, false, 6);
-    assert_eq!(selected_local.tlcs.len(), 0);
-}
-
-#[test]
-fn has_unresolved_distinguishes_pending_and_preceding_remote_force_close() {
-    let channel_id = gen_rand_sha256_hash();
-    let payment_hash = gen_rand_sha256_hash();
-    let tlc = tlc_info(
-        TLCId::Offered(0),
-        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        payment_hash,
-        HashAlgorithm::CkbHash,
-    );
-    let mut state = closed_state_with_offered_local_announced(
-        channel_id,
-        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
-        tlc.clone(),
-    );
-
-    let preceding_remote_settlement = SettlementData {
-        local_amount: 1000,
-        remote_amount: 1000,
-        tlcs: vec![],
-    };
-    let pending_remote_settlement = SettlementData {
-        local_amount: 0,
-        remote_amount: 1000,
-        tlcs: vec![settlement_tlc_for(&tlc)],
-    };
-
-    // When the preceding remote commitment is published on-chain, the LocalAnnounced TLC is NOT in the snapshot
-    // and must not block on-chain settlement.
-    assert!(
-        !has_unresolved_onchain_tlcs_for_snapshot(&state, &preceding_remote_settlement, true),
-        "preceding remote commitment omits offered LocalAnnounced TLC and must not block finalization"
-    );
-
-    // When the pending remote commitment is published on-chain, the LocalAnnounced TLC IS in the snapshot
-    // and must be waited on until settled.
-    assert!(
-        has_unresolved_onchain_tlcs_for_snapshot(&state, &pending_remote_settlement, true),
-        "pending remote commitment includes offered LocalAnnounced TLC and must wait for settlement"
-    );
-
-    // Once resolved on-chain (e.g. marked removed after preimage or timeout), it no longer blocks.
-    state.tlc_state.set_offered_tlc_removed(
-        0,
-        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-            &TEST_SHARED_SECRET,
-        )),
-    );
-    assert!(
-        !has_unresolved_onchain_tlcs_for_snapshot(&state, &pending_remote_settlement, true),
-        "resolved TLC in pending remote commitment must not block finalization"
-    );
-}
-
 #[test]
 fn has_unresolved_and_fulfill_for_received_announce_wait_ack_on_local_close() {
     let channel_id = gen_rand_sha256_hash();
@@ -1015,6 +942,7 @@ fn has_unresolved_and_fulfill_for_received_announce_wait_ack_on_local_close() {
 
 #[test]
 fn has_unresolved_ignores_local_announced_on_local_force_close() {
+    let snapshot_store = MockStore::new();
     let channel_id = gen_rand_sha256_hash();
     let tlc = tlc_info(
         TLCId::Offered(0),
@@ -1022,112 +950,25 @@ fn has_unresolved_ignores_local_announced_on_local_force_close() {
         gen_rand_sha256_hash(),
         HashAlgorithm::CkbHash,
     );
-    let state = closed_state_with_offered_local_announced(
+    let mut state = closed_state_with_offered_local_announced(
         channel_id,
         CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
         tlc,
     );
 
+    let snapshot = state.build_settlement_data(false).unwrap();
+    assert!(snapshot.tlcs.is_empty());
+    install_unit_snapshot(&mut state, &snapshot_store, false, snapshot);
+
     assert!(
-        !has_unresolved_onchain_tlcs(&state),
+        !has_unresolved_onchain_tlcs(&state, &snapshot_store),
         "a local force-close broadcasts the local commitment, which omits offered LocalAnnounced TLCs"
     );
 }
 
 #[test]
-fn has_unresolved_keeps_local_announced_on_remote_force_close() {
-    let channel_id = gen_rand_sha256_hash();
-    let tlc = tlc_info(
-        TLCId::Offered(0),
-        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        gen_rand_sha256_hash(),
-        HashAlgorithm::CkbHash,
-    );
-    let state = closed_state_with_offered_local_announced(
-        channel_id,
-        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
-        tlc,
-    );
-
-    assert!(
-        has_unresolved_onchain_tlcs(&state),
-        "a remote force-close can spend offered LocalAnnounced TLCs from the signed remote commitment"
-    );
-}
-
-#[test]
-fn has_unresolved_ignores_local_announced_on_preceding_remote_commitment_force_close() {
-    let channel_id = gen_rand_sha256_hash();
-    let mut tlc = tlc_info(
-        TLCId::Offered(0),
-        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        gen_rand_sha256_hash(),
-        HashAlgorithm::CkbHash,
-    );
-    tlc.created_at = CommitmentNumbers {
-        local: 1,
-        remote: 1,
-    };
-
-    let mut state = closed_state_with_offered_local_announced(
-        channel_id,
-        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
-        tlc,
-    );
-    // Remote force-closed by broadcasting preceding commitment (not matching pending commitment hash)
-    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
-
-    assert!(
-        !has_unresolved_onchain_tlcs(&state),
-        "a remote force-close broadcasting preceding commitment omits LocalAnnounced TLC and must not block settlement"
-    );
-}
-
-#[test]
-fn has_unresolved_waits_for_local_announced_on_pending_remote_commitment_force_close() {
-    let channel_id = gen_rand_sha256_hash();
-    let mut tlc = tlc_info(
-        TLCId::Offered(0),
-        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-        gen_rand_sha256_hash(),
-        HashAlgorithm::CkbHash,
-    );
-    tlc.created_at = CommitmentNumbers {
-        local: 1,
-        remote: 1,
-    };
-
-    let mut state = closed_state_with_offered_local_announced(
-        channel_id,
-        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
-        tlc,
-    );
-    let (pending_tx, _) = state
-        .build_commitment_tx_and_settlement_data(true)
-        .expect("build pending commitment tx");
-    state.shutdown_transaction_hash = Some(pending_tx.hash().unpack());
-
-    assert!(
-        has_unresolved_onchain_tlcs(&state),
-        "a remote force-close broadcasting pending commitment includes LocalAnnounced TLC and must wait for settlement"
-    );
-
-    // Once resolved on-chain, it no longer blocks
-    state.tlc_state.set_offered_tlc_removed(
-        0,
-        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
-            &TEST_SHARED_SECRET,
-        )),
-    );
-    assert!(
-        !has_unresolved_onchain_tlcs(&state),
-        "resolved LocalAnnounced TLC must not block settlement"
-    );
-}
-
-#[test]
 fn has_unresolved_falls_back_to_waiting_when_commitment_is_unknown() {
+    let snapshot_store = MockStore::new();
     let channel_id = gen_rand_sha256_hash();
     let mut tlc = tlc_info(
         TLCId::Offered(0),
@@ -1148,7 +989,7 @@ fn has_unresolved_falls_back_to_waiting_when_commitment_is_unknown() {
     state.shutdown_transaction_hash = None;
 
     assert!(
-        has_unresolved_onchain_tlcs(&state),
+        has_unresolved_onchain_tlcs(&state, &snapshot_store),
         "when confirmed commitment transaction is not yet known, conservatively wait for LocalAnnounced TLC"
     );
 }
@@ -1382,6 +1223,7 @@ fn multiple_concurrent_tlcs_distinguish_pending_and_preceding_remote_close() {
 
 #[test]
 fn multiple_concurrent_tlcs_local_force_close_resolution() {
+    let snapshot_store = MockStore::new();
     let channel_id = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
 
@@ -1423,9 +1265,28 @@ fn multiple_concurrent_tlcs_local_force_close_resolution() {
     state.tlc_state.offered_tlcs.tlcs = vec![tlc_0, tlc_1];
     state.tlc_state.received_tlcs.tlcs = vec![tlc_2, tlc_3];
 
+    let tlcs = [TLCId::Offered(1), TLCId::Received(0), TLCId::Received(1)]
+        .iter()
+        .map(|id| {
+            let mut tlc = settlement_tlc_for(state.tlc_state.get(id).unwrap());
+            tlc.tlc_id = tlc.tlc_id.flip();
+            tlc
+        })
+        .collect();
+    install_unit_snapshot(
+        &mut state,
+        &snapshot_store,
+        false,
+        SettlementData {
+            local_amount: 0,
+            remote_amount: 0,
+            tlcs,
+        },
+    );
+
     // Local force close should block while committed/announced-received TLCs are unresolved
     assert!(
-        has_unresolved_onchain_tlcs(&state),
+        has_unresolved_onchain_tlcs(&state, &snapshot_store),
         "local force close has active committed & AnnounceWaitAck TLCs"
     );
 
@@ -1436,7 +1297,7 @@ fn multiple_concurrent_tlcs_local_force_close_resolution() {
             payment_preimage: preimage_1,
         }),
     );
-    assert!(has_unresolved_onchain_tlcs(&state));
+    assert!(has_unresolved_onchain_tlcs(&state, &snapshot_store));
 
     // Resolve TLC 2 (received AnnounceWaitAck)
     state.tlc_state.set_received_tlc_removed(
@@ -1445,7 +1306,7 @@ fn multiple_concurrent_tlcs_local_force_close_resolution() {
             payment_preimage: preimage_2,
         }),
     );
-    assert!(has_unresolved_onchain_tlcs(&state));
+    assert!(has_unresolved_onchain_tlcs(&state, &snapshot_store));
 
     // Resolve TLC 3 (received committed)
     state.tlc_state.set_received_tlc_removed(
@@ -1458,7 +1319,1331 @@ fn multiple_concurrent_tlcs_local_force_close_resolution() {
     // Now all local commitment TLCs are resolved. TLC 0 (Offered LocalAnnounced) is omitted
     // from local commitment and must not block finalization!
     assert!(
-        !has_unresolved_onchain_tlcs(&state),
+        !has_unresolved_onchain_tlcs(&state, &snapshot_store),
         "local force close should not be blocked by offered LocalAnnounced TLC"
     );
+}
+
+#[test]
+fn regression_remote_force_close_with_received_announce_wait_prev_ack_does_not_block() {
+    let snapshot_store = MockStore::new();
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let tlc = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitPrevAck),
+        payment_hash,
+        hash_algorithm,
+    );
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.to_local_amount = 100_000_000;
+    state.to_remote_amount = 100_000_000;
+    state.tlc_state.received_tlcs.tlcs = vec![tlc];
+    let funding_tx = TransactionBuilder::default()
+        .output(
+            CellOutput::new_builder()
+                .capacity(100_000_000 * 100_000_000u64)
+                .build(),
+        )
+        .build();
+    state.funding_tx = Some(funding_tx.data());
+    state.remote_channel_public_keys = Some(ChannelBasePublicKeys {
+        funding_pubkey: gen_rand_fiber_public_key(),
+        tlc_base_key: gen_rand_fiber_public_key(),
+    });
+    state.remote_commitment_points = vec![
+        (0, gen_rand_fiber_public_key()),
+        (1, gen_rand_fiber_public_key()),
+    ];
+    let (pending_tx, snapshot) = state
+        .build_commitment_tx_and_settlement_data(true)
+        .expect("build pending commitment tx");
+    state.shutdown_transaction_hash = Some(pending_tx.hash().unpack());
+    install_unit_snapshot(&mut state, &snapshot_store, true, snapshot);
+
+    assert!(
+        !has_unresolved_onchain_tlcs(&state, &snapshot_store),
+        "received AnnounceWaitPrevAck is not included in remote commitment snapshot and must not block settlement"
+    );
+}
+
+#[test]
+fn test_parse_commitment_lock_direction_and_validation() {
+    let local_privkey = Privkey::from([1u8; 32]);
+    let remote_privkey = Privkey::from([2u8; 32]);
+    let local_funding_pubkey = local_privkey.pubkey();
+    let remote_funding_pubkey = remote_privkey.pubkey();
+
+    // Remote commitment lock: local_funding first, then remote_funding
+    let remote_ctx = KeyAggContext::new([local_funding_pubkey, remote_funding_pubkey]).unwrap();
+    let remote_xonly = remote_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+    let remote_lock_pubkey_hash = &blake2b_256(remote_xonly)[0..20];
+
+    let delay_epoch = 100u64;
+    let commitment_number = 42u64;
+    let witness_hash = [9u8; 20];
+
+    let mut remote_lock_args = Vec::new();
+    remote_lock_args.extend_from_slice(remote_lock_pubkey_hash);
+    remote_lock_args.extend_from_slice(&delay_epoch.to_be_bytes());
+    remote_lock_args.extend_from_slice(&commitment_number.to_be_bytes());
+    remote_lock_args.extend_from_slice(&witness_hash);
+    remote_lock_args.push(0x00);
+
+    let remote_lock = get_script_by_contract(Contract::CommitmentLock, &remote_lock_args);
+
+    let parsed = parse_commitment_lock(&remote_lock, &local_funding_pubkey, &remote_funding_pubkey)
+        .expect("should parse remote commitment lock");
+    assert!(parsed.for_remote);
+    assert_eq!(parsed.commitment_number, 42);
+    assert_eq!(parsed.witness_hash, witness_hash);
+
+    // Local commitment lock: remote_funding first, then local_funding
+    let local_ctx = KeyAggContext::new([remote_funding_pubkey, local_funding_pubkey]).unwrap();
+    let local_xonly = local_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+    let local_lock_pubkey_hash = &blake2b_256(local_xonly)[0..20];
+
+    let mut local_lock_args = Vec::new();
+    local_lock_args.extend_from_slice(local_lock_pubkey_hash);
+    local_lock_args.extend_from_slice(&delay_epoch.to_be_bytes());
+    local_lock_args.extend_from_slice(&commitment_number.to_be_bytes());
+    local_lock_args.extend_from_slice(&witness_hash);
+    local_lock_args.push(0x00);
+
+    let local_lock = get_script_by_contract(Contract::CommitmentLock, &local_lock_args);
+
+    let parsed_local =
+        parse_commitment_lock(&local_lock, &local_funding_pubkey, &remote_funding_pubkey)
+            .expect("should parse local commitment lock");
+    assert!(!parsed_local.for_remote);
+    assert_eq!(parsed_local.commitment_number, 42);
+    assert_eq!(parsed_local.witness_hash, witness_hash);
+
+    // Corrupted / too short args
+    let too_short_lock = get_script_by_contract(Contract::CommitmentLock, &[0u8; 35]);
+    assert!(parse_commitment_lock(
+        &too_short_lock,
+        &local_funding_pubkey,
+        &remote_funding_pubkey
+    )
+    .is_none());
+
+    // Wrong pubkeys
+    let unrelated_pubkey = Privkey::from([3u8; 32]).pubkey();
+    assert!(
+        parse_commitment_lock(&remote_lock, &unrelated_pubkey, &remote_funding_pubkey).is_none()
+    );
+}
+
+#[test]
+fn test_verify_and_select_settlement_data_preceding_and_pending() {
+    let local_privkey = Privkey::from([1u8; 32]);
+    let remote_privkey = Privkey::from([2u8; 32]);
+    let local_settlement_key = Privkey::from([3u8; 32]);
+    let remote_settlement_key = Privkey::from([4u8; 32]).pubkey();
+    let channel_id = gen_rand_sha256_hash();
+
+    let preceding_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 2000,
+        tlcs: vec![],
+    };
+    let pending_settlement = SettlementData {
+        local_amount: 500,
+        remote_amount: 2500,
+        tlcs: vec![],
+    };
+    let local_settlement = SettlementData {
+        local_amount: 1500,
+        remote_amount: 1500,
+        tlcs: vec![],
+    };
+
+    let channel_data = ChannelData {
+        channel_id,
+        funding_udt_type_script: None,
+        local_settlement_key: local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey: local_privkey.pubkey(),
+        remote_funding_pubkey: remote_privkey.pubkey(),
+        remote_settlement_data: preceding_settlement.clone(),
+        pending_remote_settlement_data: pending_settlement.clone(),
+        local_settlement_data: local_settlement.clone(),
+        revocation_data: Some(RevocationData {
+            commitment_number: 10,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        }),
+    };
+
+    // Revocation 10 leaves preceding 11 and pending 12; local uses its own snapshot.
+    for (for_remote, number, expected) in [
+        (true, 11, &preceding_settlement),
+        (true, 12, &pending_settlement),
+        (false, 11, &local_settlement),
+    ] {
+        let lock = create_test_commitment_lock_with_keys(
+            &local_privkey,
+            &remote_privkey,
+            &local_settlement_key,
+            remote_settlement_key,
+            expected,
+            for_remote,
+            number,
+        );
+        let (actual_direction, actual_number, selected) =
+            verify_and_select_settlement_data(&channel_data, &lock)
+                .expect("commitment lock should verify");
+        assert_eq!(actual_direction, for_remote);
+        assert_eq!(actual_number, number);
+        assert_eq!(selected, expected);
+
+        let mut tampered_args = lock.args().raw_data().to_vec();
+        tampered_args[40] ^= 0xff;
+        let tampered_lock = get_script_by_contract(Contract::CommitmentLock, &tampered_args);
+        assert!(verify_and_select_settlement_data(&channel_data, &tampered_lock).is_none());
+    }
+}
+
+#[test]
+fn test_tracked_settlement_tlcs_extraction() {
+    let local_privkey = Privkey::from([1u8; 32]);
+    let remote_privkey = Privkey::from([2u8; 32]);
+    let local_settlement_key = Privkey::from([3u8; 32]);
+    let remote_settlement_key = Privkey::from([4u8; 32]).pubkey();
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+
+    let settlement_tlc = SettlementTlc {
+        tlc_id: TLCId::Offered(5),
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_amount: 3000,
+        payment_hash,
+        expiry: 200,
+        local_key: Privkey::from([5u8; 32]),
+        remote_key: Privkey::from([6u8; 32]).pubkey(),
+    };
+
+    let pending_settlement = SettlementData {
+        local_amount: 500,
+        remote_amount: 2500,
+        tlcs: vec![settlement_tlc],
+    };
+
+    let channel_data = ChannelData {
+        channel_id,
+        funding_udt_type_script: None,
+        local_settlement_key: local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey: local_privkey.pubkey(),
+        remote_funding_pubkey: remote_privkey.pubkey(),
+        remote_settlement_data: SettlementData {
+            local_amount: 0,
+            remote_amount: 0,
+            tlcs: vec![],
+        },
+        pending_remote_settlement_data: pending_settlement.clone(),
+        local_settlement_data: SettlementData {
+            local_amount: 0,
+            remote_amount: 0,
+            tlcs: vec![],
+        },
+        revocation_data: None,
+    };
+
+    // Commitment 2 = pending
+    let pending_witness = settlement_data_to_witness(
+        &pending_settlement,
+        true,
+        local_settlement_key,
+        remote_settlement_key,
+    );
+    let pending_witness_hash = blake160(&pending_witness).0;
+
+    let remote_ctx = KeyAggContext::new([local_privkey.pubkey(), remote_privkey.pubkey()]).unwrap();
+    let remote_xonly = remote_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+    let remote_lock_pubkey_hash = &blake2b_256(remote_xonly)[0..20];
+
+    let mut lock_args = Vec::new();
+    lock_args.extend_from_slice(remote_lock_pubkey_hash);
+    lock_args.extend_from_slice(&100u64.to_be_bytes());
+    lock_args.extend_from_slice(&2u64.to_be_bytes());
+    lock_args.extend_from_slice(&pending_witness_hash);
+    lock_args.push(0x00);
+
+    let lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
+
+    let tracked = tracked_settlement_tlcs(&lock, &channel_data, true)
+        .expect("should extract tracked settlement tlcs");
+    assert_eq!(tracked.len(), 1);
+    assert_eq!(tracked[0].tlc_id, TLCId::Offered(5));
+    assert_eq!(tracked[0].payment_hash, payment_hash);
+
+    // Direction mismatch: expected local, but lock is remote
+    assert!(tracked_settlement_tlcs(&lock, &channel_data, false).is_none());
+}
+
+#[derive(Clone, Default)]
+struct MockSettlementChainClient {
+    transactions: Arc<Mutex<HashMap<ckb_types::H256, Result<GetTxResponse, String>>>>,
+    cells: Arc<Mutex<Vec<ckb_sdk::rpc::ckb_indexer::Cell>>>,
+    get_tx_call_count: Arc<AtomicUsize>,
+}
+
+impl MockSettlementChainClient {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn set_tx(&self, hash: ckb_types::H256, tx: TransactionView) {
+        self.transactions.lock().unwrap().insert(
+            hash,
+            Ok(GetTxResponse {
+                transaction: Some(tx),
+                tx_status: ckb_types::core::tx_pool::TxStatus::Unknown,
+            }),
+        );
+    }
+
+    fn set_tx_err(&self, hash: ckb_types::H256, err: &str) {
+        self.transactions
+            .lock()
+            .unwrap()
+            .insert(hash, Err(err.to_string()));
+    }
+
+    fn get_tx_call_count(&self) -> usize {
+        self.get_tx_call_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl CkbChainClient for MockSettlementChainClient {
+    async fn get_transaction(&self, hash: ckb_types::H256) -> Result<GetTxResponse, anyhow::Error> {
+        self.get_tx_call_count.fetch_add(1, Ordering::SeqCst);
+        let txs = self.transactions.lock().unwrap();
+        match txs.get(&hash) {
+            Some(Ok(resp)) => Ok(resp.clone()),
+            Some(Err(err)) => Err(anyhow::anyhow!("{}", err)),
+            None => Ok(GetTxResponse::default()),
+        }
+    }
+
+    async fn get_cells(
+        &self,
+        _search_key: ckb_sdk::rpc::ckb_indexer::SearchKey,
+        _order: ckb_sdk::rpc::ckb_indexer::Order,
+        _limit: u32,
+        _after: Option<ckb_jsonrpc_types::JsonBytes>,
+    ) -> Result<ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>, anyhow::Error>
+    {
+        let cells = self.cells.lock().unwrap().clone();
+        Ok(ckb_sdk::rpc::ckb_indexer::Pagination {
+            objects: cells,
+            last_cursor: ckb_jsonrpc_types::JsonBytes::from_bytes(ckb_types::bytes::Bytes::new()),
+        })
+    }
+
+    async fn get_block_timestamp(
+        &self,
+        _block_hash: Hash256,
+    ) -> Result<Option<u64>, anyhow::Error> {
+        Ok(None)
+    }
+
+    async fn get_shutdown_tx(
+        &self,
+        _funding_lock_script: Script,
+    ) -> Result<Option<GetShutdownTxResponse>, anyhow::Error> {
+        Ok(None)
+    }
+}
+
+struct MessageCollectorActor(tokio::sync::mpsc::UnboundedSender<NetworkActorMessage>);
+
+#[async_trait::async_trait]
+impl Actor for MessageCollectorActor {
+    type Msg = NetworkActorMessage;
+    type State = ();
+    type Arguments = ();
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
+    }
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let _ = self.0.send(message);
+        Ok(())
+    }
+}
+
+fn create_test_commitment_lock_with_keys(
+    local_privkey: &Privkey,
+    remote_privkey: &Privkey,
+    local_settlement_privkey: &Privkey,
+    remote_settlement_pubkey: Pubkey,
+    settlement_data: &SettlementData,
+    for_remote: bool,
+    commitment_number: u64,
+) -> Script {
+    let witness = settlement_data_to_witness(
+        settlement_data,
+        for_remote,
+        local_settlement_privkey.clone(),
+        remote_settlement_pubkey,
+    );
+    let witness_hash = blake160(&witness).0;
+
+    let (pubkey1, pubkey2) = if for_remote {
+        (local_privkey.pubkey(), remote_privkey.pubkey())
+    } else {
+        (remote_privkey.pubkey(), local_privkey.pubkey())
+    };
+    let ctx = KeyAggContext::new([pubkey1, pubkey2]).unwrap();
+    let xonly = ctx.aggregated_pubkey::<Point>().serialize_xonly();
+    let lock_pubkey_hash = &blake2b_256(xonly)[0..20];
+
+    let mut lock_args = Vec::new();
+    lock_args.extend_from_slice(lock_pubkey_hash);
+    lock_args.extend_from_slice(&100u64.to_be_bytes());
+    lock_args.extend_from_slice(&commitment_number.to_be_bytes());
+    lock_args.extend_from_slice(&witness_hash);
+    lock_args.push(0x00);
+
+    get_script_by_contract(Contract::CommitmentLock, &lock_args)
+}
+
+fn create_test_commitment_tx(
+    funding_outpoint: OutPoint,
+    lock: Script,
+    extra_cell_deps: Vec<CellDep>,
+) -> TransactionView {
+    let mut builder = TransactionBuilder::default()
+        .input(CellInput::new(funding_outpoint, 0))
+        .output(
+            CellOutput::new_builder()
+                .lock(lock)
+                .capacity(100_000_000u64)
+                .build(),
+        )
+        .output_data(ckb_types::packed::Bytes::default());
+    for dep in extra_cell_deps {
+        builder = builder.cell_dep(dep);
+    }
+    builder.build()
+}
+
+async fn assert_confirmed_snapshot_recovery(wrong_direction: bool) {
+    let mut node = NetworkNode::new().await;
+    let store = node.store.clone();
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_privkey = Privkey::from_slice(&[11u8; 32]);
+    let remote_privkey = Privkey::from_slice(&[22u8; 32]);
+    let local_settlement_privkey = Privkey::from_slice(&[33u8; 32]);
+    let remote_settlement_pubkey = Privkey::from_slice(&[44u8; 32]).pubkey();
+
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    tlc.created_at = CommitmentNumbers {
+        local: 10,
+        remote: 10,
+    };
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        tlc.clone(),
+    );
+    let funding_outpoint = state.get_funding_transaction_outpoint().unwrap();
+
+    let preceding_settlement = SettlementData {
+        local_amount: 100_000_000,
+        remote_amount: 100_000_000,
+        tlcs: vec![],
+    };
+    let pending_settlement = SettlementData {
+        local_amount: 100_000_000,
+        remote_amount: 100_000_000,
+        tlcs: vec![settlement_tlc_for(&tlc)],
+    };
+
+    // Store watchtower channel data with commitment 11 (preceding) having no TLCs,
+    // and commitment 12 (pending) having TLC 0
+    store.insert_watch_channel(
+        NodeId::local(),
+        channel_id,
+        None,
+        local_settlement_privkey.clone(),
+        remote_settlement_pubkey,
+        local_privkey.pubkey(),
+        remote_privkey.pubkey(),
+        pending_settlement.clone(),
+    );
+    store.update_revocation(
+        NodeId::local(),
+        channel_id,
+        RevocationData {
+            commitment_number: 10,
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Default::default(),
+        },
+        preceding_settlement.clone(),
+    );
+
+    // Chain commitment transaction is for commitment 11 (preceding)
+    let preceding_lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &preceding_settlement,
+        true,
+        11,
+    );
+    let preceding_tx = create_test_commitment_tx(funding_outpoint, preceding_lock, vec![]);
+    let preceding_tx_hash: ckb_types::H256 = preceding_tx.hash().unpack();
+
+    state.shutdown_transaction_hash = Some(preceding_tx_hash.clone());
+    store.insert_channel_actor_state(state.clone());
+
+    if wrong_direction {
+        store.store_shutdown_settlement_record(
+            &channel_id,
+            &ShutdownSettlementRecord {
+                shutdown_tx_hash: preceding_tx_hash.clone(),
+                for_remote: false,
+                commitment_number: 11,
+                settlement_data: pending_settlement,
+            },
+        );
+    }
+    node.chain_client.state.write().unwrap().txs.insert(
+        preceding_tx_hash.into(),
+        GetTxResponse {
+            transaction: Some(preceding_tx),
+            ..Default::default()
+        },
+    );
+    // Exercise the production scheduler, RPC recovery, recovered-event delivery,
+    // offline reconciliation and cleanup. The test never clears flags itself.
+    trigger_shutdown_check(&node);
+    wait_for_settlement_completion(&node, channel_id).await;
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn test_scenario_a_recovers_snapshot_and_clears_flags_when_already_confirmed() {
+    assert_confirmed_snapshot_recovery(false).await;
+}
+
+#[tokio::test]
+async fn review_scheduler_recovers_wrong_direction_snapshot() {
+    assert_confirmed_snapshot_recovery(true).await;
+}
+
+#[tokio::test]
+async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confirmed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_privkey = Privkey::from_slice(&[11u8; 32]);
+    let remote_privkey = Privkey::from_slice(&[22u8; 32]);
+    let local_settlement_privkey = Privkey::from_slice(&[33u8; 32]);
+    let remote_settlement_pubkey = Privkey::from_slice(&[44u8; 32]).pubkey();
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        tlc_info(
+            TLCId::Offered(0),
+            TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+            gen_rand_sha256_hash(),
+            HashAlgorithm::CkbHash,
+        ),
+    );
+    let funding_outpoint = state.get_funding_transaction_outpoint().unwrap();
+
+    let settlement = SettlementData {
+        local_amount: 100_000_000,
+        remote_amount: 100_000_000,
+        tlcs: vec![],
+    };
+    store.insert_watch_channel(
+        NodeId::local(),
+        channel_id,
+        None,
+        local_settlement_privkey.clone(),
+        remote_settlement_pubkey,
+        local_privkey.pubkey(),
+        remote_privkey.pubkey(),
+        settlement.clone(),
+    );
+
+    let lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &settlement,
+        true,
+        0,
+    );
+    let tx = create_test_commitment_tx(funding_outpoint, lock, vec![]);
+    let tx_hash: ckb_types::H256 = tx.hash().unpack();
+
+    state.shutdown_transaction_hash = Some(tx_hash.clone());
+    store.insert_channel_actor_state(state.clone());
+
+    let chain_client = MockSettlementChainClient::new();
+    let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (myself, _) = Actor::spawn(None, MessageCollectorActor(sender), ())
+        .await
+        .expect("spawn collector");
+
+    // 1st attempt: RPC returns error
+    chain_client.set_tx_err(tx_hash.clone(), "RPC connection timeout");
+    check_channel_shutdown_settlement(
+        chain_client.clone(),
+        myself.clone(),
+        state.clone(),
+        store.clone(),
+    )
+    .await;
+
+    assert_eq!(chain_client.get_tx_call_count(), 1);
+    assert!(
+        store.get_shutdown_settlement_record(&channel_id).is_none(),
+        "failed RPC must not store snapshot record"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "no recovered message sent on failure"
+    );
+
+    // 2nd attempt: RPC succeeds
+    chain_client.set_tx(tx_hash.clone(), tx);
+    check_channel_shutdown_settlement(
+        chain_client.clone(),
+        myself.clone(),
+        state.clone(),
+        store.clone(),
+    )
+    .await;
+
+    assert_eq!(chain_client.get_tx_call_count(), 2);
+    let record = store
+        .get_shutdown_settlement_record(&channel_id)
+        .expect("second RPC call must recover snapshot record");
+    assert_eq!(record.shutdown_tx_hash, tx_hash);
+
+    let event = rx.recv().await.expect("receive message");
+    assert!(matches!(
+        event,
+        NetworkActorMessage::Event(NetworkActorEvent::ChannelSettlementRecovered(..))
+    ));
+}
+
+#[tokio::test]
+async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_tlc_resolved() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .build()
+            .with_store(store.clone()),
+    )
+    .await;
+    let preimage = gen_rand_sha256_hash();
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_privkey = Privkey::from_slice(&[11u8; 32]);
+    let remote_privkey = Privkey::from_slice(&[22u8; 32]);
+    let local_settlement_privkey = Privkey::from_slice(&[33u8; 32]);
+    let remote_settlement_pubkey = Privkey::from_slice(&[44u8; 32]).pubkey();
+
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash_for(preimage, HashAlgorithm::CkbHash),
+        HashAlgorithm::CkbHash,
+    );
+    tlc.created_at = CommitmentNumbers {
+        local: 1,
+        remote: 1,
+    };
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc.clone(),
+    );
+    let funding_outpoint = state.get_funding_transaction_outpoint().unwrap();
+
+    let pending_settlement = SettlementData {
+        local_amount: 100_000_000,
+        remote_amount: 100_000_000,
+        tlcs: vec![settlement_tlc_for(&tlc)],
+    };
+
+    store.insert_watch_channel(
+        NodeId::local(),
+        channel_id,
+        None,
+        local_settlement_privkey.clone(),
+        remote_settlement_pubkey,
+        local_privkey.pubkey(),
+        remote_privkey.pubkey(),
+        pending_settlement.clone(),
+    );
+
+    // Commitment lock for commitment 2 (pending)
+    let pending_lock = create_test_commitment_lock_with_keys(
+        &local_privkey,
+        &remote_privkey,
+        &local_settlement_privkey,
+        remote_settlement_pubkey,
+        &pending_settlement,
+        true,
+        2,
+    );
+
+    // Real broadcast tx has additional cell_dep (simulating UDT/funding cell deps)
+    let extra_dep = CellDep::new_builder()
+        .out_point(OutPoint::new(gen_rand_sha256_hash().into(), 0))
+        .build();
+    let pending_tx_with_deps =
+        create_test_commitment_tx(funding_outpoint, pending_lock, vec![extra_dep]);
+    let pending_tx_hash: ckb_types::H256 = pending_tx_with_deps.hash().unpack();
+
+    state.shutdown_transaction_hash = Some(pending_tx_hash.clone());
+    store.insert_channel_actor_state(state.clone());
+
+    let chain_client = MockSettlementChainClient::new();
+    chain_client.set_tx(pending_tx_hash.clone(), pending_tx_with_deps);
+
+    check_channel_shutdown_settlement(
+        chain_client,
+        node.network_actor.clone(),
+        state.clone(),
+        store.clone(),
+    )
+    .await;
+    // A network RPC is a mailbox barrier after the recovered/completed events.
+    node.node_info().await;
+    assert!(store
+        .get_channel_actor_state(&channel_id)
+        .unwrap()
+        .is_waiting_onchain_settlement());
+
+    // Assert the exact recovered snapshot
+    let record = store
+        .get_shutdown_settlement_record(&channel_id)
+        .expect("pending snapshot record must be persisted");
+    assert_eq!(record.shutdown_tx_hash, pending_tx_hash);
+    assert_eq!(record.commitment_number, 2);
+    assert!(record.for_remote);
+    assert_eq!(record.settlement_data.tlcs.len(), 1);
+    assert_eq!(record.settlement_data.tlcs[0].tlc_id, TLCId::Offered(0));
+
+    // Supplying the on-chain proof must cause production reconciliation to
+    // remove the TLC, persist the terminal state and clean up the record.
+    store.insert_onchain_tlc_settlement(
+        &NodeId::local(),
+        &channel_id,
+        TLCId::Offered(0),
+        OnChainTlcSettlement {
+            payment_hash: tlc.payment_hash,
+            hash_algorithm: tlc.hash_algorithm,
+            preimage: Some(preimage),
+            tx_hash: gen_rand_sha256_hash(),
+            tlc_index: 0,
+        },
+    );
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::CheckChannels,
+        ))
+        .unwrap();
+    wait_for_settlement_completion(&node, channel_id).await;
+    let finished = store.get_channel_actor_state(&channel_id).unwrap();
+    assert!(matches!(
+        finished
+            .tlc_state
+            .get(&TLCId::Offered(0))
+            .unwrap()
+            .removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFulfill(_))
+    ));
+    node.stop().await;
+}
+
+#[test]
+fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_node = NodeId::local();
+    let foreign_node = NodeId::from_bytes(vec![42u8; 32]);
+
+    let local_priv = Privkey::from_slice(&[1u8; 32]);
+    let remote_pub = Privkey::from_slice(&[2u8; 32]).pubkey();
+    let local_funding = Privkey::from_slice(&[3u8; 32]).pubkey();
+    let remote_funding = Privkey::from_slice(&[4u8; 32]).pubkey();
+
+    let local_settlement = SettlementData {
+        local_amount: 11111,
+        remote_amount: 22222,
+        tlcs: vec![],
+    };
+    let foreign_settlement = SettlementData {
+        local_amount: 99999,
+        remote_amount: 88888,
+        tlcs: vec![],
+    };
+
+    // Initially neither has the channel
+    assert!(store.get_local_watch_channel(&channel_id).is_none());
+
+    // Insert channel ONLY for foreign node
+    store.insert_watch_channel(
+        foreign_node,
+        channel_id,
+        None,
+        local_priv.clone(),
+        remote_pub,
+        local_funding,
+        remote_funding,
+        foreign_settlement,
+    );
+
+    // get_local_watch_channel MUST NOT return foreign node's channel
+    assert!(
+        store.get_local_watch_channel(&channel_id).is_none(),
+        "foreign node record must not be returned for local node"
+    );
+
+    // Now insert channel for local node with different settlement data
+    store.insert_watch_channel(
+        local_node,
+        channel_id,
+        None,
+        local_priv,
+        remote_pub,
+        local_funding,
+        remote_funding,
+        local_settlement,
+    );
+
+    // get_local_watch_channel MUST return local node's channel data
+    let loaded = store
+        .get_local_watch_channel(&channel_id)
+        .expect("should load local watch channel");
+    assert_eq!(loaded.pending_remote_settlement_data.local_amount, 11111);
+    assert_eq!(loaded.pending_remote_settlement_data.remote_amount, 22222);
+}
+
+#[tokio::test]
+async fn test_scenario_e_real_db_persistence_and_reopen() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let channel_id = gen_rand_sha256_hash();
+    let tx_hash: ckb_types::H256 = gen_rand_sha256_hash().into();
+
+    let record = ShutdownSettlementRecord {
+        shutdown_tx_hash: tx_hash.clone(),
+        for_remote: true,
+        commitment_number: 2,
+        settlement_data: SettlementData {
+            local_amount: 12345,
+            remote_amount: 67890,
+            tlcs: vec![],
+        },
+    };
+
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    state.shutdown_transaction_hash = Some(tx_hash.clone());
+
+    // 1. Open store, write record and channel state
+    {
+        let store = open_store(temp_dir.path()).expect("open store");
+        store.store_shutdown_settlement_record(&channel_id, &record);
+        store.insert_channel_actor_state(state.clone());
+    } // store is dropped here, all DB handles released
+
+    // 2. Reopen store from the same path
+    {
+        let store2 = open_store(temp_dir.path()).expect("reopen store");
+        let loaded_record = store2
+            .get_shutdown_settlement_record(&channel_id)
+            .expect("loaded record");
+        assert_eq!(loaded_record, record);
+
+        let loaded_state = store2
+            .get_channel_actor_state(&channel_id)
+            .expect("loaded state");
+        assert_eq!(loaded_state.id, channel_id);
+        assert_eq!(
+            loaded_state.shutdown_transaction_hash,
+            Some(tx_hash.clone())
+        );
+
+        // Run real offline reconciliation against the reopened store;
+        // it must load the persisted record and finish itself.
+        let config = NetworkNodeConfigBuilder::new()
+            .build()
+            .with_store(store2.clone());
+        let mut node = NetworkNode::new_with_config(config).await;
+        node.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::CheckChannels,
+            ))
+            .unwrap();
+        wait_for_settlement_completion(&node, channel_id).await;
+        node.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let config = NetworkNodeConfigBuilder::new()
+        .build()
+        .with_store(store.clone());
+    let mut node = NetworkNode::new_with_config(config).await;
+
+    // --- Part 1: Live actor path ---
+    {
+        let channel_id = gen_rand_sha256_hash();
+        let tx_hash: ckb_types::H256 = gen_rand_sha256_hash().into();
+        let local_privkey = Privkey::from_slice(&[11u8; 32]);
+        let remote_pubkey = Privkey::from_slice(&[22u8; 32]).pubkey();
+
+        let mut state = empty_channel_state(channel_id);
+        state.state = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_REMOTE
+                | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+                | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        );
+        state.shutdown_transaction_hash = Some(tx_hash.clone());
+
+        store.insert_channel_actor_state(state.clone());
+
+        let record = ShutdownSettlementRecord {
+            shutdown_tx_hash: tx_hash.clone(),
+            for_remote: true,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 100_000_000,
+                remote_amount: 100_000_000,
+                tlcs: vec![], // all TLCs resolved
+            },
+        };
+
+        let channel_actor = ChannelActor::new(
+            local_privkey.pubkey(),
+            remote_pubkey,
+            node.network_actor.clone(),
+            store.clone(),
+            None,
+        );
+
+        let (actor_ref, handle) = Actor::spawn(
+            None,
+            channel_actor,
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: Default::default(),
+                private_key: local_privkey,
+            },
+        )
+        .await
+        .expect("spawn channel actor");
+
+        actor_ref
+            .send_message(ChannelActorMessage::Event(
+                ChannelEvent::OnChainSettlementCompleted,
+            ))
+            .unwrap();
+        let mut invalid = record.clone();
+        invalid.for_remote = false;
+        actor_ref
+            .send_message(ChannelActorMessage::Event(
+                ChannelEvent::ShutdownSettlementRecovered(invalid),
+            ))
+            .unwrap();
+        ractor::call!(actor_ref, |reply| ChannelActorMessage::Command(
+            ChannelCommand::TestBarrier(reply)
+        ))
+        .unwrap();
+        assert!(store
+            .get_channel_actor_state(&channel_id)
+            .unwrap()
+            .is_waiting_onchain_settlement());
+        store.store_shutdown_settlement_record(&channel_id, &record);
+
+        ractor::call!(
+            node.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+                channel_id, actor_ref, reply
+            ))
+        )
+        .unwrap();
+        node.network_actor
+            .send_message(NetworkActorMessage::Event(
+                NetworkActorEvent::ChannelSettlementRecovered(channel_id, record),
+            ))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("live actor must complete")
+            .unwrap();
+
+        // Verify channel state in store: waiting flags are cleared!
+        let final_state = store
+            .get_channel_actor_state(&channel_id)
+            .expect("load final state");
+        let ChannelState::Closed(flags) = final_state.state else {
+            panic!()
+        };
+        assert!(!flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT));
+        assert!(!flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED));
+        // Verify snapshot record was deleted after finalization
+        assert!(store.get_shutdown_settlement_record(&channel_id).is_none());
+    }
+
+    // --- Part 2: No-actor path ---
+    {
+        let channel_id = gen_rand_sha256_hash();
+        let tx_hash: ckb_types::H256 = gen_rand_sha256_hash().into();
+
+        let mut state = empty_channel_state(channel_id);
+        state.state = ChannelState::Closed(
+            CloseFlags::UNCOOPERATIVE_REMOTE
+                | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+                | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        );
+        state.shutdown_transaction_hash = Some(tx_hash.clone());
+
+        store.insert_channel_actor_state(state.clone());
+
+        let record = ShutdownSettlementRecord {
+            shutdown_tx_hash: tx_hash.clone(),
+            for_remote: true,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 100_000_000,
+                remote_amount: 100_000_000,
+                tlcs: vec![],
+            },
+        };
+        node.network_actor
+            .send_message(NetworkActorMessage::Event(
+                NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+            ))
+            .unwrap();
+        node.node_info().await;
+        assert!(store
+            .get_channel_actor_state(&channel_id)
+            .unwrap()
+            .is_waiting_onchain_settlement());
+
+        store.store_shutdown_settlement_record(&channel_id, &record);
+
+        node.network_actor
+            .send_message(NetworkActorMessage::Event(
+                NetworkActorEvent::ChannelSettlementRecovered(channel_id, record),
+            ))
+            .unwrap();
+        wait_for_settlement_completion(&node, channel_id).await;
+
+        let final_state = store.get_channel_actor_state(&channel_id).unwrap();
+        let ChannelState::Closed(final_flags) = final_state.state else {
+            panic!()
+        };
+        assert!(!final_flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT));
+        assert!(!final_flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED));
+        assert!(store.get_shutdown_settlement_record(&channel_id).is_none());
+    }
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn test_scenario_g_malformed_script_wrong_funding_and_direction_mismatch_stay_waiting() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let store = open_store(temp_dir.path()).expect("open store");
+    let channel_id = gen_rand_sha256_hash();
+
+    let local_privkey = Privkey::from_slice(&[11u8; 32]);
+    let remote_privkey = Privkey::from_slice(&[22u8; 32]);
+    let local_settlement_privkey = Privkey::from_slice(&[33u8; 32]);
+    let remote_settlement_pubkey = Privkey::from_slice(&[44u8; 32]).pubkey();
+
+    let mut state = closed_state_with_offered_local_announced(
+        channel_id,
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+        tlc_info(
+            TLCId::Offered(0),
+            TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+            gen_rand_sha256_hash(),
+            HashAlgorithm::CkbHash,
+        ),
+    );
+    let funding_outpoint = state.get_funding_transaction_outpoint().unwrap();
+
+    let settlement = SettlementData {
+        local_amount: 100_000_000,
+        remote_amount: 100_000_000,
+        tlcs: vec![],
+    };
+    store.insert_watch_channel(
+        NodeId::local(),
+        channel_id,
+        None,
+        local_settlement_privkey.clone(),
+        remote_settlement_pubkey,
+        local_privkey.pubkey(),
+        remote_privkey.pubkey(),
+        settlement.clone(),
+    );
+
+    let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (myself, _) = Actor::spawn(None, MessageCollectorActor(sender), ())
+        .await
+        .expect("spawn collector");
+
+    // 1. Malformed commitment lock (wrong code hash)
+    {
+        let malformed_lock = Script::new_builder()
+            .code_hash(gen_rand_sha256_hash())
+            .hash_type(ckb_types::core::ScriptHashType::Data2)
+            .args([0u8; 60].pack())
+            .build();
+        assert!(
+            parse_commitment_lock(
+                &malformed_lock,
+                &local_privkey.pubkey(),
+                &remote_privkey.pubkey()
+            )
+            .is_none(),
+            "malformed lock with wrong code hash must return None"
+        );
+
+        let tx = create_test_commitment_tx(funding_outpoint.clone(), malformed_lock, vec![]);
+        let tx_hash: ckb_types::H256 = tx.hash().unpack();
+
+        let chain_client = MockSettlementChainClient::new();
+        chain_client.set_tx(tx_hash.clone(), tx);
+
+        state.shutdown_transaction_hash = Some(tx_hash);
+        check_channel_shutdown_settlement(
+            chain_client,
+            myself.clone(),
+            state.clone(),
+            store.clone(),
+        )
+        .await;
+        assert!(
+            store.get_shutdown_settlement_record(&channel_id).is_none(),
+            "malformed script must not recover snapshot"
+        );
+    }
+
+    // 2. Wrong funding input (tx does not spend channel's funding outpoint)
+    {
+        let valid_lock = create_test_commitment_lock_with_keys(
+            &local_privkey,
+            &remote_privkey,
+            &local_settlement_privkey,
+            remote_settlement_pubkey,
+            &settlement,
+            true,
+            0,
+        );
+        let wrong_outpoint = OutPoint::new(gen_rand_sha256_hash().into(), 99);
+        let tx_wrong_funding = create_test_commitment_tx(wrong_outpoint, valid_lock, vec![]);
+        let tx_hash: ckb_types::H256 = tx_wrong_funding.hash().unpack();
+
+        let chain_client = MockSettlementChainClient::new();
+        chain_client.set_tx(tx_hash.clone(), tx_wrong_funding);
+
+        state.shutdown_transaction_hash = Some(tx_hash);
+        check_channel_shutdown_settlement(
+            chain_client,
+            myself.clone(),
+            state.clone(),
+            store.clone(),
+        )
+        .await;
+        assert!(
+            store.get_shutdown_settlement_record(&channel_id).is_none(),
+            "tx with mismatched funding input must not recover snapshot"
+        );
+    }
+
+    // 3. Direction mismatch: channel state is UNCOOPERATIVE_REMOTE, but lock is built for local close (for_remote=false)
+    {
+        let local_lock = create_test_commitment_lock_with_keys(
+            &local_privkey,
+            &remote_privkey,
+            &local_settlement_privkey,
+            remote_settlement_pubkey,
+            &settlement,
+            false, // for_remote = false
+            0,
+        );
+        let tx_local_lock = create_test_commitment_tx(funding_outpoint.clone(), local_lock, vec![]);
+        let tx_hash: ckb_types::H256 = tx_local_lock.hash().unpack();
+
+        let chain_client = MockSettlementChainClient::new();
+        chain_client.set_tx(tx_hash.clone(), tx_local_lock);
+
+        state.shutdown_transaction_hash = Some(tx_hash);
+        check_channel_shutdown_settlement(
+            chain_client,
+            myself.clone(),
+            state.clone(),
+            store.clone(),
+        )
+        .await;
+        assert!(
+            store.get_shutdown_settlement_record(&channel_id).is_none(),
+            "direction mismatch must not recover snapshot"
+        );
+    }
+
+    // 4. Missing watchtower data: non-existent channel_id
+    {
+        let unknown_channel_id = gen_rand_sha256_hash();
+        let mut unknown_state = state.clone();
+        unknown_state.id = unknown_channel_id;
+
+        let valid_lock = create_test_commitment_lock_with_keys(
+            &local_privkey,
+            &remote_privkey,
+            &local_settlement_privkey,
+            remote_settlement_pubkey,
+            &settlement,
+            true,
+            0,
+        );
+        let tx = create_test_commitment_tx(funding_outpoint, valid_lock, vec![]);
+        let tx_hash: ckb_types::H256 = tx.hash().unpack();
+
+        let chain_client = MockSettlementChainClient::new();
+        chain_client.set_tx(tx_hash.clone(), tx);
+
+        unknown_state.shutdown_transaction_hash = Some(tx_hash);
+        check_channel_shutdown_settlement(
+            chain_client,
+            myself.clone(),
+            unknown_state.clone(),
+            store.clone(),
+        )
+        .await;
+        assert!(
+            store
+                .get_shutdown_settlement_record(&unknown_channel_id)
+                .is_none(),
+            "missing watchtower data must not recover snapshot"
+        );
+    }
+
+    assert!(rx.try_recv().is_err(), "no messages should have been sent");
+}
+
+#[test]
+fn review_missing_snapshot_must_remain_unknown() {
+    let snapshot_store = MockStore::new();
+    let mut state = empty_channel_state(gen_rand_sha256_hash());
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    assert!(
+        has_unresolved_onchain_tlcs(&state, &snapshot_store),
+        "missing verified snapshot must not allow finalization"
+    );
+}
+
+#[test]
+fn review_wrong_direction_record_must_not_resolve_active_tlc() {
+    let snapshot_store = MockStore::new();
+    let mut state = closed_state_with_offered_local_announced(
+        gen_rand_sha256_hash(),
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        tlc_info(
+            TLCId::Offered(0),
+            TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+            gen_rand_sha256_hash(),
+            HashAlgorithm::CkbHash,
+        ),
+    );
+    let tx_hash = gen_rand_sha256_hash().into();
+    state.shutdown_transaction_hash = Some(tx_hash);
+    snapshot_store.store_shutdown_settlement_record(
+        &state.get_id(),
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 0,
+                remote_amount: 0,
+                tlcs: vec![],
+            },
+        },
+    );
+    assert!(
+        has_unresolved_onchain_tlcs(&state, &snapshot_store),
+        "a local-direction record cannot resolve a remote close"
+    );
+
+    // Reconciliation must see updates to the persisted record without refreshing state.
+    let mut record = snapshot_store
+        .get_shutdown_settlement_record(&state.get_id())
+        .unwrap();
+    record.for_remote = true;
+    snapshot_store.store_shutdown_settlement_record(&state.get_id(), &record);
+    assert!(!has_unresolved_onchain_tlcs(&state, &snapshot_store));
+
+    record.shutdown_tx_hash = gen_rand_sha256_hash().into();
+    snapshot_store.store_shutdown_settlement_record(&state.get_id(), &record);
+    assert!(has_unresolved_onchain_tlcs(&state, &snapshot_store));
+
+    snapshot_store.delete_shutdown_settlement_record(&state.get_id());
+    assert!(has_unresolved_onchain_tlcs(&state, &snapshot_store));
 }

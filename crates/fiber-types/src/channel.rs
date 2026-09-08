@@ -11,6 +11,7 @@ use crate::EntityHex;
 use crate::Hash256;
 use crate::Privkey;
 use crate::Pubkey;
+use crate::SettlementData;
 use bitflags::bitflags;
 use ckb_types::packed::Byte32 as MByte32;
 use ckb_types::packed::Script;
@@ -1825,4 +1826,13 @@ impl From<&crate::protocol::ChannelUpdate> for ChannelUpdateInfo {
             fee_rate: update.tlc_fee_proportional_millionths as u64,
         }
     }
+}
+
+/// Structured snapshot of the shutdown settlement data used for on-chain TLC reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShutdownSettlementRecord {
+    pub shutdown_tx_hash: H256,
+    pub for_remote: bool,
+    pub commitment_number: u64,
+    pub settlement_data: SettlementData,
 }
