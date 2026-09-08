@@ -671,7 +671,7 @@ fn liquidity_swap_state_to_string(state: LiquiditySwapState) -> String {
     .to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::HashSet;
     use std::future::pending;
