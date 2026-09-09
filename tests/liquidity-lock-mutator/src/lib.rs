@@ -799,7 +799,7 @@ pub fn build_refund_transaction(
     cell_deps: Vec<packed::CellDep>,
 ) -> TransactionView {
     let mut output = packed::CellOutput::new_builder()
-        .capacity(Capacity::shannons(params.capacity_ckb.max(1)).pack())
+        .capacity(Capacity::shannons(params.capacity_ckb.saturating_sub(1_000).max(1)).pack())
         .lock(params.refund_lock.clone());
     let output_data = if let Some(udt_type_script) = &params.udt_type_script {
         output = output.type_(Some(udt_type_script.clone()).pack());
@@ -1655,7 +1655,7 @@ mod tests {
 
         assert_eq!(tx.outputs().len(), 1);
         let output = tx.outputs().get(0).expect("output").clone();
-        assert_eq!(u64::from(output.capacity()), params.capacity_ckb);
+        assert_eq!(u64::from(output.capacity()), params.capacity_ckb.saturating_sub(1_000).max(1));
         assert_eq!(output.lock(), params.refund_lock);
         assert_eq!(output.type_().to_opt(), params.udt_type_script.clone());
         let data = tx.outputs_data().get(0).expect("data").raw_data();

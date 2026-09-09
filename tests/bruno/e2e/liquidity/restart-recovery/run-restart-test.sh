@@ -425,7 +425,7 @@ discover_handoff() {
   # broadcast record persisted - that record is exactly what the restarted
   # process resumes from.
   local provider_swap
-  provider_swap="$(rpc_call "$NODE2_RPC_URL" get_swap "{\"swap_id\":\"$HANDOFF_SWAP_ID\"}")" \
+  provider_swap="$(rpc_call "$NODE2_RPC_URL" get_swap "[{\"swap_id\":\"$HANDOFF_SWAP_ID\"}]")" \
     || failure "provider get_swap failed"
   jq -e --arg swap_id "$HANDOFF_SWAP_ID" --arg payment_hash "$HANDOFF_PAYMENT_HASH" \
     '.result != null and .result.state == "payout_pending" and .result.swap_id == $swap_id and .result.payment_hash == $payment_hash' \

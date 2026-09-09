@@ -69,7 +69,7 @@ script:post-response {
 
   // Type script: exactly the generated simple UDT script.
   const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
-  const typeScript = cell.output.type_;
+  const typeScript = cell.output.type;
   if (!typeScript
     || typeScript.code_hash !== expectedScript.code_hash
     || typeScript.hash_type !== expectedScript.hash_type
