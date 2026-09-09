@@ -35,10 +35,7 @@ use crate::{
         CkbConfig,
     },
     fiber::{
-        channel::{
-            settlement_data_to_witness, settlement_tlc_local_pubkey_hash,
-            settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS,
-        },
+        channel::{settlement_data_to_witness, settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS},
         onchain_tlc_reconcile::OnChainTlcSettlement,
     },
     now_timestamp_as_millis_u64,
@@ -55,7 +52,7 @@ use crate::{
 };
 use fiber_types::{
     ChannelData, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
-    TLCId,
+    SettlementTlc, TLCId,
 };
 
 use super::{WatchtowerSignOutcome, WatchtowerSigner, WatchtowerStore};
@@ -776,6 +773,61 @@ struct TrackedSettlementTlc {
     witness: Vec<u8>,
 }
 
+impl TrackedSettlementTlc {
+    fn from_settlement_tlc(tlc: &SettlementTlc, for_remote: bool) -> Self {
+        Self {
+            tlc_id: if for_remote {
+                tlc.tlc_id
+            } else {
+                tlc.tlc_id.flip()
+            },
+            payment_hash: tlc.payment_hash,
+            hash_algorithm: tlc.hash_algorithm,
+            witness: settlement_tlc_to_witness(tlc, for_remote),
+        }
+    }
+
+    fn signing_key(
+        &self,
+        settlement_data: &SettlementData,
+        channel_data: &ChannelData,
+        for_remote: bool,
+        commitment_number: u64,
+    ) -> Result<(fiber_types::OnchainKeyPurpose, Option<Privkey>), Box<dyn std::error::Error>> {
+        // Witness indices shift after unlocks, so resolve the verified identity
+        // before reading the key's original derivation index from the snapshot.
+        let tlc = settlement_data
+            .tlcs
+            .iter()
+            .find(|tlc| Self::from_settlement_tlc(tlc, for_remote) == *self)
+            .ok_or_else(|| {
+                anyhow!("settlement unlock TLC is missing from the selected snapshot")
+            })?;
+        let derivation_index = match tlc.local_key_commitment_number {
+            Some(index) => index,
+            // Legacy local keys sign directly; their request purpose is never sent
+            // to an external signer and does not enter the signature digest.
+            None if tlc.local_key.is_some() => commitment_number,
+            None => return Err(anyhow!("external TLC signing derivation index is missing").into()),
+        };
+        let purpose = fiber_types::OnchainKeyPurpose::Tlc {
+            commitment_number: derivation_index,
+        };
+        if tlc.local_key.is_none() {
+            let expected = channel_data
+                .expected_onchain_pubkey(&purpose)
+                .map_err(std::io::Error::other)?;
+            if Some(expected) != tlc.local_key_pubkey {
+                return Err(anyhow!(
+                    "external TLC signing public key does not match the selected snapshot"
+                )
+                .into());
+            }
+        }
+        Ok((purpose, tlc.local_key.clone()))
+    }
+}
+
 struct WatchedSettlementScan {
     witness_input_indices: HashMap<ckb_types::packed::Byte32, usize>,
     tracked_tlcs_by_outpoint: HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
@@ -837,16 +889,7 @@ fn tracked_settlement_tlcs(
         settlement_data
             .tlcs
             .iter()
-            .map(|tlc| TrackedSettlementTlc {
-                tlc_id: if for_remote {
-                    tlc.tlc_id
-                } else {
-                    tlc.tlc_id.flip()
-                },
-                payment_hash: tlc.payment_hash,
-                hash_algorithm: tlc.hash_algorithm,
-                witness: settlement_tlc_to_witness(tlc, for_remote),
-            })
+            .map(|tlc| TrackedSettlementTlc::from_settlement_tlc(tlc, for_remote))
             .collect(),
     )
 }
@@ -1191,7 +1234,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     settlement_witness: Option<SettlementWitness>,
     tracked_tlcs: &[TrackedSettlementTlc],
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut dyn CellCollector,
     store: &S,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
@@ -1226,6 +1269,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let is_first_settlement = settlement_witness.is_none();
     let settlement_data =
         settlement_data_for_commitment(&channel_data, for_remote, commitment_number).clone();
+    if settlement_data
+        .tlcs
+        .iter()
+        .any(|tlc| tlc.local_key.is_none() && tlc.local_key_pubkey.is_none())
+    {
+        return Err(anyhow!("TLC signing public key is missing").into());
+    }
 
     let fee_provider_lock_script =
         get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
@@ -1279,66 +1329,43 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 };
 
                                 if tlc.is_offered() {
-                                    if let Some(private_key) =
-                                        tlc.find_matched_private_key(&settlement_data, false)
-                                    {
-                                        if current_time > expiry {
-                                            unlock_option = Some((
-                                                Unlock {
-                                                    unlock_type: i as u8,
-                                                    with_preimage: false,
-                                                    signature: [0u8; 65],
-                                                    preimage: None,
-                                                },
-                                                tlc.payment_amount,
-                                                private_key.clone(),
-                                            ));
-                                            break;
-                                        }
-                                    } else {
-                                        warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
-                                    }
-                                } else if let Some(private_key) =
-                                    tlc.find_matched_private_key(&settlement_data, true)
-                                {
-                                    if let Some(preimage) = verified_watch_preimage(
-                                        store,
-                                        self_node_id,
-                                        &tracked_tlcs[i],
-                                    ) {
+                                    if current_time > expiry {
                                         unlock_option = Some((
                                             Unlock {
                                                 unlock_type: i as u8,
-                                                with_preimage: true,
+                                                with_preimage: false,
                                                 signature: [0u8; 65],
-                                                preimage: Some(preimage),
+                                                preimage: None,
                                             },
                                             tlc.payment_amount,
-                                            private_key.clone(),
+                                            None,
                                         ));
                                         break;
-                                    } else if current_time > expiry {
-                                        pending_tlcs_count = checked_sub_usize(
-                                            pending_tlcs_count,
-                                            1,
-                                            "pending TLC count",
-                                        )?;
                                     }
-                                } else {
-                                    warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
+                                } else if let Some(preimage) =
+                                    verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
+                                {
+                                    unlock_option = Some((
+                                        Unlock {
+                                            unlock_type: i as u8,
+                                            with_preimage: true,
+                                            signature: [0u8; 65],
+                                            preimage: Some(preimage),
+                                        },
+                                        tlc.payment_amount,
+                                        None,
+                                    ));
+                                    break;
+                                } else if current_time > expiry {
+                                    pending_tlcs_count = checked_sub_usize(
+                                        pending_tlcs_count,
+                                        1,
+                                        "pending TLC count",
+                                    )?;
                                 }
                             }
 
                             if pending_tlcs_count == 0 {
-                                let Some(local_settlement_key) =
-                                    channel_data.local_settlement_key.clone()
-                                else {
-                                    warn!(
-                                        channel_id = ?channel_data.channel_id,
-                                        "watchtower cannot settle without local_settlement_key; remote settlement signing is not wired"
-                                    );
-                                    return Ok(None);
-                                };
                                 unlock_option = Some((
                                     Unlock {
                                         unlock_type: 0xFF,
@@ -1347,13 +1374,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                         preimage: None,
                                     },
                                     sw.settlement_local_amount,
-                                    local_settlement_key,
+                                    channel_data.local_settlement_key.clone(),
                                 ));
                             }
 
                             if let Some((unlock, unlock_amount, private_key)) = unlock_option {
                                 debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                                (unlock, unlock_amount, Some(private_key), sw.to_witness())
+                                (unlock, unlock_amount, private_key, sw.to_witness())
                             } else {
                                 return Ok(None);
                             }
@@ -1387,68 +1414,40 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             };
 
                             if !tlc.is_offered() {
-                                if let Some(private_key) =
-                                    tlc.find_matched_private_key(&settlement_data, false)
-                                {
-                                    if current_time > expiry {
-                                        unlock_option = Some((
-                                            Unlock {
-                                                unlock_type: i as u8,
-                                                with_preimage: false,
-                                                signature: [0u8; 65],
-                                                preimage: None,
-                                            },
-                                            tlc.payment_amount,
-                                            private_key.clone(),
-                                        ));
-                                        break;
-                                    }
-                                } else {
-                                    warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
-                                }
-                            } else if let Some(private_key) =
-                                tlc.find_matched_private_key(&settlement_data, true)
-                            {
-                                if let Some(preimage) =
-                                    verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
-                                {
+                                if current_time > expiry {
                                     unlock_option = Some((
                                         Unlock {
                                             unlock_type: i as u8,
-                                            with_preimage: true,
+                                            with_preimage: false,
                                             signature: [0u8; 65],
-                                            preimage: Some(preimage),
+                                            preimage: None,
                                         },
                                         tlc.payment_amount,
-                                        private_key.clone(),
+                                        None,
                                     ));
                                     break;
-                                } else if current_time > expiry {
-                                    pending_tlcs_count = checked_sub_usize(
-                                        pending_tlcs_count,
-                                        1,
-                                        "pending TLC count",
-                                    )?;
                                 }
-                            } else {
-                                warn!(
-                                    "Can not find private key for tlc: {:?}, settlement tlcs: {:?}",
-                                    tlc,
-                                    settlement_data.tlcs.iter().collect::<Vec<_>>()
-                                );
+                            } else if let Some(preimage) =
+                                verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
+                            {
+                                unlock_option = Some((
+                                    Unlock {
+                                        unlock_type: i as u8,
+                                        with_preimage: true,
+                                        signature: [0u8; 65],
+                                        preimage: Some(preimage),
+                                    },
+                                    tlc.payment_amount,
+                                    None,
+                                ));
+                                break;
+                            } else if current_time > expiry {
+                                pending_tlcs_count =
+                                    checked_sub_usize(pending_tlcs_count, 1, "pending TLC count")?;
                             }
                         }
 
                         if pending_tlcs_count == 0 {
-                            let Some(local_settlement_key) =
-                                channel_data.local_settlement_key.clone()
-                            else {
-                                warn!(
-                                    channel_id = ?channel_data.channel_id,
-                                    "watchtower cannot settle without local_settlement_key; remote settlement signing is not wired"
-                                );
-                                return Ok(None);
-                            };
                             unlock_option = Some((
                                 Unlock {
                                     unlock_type: 0xFE,
@@ -1457,13 +1456,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                     preimage: None,
                                 },
                                 sw.settlement_remote_amount,
-                                local_settlement_key,
+                                channel_data.local_settlement_key.clone(),
                             ));
                         }
 
                         if let Some((unlock, unlock_amount, private_key)) = unlock_option {
                             debug!("unlock: {:?}, unlock_amount: {:?}", unlock, unlock_amount);
-                            (unlock, unlock_amount, Some(private_key), sw.to_witness())
+                            (unlock, unlock_amount, private_key, sw.to_witness())
                         } else {
                             return Ok(None);
                         }
@@ -1591,6 +1590,20 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 return Ok(None);
             }
         }
+    };
+
+    let (key_purpose, unlock_key) = if unlock.unlock_type < 0xFE {
+        tracked_tlcs
+            .get(unlock.unlock_type as usize)
+            .ok_or_else(|| anyhow!("missing tracked TLC for settlement unlock"))?
+            .signing_key(
+                &settlement_data,
+                &channel_data,
+                for_remote,
+                commitment_number,
+            )?
+    } else {
+        (fiber_types::OnchainKeyPurpose::Settlement, unlock_key)
     };
 
     let mut new_commitment_lock_script_args = lock_script_args[0..36].to_vec();
@@ -1768,7 +1781,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     self_node_id,
                     channel_data.channel_id,
                     tx,
-                    onchain_key_purpose(unlock.unlock_type, commitment_number),
+                    key_purpose,
                     unlock.with_preimage,
                     unlock_key,
                     signer,
@@ -2007,7 +2020,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     self_node_id,
                     channel_data.channel_id,
                     tx,
-                    onchain_key_purpose(unlock.unlock_type, commitment_number),
+                    key_purpose,
                     unlock.with_preimage,
                     unlock_key,
                     signer,
@@ -2016,14 +2029,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
 
         Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
-    }
-}
-
-fn onchain_key_purpose(unlock_type: u8, commitment_number: u64) -> fiber_types::OnchainKeyPurpose {
-    if unlock_type < 0xFE {
-        fiber_types::OnchainKeyPurpose::Tlc { commitment_number }
-    } else {
-        fiber_types::OnchainKeyPurpose::Settlement
     }
 }
 
@@ -2071,12 +2076,15 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                     content: signed,
                     signature,
                     ..
-                } if signed.transaction.as_slice() == awaiting.transaction.as_slice() => Ok(Some(
-                    apply_settlement_signature(tx, change_signer, signature, with_preimage)?,
-                )),
+                } if signed == awaiting => Ok(Some(apply_settlement_signature(
+                    tx,
+                    change_signer,
+                    signature,
+                    with_preimage,
+                )?)),
                 WatchtowerExternalState::AwaitingSignature {
                     content: pending, ..
-                } if pending.transaction.as_slice() == awaiting.transaction.as_slice() => Ok(None),
+                } if pending == awaiting => Ok(None),
                 _ => {
                     store.put_watchtower_signer(
                         node_id,
@@ -2086,7 +2094,12 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                                 request_id,
                                 content: awaiting,
                             },
-                            last_applied: external.last_applied,
+                            // Correcting an old request's derivation index can keep
+                            // the same transaction/request ID. Its old signature must
+                            // not make a corrected submission look already applied.
+                            last_applied: external
+                                .last_applied
+                                .filter(|applied| applied.request_id != request_id),
                         }),
                     );
                     Ok(None)
@@ -2167,7 +2180,7 @@ fn sign_tx(
     Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SettlementWitness {
     pending_htlc_count: usize,
     pending_htlcs: Vec<Htlc>,
@@ -2217,7 +2230,7 @@ impl<'a> WitnessReader<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Htlc {
     htlc_type: u8,
     payment_amount: u128,
@@ -2272,30 +2285,6 @@ impl Htlc {
         } else {
             None
         }
-    }
-
-    pub fn find_matched_private_key<'a>(
-        &self,
-        settlement_data: &'a SettlementData,
-        with_preimage: bool,
-    ) -> Option<&'a Privkey> {
-        settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-            let payment_hash_matches = settlement_tlc
-                .payment_hash
-                .as_ref()
-                .starts_with(&self.payment_hash);
-            let pubkey_hash_matches = match (self.is_offered(), with_preimage) {
-                (true, true) | (false, false) => {
-                    self.remote_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
-                }
-                _ => {
-                    self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
-                }
-            };
-            (payment_hash_matches && pubkey_hash_matches)
-                .then_some(settlement_tlc.local_key.as_ref())
-                .flatten()
-        })
     }
 }
 
@@ -3465,3 +3454,7 @@ mod tests {
         assert_eq!(settlements[1].1, TLCId::Offered(1));
     }
 }
+
+#[cfg(all(test, feature = "watchtower"))]
+#[path = "external_signing_tests.rs"]
+mod external_signing_tests;

@@ -5,7 +5,10 @@ use ckb_types::packed::Script;
 use ractor::{ActorCell, ActorRef, ActorStatus};
 use tokio::sync::{mpsc, RwLock};
 
-use crate::ckb::{client::CkbRpcClient, CkbChainMessage};
+use crate::ckb::{
+    client::{CkbChainClient, CkbRpcClient},
+    CkbChainMessage,
+};
 use crate::fiber::{
     graph::NetworkGraph,
     network::{
@@ -112,10 +115,10 @@ pub trait TenantRuntimeFactory: Send + Sync {
 
 /// Starts a tenant-scoped Fiber channel/payment runtime and wires it to Public
 /// T through the in-process transport.
-pub struct FiberTenantRuntimeFactory {
+pub struct FiberTenantRuntimeFactory<C = CkbRpcClient> {
     lsp_config: LspConfig,
     template_config: FiberConfig,
-    chain_client: CkbRpcClient,
+    chain_client: C,
     chain_actor: ActorRef<CkbChainMessage>,
     public_network_actor: ActorRef<NetworkActorMessage>,
     tenant_store: Store,
@@ -123,12 +126,12 @@ pub struct FiberTenantRuntimeFactory {
     default_shutdown_script: Script,
 }
 
-impl FiberTenantRuntimeFactory {
+impl<C: CkbChainClient + Clone + Send + Sync + 'static> FiberTenantRuntimeFactory<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         lsp_config: LspConfig,
         template_config: FiberConfig,
-        chain_client: CkbRpcClient,
+        chain_client: C,
         chain_actor: ActorRef<CkbChainMessage>,
         public_network_actor: ActorRef<NetworkActorMessage>,
         tenant_store: Store,
@@ -154,7 +157,9 @@ impl FiberTenantRuntimeFactory {
 }
 
 #[async_trait]
-impl TenantRuntimeFactory for FiberTenantRuntimeFactory {
+impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
+    for FiberTenantRuntimeFactory<C>
+{
     fn provision(&self, tenant_id: &TenantId) -> Result<HostedTenantRecord, String> {
         let config = self.tenant_config(tenant_id);
         let tenant_pubkey = pubkey_from_tentacle(config.public_key());

@@ -70,7 +70,7 @@ use crate::{
         create_n_nodes_network_with_visibility, establish_channel_between_nodes, gen_rpc_config,
         get_test_root_actor, init_tracing, wait_until_async_timeout,
         wait_until_node_supports_trampoline_routing, ChannelParameters, NetworkNode,
-        HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
+        NetworkNodeConfig, HUGE_CKB_AMOUNT, MIN_RESERVED_CKB,
     },
     NetworkServiceEvent,
 };
@@ -847,7 +847,19 @@ async fn create_lsp_test_network(
                 }),
             "duplicate test tenant id {tenant_id} on LSP node {lsp_node_index}"
         );
-        let tenant = NetworkNode::new_with_node_name(&format!("lsp-tenant-{tenant_name}")).await;
+        // Cold signer-status queries read the host's tenant namespace without starting
+        // a runtime, so the fixture must use the same storage layout as production.
+        let tenant = NetworkNode::new_with_config(
+            NetworkNodeConfig::builder()
+                .node_name(Some(format!("lsp-tenant-{tenant_name}")))
+                .build()
+                .with_store(
+                    nodes[*lsp_node_index]
+                        .store
+                        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str())),
+                ),
+        )
+        .await;
         connect_in_process(&nodes[*lsp_node_index], &tenant).await;
         let record = HostedTenantRecord {
             tenant_id: tenant_id.clone(),

@@ -34,6 +34,8 @@ use crate::store::{open_store, NodeNamespace, Store};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod integration;
+#[cfg(not(target_arch = "wasm32"))]
+mod signer_isolation;
 
 fn test_token_issuer() -> BiscuitTokenIssuer {
     let root = biscuit_auth::KeyPair::new();

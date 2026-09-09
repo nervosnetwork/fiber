@@ -350,10 +350,26 @@ where
         extensions: &Extensions,
         params: GetChannelSigningStatusParams,
     ) -> Result<GetChannelSigningStatusResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .get_channel_signing_status(params)
-                .await;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(tenant) = extensions.get::<crate::rpc::tenant::AuthenticatedTenant>() {
+            let actor = self
+                .lsp_actor
+                .as_ref()
+                .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
+            let channel_id: fiber_types::Hash256 = params.channel_id.into();
+            let state = call!(actor, |reply| {
+                crate::lsp::LspServiceMessage::GetTenantSigningStatus {
+                    tenant_id: tenant.0.clone(),
+                    channel_id,
+                    reply,
+                }
+            })
+            .rpc_err()?
+            .rpc_err()?;
+            return Ok(GetChannelSigningStatusResult {
+                channel_id: params.channel_id,
+                status: to_rpc_channel_signing_status(&state).rpc_err()?,
+            });
         }
         self.get_channel_signing_status(params).await
     }

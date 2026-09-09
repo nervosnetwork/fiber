@@ -300,6 +300,12 @@ impl NetworkNodeConfig {
     pub fn builder() -> NetworkNodeConfigBuilder {
         NetworkNodeConfigBuilder::new()
     }
+
+    /// Uses a supplied store so hosted test nodes can share the host's tenant namespaces.
+    pub fn with_store(mut self, store: Store) -> Self {
+        self.store = store;
+        self
+    }
 }
 
 pub struct NetworkNodeConfigBuilder {

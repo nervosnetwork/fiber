@@ -417,19 +417,27 @@ mod tests {
     }
 
     #[test]
-    fn auto_requires_confirmation_for_onchain_claims() {
-        let review = review(SigningIntent::SettlementTransaction);
+    fn auto_and_manual_require_confirmation_for_onchain_claims() {
         let content = content();
         let registry = PaymentRegistry::default();
-        assert_eq!(
-            SigningPolicy::Auto.decide(SigningPolicyInput {
-                review: &review,
-                content: &content,
-                settlement: None,
-                registry: &registry,
-            }),
-            SigningDecision::RequireConfirmation
-        );
+        for intent in [
+            SigningIntent::SettlementTransaction,
+            SigningIntent::TlcTransaction,
+        ] {
+            let review = review(intent);
+            for policy in [SigningPolicy::Auto, SigningPolicy::Manual] {
+                assert_eq!(
+                    policy.decide(SigningPolicyInput {
+                        review: &review,
+                        content: &content,
+                        settlement: None,
+                        registry: &registry,
+                    }),
+                    SigningDecision::RequireConfirmation,
+                    "{policy:?}: {intent:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -471,6 +479,31 @@ mod tests {
                 review: &review,
                 content: &content,
                 settlement: None,
+                registry: &registry,
+            }),
+            SigningDecision::Deny
+        );
+    }
+
+    #[test]
+    fn auto_denies_nonce_reuse_for_different_message() {
+        let mut review = review(SigningIntent::CommitmentTransaction);
+        review
+            .warnings
+            .push(SigningWarning::NoncePreviouslyUsedForDifferentMessage {
+                previous_message: [9u8; 32],
+            });
+        let hash = Hash256::from([9; 32]);
+        let mut registry = PaymentRegistry::default();
+        registry.record_issued_invoice(hash);
+        registry.note_signed_balance(10);
+        let settlement = inbound_settlement(hash, 15);
+        let content = content_for(commitment_tx_for(&settlement, true));
+        assert_eq!(
+            SigningPolicy::Auto.decide(SigningPolicyInput {
+                review: &review,
+                content: &content,
+                settlement: Some(binding(&settlement)),
                 registry: &registry,
             }),
             SigningDecision::Deny

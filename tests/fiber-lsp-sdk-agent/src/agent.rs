@@ -385,13 +385,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use ckb_types::prelude::*;
     use fiber_json_types::{
         ChannelSigningStatus, ChannelSigningTransition, GetChannelSigningStatusResult,
         GetLspTenantRegistryNonceResult, Hash256 as JsonHash256, LspTenantRuntimeStatus,
         LspTenantStatus, RegisterLspTenantParams, RegisterLspTenantResult,
         SubmitChannelSignatureParams,
     };
-    use fiber_lsp_sdk::{MemoryStore, RootKey, RootSigner};
+    use fiber_lsp_sdk::{MemoryStore, RootKey, RootSigner, SignerStore};
     use fiber_types::{Privkey, TenantId, TenantRegistryPayload, TenantRegistrySignature};
 
     use super::*;
@@ -409,6 +410,8 @@ mod tests {
         register_calls: usize,
         statuses: HashMap<JsonHash256, ChannelSigningStatus>,
         submissions: Vec<SubmitChannelSignatureParams>,
+        watchtower_statuses: HashMap<JsonHash256, WatchtowerSigningStatus>,
+        watchtower_submissions: Vec<fiber_json_types::SubmitWatchtowerSignatureParams>,
         tenant_tokens: Vec<String>,
     }
 
@@ -507,18 +510,24 @@ mod tests {
             tenant_token: &str,
             channel_id: JsonHash256,
         ) -> Result<fiber_json_types::GetWatchtowerSigningStatusResult> {
-            self.state().tenant_tokens.push(tenant_token.to_string());
-            Ok(fiber_json_types::GetWatchtowerSigningStatusResult {
-                channel_id,
-                status: WatchtowerSigningStatus::NoSignatureRequired,
-            })
+            let mut state = self.state();
+            state.tenant_tokens.push(tenant_token.to_string());
+            let status = state
+                .watchtower_statuses
+                .get(&channel_id)
+                .cloned()
+                .unwrap_or(WatchtowerSigningStatus::NoSignatureRequired);
+            Ok(fiber_json_types::GetWatchtowerSigningStatusResult { channel_id, status })
         }
 
         async fn submit_watchtower_signature(
             &self,
-            _tenant_token: &str,
-            _params: fiber_json_types::SubmitWatchtowerSignatureParams,
+            tenant_token: &str,
+            params: fiber_json_types::SubmitWatchtowerSignatureParams,
         ) -> Result<SubmitWatchtowerSignatureResult> {
+            let mut state = self.state();
+            state.tenant_tokens.push(tenant_token.to_string());
+            state.watchtower_submissions.push(params);
             Ok(SubmitWatchtowerSignatureResult::Applied)
         }
     }
@@ -562,7 +571,7 @@ mod tests {
             .data()
     }
 
-    async fn bind_pending(agent: &mut Agent<FakeNode, MemoryStore>, channel_id: Hash256) {
+    async fn bind_pending<S: SignerStore>(agent: &mut Agent<FakeNode, S>, channel_id: Hash256) {
         let key_id = agent.pending_channel_key_id().expect("pending key");
         let signer = agent.open_channel(key_id).await.expect("open signer");
         let tx = approved_funding_tx(funding_lock_for(
@@ -741,5 +750,59 @@ mod tests {
         assert_eq!(state.submissions[0].request_id, JsonHash256([0x22; 32]));
         assert_eq!(state.submissions[0].partial_signature.len(), 32);
         assert!(state.submissions[0].next_material.is_some());
+    }
+
+    #[tokio::test]
+    async fn agent_recovers_pending_watchtower_signature_after_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let node = FakeNode::default();
+        node.insert_external_channel(channel_id());
+        let config = || AgentConfig {
+            store_dir: dir.path().to_path_buf(),
+            status_file: Some(dir.path().join("status.json")),
+        };
+        let mut first = Agent::open(node.clone(), config())
+            .await
+            .expect("first open");
+        first.initialize().await.expect("first initialize");
+        bind_pending(&mut first, channel_id()).await;
+        drop(first);
+
+        let tx = ckb_types::core::TransactionBuilder::default()
+            .output(
+                ckb_types::packed::CellOutput::new_builder()
+                    .capacity(1000u64)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data();
+        let request_id = JsonHash256([0x33; 32]);
+        node.state().watchtower_statuses.insert(
+            channel_id().into(),
+            WatchtowerSigningStatus::SignatureRequired {
+                request_id,
+                content: fiber_json_types::OnchainSigningContent {
+                    key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
+                    transaction: tx.into(),
+                },
+            },
+        );
+
+        let mut reopened = Agent::open(node.clone(), config()).await.expect("reopen");
+        reopened.initialize().await.expect("reinitialize");
+        reopened
+            .poll_once()
+            .await
+            .expect("poll and sign watchtower");
+
+        let state = node.state();
+        assert_eq!(state.watchtower_submissions.len(), 1);
+        assert_eq!(state.watchtower_submissions[0].request_id, request_id);
+        assert_eq!(
+            state.watchtower_submissions[0].channel_id,
+            channel_id().into()
+        );
+        assert_eq!(state.watchtower_submissions[0].signature.len(), 65);
     }
 }

@@ -184,6 +184,47 @@ impl ChannelData {
             .or_else(|| self.local_settlement_key.as_ref().map(Privkey::pubkey))
             .expect("watch channel must contain a local settlement public or private key")
     }
+
+    /// Return the expected public key for an on-chain signing request.
+    ///
+    /// TLC requests must resolve to a known derivation index. Missing or conflicting
+    /// key material cannot be replaced by the settlement base key.
+    pub fn expected_onchain_pubkey(
+        &self,
+        purpose: &crate::channel_signer::OnchainKeyPurpose,
+    ) -> Result<Pubkey, String> {
+        match purpose {
+            crate::channel_signer::OnchainKeyPurpose::Settlement => self
+                .local_settlement_key_pubkey
+                .or_else(|| self.local_settlement_key.as_ref().map(Privkey::pubkey))
+                .ok_or_else(|| "settlement signing public key is missing".to_string()),
+            crate::channel_signer::OnchainKeyPurpose::Tlc { commitment_number } => {
+                let mut expected = None;
+                for tlc in self
+                    .local_settlement_data
+                    .tlcs
+                    .iter()
+                    .chain(self.remote_settlement_data.tlcs.iter())
+                    .chain(self.pending_remote_settlement_data.tlcs.iter())
+                    .filter(|tlc| tlc.local_key_commitment_number == Some(*commitment_number))
+                {
+                    let pubkey = tlc
+                        .local_key_pubkey
+                        .or_else(|| tlc.local_key.as_ref().map(Privkey::pubkey))
+                        .ok_or_else(|| "TLC signing public key is missing".to_string())?;
+                    if expected.is_some_and(|key| key != pubkey) {
+                        return Err(
+                            "conflicting TLC signing public keys for derivation index".to_string()
+                        );
+                    }
+                    expected = Some(pubkey);
+                }
+                expected.ok_or_else(|| {
+                    format!("TLC signing key not found for derivation index {commitment_number}")
+                })
+            }
+        }
+    }
 }
 
 /// CKB blake160: the first 20 bytes of blake2b-256.

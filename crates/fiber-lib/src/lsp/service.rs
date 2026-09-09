@@ -2,15 +2,16 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
-use crate::fiber::network::{
-    BufferedTrampolineUpstreamStatus, FiberActorCommand, NetworkActorMessage,
+use crate::fiber::{
+    channel::{ChannelActorState, ChannelActorStateStore},
+    network::{BufferedTrampolineUpstreamStatus, FiberActorCommand, NetworkActorMessage},
 };
 use crate::fiber_types::{
     Hash256, PaymentStatus, Privkey, Pubkey, TenantRegistryPayload, TenantRegistrySignature,
     TlcErrorCode,
 };
 use crate::invoice::CkbInvoice;
-use crate::store::Store;
+use crate::store::{NodeNamespace, Store};
 
 use super::{
     is_permanent_hosted_payment_failure, tenant_watchtower_node_id, BiscuitTokenIssuer,
@@ -77,6 +78,12 @@ pub enum LspServiceMessage {
         TenantId,
         RpcReplyPort<Result<HostedTenantRpcContext, String>>,
     ),
+    /// Reads a tenant's channel signing status directly from store without activating runtime.
+    GetTenantSigningStatus {
+        tenant_id: TenantId,
+        channel_id: Hash256,
+        reply: RpcReplyPort<Result<ChannelActorState, String>>,
+    },
     RegisterInvoice {
         tenant_id: TenantId,
         invoice: CkbInvoice,
@@ -406,6 +413,23 @@ impl Actor for LspService {
                     Ok(None) => Err(format!("tenant {tenant_id} is not registered")),
                     Err(error) => Err(error),
                 };
+                let _ = reply.send(result);
+            }
+            LspServiceMessage::GetTenantSigningStatus {
+                tenant_id,
+                channel_id,
+                reply,
+            } => {
+                let result = (|| {
+                    if state.registry.get(&tenant_id)?.is_none() {
+                        return Err(format!("tenant {tenant_id} is not registered"));
+                    }
+                    state
+                        .store
+                        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()))
+                        .get_channel_actor_state(&channel_id)
+                        .ok_or_else(|| format!("channel {channel_id:?} not found"))
+                })();
                 let _ = reply.send(result);
             }
             LspServiceMessage::RegisterInvoice {

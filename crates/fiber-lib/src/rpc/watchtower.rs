@@ -205,6 +205,11 @@ where
             .map(TryInto::try_into)
             .transpose()
             .map_err(rpc_error)?;
+        if ctx.tenant_scoped && local_settlement_key.is_some() {
+            return Err(rpc_error(
+                "tenant token cannot register a local settlement key",
+            ));
+        }
         let supplied_local_settlement_pubkey = params
             .local_settlement_key_pubkey
             .map(Pubkey::try_from)
@@ -387,13 +392,6 @@ where
             .as_slice()
             .try_into()
             .map_err(|_| rpc_error("watchtower signature must be 65 bytes"))?;
-        if self
-            .store
-            .get_watch_channel(&node_id, &channel_id)
-            .is_none()
-        {
-            return Err(rpc_error("watched channel not found"));
-        }
         let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
             return Err(rpc_error("watched channel not found"));
         };
@@ -431,12 +429,11 @@ where
                 "signature request id does not match the current request",
             ));
         }
-        crate::watchtower::WatchtowerSigner::apply_submitted(
-            &channel.local_settlement_pubkey(),
-            &content,
-            signature,
-        )
-        .map_err(rpc_error)?;
+        let expected_pubkey = channel
+            .expected_onchain_pubkey(&content.key_purpose)
+            .map_err(rpc_error)?;
+        crate::watchtower::WatchtowerSigner::apply_submitted(&expected_pubkey, &content, signature)
+            .map_err(rpc_error)?;
         external.last_applied = Some(LastAppliedWatchtowerSignature {
             request_id,
             signature,

@@ -896,7 +896,7 @@ pub enum OnchainKeyPurpose {
 
 /// Plaintext on-chain transaction signed by a channel signer.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct OnchainSigningContent {
     /// Selects either the TLC base key or one derived TLC key.
     pub key_purpose: OnchainKeyPurpose,
@@ -905,14 +905,14 @@ pub struct OnchainSigningContent {
 }
 
 /// Parameters for querying a watched channel's external signing status.
-#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema, PartialEq, Eq)]
 pub struct GetWatchtowerSigningStatusParams {
     /// The watched channel whose signer state should be read.
     pub channel_id: Hash256,
 }
 
 /// Result of querying a watched channel's external signing status.
-#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema, PartialEq, Eq)]
 pub struct GetWatchtowerSigningStatusResult {
     /// The watched channel whose signer state was read.
     pub channel_id: Hash256,
@@ -922,7 +922,7 @@ pub struct GetWatchtowerSigningStatusResult {
 
 /// Read-only projection of a watchtower's external signer sub-state.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum WatchtowerSigningStatus {
     /// This watched channel holds a local settlement secret.
