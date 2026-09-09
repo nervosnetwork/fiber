@@ -470,7 +470,7 @@ pub(crate) fn collect_onchain_confirmed_payer_tlcs(
         .collect()
 }
 
-/// Offered updates excluded by a confirmed remote close can no longer be paid on this channel.
+/// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
 /// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
 pub(crate) fn collect_onchain_excluded_tlcs(
     state: &ChannelActorState,
@@ -484,18 +484,16 @@ pub(crate) fn collect_onchain_excluded_tlcs(
     let Some(record) = state.load_shutdown_settlement_record(store) else {
         return vec![];
     };
-    // This path only handles TLCs excluded by the peer's commitment.
-    if !record.for_remote
-        // Zero amounts identify the synthetic revocation scope, not a real snapshot.
-        || (record.settlement_data.local_amount == 0 && record.settlement_data.remote_amount == 0)
-        // Revoked commitments are resolved by revocation, not TLC exclusion.
-        || store
+    // Zero amounts identify the synthetic revocation scope, not a real snapshot.
+    if (record.settlement_data.local_amount == 0 && record.settlement_data.remote_amount == 0)
+        // Revocation data describes the peer's commitments, never our local commitment.
+        || (record.for_remote && store
             .get_local_watch_channel(&state.get_id())
             .is_some_and(|data| {
                 data.revocation_data.is_some_and(|revocation| {
                     record.commitment_number <= revocation.commitment_number
                 })
-            })
+            }))
     {
         return vec![];
     }
@@ -514,11 +512,14 @@ pub(crate) fn collect_onchain_excluded_tlcs(
         })
         .filter(|tlc| {
             // Included TLCs must follow normal on-chain resolution, even if LocalAnnounced.
-            !record
-                .settlement_data
-                .tlcs
-                .iter()
-                .any(|included| included.tlc_id == tlc.tlc_id)
+            !record.settlement_data.tlcs.iter().any(|included| {
+                let local_id = if record.for_remote {
+                    included.tlc_id
+                } else {
+                    included.tlc_id.flip()
+                };
+                local_id == tlc.tlc_id
+            })
         })
         .map(|tlc| OnChainTimeoutSettledTlc {
             tlc_id: tlc.tlc_id,

@@ -2855,6 +2855,7 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
 }
 
 async fn assert_excluded_payer_reconciliation(
+    close_flag: CloseFlags,
     live_actor: bool,
     partial_failure: bool,
     reused_attempt: bool,
@@ -2870,7 +2871,7 @@ async fn assert_excluded_payer_reconciliation(
     let payment_hash = gen_rand_sha256_hash();
     let mut state = empty_channel_state(channel_id);
     state.state = ChannelState::Closed(
-        CloseFlags::UNCOOPERATIVE_REMOTE
+        close_flag
             | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
             | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
     );
@@ -2959,7 +2960,7 @@ async fn assert_excluded_payer_reconciliation(
         &channel_id,
         &ShutdownSettlementRecord {
             shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
-            for_remote: true,
+            for_remote: close_flag == CloseFlags::UNCOOPERATIVE_REMOTE,
             commitment_number: 1,
             settlement_data: SettlementData {
                 local_amount: 1000,
@@ -3073,34 +3074,75 @@ async fn assert_excluded_payer_reconciliation(
 #[tokio::test]
 async fn test_excluded_local_announced_fails_payer_before_finalization() {
     for live in [false, true] {
-        assert_excluded_payer_reconciliation(live, false, false, false, false).await;
+        assert_excluded_payer_reconciliation(
+            CloseFlags::UNCOOPERATIVE_REMOTE,
+            live,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn test_excluded_local_announced_repairs_partial_payment_write() {
-    assert_excluded_payer_reconciliation(false, true, false, false, false).await;
+    assert_excluded_payer_reconciliation(
+        CloseFlags::UNCOOPERATIVE_REMOTE,
+        false,
+        true,
+        false,
+        false,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_excluded_local_announced_does_not_fail_reused_attempt() {
-    assert_excluded_payer_reconciliation(false, false, true, false, false).await;
+    assert_excluded_payer_reconciliation(
+        CloseFlags::UNCOOPERATIVE_REMOTE,
+        false,
+        false,
+        true,
+        false,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_excluded_local_announced_preserves_other_inflight_shards() {
-    assert_excluded_payer_reconciliation(false, false, false, true, false).await;
+    assert_excluded_payer_reconciliation(
+        CloseFlags::UNCOOPERATIVE_REMOTE,
+        false,
+        false,
+        false,
+        true,
+        false,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn test_excluded_local_announced_relays_failure_before_finalization() {
+    assert_excluded_tlc_relays_failure_before_finalization(CloseFlags::UNCOOPERATIVE_REMOTE).await;
+}
+
+#[tokio::test]
+async fn test_local_force_close_excluded_tlc_relays_failure_before_finalization() {
+    assert_excluded_tlc_relays_failure_before_finalization(CloseFlags::UNCOOPERATIVE_LOCAL).await;
+}
+
+async fn assert_excluded_tlc_relays_failure_before_finalization(close_flag: CloseFlags) {
     let mut node = NetworkNode::new().await;
     let channel_id = gen_rand_sha256_hash();
     let upstream_id = gen_rand_sha256_hash();
     let payment_hash = gen_rand_sha256_hash();
     let mut state = empty_channel_state(channel_id);
     state.state = ChannelState::Closed(
-        CloseFlags::UNCOOPERATIVE_REMOTE
+        close_flag
             | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
             | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
     );
@@ -3122,7 +3164,7 @@ async fn test_excluded_local_announced_relays_failure_before_finalization() {
         &channel_id,
         &ShutdownSettlementRecord {
             shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
-            for_remote: true,
+            for_remote: close_flag == CloseFlags::UNCOOPERATIVE_REMOTE,
             commitment_number: 1,
             settlement_data: SettlementData {
                 local_amount: 1000,
@@ -3252,6 +3294,159 @@ fn test_excluded_local_announced_requires_real_confirmed_snapshot() {
 #[tokio::test]
 async fn test_excluded_payment_does_not_block_channel_or_network_actor() {
     for live in [false, true] {
-        assert_excluded_payer_reconciliation(live, false, false, false, true).await;
+        assert_excluded_payer_reconciliation(
+            CloseFlags::UNCOOPERATIVE_REMOTE,
+            live,
+            false,
+            false,
+            false,
+            true,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn test_local_force_close_excluded_tlc_fails_payer_offline() {
+    assert_excluded_payer_reconciliation(
+        CloseFlags::UNCOOPERATIVE_LOCAL,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_local_force_close_excluded_tlc_fails_payer_live() {
+    assert_excluded_payer_reconciliation(
+        CloseFlags::UNCOOPERATIVE_LOCAL,
+        true,
+        false,
+        false,
+        false,
+        false,
+    )
+    .await;
+}
+
+#[test]
+fn test_local_force_close_excluded_tlc_respects_snapshot_direction() {
+    use crate::fiber::onchain_tlc_reconcile::collect_onchain_excluded_tlcs;
+    let store = MockStore::new();
+    let mut state = empty_channel_state(gen_rand_sha256_hash());
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    state.tlc_state.add_offered_tlc(tlc.clone());
+    // In a local snapshot, Offered(0) represents the opposite direction and must
+    // not hide our excluded outgoing TLC with the same numeric id.
+    let mut included = settlement_tlc_for(&tlc);
+    install_unit_snapshot(
+        &mut state,
+        &store,
+        false,
+        SettlementData {
+            local_amount: 1000,
+            remote_amount: 1000,
+            tlcs: vec![included.clone()],
+        },
+    );
+    assert_eq!(collect_onchain_excluded_tlcs(&state, &store).len(), 1);
+    included.tlc_id = included.tlc_id.flip();
+    install_unit_snapshot(
+        &mut state,
+        &store,
+        false,
+        SettlementData {
+            local_amount: 1000,
+            remote_amount: 1000,
+            tlcs: vec![included],
+        },
+    );
+    assert!(
+        collect_onchain_excluded_tlcs(&state, &store).is_empty(),
+        "an included outgoing TLC must follow normal on-chain resolution"
+    );
+}
+
+#[tokio::test]
+async fn test_local_force_close_excluded_tlc_waits_for_payment_persistence() {
+    for live in [false, true] {
+        assert_excluded_payer_reconciliation(
+            CloseFlags::UNCOOPERATIVE_LOCAL,
+            live,
+            false,
+            false,
+            false,
+            true,
+        )
+        .await;
+    }
+}
+
+#[test]
+fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
+    use crate::fiber::onchain_tlc_reconcile::collect_onchain_excluded_tlcs;
+    let store = MockStore::new();
+    let channel_id = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    let snapshot = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![],
+    };
+    state.tlc_state.add_offered_tlc(tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    ));
+    store.watch_channels.borrow_mut().insert(
+        channel_id,
+        ChannelData {
+            channel_id,
+            funding_udt_type_script: None,
+            local_settlement_key: Privkey::from([1u8; 32]),
+            remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
+            local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
+            remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
+            remote_settlement_data: snapshot.clone(),
+            pending_remote_settlement_data: snapshot.clone(),
+            local_settlement_data: snapshot.clone(),
+            revocation_data: Some(RevocationData {
+                commitment_number: 1,
+                aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+                output: CellOutput::default(),
+                output_data: Default::default(),
+            }),
+        },
+    );
+    for for_remote in [false, true] {
+        let close_flag = if for_remote {
+            CloseFlags::UNCOOPERATIVE_REMOTE
+        } else {
+            CloseFlags::UNCOOPERATIVE_LOCAL
+        };
+        state.state = ChannelState::Closed(
+            close_flag
+                | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+                | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+        );
+        install_unit_snapshot(&mut state, &store, for_remote, snapshot.clone());
+        assert_eq!(
+            collect_onchain_excluded_tlcs(&state, &store).len(),
+            usize::from(!for_remote)
+        );
     }
 }
