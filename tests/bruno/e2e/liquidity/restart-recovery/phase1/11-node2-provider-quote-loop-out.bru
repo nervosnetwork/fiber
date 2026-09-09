@@ -84,7 +84,7 @@ script:post-response {
   // base_fee + amount * proportional_fee_ppm / 1_000_000.
   const expectedProviderFee =
     BigInt(bru.getVar("REGISTRY_BASE_FEE"))
-    + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / 1000000n;
+    + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / BigInt(1000000);
   if (envelope.provider_fee !== "0x" + expectedProviderFee.toString(16)) {
     throw new Error(`provider_fee must be the registry-derived fee 0x${expectedProviderFee.toString(16)}, got: ${envelope.provider_fee}`);
   }
@@ -123,7 +123,7 @@ script:post-response {
   if (expiresAt <= nowMs) {
     throw new Error(`quote must not be expired: expires_at=${envelope.expires_at}`);
   }
-  if (BigInt(envelope.payout_deadline) !== expiresAt + 10000n) {
+  if (BigInt(envelope.payout_deadline) !== expiresAt + BigInt(10000)) {
     throw new Error(`payout_deadline must be expires_at + 10000ms: ${envelope.payout_deadline}`);
   }
   // refund_after_lock_time is an absolute CKB `since` timestamp covering
@@ -133,7 +133,7 @@ script:post-response {
   if (since === seconds) {
     throw new Error(`refund_after_lock_time must carry since flag bits: ${envelope.refund_after_lock_time}`);
   }
-  if (seconds * 1000n < expiresAt + 20000n || seconds * 1000n >= expiresAt + 21000n) {
+  if (seconds * BigInt(1000) < expiresAt + BigInt(20000) || seconds * BigInt(1000) >= expiresAt + BigInt(21000)) {
     throw new Error(`refund since timestamp does not cover expiry + 20s: ${envelope.refund_after_lock_time}`);
   }
 

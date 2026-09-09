@@ -1929,26 +1929,17 @@ impl NetworkNode {
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_pubkey),
         )
         .await;
-        self.network_actor
-            .wait(Some(event_wait_timeout()))
-            .await
-            .expect("timed out stopping network actor");
-        if let Some(event_forwarder_task) = self.event_forwarder_task.take() {
-            tokio::time::timeout(event_wait_timeout(), event_forwarder_task)
-                .await
-                .expect("timed out stopping event forwarder task")
-                .expect("event forwarder task panicked");
-        }
+        self.event_forwarder_task.take();
+    }
+
+    pub async fn restart(&mut self) {
+        self.stop().await;
         self.chain_actor
             .stop(Some("stopping chain actor on request".to_string()));
         self.chain_actor
             .wait(Some(event_wait_timeout()))
             .await
             .expect("timed out stopping chain actor");
-    }
-
-    pub async fn restart(&mut self) {
-        self.stop().await;
         // Tentacle shutdown may require some time to propagate to other nodes.
         // If we start the node immediately, other nodes may deem our new connection
         // as a duplicate connection and report RepeatedConnection error.

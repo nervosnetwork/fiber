@@ -63,7 +63,7 @@ script:post-response {
   // base_fee + amount * proportional_fee_ppm / 1_000_000.
   const expectedProviderFee =
     BigInt(bru.getVar("REGISTRY_BASE_FEE"))
-    + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / 1000000n;
+     + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / BigInt(1000000);
   if (envelope.provider_fee !== "0x" + expectedProviderFee.toString(16)) {
     throw new Error(`provider_fee must be the registry-derived fee 0x${expectedProviderFee.toString(16)}, got: ${envelope.provider_fee}`);
   }
@@ -102,7 +102,7 @@ script:post-response {
   if (since === seconds) {
     throw new Error(`refund_after_lock_time must carry since flag bits: ${envelope.refund_after_lock_time}`);
   }
-  if (seconds * 1000n < expiresAt || seconds * 1000n >= expiresAt + 1000n) {
+  if (seconds * BigInt(1000) < expiresAt || seconds * BigInt(1000) >= expiresAt + BigInt(1000)) {
     throw new Error(`refund since timestamp does not cover the quote expiry: ${envelope.refund_after_lock_time}`);
   }
   // The provider claims the lock cell into its own default funding lock and

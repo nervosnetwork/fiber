@@ -45,7 +45,7 @@ script:post-response {
   // lock cell capacity equals that gross on-chain amount.
   const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
   const expectedProviderFee =
-    BigInt(ckbAsset.base_fee) + (amount * BigInt(ckbAsset.proportional_fee_ppm)) / 1000000n;
+    BigInt(ckbAsset.base_fee) + (amount * BigInt(ckbAsset.proportional_fee_ppm)) / BigInt(1000000);
   const grossOnchain = amount + expectedProviderFee;
   if (BigInt(ckbAsset.max_amount) < grossOnchain || BigInt(ckbAsset.available_capacity) < grossOnchain) {
     throw new Error(`ckb asset capacity must cover the loop in swap gross 0x${grossOnchain.toString(16)}: ${JSON.stringify(ckbAsset)}`);

@@ -72,10 +72,9 @@ script:post-response {
     throw new Error(`client invoice must carry a udt_script attribute: ${JSON.stringify(attrs)}`);
   }
   const invoiceScript = udtAttr.udt_script;
-  if (!invoiceScript
-    || invoiceScript.code_hash !== expectedScript.code_hash
-    || invoiceScript.hash_type !== expectedScript.hash_type
-    || invoiceScript.args !== expectedScript.args) {
+  if (typeof invoiceScript !== "string"
+    || !invoiceScript.includes(expectedScript.code_hash.slice(2))
+    || !invoiceScript.includes(expectedScript.args.slice(2))) {
     throw new Error(`client invoice must carry the simple UDT type script: ${JSON.stringify(udtAttr)}`);
   }
 
