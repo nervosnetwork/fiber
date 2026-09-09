@@ -129,7 +129,7 @@ script:post-response {
   // refund_after_lock_time is an absolute CKB `since` timestamp covering
   // expires_at + 20s, rounded up to whole seconds in the 56-bit value field.
   const since = BigInt(envelope.refund_after_lock_time);
-  const seconds = since & 0x00ffffffffffffffn;
+  const seconds = since & BigInt("0x00ffffffffffffff");
   if (since === seconds) {
     throw new Error(`refund_after_lock_time must carry since flag bits: ${envelope.refund_after_lock_time}`);
   }
