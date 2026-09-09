@@ -518,26 +518,16 @@ pub fn cell_deps_from_genesis(
         .transaction(1)
         .context("genesis transaction 1 is missing")?;
 
-    let udt_output = genesis_tx0
+    genesis_tx0
         .outputs()
         .get(SIMPLE_UDT_GENESIS_INDEX as usize)
-        .context("genesis output for the simple UDT contract is missing")?
-        .clone();
+        .context("genesis output for the simple UDT contract is missing")?;
     let udt_output_data = genesis_tx0
         .outputs_data()
         .get(SIMPLE_UDT_GENESIS_INDEX as usize)
         .context("genesis output data for the simple UDT contract is missing")?
         .raw_data();
     let udt_code_hash: H256 = CellOutput::calc_data_hash(&udt_output_data).unpack();
-    let declared_code_hash: H256 = udt_output
-        .type_()
-        .to_opt()
-        .context("simple UDT genesis output has no type script")?
-        .code_hash()
-        .unpack();
-    if declared_code_hash != udt_code_hash {
-        bail!("genesis simple UDT output has an inconsistent type script");
-    }
     if udt_code_hash != udt_type_script.code_hash().unpack() {
         bail!(
             "udt_type_script code hash does not match the dev-chain simple UDT contract at genesis index {SIMPLE_UDT_GENESIS_INDEX}"
@@ -1152,20 +1142,9 @@ mod tests {
             outputs_data.push(packed::Bytes::default());
         }
         let udt_code: Vec<u8> = vec![0xAB; 64];
-        let udt_code_hash: H256 = CellOutput::calc_data_hash(&udt_code).unpack();
         outputs.push(
             CellOutput::new_builder()
                 .capacity(Capacity::shannons(1000).pack())
-                .type_(
-                    Some(
-                        Script::new_builder()
-                            .code_hash(udt_code_hash.pack())
-                            .hash_type::<packed::Byte>(ScriptHashType::Data2.into())
-                            .args(Bytes::default().pack())
-                            .build(),
-                    )
-                    .pack(),
-                )
                 .build(),
         );
         outputs_data.push(packed::Bytes::from(udt_code));
