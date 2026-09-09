@@ -32,8 +32,9 @@ pub use crate::liquidity::chain::{
 };
 use crate::liquidity::quote::{
     absolute_timestamp_since, build_loop_in_quote_terms, json_asset_to_liquidity_asset,
-    liquidity_asset_to_json_info, liquidity_quote_envelope_from_terms, parse_script_hex,
-    validate_imported_quote, validate_loop_out_quote_request,
+    liquidity_asset_to_json_info, liquidity_lock_capacity_requirement,
+    liquidity_quote_envelope_from_terms, parse_script_hex, validate_imported_quote,
+    validate_loop_out_quote_request,
 };
 use crate::liquidity::store::{
     LiquidityStateTransition, LiquidityStore, LiquidityStoreError, LiquiditySwapKind,
@@ -595,6 +596,17 @@ where
         let preimage = crate::gen_rand_sha256_hash();
         let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
         let quote_id: Hash256 = crate::gen_rand_sha256_hash();
+        let refund_after_lock_time =
+            absolute_timestamp_since(validated.expires_at.saturating_add(20_000))?;
+        let asset_type_script = asset.udt_type_script.clone().map(Into::into);
+        let capacity_requirement_ckb = liquidity_lock_capacity_requirement(
+            payment_hash.into(),
+            &claimant_lock,
+            &self.provider_funding_lock_script,
+            refund_after_lock_time,
+            params.amount,
+            asset_type_script.as_ref(),
+        )?;
         let terms = LoopOutQuoteTerms {
             quote_id,
             swap_kind: LiquiditySwapKind::LoopOut,
@@ -604,14 +616,12 @@ where
             provider_fee: validated.provider_fee,
             routing_fee_limit: validated.routing_fee_limit,
             onchain_fee_estimate_ckb: 1_000,
-            capacity_requirement_ckb: 10_000,
+            capacity_requirement_ckb,
             payment_hash,
             payment_preimage: Some(preimage),
             expires_at: validated.expires_at,
             payout_deadline: validated.expires_at.saturating_add(10_000),
-            refund_after_lock_time: absolute_timestamp_since(
-                validated.expires_at.saturating_add(20_000),
-            )?,
+            refund_after_lock_time,
             claimant_lock,
             refund_lock: self.provider_funding_lock_script.clone(),
             client_invoice: None,
@@ -647,6 +657,15 @@ where
         )?;
         terms.claimant_lock = self.provider_funding_lock_script.clone();
         terms.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
+        let asset_type_script = terms.asset.udt_type_script.clone().map(Into::into);
+        terms.capacity_requirement_ckb = liquidity_lock_capacity_requirement(
+            terms.payment_hash.into(),
+            &terms.claimant_lock,
+            &terms.refund_lock,
+            terms.refund_after_lock_time,
+            terms.amount,
+            asset_type_script.as_ref(),
+        )?;
         if terms.provider_fee > params.max_provider_fee {
             return Err(LiquidityLoopOutError::ProviderFeeTooHigh);
         }

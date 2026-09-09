@@ -1,6 +1,8 @@
 use ckb_sdk::{Since, SinceType};
-use ckb_types::packed::Script;
-use ckb_types::prelude::Entity;
+use ckb_types::bytes::Bytes;
+use ckb_types::core::Capacity;
+use ckb_types::packed::{CellOutput, Script};
+use ckb_types::prelude::*;
 use fiber_json_types::{LiquidityAssetInfo, LiquidityQuoteEnvelope};
 use fiber_types::{
     Hash256, HashAlgorithm, LiquidityAsset, LiquidityAssetKind, LiquiditySwapKind, Pubkey,
@@ -36,6 +38,43 @@ pub fn compute_provider_fee(
         .base_fee
         .checked_add(proportional)
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)
+}
+
+/// Calculate the minimum capacity required by a liquidity-lock output.
+pub fn liquidity_lock_capacity_requirement(
+    payment_hash: [u8; 32],
+    claimant_lock: &Script,
+    refund_lock: &Script,
+    refund_after_lock_time: u64,
+    amount: u128,
+    asset_type_script: Option<&Script>,
+) -> Result<u64, LiquidityLoopOutError> {
+    let lock = Script::new_builder()
+        .code_hash([0u8; 32].pack())
+        .hash_type::<ckb_types::packed::Byte>(2.into())
+        .args(
+            Bytes::from(crate::liquidity::build_liquidity_lock_args(
+                payment_hash,
+                claimant_lock,
+                refund_lock,
+                refund_after_lock_time,
+                amount,
+                asset_type_script,
+            ))
+            .pack(),
+        )
+        .build();
+    let output = CellOutput::new_builder()
+        .capacity(Capacity::shannons(0).pack())
+        .lock(lock)
+        .type_(asset_type_script.cloned().pack())
+        .build();
+    let data_capacity = Capacity::bytes(if asset_type_script.is_some() { 16 } else { 0 })
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))?;
+    output
+        .occupied_capacity(data_capacity)
+        .map(|capacity| capacity.as_u64())
+        .map_err(|error| LiquidityLoopOutError::Chain(error.to_string()))
 }
 
 /// Validate a Loop Out quote request against provider asset policy and client fee caps.
@@ -486,6 +525,23 @@ mod tests {
 
     fn ckb_client_invoice(payment_hash: Hash256) -> crate::invoice::CkbInvoice {
         client_invoice(payment_hash, Some(1_000), None)
+    }
+
+    #[test]
+    fn liquidity_lock_capacity_covers_occupied_ckb_output() {
+        let claimant_lock = udt_script("0x11");
+        let refund_lock = udt_script("0x22");
+        let capacity = liquidity_lock_capacity_requirement(
+            [7; 32],
+            &claimant_lock.clone().into(),
+            &refund_lock.clone().into(),
+            0x5100000000012600,
+            1_000,
+            None,
+        )
+        .expect("capacity");
+
+        assert!(capacity > 10_000);
     }
 
     fn imported_quote_terms(
