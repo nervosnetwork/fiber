@@ -14,7 +14,8 @@ use crate::fiber::graph::{
     GraphChannelStat, NetworkGraph, NetworkGraphStateStore, PathFindError, SendPaymentState,
 };
 use crate::fiber::network::{
-    NetworkActorStateStore, DEFAULT_CHAIN_ACTOR_TIMEOUT, DEFAULT_PAYMENT_TRY_LIMIT,
+    NetworkActorStateStore, OnChainTlcRemoveCompletion, DEFAULT_CHAIN_ACTOR_TIMEOUT,
+    DEFAULT_PAYMENT_TRY_LIMIT,
 };
 use crate::fiber::{
     KeyPair, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
@@ -795,6 +796,15 @@ impl SendPaymentWithRouterCommand {
 /// The interval at which to check payment status for timeout detection
 const PAYMENT_STATUS_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Source identity and attempt binding for acknowledging a persisted TLC removal.
+#[derive(Clone, Debug)]
+pub struct PaymentTlcRemoveContext {
+    pub channel_id: Hash256,
+    pub tlc_id: fiber_types::TLCId,
+    pub channel_outpoint: OutPoint,
+    pub tried_times: u32,
+}
+
 #[derive(Debug, AsRefStr)]
 pub enum PaymentActorMessage {
     // SendPayment
@@ -810,6 +820,10 @@ pub enum PaymentActorMessage {
     OnRemoveTlcEvent {
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
+        /// Locally detected failure; None uses the peer's onion error packet.
+        local_error: Option<TlcErr>,
+        /// Request an asynchronous receipt after persisting the payment outcome.
+        completion: Option<PaymentTlcRemoveContext>,
     },
     /// Reconcile a first-hop attempt from a channel-scoped on-chain fulfill proof.
     ReconcileOnChainFulfill {
@@ -831,6 +845,9 @@ pub struct PaymentActorState {
     // on the node performance, which in worst case may lead node not response revoke_and_ack
     // in expected time, and then the peer will disconnect us.
     retry_send_payment_count: usize,
+    // Deduplicate only replayed on-chain removal notifications in this actor lifetime.
+    // A fresh actor must be able to recover a persisted retry whose timer was lost.
+    processed_onchain_removals: HashSet<(Hash256, fiber_types::TLCId)>,
 }
 
 impl PaymentActorState {
@@ -844,6 +861,7 @@ impl PaymentActorState {
             init_command: Some(init_command),
             last_error_packet: None,
             retry_send_payment_count: 0,
+            processed_onchain_removals: HashSet::new(),
         }
     }
 }
@@ -1055,9 +1073,43 @@ where
                     .await;
                 self.check_payment_final(myself, state);
             }
-            PaymentActorMessage::OnRemoveTlcEvent { attempt_id, reason } => {
-                self.handle_remove_tlc_event(myself.clone(), state, attempt_id, reason)
+            PaymentActorMessage::OnRemoveTlcEvent {
+                attempt_id,
+                reason,
+                local_error,
+                completion,
+            } => {
+                let result = self
+                    .handle_remove_tlc_event(
+                        state,
+                        attempt_id,
+                        reason.clone(),
+                        local_error.as_ref(),
+                        completion.as_ref(),
+                    )
                     .await;
+                match result {
+                    Ok(retry) => {
+                        if let Some(completion) = completion {
+                            self.network
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::OnChainTlcRemoveCompleted {
+                                        downstream_channel_id: completion.channel_id,
+                                        downstream_tlc_id: completion.tlc_id,
+                                        completion: OnChainTlcRemoveCompletion::Payer,
+                                        payment_hash: state.payment_hash,
+                                        reason,
+                                    },
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        }
+                        if retry {
+                            // Queue the channel acknowledgement before scheduling another try.
+                            self.register_payment_retry(myself.clone(), state, attempt_id);
+                        }
+                    }
+                    Err(err) => warn!("Failed to process TLC removal: {}", err),
+                }
                 self.check_payment_final(myself, state);
             }
             PaymentActorMessage::ReconcileOnChainFulfill {
@@ -1833,13 +1885,14 @@ where
         }
     }
 
-    async fn handle_remove_tlc_event(
+    pub(super) async fn handle_remove_tlc_event(
         &self,
-        myself: ActorRef<PaymentActorMessage>,
         state: &mut PaymentActorState,
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
-    ) {
+        local_error: Option<&TlcErr>,
+        completion: Option<&PaymentTlcRemoveContext>,
+    ) -> Result<bool, String> {
         let payment_hash = state.payment_hash;
         let (Some(mut session), Some(mut attempt)) =
             self.get_payment_session_with_attempt(payment_hash, attempt_id)
@@ -1848,73 +1901,98 @@ where
                 "Payment session or attempt not found for payment hash: {:?}, attempt id: {:?}",
                 payment_hash, attempt_id
             );
-            return;
+            return Err("Payment session or attempt missing for TLC removal".to_string());
         };
 
-        match reason {
-            RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
-                self.network_graph
-                    .write()
-                    .await
-                    .record_attempt_success(&attempt);
-                attempt.set_success_status();
-                attempt.preimage = Some(fulfill.payment_preimage);
-                self.store.insert_attempt(attempt.clone());
+        let mut already_processed = false;
+        if let Some(completion) = completion {
+            if !attempt.first_hop_channel_outpoint_eq(&completion.channel_outpoint)
+                || attempt.is_success()
+            {
+                return Ok(false);
+            }
+            let same_execution = attempt.tried_times == completion.tried_times;
+            let just_retried = attempt.is_retrying()
+                && attempt.tried_times == completion.tried_times.saturating_add(1);
+            if !same_execution && !just_retried {
+                return Ok(false);
+            }
+            // Duplicates must not increment retry counts, release route usage twice, or
+            // fail the next execution of this attempt after its route has been rebuilt.
+            if attempt.is_failed() || attempt.is_retrying() {
+                already_processed = true;
+            }
+        }
 
-                session.update_with_attempt(attempt);
-                if !session.is_dry_run() {
-                    self.store.insert_payment_session(session.clone());
-                    // Clean up channel index to prevent retries on channel ready
-                    if session.status.is_final() {
-                        self.store
-                            .clear_attempts_channel_index(session.payment_hash());
+        let mut retry = already_processed && attempt.is_retrying();
+        if !already_processed {
+            match reason {
+                RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
+                    self.network_graph
+                        .write()
+                        .await
+                        .record_attempt_success(&attempt);
+                    attempt.set_success_status();
+                    attempt.preimage = Some(fulfill.payment_preimage);
+                    self.store.insert_attempt(attempt.clone());
+
+                    session.update_with_attempt(attempt);
+                    if !session.is_dry_run() {
+                        self.store.insert_payment_session(session.clone());
+                        // Clean up channel index to prevent retries on channel ready
+                        if session.status.is_final() {
+                            self.store
+                                .clear_attempts_channel_index(session.payment_hash());
+                        }
                     }
                 }
-            }
-            RemoveTlcReason::RemoveTlcFail(reason) => {
-                let (tlc_error, route_index) =
-                    match reason.decode(&attempt.session_key, attempt.hops_public_keys()) {
-                        Some(decoded)
-                            if decoded.hop_index.saturating_add(1) < attempt.route.nodes.len() =>
-                        {
-                            (decoded.error, Some(decoded.hop_index + 1))
-                        }
-                        _ => {
-                            debug_event!(self.network, "InvalidOnionError");
-                            (TlcErr::new(TlcErrorCode::InvalidOnionError), None)
+                RemoveTlcReason::RemoveTlcFail(reason) => {
+                    let (tlc_error, route_index) = if let Some(local_error) = local_error {
+                        (local_error.clone(), None)
+                    } else {
+                        match reason.decode(&attempt.session_key, attempt.hops_public_keys()) {
+                            Some(decoded)
+                                if decoded.hop_index.saturating_add(1)
+                                    < attempt.route.nodes.len() =>
+                            {
+                                (decoded.error, Some(decoded.hop_index + 1))
+                            }
+                            _ => {
+                                debug_event!(self.network, "InvalidOnionError");
+                                (TlcErr::new(TlcErrorCode::InvalidOnionError), None)
+                            }
                         }
                     };
-                let need_to_retry = if let Some(route_index) = route_index {
-                    self.network_graph.write().await.record_attempt_fail_at_hop(
-                        &attempt,
-                        tlc_error.clone(),
-                        route_index,
-                    )
-                } else {
-                    self.network_graph.write().await.record_attempt_fail(
-                        &attempt,
-                        tlc_error.clone(),
-                        false,
-                    )
-                };
-                debug!(
-                    "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
-                    payment_hash,
-                    tlc_error.error_code.as_ref(),
-                    need_to_retry
-                );
-                state.last_error_packet = Some(reason.clone());
+                    let need_to_retry = if let Some(route_index) = route_index {
+                        self.network_graph.write().await.record_attempt_fail_at_hop(
+                            &attempt,
+                            tlc_error.clone(),
+                            route_index,
+                        )
+                    } else {
+                        self.network_graph.write().await.record_attempt_fail(
+                            &attempt,
+                            tlc_error.clone(),
+                            false,
+                        )
+                    };
+                    debug!(
+                        "payment_hash: {:?} set attempt failed with: {:?} need_to_retry: {:?}",
+                        payment_hash,
+                        tlc_error.error_code.as_ref(),
+                        need_to_retry
+                    );
+                    state.last_error_packet = Some(reason.clone());
 
-                self.set_attempt_fail_with_error(
-                    &mut session,
-                    &mut attempt,
-                    Some(tlc_error.error_code),
-                    &tlc_error.to_string(),
-                    need_to_retry,
-                );
+                    self.set_attempt_fail_with_error(
+                        &mut session,
+                        &mut attempt,
+                        Some(tlc_error.error_code),
+                        &tlc_error.to_string(),
+                        need_to_retry,
+                    );
 
-                if attempt.is_retrying() {
-                    self.register_payment_retry(myself.clone(), state, Some(attempt.id));
+                    retry = attempt.is_retrying();
                 }
             }
         }
@@ -1931,6 +2009,29 @@ where
                 );
             }
         }
+        if let Some(completion) = completion {
+            // Finish the session before acknowledging an exhausted or replayed failure.
+            // Reuse the existing session API without applying another attempt failure.
+            if let Some(attempt) =
+                attempt_id.and_then(|id| self.store.get_attempt(payment_hash, id))
+            {
+                if attempt.is_failed()
+                    && !session.status.is_final()
+                    && !session.active_attempts().iter().any(|a| a.id != attempt.id)
+                {
+                    self.set_payment_fail_with_error(
+                        &mut session,
+                        attempt.last_error.as_deref().unwrap_or_default(),
+                        local_error.map(|error| error.error_code),
+                    );
+                }
+            }
+            // Record only after persistence; duplicates still receive the completion receipt.
+            retry &= state
+                .processed_onchain_removals
+                .insert((completion.channel_id, completion.tlc_id));
+        }
+        Ok(retry)
     }
 
     /// Apply an on-chain-confirmed fulfill to one exact payment attempt.

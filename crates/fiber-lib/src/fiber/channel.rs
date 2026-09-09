@@ -15,10 +15,10 @@ use crate::fiber::fee::{
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
-    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
-    OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
+    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -1954,6 +1954,7 @@ where
                             tlc_info.payment_hash,
                             tlc_info.attempt_id,
                             remove_reason,
+                            None,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3084,6 +3085,7 @@ where
                                 tlc.payment_hash,
                                 attempt_id,
                                 reason.clone(),
+                                None,
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3339,12 +3341,59 @@ where
         }
     }
 
+    fn fail_onchain_excluded_tlcs(&self, state: &mut ChannelActorState) -> bool {
+        let mut applied = true;
+        for tlc in collect_onchain_excluded_tlcs(state, &self.store) {
+            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                &tlc.shared_secret,
+            ));
+            match tlc.role {
+                OnChainTimeoutTlcRole::Forwarded {
+                    forwarding_channel_id,
+                    forwarding_tlc_id,
+                } => {
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::RelayOnChainTlcRemove {
+                                downstream_channel_id: state.get_id(),
+                                downstream_tlc_id: tlc.tlc_id,
+                                forwarding_channel_id,
+                                forwarding_tlc_id,
+                                payment_hash: tlc.payment_hash,
+                                reason,
+                            },
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    applied = false;
+                }
+                OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::TlcRemoveReceived(
+                                tlc.payment_hash,
+                                attempt_id,
+                                reason,
+                                Some((state.get_id(), tlc.tlc_id)),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    applied = false;
+                }
+            }
+        }
+        applied
+    }
+
     /// Returns true when no reconcilable TLC remains unresolved on this channel.
     async fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState, now: u64) -> bool {
         self.maintain_waiting_onchain_settlement_tlcs(state, now);
         let payer_effects_applied = self.settle_onchain_fulfilled_tlcs(state).await;
         self.finalize_onchain_timed_out_received_tlcs(state);
-        payer_effects_applied && !has_unresolved_onchain_tlcs(state, &self.store)
+        let excluded_effects_applied = self.fail_onchain_excluded_tlcs(state);
+        payer_effects_applied
+            && excluded_effects_applied
+            && !has_unresolved_onchain_tlcs(state, &self.store)
     }
 
     async fn finalize_onchain_settlement(
@@ -3366,6 +3415,9 @@ where
         }
 
         flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
+        // Persist the chain signal before asking NetworkActor to validate exclusion evidence.
+        state.update_state(ChannelState::Closed(flags));
+        self.store.insert_channel_actor_state(state.clone());
         let now = now_timestamp_as_millis_u64();
         if self.reconcile_onchain_tlcs(state, now).await {
             flags.remove(

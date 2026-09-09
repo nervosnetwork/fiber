@@ -19,8 +19,8 @@ use fiber_types::NodeId;
 use fiber_types::{
     AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
     Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord,
-    TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, SettlementData, SettlementTlc,
+    ShutdownSettlementRecord, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
 use ractor::Actor;
@@ -2851,5 +2851,407 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
         args[40] ^= 0xff;
         let invalid = lock.as_builder().args(args.pack()).build();
         assert!(verify_and_select_settlement_data(&channel_data, &invalid).is_none());
+    }
+}
+
+async fn assert_excluded_payer_reconciliation(
+    live_actor: bool,
+    partial_failure: bool,
+    reused_attempt: bool,
+    other_inflight: bool,
+    block_payment: bool,
+) {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::payment::SendPaymentDataBuilder;
+    use fiber_types::{AttemptStatus, PaymentHopData, PaymentSession, PaymentStatus};
+
+    let mut node = NetworkNode::new().await;
+    let channel_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    tlc.attempt_id = Some(1);
+    // Exclusion is conclusive even before the TLC's expiry.
+    tlc.expiry = u64::MAX;
+    state.tlc_state.add_offered_tlc(tlc);
+    state.funding_tx = Some(
+        TransactionBuilder::default()
+            .output(
+                CellOutput::new_builder()
+                    .capacity(100_000_000_000u64)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data(),
+    );
+    let source = state.get_local_pubkey();
+    let target = gen_rand_fiber_public_key();
+    let mut session = PaymentSession {
+        request: SendPaymentDataBuilder::new(target, 1000, payment_hash)
+            .max_fee_amount(Some(100))
+            .build()
+            .unwrap(),
+        status: PaymentStatus::Inflight,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        created_at: 0,
+        last_updated_at: 0,
+        cached_attempts: vec![],
+    };
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: 1000,
+                next_hop: Some(target),
+                funding_tx_hash: state
+                    .get_funding_transaction_outpoint()
+                    .unwrap()
+                    .tx_hash()
+                    .into(),
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: 1000,
+                ..Default::default()
+            },
+        ],
+    );
+    attempt.set_inflight_status();
+    attempt.try_limit = 1;
+    attempt.tried_times = 2;
+    session.append_attempt(attempt.clone());
+    if other_inflight {
+        session.request.amount = 2000;
+        let mut other = attempt.clone();
+        other.id = 2;
+        other.route.nodes[0].channel_outpoint =
+            ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0);
+        session.append_attempt(other.clone());
+        node.store.insert_attempt(other);
+    }
+    node.store.insert_payment_session(session);
+    if partial_failure {
+        // Seed inconsistent persisted state: the attempt is failed, but the session is unfinished.
+        attempt.set_failed_status("TLC excluded from confirmed remote commitment", false);
+    }
+    if reused_attempt {
+        attempt.route.nodes[0].channel_outpoint =
+            ckb_types::packed::OutPoint::new(gen_rand_sha256_hash().into(), 0);
+    }
+    node.store.insert_attempt(attempt);
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    node.store.store_shutdown_settlement_record(
+        &channel_id,
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: true,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![],
+            },
+        },
+    );
+    node.store.insert_channel_actor_state(state);
+    let mut live_ref = None;
+    if live_actor {
+        let key = Privkey::from([11; 32]);
+        let (actor, _handle) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                key.pubkey(),
+                target,
+                node.network_actor.clone(),
+                node.store.clone(),
+                None,
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: Default::default(),
+                private_key: key,
+            },
+        )
+        .await
+        .unwrap();
+        live_ref = Some(actor.clone());
+        ractor::call!(
+            node.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+                channel_id, actor, reply
+            ))
+        )
+        .unwrap();
+    }
+    let graph_guard = if block_payment {
+        Some(node.network_graph.write().await)
+    } else {
+        None
+    };
+    node.network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .unwrap();
+    if block_payment {
+        if let Some(actor) = &live_ref {
+            ractor::call_t!(
+                actor,
+                |reply| ChannelActorMessage::Command(ChannelCommand::TestBarrier(reply)),
+                500
+            )
+            .expect("channel actor must not wait for payment persistence");
+        }
+        tokio::time::timeout(std::time::Duration::from_millis(500), node.node_info())
+            .await
+            .expect("network actor must not wait for payment persistence");
+        assert!(node
+            .store
+            .get_channel_actor_state(&channel_id)
+            .unwrap()
+            .is_waiting_onchain_settlement());
+        // Duplicate maintenance before the payment reply must remain harmless.
+        for _ in 0..3 {
+            node.network_actor
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+                ))
+                .unwrap();
+        }
+    }
+    drop(graph_guard);
+    wait_for_settlement_completion(&node, channel_id).await;
+    let finished = node.store.get_channel_actor_state(&channel_id).unwrap();
+    let tlc = finished.tlc_state.get(&TLCId::Offered(0)).unwrap();
+    assert!(
+        matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_))),
+        "excluded TLC must fail before channel finalizes (live={live_actor})"
+    );
+    assert_eq!(tlc.outbound_status(), OutboundTlcStatus::RemoteRemoved);
+    assert_eq!(
+        node.store.get_attempt(payment_hash, 1).unwrap().status,
+        if reused_attempt {
+            AttemptStatus::Inflight
+        } else {
+            AttemptStatus::Failed
+        }
+    );
+    assert_eq!(
+        node.store.get_payment_session(payment_hash).unwrap().status,
+        if reused_attempt || other_inflight {
+            PaymentStatus::Inflight
+        } else {
+            PaymentStatus::Failed
+        }
+    );
+    assert_eq!(
+        node.store.get_persisted_payment_status(payment_hash),
+        Some(if reused_attempt || other_inflight {
+            PaymentStatus::Inflight
+        } else {
+            PaymentStatus::Failed
+        })
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn test_excluded_local_announced_fails_payer_before_finalization() {
+    for live in [false, true] {
+        assert_excluded_payer_reconciliation(live, false, false, false, false).await;
+    }
+}
+
+#[tokio::test]
+async fn test_excluded_local_announced_repairs_partial_payment_write() {
+    assert_excluded_payer_reconciliation(false, true, false, false, false).await;
+}
+
+#[tokio::test]
+async fn test_excluded_local_announced_does_not_fail_reused_attempt() {
+    assert_excluded_payer_reconciliation(false, false, true, false, false).await;
+}
+
+#[tokio::test]
+async fn test_excluded_local_announced_preserves_other_inflight_shards() {
+    assert_excluded_payer_reconciliation(false, false, false, true, false).await;
+}
+
+#[tokio::test]
+async fn test_excluded_local_announced_relays_failure_before_finalization() {
+    let mut node = NetworkNode::new().await;
+    let channel_id = gen_rand_sha256_hash();
+    let upstream_id = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    tlc.forwarding_tlc = Some((upstream_id, 0));
+    let expected_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+        &tlc.shared_secret,
+    ));
+    state.tlc_state.add_offered_tlc(tlc);
+    node.store.insert_channel_actor_state(state.clone());
+    node.store.store_shutdown_settlement_record(
+        &channel_id,
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: true,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![],
+            },
+        },
+    );
+    node.network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .unwrap();
+    node.node_info().await;
+    assert!(
+        node.store
+            .get_channel_actor_state(&channel_id)
+            .unwrap()
+            .is_waiting_onchain_settlement(),
+        "missing upstream must keep downstream retryable"
+    );
+    let mut upstream = empty_channel_state(upstream_id);
+    upstream.state = ChannelState::ChannelReady;
+    upstream.tlc_state.add_received_tlc(tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    ));
+    node.store.insert_channel_actor_state(upstream);
+    // The offline upstream must durably queue the failure before acknowledging it.
+    for _ in 0..3 {
+        node.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::CheckChannels,
+            ))
+            .unwrap();
+        node.node_info().await;
+    }
+    wait_for_settlement_completion(&node, channel_id).await;
+    let upstream = node.store.get_channel_actor_state(&upstream_id).unwrap();
+    assert_eq!(
+        upstream.retryable_tlc_operations,
+        std::collections::VecDeque::from([RetryableTlcOperation::RemoveTlc(
+            TLCId::Received(0),
+            expected_reason.clone(),
+        )]),
+        "the upstream must persist exactly one failure for the forwarded TLC"
+    );
+    let finished = node.store.get_channel_actor_state(&channel_id).unwrap();
+    assert_eq!(
+        finished
+            .tlc_state
+            .get(&TLCId::Offered(0))
+            .unwrap()
+            .removed_reason,
+        Some(expected_reason)
+    );
+    node.stop().await;
+}
+
+#[test]
+fn test_excluded_local_announced_requires_real_confirmed_snapshot() {
+    use crate::fiber::onchain_tlc_reconcile::collect_onchain_excluded_tlcs;
+    let store = MockStore::new();
+    let mut state = empty_channel_state(gen_rand_sha256_hash());
+    let tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        gen_rand_sha256_hash(),
+        HashAlgorithm::CkbHash,
+    );
+    state.tlc_state.add_offered_tlc(tlc.clone());
+    let waiting = CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT;
+    state.state = ChannelState::Closed(waiting);
+    let snapshot = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![],
+    };
+    install_unit_snapshot(&mut state, &store, true, snapshot);
+    assert!(
+        collect_onchain_excluded_tlcs(&state, &store).is_empty(),
+        "not confirmed"
+    );
+    state.state = ChannelState::Closed(waiting | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
+    assert_eq!(collect_onchain_excluded_tlcs(&state, &store).len(), 1);
+    let record = store
+        .get_shutdown_settlement_record(&state.get_id())
+        .unwrap();
+    for invalid in [
+        ShutdownSettlementRecord {
+            shutdown_tx_hash: gen_rand_sha256_hash().into(),
+            ..record.clone()
+        },
+        ShutdownSettlementRecord {
+            for_remote: false,
+            ..record.clone()
+        },
+        ShutdownSettlementRecord {
+            settlement_data: SettlementData {
+                local_amount: 0,
+                remote_amount: 0,
+                tlcs: vec![],
+            },
+            ..record.clone()
+        },
+        ShutdownSettlementRecord {
+            settlement_data: SettlementData {
+                tlcs: vec![settlement_tlc_for(&tlc)],
+                ..record.settlement_data.clone()
+            },
+            ..record.clone()
+        },
+    ] {
+        store.store_shutdown_settlement_record(&state.get_id(), &invalid);
+        assert!(collect_onchain_excluded_tlcs(&state, &store).is_empty());
+    }
+    store.delete_shutdown_settlement_record(&state.get_id());
+    assert!(collect_onchain_excluded_tlcs(&state, &store).is_empty());
+    store.store_shutdown_settlement_record(&state.get_id(), &record);
+    state.tlc_state.get_mut(&TLCId::Offered(0)).unwrap().status =
+        TlcStatus::Outbound(OutboundTlcStatus::Committed);
+    assert!(collect_onchain_excluded_tlcs(&state, &store).is_empty());
+}
+
+#[tokio::test]
+async fn test_excluded_payment_does_not_block_channel_or_network_actor() {
+    for live in [false, true] {
+        assert_excluded_payer_reconciliation(live, false, false, false, true).await;
     }
 }

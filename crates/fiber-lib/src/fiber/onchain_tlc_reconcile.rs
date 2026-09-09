@@ -302,8 +302,7 @@ pub(crate) struct OnChainConfirmedPayerTlc {
     pub preimage: Hash256,
 }
 
-/// An offered TLC that expired on a force-closed channel and was consumed on-chain via the
-/// timeout path (no preimage revealed).
+/// An offered TLC failed by an on-chain timeout or exclusion from a confirmed commitment.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OnChainTimeoutSettledTlc {
     /// The downstream TLC on the force-closed channel that must be marked removed locally.
@@ -467,6 +466,77 @@ pub(crate) fn collect_onchain_confirmed_payer_tlcs(
                 attempt_id,
                 preimage,
             })
+        })
+        .collect()
+}
+
+/// Offered updates excluded by a confirmed remote close can no longer be paid on this channel.
+/// A missing snapshot or the synthetic zero-valued revocation scope is not exclusion evidence.
+pub(crate) fn collect_onchain_excluded_tlcs(
+    state: &ChannelActorState,
+    store: &impl ChannelActorStateStore,
+) -> Vec<OnChainTimeoutSettledTlc> {
+    // Wait until on-chain settlement is confirmed before failing excluded TLCs.
+    if !state.is_onchain_settlement_confirmed() {
+        return vec![];
+    }
+    // A missing or mismatched shutdown snapshot cannot prove exclusion.
+    let Some(record) = state.load_shutdown_settlement_record(store) else {
+        return vec![];
+    };
+    // This path only handles TLCs excluded by the peer's commitment.
+    if !record.for_remote
+        // Zero amounts identify the synthetic revocation scope, not a real snapshot.
+        || (record.settlement_data.local_amount == 0 && record.settlement_data.remote_amount == 0)
+        // Revoked commitments are resolved by revocation, not TLC exclusion.
+        || store
+            .get_local_watch_channel(&state.get_id())
+            .is_some_and(|data| {
+                data.revocation_data.is_some_and(|revocation| {
+                    record.commitment_number <= revocation.commitment_number
+                })
+            })
+    {
+        return vec![];
+    }
+    state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .filter(|tlc| {
+            // Only uncommitted outgoing updates are candidates for this failure path.
+            tlc.outbound_status() == OutboundTlcStatus::LocalAnnounced
+                // Do not apply failure again to a TLC already being removed.
+                && tlc.removed_reason.is_none()
+                // A confirmed removal has no remaining effects to reconcile here.
+                && tlc.removed_confirmed_at.is_none()
+        })
+        .filter(|tlc| {
+            // Included TLCs must follow normal on-chain resolution, even if LocalAnnounced.
+            !record
+                .settlement_data
+                .tlcs
+                .iter()
+                .any(|included| included.tlc_id == tlc.tlc_id)
+        })
+        .map(|tlc| OnChainTimeoutSettledTlc {
+            tlc_id: tlc.tlc_id,
+            payment_hash: tlc.payment_hash,
+            shared_secret: tlc.shared_secret,
+            role: match tlc.forwarding_tlc {
+                // Forwarded payments must propagate the failure to the upstream channel.
+                Some((forwarding_channel_id, forwarding_tlc_id)) => {
+                    OnChainTimeoutTlcRole::Forwarded {
+                        forwarding_channel_id,
+                        forwarding_tlc_id,
+                    }
+                }
+                // Locally originated TLCs notify the payer attempt, if one exists.
+                None => OnChainTimeoutTlcRole::OriginPayer {
+                    attempt_id: tlc.attempt_id,
+                },
+            },
         })
         .collect()
 }
