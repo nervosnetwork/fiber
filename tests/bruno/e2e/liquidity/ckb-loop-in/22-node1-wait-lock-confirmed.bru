@@ -76,8 +76,7 @@ script:post-response {
 
   // The confirmed lock cell must still be live (the provider only claims it
   // later) and hold exactly the gross on-chain amount (swap amount + provider
-  // fee), which the quote advertised as capacity_requirement_ckb. The CKB
-  // outpoint JSON carries the index as a hex quantity.
+  // fee). The CKB outpoint JSON carries the index as a hex quantity.
   const lockOutpoint = {
     tx_hash: bru.getVar("LOCK_TX_HASH"),
     index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),

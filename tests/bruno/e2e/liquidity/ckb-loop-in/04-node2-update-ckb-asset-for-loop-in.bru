@@ -45,8 +45,8 @@ assert {
 script:pre-request {
   // Single source for the swap amount and client fee caps consumed by the
   // invoice (13), quote (16), import (17) and execute (19) requests below.
-  // 0x6fc23ac00 is 300 CKB: the loop-in lock cell capacity equals the gross
-  // on-chain amount and must cover the CKB minimum occupied capacity of the
+  // 0x6fc23ac00 is 300 CKB: the loop-in lock cell value is the gross on-chain
+  // amount and must cover the CKB minimum occupied capacity of the
   // liquidity-lock script (roughly 222 CKB).
   bru.setVar("SWAP_AMOUNT_HEX", "0x6fc23ac00");
   bru.setVar("MAX_PROVIDER_FEE_HEX", "0xa");
@@ -65,11 +65,10 @@ script:post-response {
   if (asset.enabled !== true) {
     throw new Error("updated ckb asset must be enabled");
   }
-  // The loop-in lock cell capacity equals the gross on-chain amount
-  // (amount + provider fee, the latter derived from this very entry's fee
-  // parameters), and that cell must satisfy the CKB minimum occupied
-  // capacity of roughly 222 CKB. The registry therefore has to accept the
-  // 300 CKB swap amount plus its fee.
+  // The loop-in lock cell value equals the gross on-chain amount (amount plus
+  // provider fee, derived from this entry's fee parameters), and that value
+  // must satisfy the CKB minimum occupied capacity of roughly 222 CKB. The
+  // registry therefore has to accept the 300 CKB swap amount plus its fee.
   const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
   const providerFee =
     BigInt(asset.base_fee) + (amount * BigInt(asset.proportional_fee_ppm)) / BigInt(1000000);

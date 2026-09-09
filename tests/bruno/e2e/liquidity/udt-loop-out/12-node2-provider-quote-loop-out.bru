@@ -101,11 +101,10 @@ script:post-response {
   if (envelope.routing_fee_limit !== bru.getVar("MAX_ROUTING_FEE_HEX")) {
     throw new Error(`routing_fee_limit must be the requested cap ${bru.getVar("MAX_ROUTING_FEE_HEX")}, got: ${envelope.routing_fee_limit}`);
   }
-  // Provider quote constants (liquidity actor): onchain fee estimate 1000,
-  // capacity requirement 10000 shannons. Both are asset-kind agnostic: for a
-  // UDT swap the payout cell capacity is the 10000-shannon requirement and
-  // the cell data carries the UDT amount.
-  if (envelope.onchain_fee_estimate_ckb !== "0x3e8" || envelope.capacity_requirement_ckb !== "0x2710") {
+  // The capacity requirement is the occupied capacity of the payout lock
+  // cell; it is independent of the UDT amount and may vary with lock data.
+  if (envelope.onchain_fee_estimate_ckb !== "0x3e8"
+    || BigInt(envelope.capacity_requirement_ckb) <= BigInt(envelope.onchain_fee_estimate_ckb)) {
     throw new Error(`unexpected on-chain cost estimates: ${JSON.stringify(envelope)}`);
   }
   if (envelope.claimant_lock !== bru.getVar("CLAIMANT_LOCK")) {

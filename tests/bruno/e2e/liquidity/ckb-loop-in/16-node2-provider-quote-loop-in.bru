@@ -75,11 +75,10 @@ script:post-response {
   if (envelope.onchain_fee_estimate_ckb !== "0x3e8") {
     throw new Error(`unexpected on-chain fee estimate: ${envelope.onchain_fee_estimate_ckb}`);
   }
-  // For Loop In the lock cell capacity equals the gross on-chain amount
-  // (amount + provider fee); the channel payment itself moves only the amount.
-  const gross = BigInt(bru.getVar("SWAP_AMOUNT_HEX")) + expectedProviderFee;
-  if (envelope.capacity_requirement_ckb !== "0x" + gross.toString(16)) {
-    throw new Error(`capacity_requirement_ckb must equal the gross on-chain amount 0x${gross.toString(16)}, got: ${envelope.capacity_requirement_ckb}`);
+  // The capacity requirement is the occupied capacity of the lock cell. The
+  // CKB amount and provider fee are separate value transferred by that cell.
+  if (BigInt(envelope.capacity_requirement_ckb) <= BigInt(envelope.onchain_fee_estimate_ckb)) {
+    throw new Error(`capacity_requirement_ckb must exceed the on-chain fee estimate: ${JSON.stringify(envelope)}`);
   }
   // The payment hash comes from the client invoice.
   if (envelope.payment_hash !== bru.getVar("PAYMENT_HASH")) {

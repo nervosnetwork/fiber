@@ -83,7 +83,8 @@ script:post-response {
     throw new Error(`quote amount must be the requested ${bru.getVar("SWAP_AMOUNT_HEX")}, got: ${envelope.amount}`);
   }
   // Provider fee is derived from the registry response captured in request 04:
-  // base_fee + amount * proportional_fee_ppm / 1_000_000.  const expectedProviderFee =
+  // base_fee + amount * proportional_fee_ppm / 1_000_000.
+  const expectedProviderFee =
     BigInt(bru.getVar("REGISTRY_BASE_FEE"))
     + (BigInt(bru.getVar("SWAP_AMOUNT_HEX")) * BigInt(bru.getVar("REGISTRY_FEE_PPM"))) / BigInt(1000000);
   if (envelope.provider_fee !== "0x" + expectedProviderFee.toString(16)) {
