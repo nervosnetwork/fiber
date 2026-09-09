@@ -97,12 +97,10 @@ script:post-response {
   if (envelope.onchain_fee_estimate_ckb !== "0x3e8") {
     throw new Error(`unexpected on-chain fee estimate: ${envelope.onchain_fee_estimate_ckb}`);
   }
-  // UDT Loop In semantics (build_loop_in_quote_terms): for a UDT asset the
-  // capacity_requirement_ckb is the CKB operational capacity of the lock cell
-  // (the on-chain fee estimate), NOT the gross UDT amount. The gross UDT
-  // amount lives in the lock cell data instead (asserted in request 18).
-  if (envelope.capacity_requirement_ckb !== envelope.onchain_fee_estimate_ckb) {
-    throw new Error(`udt capacity_requirement_ckb must equal the on-chain fee estimate ${envelope.onchain_fee_estimate_ckb}, got: ${envelope.capacity_requirement_ckb}`);
+  // For UDT, capacity_requirement_ckb is the occupied capacity of the lock
+  // cell; the gross UDT amount lives in the lock cell data.
+  if (BigInt(envelope.capacity_requirement_ckb) <= BigInt(envelope.onchain_fee_estimate_ckb)) {
+    throw new Error(`udt capacity_requirement_ckb must exceed the on-chain fee estimate: ${JSON.stringify(envelope)}`);
   }
   if (envelope.payment_hash !== bru.getVar("PAYMENT_HASH")) {
     throw new Error(`quote payment_hash must be the client invoice payment hash: ${envelope.payment_hash}`);

@@ -19,7 +19,8 @@ use fiber_json_types::{
     SetLiquidityProviderModeParams, UpdateLiquidityAssetParams,
 };
 use fiber_types::{
-    Hash256, HashAlgorithm, LiquidityChainTxRole, LiquidityChainTxStatus, LiquiditySwapState,
+    Hash256, HashAlgorithm, LiquidityAssetKind, LiquidityChainTxRole, LiquidityChainTxStatus,
+    LiquiditySwapState,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 #[cfg(test)]
@@ -599,14 +600,23 @@ where
         let refund_after_lock_time =
             absolute_timestamp_since(validated.expires_at.saturating_add(20_000))?;
         let asset_type_script = asset.udt_type_script.clone().map(Into::into);
-        let capacity_requirement_ckb = liquidity_lock_capacity_requirement(
-            payment_hash.into(),
-            &claimant_lock,
-            &self.provider_funding_lock_script,
-            refund_after_lock_time,
-            params.amount,
-            asset_type_script.as_ref(),
-        )?;
+        let capacity_requirement_ckb = match asset.kind {
+            LiquidityAssetKind::Ckb => params
+                .amount
+                .checked_add(validated.provider_fee)
+                .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?
+                .max(1)
+                .try_into()
+                .map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?,
+            LiquidityAssetKind::Udt => liquidity_lock_capacity_requirement(
+                payment_hash.into(),
+                &claimant_lock,
+                &self.provider_funding_lock_script,
+                refund_after_lock_time,
+                params.amount,
+                asset_type_script.as_ref(),
+            )?,
+        };
         let terms = LoopOutQuoteTerms {
             quote_id,
             swap_kind: LiquiditySwapKind::LoopOut,
@@ -657,15 +667,17 @@ where
         )?;
         terms.claimant_lock = self.provider_funding_lock_script.clone();
         terms.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
-        let asset_type_script = terms.asset.udt_type_script.clone().map(Into::into);
-        terms.capacity_requirement_ckb = liquidity_lock_capacity_requirement(
-            terms.payment_hash.into(),
-            &terms.claimant_lock,
-            &terms.refund_lock,
-            terms.refund_after_lock_time,
-            terms.amount,
-            asset_type_script.as_ref(),
-        )?;
+        if terms.asset.kind == LiquidityAssetKind::Udt {
+            let asset_type_script = terms.asset.udt_type_script.clone().map(Into::into);
+            terms.capacity_requirement_ckb = liquidity_lock_capacity_requirement(
+                terms.payment_hash.into(),
+                &terms.claimant_lock,
+                &terms.refund_lock,
+                terms.refund_after_lock_time,
+                terms.amount,
+                asset_type_script.as_ref(),
+            )?;
+        }
         if terms.provider_fee > params.max_provider_fee {
             return Err(LiquidityLoopOutError::ProviderFeeTooHigh);
         }
