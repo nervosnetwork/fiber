@@ -49,7 +49,7 @@ script:pre-request {
 
 script:post-response {
   const result = res.body.result;
-  if (typeof result.invoice_address !== "string" || !result.invoice_address.startsWith("ckb")) {
+  if (typeof result.invoice_address !== "string" || !result.invoice_address.startsWith("fibd")) {
     throw new Error(`new_invoice must return a signed invoice string: ${JSON.stringify(result)}`);
   }
   const paymentHash = result.invoice && result.invoice.data && result.invoice.data.payment_hash;

@@ -24,7 +24,7 @@ body:json {
       {
         "amount": "{{SWAP_AMOUNT_HEX}}",
         "currency": "Fibd",
-        "description": "bruno udt loop in rejection client invoice",
+        "description": "bruno provider mode client invoice",
         "expiry": "0xe10",
         "payment_preimage": "{{RANDOM_PREIMAGE}}",
         "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}}
@@ -52,7 +52,7 @@ script:post-response {
   const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
 
   const result = res.body.result;
-  if (typeof result.invoice_address !== "string" || !result.invoice_address.startsWith("ckb")) {
+  if (typeof result.invoice_address !== "string" || !result.invoice_address.startsWith("fibd")) {
     throw new Error(`new_invoice must return a signed invoice string: ${JSON.stringify(result)}`);
   }
   const paymentHash = result.invoice && result.invoice.data && result.invoice.data.payment_hash;
