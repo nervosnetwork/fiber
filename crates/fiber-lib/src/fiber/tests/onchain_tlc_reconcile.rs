@@ -39,9 +39,9 @@ use crate::fiber::onchain_tlc_reconcile::{
     can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
     has_unresolved_onchain_tlcs, has_unresolved_onchain_tlcs_for_snapshot, parse_commitment_lock,
-    resolve_onchain_tlc, settlement_data_for_commitment, tracked_settlement_tlcs,
-    verify_and_select_settlement_data, LegacyOnChainTlcSettlement, OnChainTimeoutTlcRole,
-    OnChainTlcResolution,
+    recover_shutdown_settlement_data, resolve_onchain_tlc, settlement_data_for_commitment,
+    tracked_settlement_tlcs, verify_and_select_settlement_data, LegacyOnChainTlcSettlement,
+    OnChainTimeoutTlcRole, OnChainTlcResolution,
 };
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
@@ -1499,6 +1499,36 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
         }),
     };
 
+    // A revoked remote lock needs no historical TLC snapshot. The same number in
+    // the local direction, or a newer remote lock, must still pass hash binding.
+    for (for_remote, number, accepted) in [
+        (true, 9, true),
+        (true, 10, true),
+        (true, 11, false),
+        (false, 9, false),
+    ] {
+        let mut lock = create_test_commitment_lock_with_keys(
+            &local_privkey,
+            &remote_privkey,
+            &local_settlement_key,
+            remote_settlement_key,
+            &preceding_settlement,
+            for_remote,
+            number,
+        );
+        let mut args = lock.args().raw_data().to_vec();
+        args[40] ^= 0xff;
+        lock = lock.as_builder().args(args.pack()).build();
+        assert!(verify_and_select_settlement_data(&channel_data, &lock).is_none());
+        let recovered = recover_shutdown_settlement_data(&channel_data, &lock);
+        assert_eq!(recovered.is_some(), accepted);
+        if let Some((remote, recovered_number, scope)) = recovered {
+            assert!(remote);
+            assert_eq!(recovered_number, number);
+            assert!(scope.tlcs.is_empty());
+        }
+    }
+
     // Revocation 10 leaves preceding 11 and pending 12; local uses its own snapshot.
     for (for_remote, number, expected) in [
         (true, 11, &preceding_settlement),
@@ -1770,7 +1800,7 @@ fn create_test_commitment_tx(
 }
 
 #[cfg(feature = "watchtower")]
-async fn assert_confirmed_snapshot_recovery(wrong_direction: bool) {
+async fn assert_confirmed_snapshot_recovery(wrong_direction: bool, revoked: bool) {
     let mut node = NetworkNode::new().await;
     let store = node.store.clone();
     let channel_id = gen_rand_sha256_hash();
@@ -1843,7 +1873,7 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool) {
         remote_settlement_pubkey,
         &preceding_settlement,
         true,
-        11,
+        if revoked { 9 } else { 11 },
     );
     let preceding_tx = create_test_commitment_tx(funding_outpoint, preceding_lock, vec![]);
     let preceding_tx_hash: ckb_types::H256 = preceding_tx.hash().unpack();
@@ -1879,13 +1909,13 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool) {
 #[tokio::test]
 #[cfg(feature = "watchtower")]
 async fn test_scenario_a_recovers_snapshot_and_clears_flags_when_already_confirmed() {
-    assert_confirmed_snapshot_recovery(false).await;
+    assert_confirmed_snapshot_recovery(false, false).await;
 }
 
 #[tokio::test]
 #[cfg(feature = "watchtower")]
 async fn review_scheduler_recovers_wrong_direction_snapshot() {
-    assert_confirmed_snapshot_recovery(true).await;
+    assert_confirmed_snapshot_recovery(true, false).await;
 }
 
 #[tokio::test]
@@ -2284,6 +2314,30 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
                 | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
         );
         state.shutdown_transaction_hash = Some(tx_hash.clone());
+        #[cfg(feature = "watchtower")]
+        for (id, preimage) in [(0, Some(gen_rand_sha256_hash())), (1, None)] {
+            let payment_hash = preimage
+                .map(|p| payment_hash_for(p, HashAlgorithm::CkbHash))
+                .unwrap_or_else(gen_rand_sha256_hash);
+            state.tlc_state.add_received_tlc(tlc_info(
+                TLCId::Received(id),
+                TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitPrevAck),
+                payment_hash,
+                HashAlgorithm::CkbHash,
+            ));
+            store.insert_onchain_tlc_settlement(
+                &NodeId::local(),
+                &channel_id,
+                TLCId::Received(id),
+                OnChainTlcSettlement {
+                    payment_hash,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    preimage,
+                    tx_hash: gen_rand_sha256_hash(),
+                    tlc_index: id as u8,
+                },
+            );
+        }
 
         store.insert_channel_actor_state(state.clone());
 
@@ -2365,6 +2419,19 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
             panic!()
         };
         assert!(!flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT));
+        #[cfg(feature = "watchtower")]
+        for id in [0, 1] {
+            let tlc = final_state.tlc_state.get(&TLCId::Received(id)).unwrap();
+            assert_eq!(tlc.inbound_status(), InboundTlcStatus::LocalRemoved);
+            assert!(
+                matches!(
+                    &tlc.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                ) == (id == 0)
+            );
+            assert!(tlc.removed_reason.is_some());
+        }
+
         assert!(!flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED));
         // Verify snapshot record was deleted after finalization
         assert!(store.get_shutdown_settlement_record(&channel_id).is_none());
@@ -2382,6 +2449,30 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
                 | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
         );
         state.shutdown_transaction_hash = Some(tx_hash.clone());
+        #[cfg(feature = "watchtower")]
+        for (id, preimage) in [(0, Some(gen_rand_sha256_hash())), (1, None)] {
+            let payment_hash = preimage
+                .map(|p| payment_hash_for(p, HashAlgorithm::CkbHash))
+                .unwrap_or_else(gen_rand_sha256_hash);
+            state.tlc_state.add_received_tlc(tlc_info(
+                TLCId::Received(id),
+                TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitPrevAck),
+                payment_hash,
+                HashAlgorithm::CkbHash,
+            ));
+            store.insert_onchain_tlc_settlement(
+                &NodeId::local(),
+                &channel_id,
+                TLCId::Received(id),
+                OnChainTlcSettlement {
+                    payment_hash,
+                    hash_algorithm: HashAlgorithm::CkbHash,
+                    preimage,
+                    tx_hash: gen_rand_sha256_hash(),
+                    tlc_index: id as u8,
+                },
+            );
+        }
 
         store.insert_channel_actor_state(state.clone());
 
@@ -2420,6 +2511,20 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
             panic!()
         };
         assert!(!final_flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT));
+        #[cfg(feature = "watchtower")]
+        for id in [0, 1] {
+            let tlc = final_state.tlc_state.get(&TLCId::Received(id)).unwrap();
+            assert_eq!(tlc.inbound_status(), InboundTlcStatus::LocalRemoved);
+            assert_eq!(
+                matches!(
+                    &tlc.removed_reason,
+                    Some(RemoveTlcReason::RemoveTlcFulfill(_))
+                ),
+                id == 0
+            );
+            assert!(tlc.removed_reason.is_some());
+        }
+
         assert!(!final_flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED));
         assert!(store.get_shutdown_settlement_record(&channel_id).is_none());
     }
@@ -2676,4 +2781,10 @@ fn review_wrong_direction_record_must_not_resolve_active_tlc() {
 
     snapshot_store.delete_shutdown_settlement_record(&state.get_id());
     assert!(has_unresolved_onchain_tlcs(&state, &snapshot_store));
+}
+
+#[tokio::test]
+#[cfg(feature = "watchtower")]
+async fn test_revoked_remote_close_recovers_and_clears_waiting() {
+    assert_confirmed_snapshot_recovery(false, true).await;
 }

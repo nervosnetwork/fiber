@@ -92,8 +92,8 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, verify_and_select_settlement_data,
-    OnChainTimeoutTlcRole,
+    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, recover_shutdown_settlement_data,
+    verify_and_select_settlement_data, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
@@ -4041,13 +4041,13 @@ where
         if !has_valid_snapshot {
             if let Some(channel_data) = store.get_local_watch_channel(&channel_id) {
                 if let Some((for_remote, commitment_number, settlement_data)) =
-                    verify_and_select_settlement_data(&channel_data, &lock)
+                    recover_shutdown_settlement_data(&channel_data, &lock)
                 {
                     let record = ShutdownSettlementRecord {
                         shutdown_tx_hash: tx_hash.clone(),
                         for_remote,
                         commitment_number,
-                        settlement_data: settlement_data.clone(),
+                        settlement_data,
                     };
                     if !state.matches_shutdown_settlement_record(&record) {
                         warn!(

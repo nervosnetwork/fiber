@@ -756,11 +756,14 @@ impl TlcState {
         self.received_tlcs.add_tlc(tlc);
     }
 
+    /// Mark a received TLC removed, including an on-chain resolution before the previous ack.
     pub fn set_received_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
         let tlc = self.get_mut(&TLCId::Received(tlc_id)).expect("get tlc");
         assert!(matches!(
             tlc.inbound_status(),
-            InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+            InboundTlcStatus::AnnounceWaitPrevAck
+                | InboundTlcStatus::AnnounceWaitAck
+                | InboundTlcStatus::Committed
         ));
         tlc.removed_reason = Some(reason);
         tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
@@ -1828,7 +1831,9 @@ impl From<&crate::protocol::ChannelUpdate> for ChannelUpdateInfo {
     }
 }
 
-/// Structured snapshot of the shutdown settlement data used for on-chain TLC reconciliation.
+/// Shutdown TLC reconciliation scope, bound to a transaction and commitment direction.
+/// For revoked remote commitments this is an empty scope, not a witness snapshot;
+/// completion still requires confirmation that all commitment cells have been spent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShutdownSettlementRecord {
     pub shutdown_tx_hash: H256,

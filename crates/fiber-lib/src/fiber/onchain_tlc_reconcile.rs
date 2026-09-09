@@ -152,6 +152,40 @@ pub fn verify_and_select_settlement_data<'a>(
     Some((parsed.for_remote, parsed.commitment_number, settlement_data))
 }
 
+/// Recover the TLC reconciliation scope for a shutdown transaction.
+/// Revoked remote commitments are resolved by revocation rather than individual TLC claims.
+/// Represent their scope as empty; this is not a witness snapshot and must never be used by
+/// the watchtower to decode settlement witnesses. Completion still requires the chain signal
+/// that all commitment cells have been spent.
+pub(crate) fn recover_shutdown_settlement_data(
+    channel_data: &ChannelData,
+    commitment_lock: &Script,
+) -> Option<(bool, u64, SettlementData)> {
+    let parsed = parse_commitment_lock(
+        commitment_lock,
+        &channel_data.local_funding_pubkey,
+        &channel_data.remote_funding_pubkey,
+    )?;
+    if parsed.for_remote
+        && channel_data
+            .revocation_data
+            .as_ref()
+            .is_some_and(|revocation| parsed.commitment_number <= revocation.commitment_number)
+    {
+        return Some((
+            true,
+            parsed.commitment_number,
+            SettlementData {
+                local_amount: 0,
+                remote_amount: 0,
+                tlcs: vec![],
+            },
+        ));
+    }
+    verify_and_select_settlement_data(channel_data, commitment_lock)
+        .map(|(for_remote, number, data)| (for_remote, number, data.clone()))
+}
+
 /// Extract TLC identities and witnesses from a verified snapshot for Watchtower scanning,
 /// converting TLC IDs to the local channel's direction.
 #[allow(dead_code)]

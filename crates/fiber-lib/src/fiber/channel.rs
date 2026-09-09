@@ -3284,7 +3284,9 @@ where
             .filter_map(|tlc| {
                 if !matches!(
                     tlc.inbound_status(),
-                    InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+                    InboundTlcStatus::AnnounceWaitPrevAck
+                        | InboundTlcStatus::AnnounceWaitAck
+                        | InboundTlcStatus::Committed
                 ) {
                     return None;
                 }
