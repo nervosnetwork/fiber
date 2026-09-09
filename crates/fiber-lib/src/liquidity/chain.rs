@@ -2069,9 +2069,10 @@ fn build_loop_in_terminal_output(
     quote: &LoopOutQuoteTerms,
     lock: packed::Script,
     gross_amount: u128,
+    capacity: u64,
 ) -> (packed::CellOutput, packed::Bytes) {
     let mut output = packed::CellOutput::new_builder()
-        .capacity(quote.capacity_requirement_ckb.max(1))
+        .capacity(capacity.max(1))
         .lock(lock);
     let output_data = if let Some(udt_type_script) = &quote.asset.udt_type_script {
         let udt_type_script: packed::Script = udt_type_script.clone().into();
@@ -2113,8 +2114,12 @@ pub fn build_loop_in_provider_claim_transaction(
     liquidity_lock_cell_deps: &[packed::CellDep],
 ) -> Result<TransactionView, LiquidityLoopOutError> {
     let gross_amount = loop_in_gross_onchain_amount(quote)?;
+    let capacity = quote
+        .capacity_requirement_ckb
+        .checked_sub(quote.onchain_fee_estimate_ckb)
+        .unwrap_or(quote.capacity_requirement_ckb);
     let (output, output_data) =
-        build_loop_in_terminal_output(quote, quote.claimant_lock.clone(), gross_amount);
+        build_loop_in_terminal_output(quote, quote.claimant_lock.clone(), gross_amount, capacity);
     let cell_deps = liquidity_lock_cell_deps.to_vec();
 
     Ok(TransactionView::new_advanced_builder()
@@ -2140,8 +2145,12 @@ pub fn build_loop_in_client_refund_transaction(
     }
 
     let gross_amount = loop_in_gross_onchain_amount(quote)?;
+    let capacity = quote
+        .capacity_requirement_ckb
+        .checked_sub(quote.onchain_fee_estimate_ckb)
+        .unwrap_or(quote.capacity_requirement_ckb);
     let (output, output_data) =
-        build_loop_in_terminal_output(quote, quote.refund_lock.clone(), gross_amount);
+        build_loop_in_terminal_output(quote, quote.refund_lock.clone(), gross_amount, capacity);
     let cell_deps = liquidity_lock_cell_deps.to_vec();
 
     Ok(TransactionView::new_advanced_builder()

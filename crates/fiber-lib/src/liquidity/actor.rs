@@ -601,22 +601,19 @@ where
             absolute_timestamp_since(validated.expires_at.saturating_add(20_000))?;
         let asset_type_script = asset.udt_type_script.clone().map(Into::into);
         let capacity_requirement_ckb = match asset.kind {
-            LiquidityAssetKind::Ckb => params
-                .amount
-                .checked_add(validated.provider_fee)
-                .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?
-                .max(1)
-                .try_into()
-                .map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?,
-            LiquidityAssetKind::Udt => liquidity_lock_capacity_requirement(
-                payment_hash.into(),
-                &claimant_lock,
-                &self.provider_funding_lock_script,
-                refund_after_lock_time,
-                params.amount,
-                asset_type_script.as_ref(),
-            )?,
-        };
+            LiquidityAssetKind::Ckb | LiquidityAssetKind::Udt => {
+                liquidity_lock_capacity_requirement(
+                    payment_hash.into(),
+                    &claimant_lock,
+                    &self.provider_funding_lock_script,
+                    refund_after_lock_time,
+                    params.amount,
+                    asset_type_script.as_ref(),
+                )?
+            }
+        }
+        .checked_add(1_000)
+        .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
         let terms = LoopOutQuoteTerms {
             quote_id,
             swap_kind: LiquiditySwapKind::LoopOut,
@@ -676,7 +673,9 @@ where
                 terms.refund_after_lock_time,
                 terms.amount,
                 asset_type_script.as_ref(),
-            )?;
+            )?
+            .checked_add(1_000)
+            .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
         }
         if terms.provider_fee > params.max_provider_fee {
             return Err(LiquidityLoopOutError::ProviderFeeTooHigh);

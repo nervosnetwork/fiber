@@ -99,7 +99,7 @@ script:post-response {
 
   // The rejected transaction must never have entered the pool or the chain.
   const known = await rpc(ckbRpcUrl, "get_transaction", [built.tx_hash]);
-  if (known.result !== null && known.result !== undefined) {
+  if (known.result && known.result.tx_status && known.result.tx_status.status !== "unknown") {
     throw new Error(`premature refund transaction must be unknown to the chain: ${JSON.stringify(known.result)}`);
   }
 
