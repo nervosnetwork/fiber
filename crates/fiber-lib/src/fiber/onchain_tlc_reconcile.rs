@@ -134,22 +134,35 @@ pub fn verify_and_select_settlement_data<'a>(
         &channel_data.local_funding_pubkey,
         &channel_data.remote_funding_pubkey,
     )?;
-    let settlement_data =
-        settlement_data_for_commitment(channel_data, parsed.for_remote, parsed.commitment_number);
-    let settlement_witness = settlement_data_to_witness(
-        settlement_data,
-        parsed.for_remote,
-        channel_data.local_settlement_key.clone(),
-        channel_data.remote_settlement_key,
-    );
-    if blake160(&settlement_witness).as_ref() != parsed.witness_hash {
-        warn!(
-            "Settlement snapshot hash does not match commitment lock for channel {:?}, commitment {}",
-            channel_data.channel_id, parsed.commitment_number
+    // Before the first RAA there is no revocation number to distinguish the initial
+    // remote commitment from a newer pending one. Bind candidates to the lock hash
+    // instead of treating the commitment-number heuristic as authoritative.
+    let remote_candidates = [
+        &channel_data.remote_settlement_data,
+        &channel_data.pending_remote_settlement_data,
+    ];
+    let local_candidates = [&channel_data.local_settlement_data];
+    let candidates: &[&SettlementData] = if parsed.for_remote {
+        &remote_candidates
+    } else {
+        &local_candidates
+    };
+    for &settlement_data in candidates {
+        let settlement_witness = settlement_data_to_witness(
+            settlement_data,
+            parsed.for_remote,
+            channel_data.local_settlement_key.clone(),
+            channel_data.remote_settlement_key,
         );
-        return None;
+        if blake160(&settlement_witness).as_ref() == parsed.witness_hash {
+            return Some((parsed.for_remote, parsed.commitment_number, settlement_data));
+        }
     }
-    Some((parsed.for_remote, parsed.commitment_number, settlement_data))
+    warn!(
+        "Settlement snapshot hash does not match commitment lock for channel {:?}, commitment {}",
+        channel_data.channel_id, parsed.commitment_number
+    );
+    None
 }
 
 /// Recover the TLC reconciliation scope for a shutdown transaction.

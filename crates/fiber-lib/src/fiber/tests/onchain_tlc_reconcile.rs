@@ -2788,3 +2788,68 @@ fn review_wrong_direction_record_must_not_resolve_active_tlc() {
 async fn test_revoked_remote_close_recovers_and_clears_waiting() {
     assert_confirmed_snapshot_recovery(false, true).await;
 }
+
+#[test]
+fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
+    let local_privkey = Privkey::from([1u8; 32]);
+    let remote_privkey = Privkey::from([2u8; 32]);
+    let local_settlement_key = Privkey::from([3u8; 32]);
+    let remote_settlement_key = Privkey::from([4u8; 32]).pubkey();
+    let channel_id = gen_rand_sha256_hash();
+
+    let preceding_settlement = SettlementData {
+        local_amount: 1000,
+        remote_amount: 2000,
+        tlcs: vec![],
+    };
+    let pending_settlement = SettlementData {
+        local_amount: 500,
+        remote_amount: 2500,
+        tlcs: vec![],
+    };
+    let local_settlement = SettlementData {
+        local_amount: 1500,
+        remote_amount: 1500,
+        tlcs: vec![],
+    };
+
+    let channel_data = ChannelData {
+        channel_id,
+        funding_udt_type_script: None,
+        local_settlement_key: local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey: local_privkey.pubkey(),
+        remote_funding_pubkey: remote_privkey.pubkey(),
+        remote_settlement_data: preceding_settlement.clone(),
+        pending_remote_settlement_data: pending_settlement.clone(),
+        local_settlement_data: local_settlement.clone(),
+        revocation_data: None,
+    };
+
+    for (for_remote, number, expected) in [
+        (true, 1, &preceding_settlement),
+        (true, 2, &pending_settlement),
+        (false, 1, &local_settlement),
+    ] {
+        let lock = create_test_commitment_lock_with_keys(
+            &local_privkey,
+            &remote_privkey,
+            &local_settlement_key,
+            remote_settlement_key,
+            expected,
+            for_remote,
+            number,
+        );
+        let (direction, actual_number, selected) =
+            verify_and_select_settlement_data(&channel_data, &lock)
+                .expect("fresh channel must recover the hash-matching snapshot without RAA");
+        assert_eq!((direction, actual_number), (for_remote, number));
+        assert_eq!(selected, expected);
+        assert!(tracked_settlement_tlcs(&lock, &channel_data, for_remote).is_some());
+        assert!(tracked_settlement_tlcs(&lock, &channel_data, !for_remote).is_none());
+        let mut args = lock.args().raw_data().to_vec();
+        args[40] ^= 0xff;
+        let invalid = lock.as_builder().args(args.pack()).build();
+        assert!(verify_and_select_settlement_data(&channel_data, &invalid).is_none());
+    }
+}
