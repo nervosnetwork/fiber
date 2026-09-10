@@ -1,5 +1,5 @@
 meta {
-  name: node1 build and publish type-script-mutated loop in lock
+  name: node1 build and publish second asset-hash-mutated loop in lock
   type: http
   seq: 29
 }
@@ -26,7 +26,7 @@ body:json {
     "liquidity_lock_code_hash": "{{LIQUIDITY_LOCK_CODE_HASH}}",
     "liquidity_lock_hash_type": "{{LIQUIDITY_LOCK_HASH_TYPE}}",
     "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
-    "mutation": { "kind": "type_script" }
+  "mutation": { "kind": "asset_type_hash" }
   }
 }
 
@@ -39,7 +39,7 @@ script:post-response {
   const { publishSignedLockTx } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
 
   // The helper (tests/liquidity-lock-mutator) funds a real liquidity-lock
-  // output from the node1 dev wallet with the UDT type script mutated and signs the
+  // output from the node1 dev wallet with the lock asset hash mutated and signs the
   // funding transaction. The suite submits it through the CKB JSON-RPC,
   // mines it and waits (bounded) for the mutated cell to commit.
   const published = await publishSignedLockTx({
@@ -48,5 +48,5 @@ script:post-response {
   });
   bru.setVar("MUTATION_TX_HASH", published.txHash);
   bru.setVar("MUTATION_OUTPOINT_INDEX", "0");
-  console.log("type-script-mutated lock committed:", published.txHash, "after", published.attempts, "polls");
+  console.log("second asset-hash-mutated lock committed:", published.txHash, "after", published.attempts, "polls");
 }

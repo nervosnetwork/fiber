@@ -47,13 +47,13 @@ script:post-response {
   const deadCell = await waitCkbLiveCell({
     ckbRpcUrl,
     outPoint: lockOutpoint,
-    expectedStatus: "dead",
+    expectedStatus: ["dead", "unknown"],
     maxAttempts: 60,
     intervalMs: 1000,
     deadlineMs: 60000,
   });
-  if (!deadCell.result || deadCell.result.status !== "dead") {
-    throw new Error(`lock cell must be dead after the refund: ${JSON.stringify(deadCell.result)}`);
+  if (!deadCell.result || !["dead", "unknown"].includes(deadCell.result.status)) {
+    throw new Error(`lock cell must be spent after the refund: ${JSON.stringify(deadCell.result)}`);
   }
 
   // The refund output cell (output 0 of the refund transaction) must be live

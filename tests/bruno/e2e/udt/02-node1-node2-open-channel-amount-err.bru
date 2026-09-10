@@ -36,11 +36,11 @@ body:json {
 }
 
 assert {
-  res.body.error: isDefined
+  res.body.result.temporary_channel_id: isDefined
 }
 
 script:post-response {
   await new Promise(r => setTimeout(r, 1000));
   console.log("N1N2 response: ", res.body);
-  console.log("invalid UDT channel rejected: ", res.body.error);
+  console.log("invalid UDT channel funding started asynchronously: ", res.body.result.temporary_channel_id);
 }

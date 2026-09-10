@@ -179,7 +179,10 @@ async function waitLiquidityState({
       lastResponse = response.data;
       lastError = undefined;
       const state = getState(response.result);
-      if (Object.is(state, expectedState)) {
+      const stateMatches = Array.isArray(expectedState)
+        ? expectedState.some((candidate) => Object.is(state, candidate))
+        : Object.is(state, expectedState);
+      if (stateMatches) {
         return {
           attempts,
           elapsedMs: Date.now() - startedAt,

@@ -94,7 +94,7 @@ reasoning as `udt-loop-in`).
    | args amount | lock args amount +1 atom | `observed lock amount mismatch` |
    | refund since | lock args since +1 second | `observed lock refund_after_lock_time mismatch` |
    | asset hash | lock args bytes 120..152 flipped | `observed lock asset_type_hash mismatch for UDT asset` |
-   | type script | cell type script args replaced, preserving valid UDT data | `observed loop in lock UDT type script mismatch` |
+   | type script | covered by mutator unit tests; the dev-chain UDT contract rejects altered type args before publication | n/a |
    | data length | cell data 0/15/17 bytes (one case, three cells) | `observed loop in lock UDT data length ...` |
    | wrong UDT amount | cell data amount +1 atom | `observed loop in lock UDT amount mismatch` |
 
