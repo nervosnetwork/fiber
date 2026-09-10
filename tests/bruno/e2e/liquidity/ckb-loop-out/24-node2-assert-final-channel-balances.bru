@@ -1,0 +1,58 @@
+meta {
+  name: node2 assert final channel balances
+  type: http
+  seq: 24
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "pubkey": "{{NODE1_PUBKEY}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const principal = BigInt(bru.getVar("QUOTE_PRINCIPAL"));
+  const channel = (res.body.result.channels || []).find(
+    (item) => item.channel_id === bru.getVar("CHANNEL_ID"),
+  );
+  if (!channel) {
+    throw new Error(`channel ${bru.getVar("CHANNEL_ID")} not found on node2`);
+  }
+
+  const expectedLocal = BigInt(bru.getVar("PROVIDER_LOCAL_BEFORE")) + principal;
+  const expectedRemote = BigInt(bru.getVar("PROVIDER_REMOTE_BEFORE")) - principal;
+  if (BigInt(channel.local_balance) !== expectedLocal) {
+    throw new Error(`provider local_balance must have increased by the principal: expected ${expectedLocal}, got ${channel.local_balance}`);
+  }
+  if (BigInt(channel.remote_balance) !== expectedRemote) {
+    throw new Error(`provider remote_balance must have decreased by the principal: expected ${expectedRemote}, got ${channel.remote_balance}`);
+  }
+  if (channel.offered_tlc_balance !== "0x0" || channel.received_tlc_balance !== "0x0") {
+    throw new Error(`provider channel must end with no outstanding TLC balances: ${JSON.stringify(channel)}`);
+  }
+  if (!Array.isArray(channel.pending_tlcs) || channel.pending_tlcs.length !== 0) {
+    throw new Error(`provider channel must end with no pending TLCs: ${JSON.stringify(channel.pending_tlcs)}`);
+  }
+}

@@ -1,0 +1,52 @@
+meta {
+  name: node1 build and publish valid loop in lock
+  type: http
+  seq: 35
+}
+
+post {
+  url: {{CKB_MUTATOR_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "payment_hash": "{{PAYMENT_HASH}}",
+    "claimant_lock": "{{PROVIDER_FUNDING_LOCK}}",
+    "refund_lock": "{{REFUND_LOCK}}",
+    "refund_after_lock_time": "{{QUOTE_REFUND_AFTER_LOCK_TIME}}",
+    "gross_amount": "{{QUOTE_GROSS_UDT}}",
+    "capacity_ckb": "{{QUOTE_CAPACITY_CKB}}",
+    "liquidity_lock_code_hash": "{{LIQUIDITY_LOCK_CODE_HASH}}",
+    "liquidity_lock_hash_type": "{{LIQUIDITY_LOCK_HASH_TYPE}}",
+    "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+    "mutation": { "kind": "none" }
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.tx: isDefined
+}
+
+script:post-response {
+  const { publishSignedLockTx } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
+
+  // Positive control: the helper commits an entirely valid liquidity-lock
+  // cell built from the same quote terms as the mutation cases. The provider
+  // accept in the next request must succeed, which proves the earlier
+  // rejections were caused by the mutations and not by the environment.
+  const published = await publishSignedLockTx({
+    ckbRpcUrl: bru.getEnvVar("CKB_RPC_URL"),
+    built: res.body,
+  });
+  bru.setVar("MUTATION_TX_HASH", published.txHash);
+  bru.setVar("MUTATION_OUTPOINT_INDEX", "0");
+  console.log("valid lock committed:", published.txHash, "after", published.attempts, "polls");
+}

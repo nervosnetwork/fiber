@@ -1,0 +1,51 @@
+meta {
+  name: assert invoice open and no provider payment or swap before accepts
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { assertQuoteUnconsumed } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
+
+  // Before the mutation cases run, the imported quote must be untouched: no
+  // provider swap, an Open client invoice and no provider payment record.
+  // Every rejected accept below re-asserts the same invariants.
+  if (!res.body.result || !res.body.result.invoice) {
+    throw new Error(`client invoice for ${bru.getVar("PAYMENT_HASH")} not found: ${JSON.stringify(res.body)}`);
+  }
+  await assertQuoteUnconsumed({
+    quoteId: bru.getVar("QUOTE_ID"),
+    paymentHash: bru.getVar("PAYMENT_HASH"),
+    providerRpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    clientRpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+  });
+  console.log("pre-accept invariants hold: no swap, invoice Open, no provider payment");
+}

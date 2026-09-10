@@ -1,0 +1,42 @@
+meta {
+  name: node2 enable liquidity provider mode for setup
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "set_liquidity_provider_mode",
+    "params": [
+      {
+        "enabled": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // The quote, import and client loop_in below need an enabled provider; the
+  // suite disables the mode again afterwards (request 15) to exercise the
+  // disabled matrix and the recovery path. Idempotent on re-runs.
+  if (res.body.result.enabled !== true) {
+    throw new Error(`provider mode must be enabled, got: ${JSON.stringify(res.body.result)}`);
+  }
+}

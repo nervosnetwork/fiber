@@ -1,0 +1,106 @@
+meta {
+  name: node1 non-terminal swap recovers to onchain locked while disabled
+  type: http
+  seq: 24
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitSwapState, waitLiquidityState, rpc } = require(
+    process.cwd() + "/scripts/wait-liquidity-state",
+  );
+
+  // F1 recovery observable: the client loop-in swap was left in
+  // OnchainLockPending before the provider mode was disabled (request 14/15).
+  // The lock confirmation is driven by the client-side chain tracer with no
+  // provider mode gate (handle_loop_in_lock_confirmed only branches on the
+  // swap role), so the swap must advance to OnchainLocked while the provider
+  // is disabled.
+  const client = await waitSwapState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "onchain_locked",
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  });
+
+  const record = client.result;
+  if (record.swap_kind !== "loop_in") {
+    throw new Error(`client swap_kind must be loop_in: ${JSON.stringify(record)}`);
+  }
+  if (record.asset_id !== bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID")) {
+    throw new Error(`client swap asset_id mismatch: ${record.asset_id}`);
+  }
+  if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+    throw new Error(`client swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
+  }
+  if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`client swap payment_hash mismatch: ${record.payment_hash}`);
+  }
+
+  // The persisted lock chain record must be confirmed as part of the same
+  // recovery (handle_loop_in_lock_confirmed marks it confirmed first), and
+  // its outpoint feeds the gated-accept request (25) and the positive accept
+  // (request 32).
+  const { decodeOutpoint } = require(process.cwd() + "/scripts/molecule-script");
+  const lockState = await waitLiquidityState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    method: "list_liquidity_chain_transactions",
+    params: [{ swap_id: bru.getVar("QUOTE_ID") }],
+    expectedState: "lock-confirmed",
+    getState: (result) => {
+      const lock = (result.transactions || []).find((tx) => tx.role === "loop_in_lock");
+      return lock && lock.status === "confirmed" ? "lock-confirmed" : `lock-${lock ? lock.status : "missing"}`;
+    },
+    maxAttempts: 60,
+    intervalMs: 1000,
+    deadlineMs: 60000,
+  });
+  const lockRecord = (lockState.result.transactions || []).find((tx) => tx.role === "loop_in_lock");
+  if (!lockRecord || typeof lockRecord.outpoint !== "string") {
+    throw new Error(`confirmed client lock record with outpoint not found: ${JSON.stringify(lockState.result)}`);
+  }
+  const outpoint = decodeOutpoint(lockRecord.outpoint);
+  if (outpoint.txHash !== lockRecord.tx_hash) {
+    throw new Error(`client lock outpoint tx_hash mismatch: ${lockRecord.outpoint} vs ${lockRecord.tx_hash}`);
+  }
+  bru.setVar("LOCK_TX_HASH", outpoint.txHash);
+  bru.setVar("LOCK_INDEX", String(outpoint.index));
+
+  // The provider still holds no swap record: the recovery happened entirely
+  // on the client while the provider mode was disabled. The gated accept for
+  // this very quote is exercised in request 25.
+  const providerSwap = await rpc(
+    bru.getEnvVar("NODE2_RPC_URL"),
+    "get_swap",
+    [{ swap_id: bru.getVar("QUOTE_ID") }],
+  );
+  if (providerSwap.result !== null && providerSwap.result !== undefined) {
+    throw new Error(`provider must not hold a swap record while the mode is disabled: ${JSON.stringify(providerSwap.result)}`);
+  }
+  console.log("client swap recovered to onchain_locked while provider mode was disabled");
+}

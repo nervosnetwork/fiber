@@ -1,0 +1,68 @@
+meta {
+  name: wait payout pending on both nodes
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitSwapState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const assertRecord = (node, record) => {
+    if (record.swap_kind !== "loop_out") {
+      throw new Error(`${node} swap_kind must be loop_out: ${JSON.stringify(record)}`);
+    }
+    if (record.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID")) {
+      throw new Error(`${node} swap asset_id mismatch: ${record.asset_id}`);
+    }
+    if (record.amount !== bru.getVar("QUOTE_AMOUNT")) {
+      throw new Error(`${node} swap amount must be ${bru.getVar("QUOTE_AMOUNT")}: ${record.amount}`);
+    }
+    if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+      throw new Error(`${node} swap payment_hash mismatch: ${record.payment_hash}`);
+    }
+  };
+
+  const client = await waitSwapState({
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "payout_pending",
+    maxAttempts: 30,
+    intervalMs: 1000,
+    deadlineMs: 30000,
+  });
+  assertRecord("client", client.result);
+
+  const provider = await waitSwapState({
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    swapId: bru.getVar("QUOTE_ID"),
+    expectedState: "payout_pending",
+    maxAttempts: 30,
+    intervalMs: 1000,
+    deadlineMs: 30000,
+  });
+  assertRecord("provider", provider.result);
+}
