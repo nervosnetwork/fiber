@@ -202,6 +202,7 @@ async fn send_remove_tlc_fail_event(fixture: &RemoveTlcFailEventFixture, packet:
                 fixture.payment_hash,
                 Some(fixture.attempt_id),
                 RemoveTlcReason::RemoveTlcFail(packet),
+                None,
             ),
         ))
         .expect("network actor alive");
@@ -5534,6 +5535,7 @@ async fn setup_mpp_remote_removed_payer_fixture_with_retry_channels(
                 payment_hash,
                 completed_tlc.attempt_id,
                 RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+                None,
             ),
         ))
         .expect("network actor alive");
@@ -7314,6 +7316,12 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
     node_0.wait_until_inflight(payment_hash).await;
     wait_for_tlc_sync(&node_0, &node_1, channels[0], 1).await;
 
+    // The harness does not run Watchtower; capture the signed local snapshot
+    // before closing and supply the recovery record after confirmation.
+    let state_before_close = node_0.get_channel_actor_state(channels[0]);
+    let local_snapshot = state_before_close.build_settlement_data(false).unwrap();
+    let commitment_number = state_before_close.get_current_commitment_number(false);
+
     node_0
         .send_shutdown(channels[0], true)
         .await
@@ -7326,6 +7334,17 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
         )
     })
     .await;
+
+    let closed_state = node_0.get_channel_actor_state(channels[0]);
+    node_0.store.store_shutdown_settlement_record(
+        &channels[0],
+        &fiber_types::ShutdownSettlementRecord {
+            shutdown_tx_hash: closed_state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number,
+            settlement_data: local_snapshot,
+        },
+    );
 
     node_0.node_info().await;
     insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
@@ -10911,4 +10930,147 @@ async fn test_send_payment_dry_run_with_too_large_hop_hint_expiry_delta() {
 
     assert!(res.is_err(), "Expect send payment failed: {:?}", res);
     assert_eq!(node1.get_inflight_payment_count().await, 0);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_local_remove_notification_reuses_retry_policy_without_double_failure() {
+    let mut node = NetworkNode::new().await;
+    let payment_hash = gen_rand_sha256_hash();
+    let source = node.get_public_key();
+    let target = gen_rand_fiber_public_key();
+    let funding_hash = gen_rand_sha256_hash();
+    let channel_outpoint = OutPoint::new(funding_hash.into(), 0);
+    let mut session = PaymentSession {
+        request: SendPaymentDataBuilder::new(target, 1000, payment_hash)
+            .max_fee_amount(Some(100))
+            .build()
+            .unwrap(),
+        status: PaymentStatus::Inflight,
+        last_error: None,
+        last_error_code: None,
+        try_limit: 3,
+        created_at: 0,
+        last_updated_at: 0,
+        cached_attempts: vec![],
+    };
+    let mut attempt = session.new_attempt(
+        1,
+        source,
+        target,
+        vec![
+            PaymentHopData {
+                amount: 1000,
+                next_hop: Some(target),
+                funding_tx_hash: funding_hash,
+                ..Default::default()
+            },
+            PaymentHopData {
+                amount: 1000,
+                ..Default::default()
+            },
+        ],
+    );
+    attempt.set_inflight_status();
+    session.append_attempt(attempt.clone());
+    node.store.insert_payment_session(session);
+    node.store.insert_attempt(attempt);
+    let actor = PaymentActor::new(
+        node.store.clone(),
+        node.network_graph.clone(),
+        node.network_actor.clone(),
+    );
+    let mut state = PaymentActorState::new(PaymentActorArguments {
+        payment_hash,
+        init_command: PaymentActorMessage::CheckPaymentStatus,
+    });
+    let completion = PaymentTlcRemoveContext {
+        channel_id: gen_rand_sha256_hash(),
+        tlc_id: TLCId::Offered(0),
+        channel_outpoint: channel_outpoint.clone(),
+        tried_times: 1,
+    };
+    let local_error = TlcErr::new_channel_fail(
+        TlcErrorCode::PermanentChannelFailure,
+        source,
+        channel_outpoint,
+        None,
+    );
+    let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(local_error.clone(), &[0; 32]));
+    assert!(
+        actor
+            .handle_remove_tlc_event(
+                &mut state,
+                Some(1),
+                reason.clone(),
+                Some(&local_error),
+                Some(&completion)
+            )
+            .await
+            .unwrap(),
+        "normal failure policy should permit a retry"
+    );
+    let retry = node.store.get_attempt(payment_hash, 1).unwrap();
+    assert_eq!(retry.status, AttemptStatus::Retrying);
+    assert_eq!(retry.tried_times, 2);
+    // Replaying the same notification acknowledges the persisted outcome without
+    // applying another failure or requesting another retry.
+    assert!(!actor
+        .handle_remove_tlc_event(
+            &mut state,
+            Some(1),
+            reason.clone(),
+            Some(&local_error),
+            Some(&completion)
+        )
+        .await
+        .unwrap());
+    let replayed = node.store.get_attempt(payment_hash, 1).unwrap();
+    assert_eq!(replayed.tried_times, 2);
+    assert_eq!(replayed.last_updated_at, retry.last_updated_at);
+    // Fresh actor state must request recovery of the persisted retry exactly once.
+    // This checks the handler result, not timer execution or a full node restart.
+    let mut recovered_state = PaymentActorState::new(PaymentActorArguments {
+        payment_hash,
+        init_command: PaymentActorMessage::CheckPaymentStatus,
+    });
+    assert!(actor
+        .handle_remove_tlc_event(
+            &mut recovered_state,
+            Some(1),
+            reason.clone(),
+            Some(&local_error),
+            Some(&completion)
+        )
+        .await
+        .unwrap());
+    assert!(!actor
+        .handle_remove_tlc_event(
+            &mut recovered_state,
+            Some(1),
+            reason.clone(),
+            Some(&local_error),
+            Some(&completion)
+        )
+        .await
+        .unwrap());
+    // Even a retry using the same first-hop channel is a different execution.
+    let mut replacement = replayed;
+    replacement.set_inflight_status();
+    node.store.insert_attempt(replacement);
+    assert!(!actor
+        .handle_remove_tlc_event(
+            &mut state,
+            Some(1),
+            reason,
+            Some(&local_error),
+            Some(&completion)
+        )
+        .await
+        .unwrap());
+    assert_eq!(
+        node.store.get_attempt(payment_hash, 1).unwrap().status,
+        AttemptStatus::Inflight
+    );
+    node.stop().await;
 }

@@ -30,7 +30,7 @@ pub struct RevocationData {
 }
 
 /// Data needed to authorize and execute a settlement transaction.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SettlementData {
     /// The total amount of CKB/UDT being settled for the local party
     pub local_amount: u128,
@@ -41,7 +41,7 @@ pub struct SettlementData {
 }
 
 /// Data needed to authorize and execute a Time-Locked Contract (TLC) settlement transaction.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SettlementTlc {
     /// The ID of the TLC (either offered or received)
     pub tlc_id: TLCId,

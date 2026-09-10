@@ -44,10 +44,8 @@ pub use payment::*;
 pub use primitives::{Hash256, NodeId, Privkey, Pubkey};
 pub use protocol::*;
 
-#[cfg(feature = "watchtower")]
 pub use watchtower::{ChannelData, RevocationData, SettlementData, SettlementTlc};
 
-#[cfg(feature = "watchtower")]
 pub mod watchtower;
 
 pub use serde_utils::{

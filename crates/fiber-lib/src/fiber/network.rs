@@ -90,13 +90,14 @@ use crate::fiber::config::{DEFAULT_COMMITMENT_DELAY_EPOCHS, MIN_TLC_EXPIRY_DELTA
 use crate::fiber::fee::{check_open_channel_parameters, check_tlc_delta_with_epochs};
 use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessageStore};
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
-    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainTimeoutTlcRole,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
+    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
-    PaymentActor, PaymentActorArguments, PaymentActorMessage, SendPaymentCommand,
-    SendPaymentDataBuilder, SendPaymentWithRouterCommand,
+    PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentTlcRemoveContext,
+    SendPaymentCommand, SendPaymentDataBuilder, SendPaymentWithRouterCommand,
 };
 use crate::fiber::peer_message_policy::{PeerMessageAdmission, PeerMessagePolicy};
 use crate::fiber::types::{
@@ -123,8 +124,8 @@ use fiber_types::{
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -865,6 +866,19 @@ impl TestFiberMessageHold {
     }
 }
 
+/// The durable effect that allows an on-chain source TLC to be removed.
+#[derive(Debug)]
+pub enum OnChainTlcRemoveCompletion {
+    /// The payer attempt and aggregate payment outcome have been persisted.
+    Payer,
+    /// The upstream channel accepted or durably queued the removal.
+    Forwarded {
+        channel_id: Hash256,
+        tlc_id: u64,
+        result: Result<(), ProcessingChannelError>,
+    },
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -933,15 +947,13 @@ pub enum NetworkActorCommand {
         payment_hash: Hash256,
         reason: RemoveTlcReason,
     },
-    /// Completion of an asynchronously forwarded on-chain RemoveTlc relay.
-    RelayOnChainTlcRemoveResult {
+    /// Completion of the durable effects of an on-chain TLC removal.
+    OnChainTlcRemoveCompleted {
         downstream_channel_id: Hash256,
         downstream_tlc_id: TLCId,
-        forwarding_channel_id: Hash256,
-        forwarding_tlc_id: u64,
         payment_hash: Hash256,
         reason: RemoveTlcReason,
-        result: Result<(), ProcessingChannelError>,
+        completion: OnChainTlcRemoveCompletion,
     },
     /// Completion of an asynchronously forwarded RemoveTlc command.
     RemoveTlcResult {
@@ -1325,8 +1337,13 @@ pub enum NetworkActorEvent {
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(Pubkey, Hash256, Byte32),
 
-    // A tlc remove message is received. (payment_hash, attempt_id, remove_tlc)
-    TlcRemoveReceived(Hash256, Option<u64>, RemoveTlcReason),
+    /// A TLC removal, optionally backed by confirmed on-chain exclusion evidence.
+    TlcRemoveReceived(
+        Hash256,
+        Option<u64>,
+        RemoveTlcReason,
+        Option<(Hash256, TLCId)>,
+    ),
 
     // A payment need to retry
     RetrySendPayment(Hash256, Option<u64>),
@@ -1350,6 +1367,10 @@ pub enum NetworkActorEvent {
 
     // Channel settlement check completed - channel is fully settled on-chain.
     ChannelSettlementCompleted(Hash256),
+
+    // Wake reconciliation when a missing snapshot becomes available, even if settlement
+    // was already confirmed. Snapshot recovery alone does not mean settlement is complete.
+    ChannelSettlementRecovered(Hash256, ShutdownSettlementRecord),
 }
 
 #[derive(Debug)]
@@ -1933,7 +1954,79 @@ where
                     &channel_id, &tx_hash, &pubkey
                 );
             }
-            NetworkActorEvent::TlcRemoveReceived(payment_hash, attempt_id, remove_tlc_reason) => {
+            NetworkActorEvent::TlcRemoveReceived(
+                payment_hash,
+                attempt_id,
+                mut remove_tlc_reason,
+                source,
+            ) => {
+                let mut local_error = None;
+                let mut completion = None;
+                if let Some((channel_id, tlc_id)) = source {
+                    // Revalidate queued events against the persisted shutdown evidence.
+                    let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+                        return Ok(());
+                    };
+                    let Some(tlc) = collect_onchain_excluded_tlcs(&channel, &self.store)
+                        .into_iter()
+                        .find(|tlc| tlc.tlc_id == tlc_id && tlc.payment_hash == payment_hash)
+                    else {
+                        return Ok(());
+                    };
+                    let OnChainTimeoutTlcRole::OriginPayer {
+                        attempt_id: source_attempt_id,
+                    } = tlc.role
+                    else {
+                        return Ok(());
+                    };
+                    if source_attempt_id != attempt_id {
+                        return Ok(());
+                    }
+                    // The source determines the local failure; do not trust a stale event reason.
+                    remove_tlc_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                        &tlc.shared_secret,
+                    ));
+                    // Manually added TLCs have no payer state to persist.
+                    let Some(id) = attempt_id else {
+                        myself.send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::OnChainTlcRemoveCompleted {
+                                downstream_channel_id: channel_id,
+                                downstream_tlc_id: tlc_id,
+                                payment_hash,
+                                reason: remove_tlc_reason,
+                                completion: OnChainTlcRemoveCompletion::Payer,
+                            },
+                        ))?;
+                        return Ok(());
+                    };
+                    let Some(attempt) = self.store.get_attempt(payment_hash, id) else {
+                        warn!(
+                            "Will retry excluded payer TLC {:?}: payment attempt missing",
+                            tlc_id
+                        );
+                        return Ok(());
+                    };
+                    let Some(channel_outpoint) = channel.get_funding_transaction_outpoint() else {
+                        warn!(
+                            "Will retry excluded payer TLC {:?}: funding outpoint missing",
+                            tlc_id
+                        );
+                        return Ok(());
+                    };
+                    local_error = Some(TlcErr::new_channel_fail(
+                        TlcErrorCode::PermanentChannelFailure,
+                        channel.get_local_pubkey(),
+                        channel_outpoint.clone(),
+                        None,
+                    ));
+                    completion = Some(PaymentTlcRemoveContext {
+                        channel_id,
+                        tlc_id,
+                        channel_outpoint,
+                        tried_times: attempt.tried_times,
+                    });
+                }
                 // When a node is restarted, RemoveTLC will also be resent if necessary
                 self.on_remove_tlc_event(
                     myself.clone(),
@@ -1941,6 +2034,8 @@ where
                     payment_hash,
                     attempt_id,
                     remove_tlc_reason,
+                    local_error,
+                    completion,
                 )
                 .await;
                 #[cfg(debug_assertions)]
@@ -2071,6 +2166,32 @@ where
                         &mut actor_state,
                         now_timestamp_as_millis_u64(),
                         true,
+                    )
+                    .await;
+                }
+            }
+            NetworkActorEvent::ChannelSettlementRecovered(channel_id, record) => {
+                let Some(current) = self.store.get_channel_actor_state(&channel_id) else {
+                    return Ok(());
+                };
+                if !current.is_waiting_onchain_settlement()
+                    || !current.matches_shutdown_settlement_record(&record)
+                {
+                    return Ok(());
+                }
+
+                if let Some(channel_actor) = state.channels.get(&channel_id) {
+                    let _ = channel_actor.send_message(ChannelActorMessage::Event(
+                        ChannelEvent::ShutdownSettlementRecovered(record),
+                    ));
+                } else if let Some(mut actor_state) =
+                    self.store.get_channel_actor_state(&channel_id)
+                {
+                    self.reconcile_onchain_tlcs_without_live_actor(
+                        state,
+                        &mut actor_state,
+                        now_timestamp_as_millis_u64(),
+                        false,
                     )
                     .await;
                 }
@@ -2694,17 +2815,24 @@ where
                         channel_state,
                         ChannelState::Closed(flags)
                             if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-                                && !flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
                     ) {
                         if let Some(actor_state) = self.store.get_channel_actor_state(&channel_id) {
-                            // Spawn async task for concurrent RPC call
+                            if actor_state.is_onchain_settlement_confirmed()
+                                && actor_state
+                                    .load_shutdown_settlement_record(&self.store)
+                                    .is_some()
+                            {
+                                continue;
+                            }
                             let chain_client = self.chain_client.clone();
                             let myself_clone = myself.clone();
+                            let store = self.store.clone();
                             crate::tasks::spawn(async move {
                                 Self::check_channel_shutdown_settlement(
                                     chain_client,
                                     myself_clone,
                                     actor_state,
+                                    store,
                                 )
                                 .await;
                             });
@@ -2790,39 +2918,60 @@ where
                     reason,
                 );
             }
-            NetworkActorCommand::RelayOnChainTlcRemoveResult {
+            NetworkActorCommand::OnChainTlcRemoveCompleted {
                 downstream_channel_id,
                 downstream_tlc_id,
-                forwarding_channel_id,
-                forwarding_tlc_id,
                 payment_hash,
                 reason,
-                result,
+                completion,
             } => {
-                state
-                    .pending_remove_tlcs
-                    .remove(&(forwarding_channel_id, forwarding_tlc_id));
+                let delivered = match completion {
+                    OnChainTlcRemoveCompletion::Payer => self
+                        .store
+                        .get_channel_actor_state(&downstream_channel_id)
+                        .is_some_and(|source| {
+                            collect_onchain_excluded_tlcs(&source, &self.store)
+                                .iter()
+                                .any(|tlc| {
+                                    tlc.tlc_id == downstream_tlc_id
+                                        && tlc.payment_hash == payment_hash
+                                        && matches!(
+                                            tlc.role,
+                                            OnChainTimeoutTlcRole::OriginPayer { .. }
+                                        )
+                                })
+                        }),
+                    OnChainTlcRemoveCompletion::Forwarded {
+                        channel_id: forwarding_channel_id,
+                        tlc_id: forwarding_tlc_id,
+                        result,
+                    } => {
+                        state
+                            .pending_remove_tlcs
+                            .remove(&(forwarding_channel_id, forwarding_tlc_id));
 
-                let delivered = match result {
-                    Ok(()) | Err(ProcessingChannelError::WaitingTlcAck) => true,
-                    Err(err) => {
-                        let already_removed_with_same_reason = self
-                            .store
-                            .get_channel_actor_state(&forwarding_channel_id)
-                            .is_some_and(|channel_state| {
-                                onchain_upstream_removed_reason_matches(
-                                    &channel_state,
-                                    forwarding_tlc_id,
-                                    &reason,
-                                )
-                            });
-                        if !already_removed_with_same_reason {
-                            error!(
-                                "Failed to relay on-chain resolved tlc {:?} upstream to channel {:?}: {}; will retry on next maintenance tick",
-                                forwarding_tlc_id, forwarding_channel_id, err
-                            );
+                        match result {
+                            Ok(()) | Err(ProcessingChannelError::WaitingTlcAck) => true,
+                            Err(err) => {
+                                let already_removed_with_same_reason = self
+                                    .store
+                                    .get_channel_actor_state(&forwarding_channel_id)
+                                    .is_some_and(|channel_state| {
+                                        onchain_upstream_removed_reason_matches(
+                                            &channel_state,
+                                            forwarding_tlc_id,
+                                            &reason,
+                                        )
+                                    });
+                                if !already_removed_with_same_reason {
+                                    error!(
+                                        "Failed to relay on-chain resolved tlc {:?} upstream to channel {:?}: {}; will retry on next maintenance tick",
+                                        forwarding_tlc_id, forwarding_channel_id, err
+                                    );
+                                }
+                                already_removed_with_same_reason
+                            }
                         }
-                        already_removed_with_same_reason
                     }
                 };
                 if delivered {
@@ -2833,6 +2982,20 @@ where
                         payment_hash,
                         reason,
                     );
+                    // Offline channels must also finish without waiting for a maintenance tick.
+                    if !state.channels.contains_key(&downstream_channel_id) {
+                        if let Some(mut source) =
+                            self.store.get_channel_actor_state(&downstream_channel_id)
+                        {
+                            self.reconcile_onchain_tlcs_without_live_actor(
+                                state,
+                                &mut source,
+                                now_timestamp_as_millis_u64(),
+                                false,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }
             NetworkActorCommand::RemoveTlcResult {
@@ -3397,14 +3560,16 @@ where
                 id: forwarding_tlc_id,
                 reason,
             },
-            move |result| NetworkActorCommand::RelayOnChainTlcRemoveResult {
+            move |result| NetworkActorCommand::OnChainTlcRemoveCompleted {
                 downstream_channel_id,
                 downstream_tlc_id,
-                forwarding_channel_id,
-                forwarding_tlc_id,
                 payment_hash,
                 reason: reason_for_result.clone(),
-                result,
+                completion: OnChainTlcRemoveCompletion::Forwarded {
+                    channel_id: forwarding_channel_id,
+                    tlc_id: forwarding_tlc_id,
+                    result,
+                },
             },
         );
     }
@@ -3573,6 +3738,7 @@ where
                                 tlc.payment_hash,
                                 attempt_id,
                                 reason.clone(),
+                                None,
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3692,6 +3858,46 @@ where
             actor_state_changed = true;
         }
 
+        for tlc in collect_onchain_excluded_tlcs(actor_state, &self.store) {
+            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                &tlc.shared_secret,
+            ));
+            match tlc.role {
+                OnChainTimeoutTlcRole::Forwarded {
+                    forwarding_channel_id,
+                    forwarding_tlc_id,
+                } => {
+                    self.relay_onchain_tlc_remove_upstream(
+                        state,
+                        actor_state,
+                        OnChainTlcRemoveRelay {
+                            downstream_tlc_id: tlc.tlc_id,
+                            forwarding_channel_id,
+                            forwarding_tlc_id,
+                            payment_hash: tlc.payment_hash,
+                            reason,
+                        },
+                    );
+                    payer_effects_applied = false;
+                }
+                OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
+                    state
+                        .network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::TlcRemoveReceived(
+                                tlc.payment_hash,
+                                attempt_id,
+                                reason,
+                                Some((channel_id, tlc.tlc_id)),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    payer_effects_applied = false;
+                }
+            }
+        }
+
         // Persist channel TLC mutations before running invoice side effects. This keeps the
         // no-live-actor path aligned with the live RemoveTlc ack ordering: channel state is durable
         // before higher-level payment or invoice notifications are emitted.
@@ -3712,7 +3918,7 @@ where
 
         // Keep waiting while any TLC outcome is still unknown. Once the settlement was confirmed
         // and every TLC is terminal, clear the close flags and drop the funding-script cache entry.
-        if !payer_effects_applied || has_unresolved_onchain_tlcs(actor_state) {
+        if !payer_effects_applied || has_unresolved_onchain_tlcs(actor_state, &self.store) {
             if mark_settlement_confirmed {
                 info!(
                     "Channel {channel_id:?} on-chain reconciliation incomplete; CheckChannels will retry"
@@ -3725,7 +3931,14 @@ where
                         | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
                 );
                 actor_state.state = ChannelState::Closed(flags);
-                settlement_state_changed = true;
+                self.store.insert_channel_actor_state(actor_state.clone());
+                self.store.delete_shutdown_settlement_record(&channel_id);
+                if let Some(ref store_actor) = state.store_actor {
+                    if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
+                        error!("Failed to request store backup after on-chain settlement finalization: {err}");
+                    }
+                }
+                settlement_state_changed = false;
                 state.channels_funding_lock_script_cache.remove(&channel_id);
                 info!("Channel {channel_id:?} on-chain settlement completed without a live actor");
             }
@@ -3924,21 +4137,33 @@ where
             }
         }
     }
+}
 
+impl<S, C> NetworkActor<S, C>
+where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
     /// Async version of check_channel_shutdown_settlement that runs in spawned task.
     /// Checks if the commitment transaction outputs have been spent (indicating settlement complete).
-    async fn check_channel_shutdown_settlement(
+    pub(crate) async fn check_channel_shutdown_settlement(
         chain_client: C,
         myself: ActorRef<NetworkActorMessage>,
         state: ChannelActorState,
+        store: S,
     ) {
         let channel_id = state.get_id();
         let ChannelState::Closed(flags) = state.state else {
             return;
         };
-        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
-            || flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED)
-        {
+        if !flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT) {
+            return;
+        }
+
+        let has_valid_snapshot = state.load_shutdown_settlement_record(&store).is_some();
+        let is_confirmed = flags.contains(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
+
+        if is_confirmed && has_valid_snapshot {
             return;
         }
 
@@ -3969,6 +4194,20 @@ where
             return;
         };
 
+        if let Some(funding_outpoint) = state.get_funding_transaction_outpoint() {
+            let spends_funding = tx
+                .inputs()
+                .into_iter()
+                .any(|input| input.previous_output() == funding_outpoint);
+            if !spends_funding {
+                warn!(
+                    "Commitment tx {:?} does not spend channel {:?} funding outpoint {:?}",
+                    tx_hash, channel_id, funding_outpoint
+                );
+                return;
+            }
+        }
+
         let Some(output) = tx.outputs().get(0) else {
             warn!(
                 "Commitment tx {:?} has no outputs when checking settlement",
@@ -3978,6 +4217,35 @@ where
         };
 
         let lock = output.lock();
+        if !has_valid_snapshot {
+            if let Some(channel_data) = store.get_local_watch_channel(&channel_id) {
+                if let Some((for_remote, commitment_number, settlement_data)) =
+                    recover_shutdown_settlement_data(&channel_data, &lock)
+                {
+                    let record = ShutdownSettlementRecord {
+                        shutdown_tx_hash: tx_hash.clone(),
+                        for_remote,
+                        commitment_number,
+                        settlement_data,
+                    };
+                    if !state.matches_shutdown_settlement_record(&record) {
+                        warn!(
+                            "Commitment direction does not match channel {:?} close flags",
+                            channel_id
+                        );
+                        return;
+                    }
+                    store.store_shutdown_settlement_record(&channel_id, &record);
+                    let _ = myself.send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelSettlementRecovered(channel_id, record),
+                    ));
+                }
+            }
+        }
+
+        if is_confirmed {
+            return;
+        }
         let lock_args = lock.args().raw_data();
         if lock_args.len() < 36 {
             warn!(
@@ -4021,7 +4289,37 @@ where
             }
         }
     }
+}
 
+#[allow(dead_code)]
+pub(crate) async fn check_channel_shutdown_settlement<S, C>(
+    chain_client: C,
+    myself: ActorRef<NetworkActorMessage>,
+    state: ChannelActorState,
+    store: S,
+) where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
+    NetworkActor::<S, C>::check_channel_shutdown_settlement(chain_client, myself, state, store)
+        .await
+}
+
+impl<S, C> NetworkActor<S, C>
+where
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + ChannelOpenRecordStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + PreimageStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    C: CkbChainClient + Clone + Send + Sync + 'static,
+{
     // Check shutdown tx of a channel, shutdown channel if channel is force closed by remote
     async fn handle_remote_channel_shutdown(
         &self,
@@ -4058,6 +4356,21 @@ where
                         let channel_id = state.get_id();
                         let pubkey = state.get_remote_pubkey();
                         let tx_hash = tx.hash();
+                        if let Some(channel_data) = self.store.get_local_watch_channel(&channel_id)
+                        {
+                            if let Some((for_remote, commitment_number, settlement_data)) =
+                                verify_and_select_settlement_data(&channel_data, &output.lock())
+                            {
+                                let record = ShutdownSettlementRecord {
+                                    shutdown_tx_hash: tx_hash.unpack(),
+                                    for_remote,
+                                    commitment_number,
+                                    settlement_data: settlement_data.clone(),
+                                };
+                                self.store
+                                    .store_shutdown_settlement_record(&channel_id, &record);
+                            }
+                        }
                         tracing::debug!("channel {channel_id:?} is shutdown by remote");
                         myself
                             .send_message(NetworkActorMessage::Event(
@@ -4454,6 +4767,7 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn on_remove_tlc_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -4461,19 +4775,23 @@ where
         payment_hash: Hash256,
         attempt_id: Option<u64>,
         reason: RemoveTlcReason,
+        local_error: Option<TlcErr>,
+        completion: Option<PaymentTlcRemoveContext>,
     ) {
         self.resume_payment_actor_and_send_command(
             myself,
             state,
             payment_hash,
-            PaymentActorMessage::OnRemoveTlcEvent { attempt_id, reason },
+            PaymentActorMessage::OnRemoveTlcEvent {
+                attempt_id,
+                reason,
+                local_error,
+                completion,
+            },
         )
         .await;
     }
 
-    /// Serialize an on-chain payer outcome through the PaymentActor and wait until the exact
-    /// attempt and aggregate session have been persisted. This acknowledgement lets channel
-    /// reconciliation safely finalize without losing the higher-level payment update on restart.
     async fn reconcile_onchain_payer_tlc(
         &self,
         state: &mut NetworkActorState<S, C>,

@@ -154,6 +154,7 @@ fn new_shutdown_tx_search_key(funding_lock_script: &Script) -> SearchKey {
 /// `CellType::Input` for the given funding lock script. Returns `None` if no
 /// such transaction exists.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 pub(crate) fn find_first_input_tx_hash(
     client: &ckb_sdk::CkbRpcClient,
     funding_lock_script: &Script,

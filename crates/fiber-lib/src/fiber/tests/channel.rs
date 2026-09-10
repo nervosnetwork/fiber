@@ -8942,6 +8942,13 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
         NetworkNode::new_2_nodes_with_established_channel(HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT, true)
             .await;
 
+    // This harness does not run the watchtower. Preserve the signed local
+    // snapshot so the test can supply its recovery result after confirmation.
+    let local_snapshot = node_a
+        .get_channel_actor_state(channel_id)
+        .build_settlement_data(false)
+        .unwrap();
+
     node_a
         .send_shutdown(channel_id, true)
         .await
@@ -8985,6 +8992,19 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     assert!(
         control_result_before_final_settlement.is_ok(),
         "closing channel actor should remain controllable before final settlement"
+    );
+
+    node_a.store.store_shutdown_settlement_record(
+        &channel_id,
+        &fiber_types::ShutdownSettlementRecord {
+            shutdown_tx_hash: state_after_close_confirmation
+                .shutdown_transaction_hash
+                .clone()
+                .unwrap(),
+            for_remote: false,
+            commitment_number: state_after_close_confirmation.get_current_commitment_number(false),
+            settlement_data: local_snapshot,
+        },
     );
 
     node_a

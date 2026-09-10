@@ -18,7 +18,8 @@ use ckb_types::packed::{OutPoint, Script};
 use fiber_sphinx::OnionErrorPacket;
 use fiber_types::{
     AppliedFlags, ChannelActorData, ChannelBasePublicKeys, ChannelState, ChannelTlcInfo,
-    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, TLCId, TlcInfo, TlcState, TlcStatus,
+    CommitmentNumbers, InMemorySigner, PaymentCustomRecords, ShutdownSettlementRecord, TLCId,
+    TlcInfo, TlcState, TlcStatus,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, TlcErr, TlcErrorCode};
@@ -35,6 +36,8 @@ pub(crate) struct MockStore {
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
     pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
+    pub(crate) shutdown_settlements: RefCell<HashMap<Hash256, ShutdownSettlementRecord>>,
+    pub(crate) watch_channels: RefCell<HashMap<Hash256, fiber_types::ChannelData>>,
 }
 
 impl MockStore {
@@ -46,6 +49,8 @@ impl MockStore {
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
             onchain_settlements: RefCell::new(HashMap::new()),
+            shutdown_settlements: RefCell::new(HashMap::new()),
+            watch_channels: RefCell::new(HashMap::new()),
         }
     }
 
@@ -146,6 +151,26 @@ impl MockStore {
             (channel_id, tlc_id),
             StoredOnChainTlcSettlement::Legacy(settlement),
         );
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_shutdown_settlement(
+        self,
+        channel_id: Hash256,
+        record: ShutdownSettlementRecord,
+    ) -> Self {
+        self.shutdown_settlements
+            .borrow_mut()
+            .insert(channel_id, record);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_watch_channel(self, channel: fiber_types::ChannelData) -> Self {
+        self.watch_channels
+            .borrow_mut()
+            .insert(channel.channel_id, channel);
         self
     }
 }
@@ -299,6 +324,31 @@ impl ChannelActorStateStore for MockStore {
 
     fn delete_pending_commit_diff(&self, _channel_id: &Hash256) {
         // No-op for tests
+    }
+
+    fn store_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+        record: &ShutdownSettlementRecord,
+    ) {
+        self.shutdown_settlements
+            .borrow_mut()
+            .insert(*channel_id, record.clone());
+    }
+
+    fn get_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<ShutdownSettlementRecord> {
+        self.shutdown_settlements.borrow().get(channel_id).cloned()
+    }
+
+    fn delete_shutdown_settlement_record(&self, channel_id: &Hash256) {
+        self.shutdown_settlements.borrow_mut().remove(channel_id);
+    }
+
+    fn get_local_watch_channel(&self, channel_id: &Hash256) -> Option<fiber_types::ChannelData> {
+        self.watch_channels.borrow().get(channel_id).cloned()
     }
 }
 
