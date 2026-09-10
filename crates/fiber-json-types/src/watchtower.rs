@@ -9,6 +9,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+/// Commitment-lock settlement witness layout.
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub enum CommitmentContractVersion {
+    /// Legacy 20-byte payment-hash prefix layout.
+    #[default]
+    Legacy,
+    /// V1 32-byte full payment-hash layout.
+    V1,
+}
+
 /// The id of a TLC, it can be either offered or received.
 #[serde_as]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -107,6 +117,9 @@ pub struct CreateWatchChannelParams {
     pub remote_funding_pubkey: Pubkey,
     /// Settlement data
     pub settlement_data: SettlementData,
+    /// Commitment-lock settlement witness layout.
+    #[serde(default)]
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 /// Parameters for removing a watch channel.

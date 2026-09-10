@@ -1224,6 +1224,7 @@ pub enum NetworkServiceEvent {
         Pubkey,
         Pubkey,
         SettlementData,
+        CommitmentContractVersion,
     ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).

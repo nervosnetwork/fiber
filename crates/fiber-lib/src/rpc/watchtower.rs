@@ -156,13 +156,14 @@ where
         let remote_settlement_key = Pubkey::try_from(params.remote_settlement_key).rpc_err()?;
         let local_funding_pubkey = Pubkey::try_from(params.local_funding_pubkey).rpc_err()?;
         let remote_funding_pubkey = Pubkey::try_from(params.remote_funding_pubkey).rpc_err()?;
+        let commitment_contract_version = params.commitment_contract_version.into();
         // Move fields out of params last, after all borrows of params are done.
         let funding_udt_type_script = params.funding_udt_type_script;
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
-        self.store.insert_watch_channel(
+        self.store.insert_watch_channel_with_version(
             node_id,
             channel_id,
             funding_udt_type_script.map(Into::into),
@@ -171,6 +172,7 @@ where
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
+            commitment_contract_version,
         );
         Ok(())
     }

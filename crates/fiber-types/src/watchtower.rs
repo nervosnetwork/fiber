@@ -3,7 +3,7 @@
 //! Contains the data structures used by the watchtower service to monitor channels
 //! and handle force-close scenarios.
 
-use crate::channel::TLCId;
+use crate::channel::{CommitmentContractVersion, TLCId};
 use crate::invoice::HashAlgorithm;
 use crate::serde_utils::{CompactSignatureAsBytes, EntityHex};
 use crate::{Hash256, Privkey, Pubkey};
@@ -85,4 +85,7 @@ pub struct ChannelData {
     pub local_settlement_data: SettlementData,
     /// Data needed to revoke an outdated commitment transaction
     pub revocation_data: Option<RevocationData>,
+    /// The commitment-lock settlement witness layout used by this channel.
+    #[serde(default)]
+    pub commitment_contract_version: CommitmentContractVersion,
 }

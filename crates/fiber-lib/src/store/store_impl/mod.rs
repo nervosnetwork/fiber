@@ -36,7 +36,7 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
-    ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    ChannelState, CommitmentContractVersion, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
     PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord, TLCId,
     TimedResult, CURSOR_SIZE,
 };
@@ -1682,6 +1682,31 @@ impl WatchtowerStore for Store {
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
     ) {
+        self.insert_watch_channel_with_version(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
+            CommitmentContractVersion::Legacy,
+        );
+    }
+
+    fn insert_watch_channel_with_version(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        local_settlement_key: Privkey,
+        remote_settlement_key: Pubkey,
+        local_funding_pubkey: Pubkey,
+        remote_funding_pubkey: Pubkey,
+        settlement_data: SettlementData,
+        commitment_contract_version: CommitmentContractVersion,
+    ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let key = [
@@ -1702,6 +1727,7 @@ impl WatchtowerStore for Store {
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
+                commitment_contract_version,
             },
             "ChannelData",
         );

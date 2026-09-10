@@ -8163,6 +8163,7 @@ impl ChannelActorState {
                             *self.get_local_funding_pubkey(),
                             *self.get_remote_funding_pubkey(),
                             settlement_data,
+                            self.commitment_contract_version,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);

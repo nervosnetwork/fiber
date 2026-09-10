@@ -410,6 +410,7 @@ fn test_store_watchtower() {
             local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
+            commitment_contract_version: Default::default(),
         }]
     );
 
@@ -439,6 +440,7 @@ fn test_store_watchtower() {
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
+            commitment_contract_version: Default::default(),
         }]
     );
 
@@ -1090,6 +1092,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
+        commitment_contract_version: Default::default(),
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 

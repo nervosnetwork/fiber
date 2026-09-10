@@ -5422,6 +5422,7 @@ async fn test_revoke_old_commitment_transaction() {
                 local_funding_pubkey,
                 remote_funding_pubkey,
                 _,
+                _,
             ) => {
                 let key_agg_ctx =
                     KeyAggContext::new(vec![remote_funding_pubkey, local_funding_pubkey])
