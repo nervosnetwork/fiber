@@ -312,12 +312,12 @@ struct MockCommittedOutPointSpend {
     block_number: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MockOutPointSpendRegistration {
     replier: ActorRef<Result<CkbOutPointSpendTracingResult, String>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MockOutPointSpendRegistrationGroup {
     lock_script: packed::Script,
     confirmations: u64,
@@ -385,6 +385,7 @@ pub trait MockChainActorMiddleware: Send + std::fmt::Debug {
     fn clone_box(&self) -> Box<dyn MockChainActorMiddleware>;
 }
 
+#[derive(Clone)]
 pub struct MockChainState {
     pub txs: HashMap<Hash256, GetTxResponse>,
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
