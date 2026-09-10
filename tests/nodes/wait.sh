@@ -5,6 +5,7 @@ set -euo pipefail
 # check all the ports are open
 
 port_file=./tests/nodes/.ports
+extra_port_file=./tests/nodes/.extra-ports
 retry_count=0
 while [ $retry_count -lt 100 ]; do
     if [ -f $port_file ]; then
@@ -16,16 +17,41 @@ while [ $retry_count -lt 100 ]; do
     fi
 done
 
-ports=()
-while IFS= read -r line; do
-    ports+=("$line")
-done < ./tests/nodes/.ports
-echo "Checking if all ports are open ... ${ports[@]}"
+if [ ! -f $port_file ]; then
+    echo "File $port_file not found after retries, exiting with status 1"
+    exit 1
+fi
+
+# Re-read on every attempt so LSP start.sh can publish the SDK agent
+# control port in .extra-ports independently of the remapped node ports.
+read_ports() {
+    ports=()
+    local file line extra
+    for file in "$port_file" "$extra_port_file"; do
+        if [ -f "$file" ]; then
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                ports+=("$line")
+            done <"$file"
+        fi
+    done
+    if [ -n "${EXTRA_WAIT_PORTS:-}" ]; then
+        for extra in $EXTRA_WAIT_PORTS; do
+            ports+=("$extra")
+        done
+    fi
+}
 
 try_number=120
 count=0
 while [ $count -lt $try_number ]; do
+    read_ports
+    echo "Checking if all ports are open ... ${ports[*]}"
     all_open=true
+    if [ ${#ports[@]} -eq 0 ]; then
+        echo "No ports listed yet ..."
+        all_open=false
+    fi
     for port in "${ports[@]}"; do
         if ! nc -z 127.0.0.1 $port; then
             echo "Port $port is not open yet ..."

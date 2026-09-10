@@ -106,6 +106,7 @@ async fn test_rpc_basic() {
         hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_trampoline_routing: Some(true),
+        lsp_buffer_duration_ms: None,
     };
 
     // node0 generate a invoice
@@ -166,6 +167,7 @@ async fn test_rpc_basic() {
         hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(false),
         allow_trampoline_routing: Some(false),
+        lsp_buffer_duration_ms: None,
     };
 
     // node0 generate a invoice
@@ -538,6 +540,7 @@ async fn test_rpc_pubkey_and_payee_public_key_same_format() {
         hash_algorithm: None,
         allow_mpp: None,
         allow_trampoline_routing: None,
+        lsp_buffer_duration_ms: None,
     };
 
     let invoice_raw = node_0
@@ -677,6 +680,7 @@ async fn test_rpc_basic_with_auth() {
                 hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
                 allow_mpp: None,
                 allow_trampoline_routing: None,
+                lsp_buffer_duration_ms: None,
             },
         )
         .await
@@ -991,6 +995,7 @@ async fn test_rpc_feature_check() {
         hash_algorithm: Some(fiber_json_types::HashAlgorithm::CkbHash),
         allow_mpp: Some(true),
         allow_trampoline_routing: Some(true),
+        lsp_buffer_duration_ms: None,
     };
     let invoice_res: Result<InvoiceResult, String> = node_0
         .send_rpc_request("new_invoice", invoice_params.clone())

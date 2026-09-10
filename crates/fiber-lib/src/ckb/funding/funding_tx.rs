@@ -208,6 +208,10 @@ pub struct FundingContext {
     pub funding_source_lock_script_cell_deps: Vec<packed::CellDep>,
     pub funding_cell_lock_script: packed::Script,
     pub funding_udt_type_script: Option<packed::Script>,
+    /// Co-located hosted tenants intentionally share the LSP operator's CKB
+    /// funding wallet. Their peer-added inputs may therefore use the same lock
+    /// as the local contribution even though their Fiber identities differ.
+    pub allow_peer_funding_source_lock: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -997,7 +1001,9 @@ impl FundingTx {
                 Some(cell) => {
                     let cell_output: packed::CellOutput = cell.output.into();
                     let cell_output_lock = cell_output.lock();
-                    if cell_output_lock == context.funding_source_lock_script {
+                    if cell_output_lock == context.funding_source_lock_script
+                        && !context.allow_peer_funding_source_lock
+                    {
                         debug!(
                             "invalid funding tx (inputs): peer uses input #{} with our lock script",
                             input_index

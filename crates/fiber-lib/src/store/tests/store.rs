@@ -2,6 +2,7 @@ use crate::ckb::signer::LocalSigner;
 use crate::fiber::channel::*;
 use crate::fiber::gossip::{get_latest_startup_broadcast_message_cursor, GossipMessageStore};
 use crate::fiber::network::get_chain_hash;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::{
     LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
 };
@@ -26,11 +27,13 @@ use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
 use crate::now_timestamp_as_millis_u64;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::store::open_store;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::store::sample::StoreSample;
 use crate::store::store_impl::deserialize_from;
 use crate::store::store_impl::serialize_to_vec;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::store_trait::PrefixIterOptions;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::store::{open_store, FiberStore, NodeNamespace};
 use crate::tests::test_utils::*;
 use crate::time::SystemTime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -42,17 +45,23 @@ use ckb_types::prelude::*;
 use ckb_types::H256;
 #[cfg(not(target_arch = "wasm32"))]
 use core::cmp::Ordering;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_store::backend::BatchWriter;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_store::backend::StorageBackend;
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_store::IteratorDirection;
 use fiber_types::protocol::AnnouncedNodeName;
+#[cfg(not(target_arch = "wasm32"))]
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
+use fiber_types::CloseFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
     SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
-use fiber_types::{
-    Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_types::{Attempt, AttemptStatus, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute};
 use musig2::secp::MaybeScalar;
 #[cfg(not(target_arch = "wasm32"))]
 use musig2::CompactSignature;
@@ -64,6 +73,70 @@ use tentacle::secio::PeerId;
 fn gen_rand_local_signer() -> LocalSigner {
     let (secret_key, _) = gen_rand_secp256k1_keypair_tuple();
     LocalSigner::new(secret_key)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_node_namespace_isolates_shared_physical_store() {
+    let path = TempDir::new("node_namespace_store");
+    let store = open_store(path).expect("create shared store");
+    let lsp_metadata = store.namespaced(NodeNamespace::lsp_metadata());
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    tenant_u1
+        .ensure_current_schema()
+        .expect("initialize u1 schema");
+    tenant_u2
+        .ensure_current_schema()
+        .expect("initialize u2 schema");
+
+    lsp_metadata.put(b"same-key", b"lsp-value");
+    tenant_u1.put(b"same-key", b"u1-value");
+    tenant_u1.put(b"scan/1", b"u1-first");
+    tenant_u1.put(b"scan/2", b"u1-second");
+    let mut tenant_u2_batch = tenant_u2.batch();
+    tenant_u2_batch.put(b"same-key", b"u2-value");
+    tenant_u2_batch.put(b"scan/1", b"u2-first");
+    tenant_u2_batch.commit();
+
+    assert_eq!(tenant_u1.get(b"same-key"), Some(b"u1-value".to_vec()));
+    assert_eq!(tenant_u2.get(b"same-key"), Some(b"u2-value".to_vec()));
+    assert_eq!(lsp_metadata.get(b"same-key"), Some(b"lsp-value".to_vec()));
+    assert_eq!(store.get(b"same-key"), None);
+    assert_eq!(
+        tenant_u1
+            .collect_iterator(
+                b"scan/".to_vec(),
+                IteratorDirection::Forward,
+                Box::new(|key| key.starts_with(b"scan/")),
+                0,
+            )
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<Vec<_>>(),
+        vec![
+            (b"scan/1".to_vec(), b"u1-first".to_vec()),
+            (b"scan/2".to_vec(), b"u1-second".to_vec()),
+        ]
+    );
+    assert_eq!(
+        tenant_u1
+            .collect_by_prefix_with(b"scan/", PrefixIterOptions::new().reverse().limit(1))
+            .into_iter()
+            .map(|kv| (kv.key, kv.value))
+            .collect::<Vec<_>>(),
+        vec![(b"scan/2".to_vec(), b"u1-second".to_vec())]
+    );
+
+    let payment_hash = Hash256::from([3; 32]);
+    let u1_preimage = Hash256::from([4; 32]);
+    let u2_preimage = Hash256::from([5; 32]);
+    tenant_u1.insert_preimage(payment_hash, u1_preimage);
+    tenant_u2.insert_preimage(payment_hash, u2_preimage);
+
+    assert_eq!(tenant_u1.get_preimage(&payment_hash), Some(u1_preimage));
+    assert_eq!(tenant_u2.get_preimage(&payment_hash), Some(u2_preimage));
+    assert_eq!(store.get_preimage(&payment_hash), None);
 }
 
 fn mock_node() -> (Privkey, NodeAnnouncement) {
@@ -391,7 +464,8 @@ fn test_store_watchtower() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key.clone(),
+        Some(local_settlement_key.clone()),
+        local_settlement_key.pubkey(),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -402,7 +476,8 @@ fn test_store_watchtower() {
         vec![ChannelData {
             channel_id,
             funding_udt_type_script: None,
-            local_settlement_key: local_settlement_key.clone(),
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
@@ -431,7 +506,8 @@ fn test_store_watchtower() {
         vec![ChannelData {
             channel_id,
             funding_udt_type_script: None,
-            local_settlement_key,
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
@@ -444,6 +520,62 @@ fn test_store_watchtower() {
 
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_external_watch_channel_contains_no_private_keys() {
+    let path = TempDir::new("test-external-watchtower-store");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+    let local_settlement_pubkey = Privkey::from(&[1; 32]).pubkey();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(0),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 42,
+            payment_hash: gen_rand_sha256_hash(),
+            expiry: u64::MAX,
+            local_key: None,
+            local_key_pubkey: Some(Privkey::from(&[5; 32]).pubkey()),
+            local_key_commitment_number: Some(42),
+            remote_key: Privkey::from(&[6; 32]).pubkey(),
+        }],
+    };
+
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        None,
+        local_settlement_pubkey,
+        Privkey::from(&[2; 32]).pubkey(),
+        Privkey::from(&[3; 32]).pubkey(),
+        Privkey::from(&[4; 32]).pubkey(),
+        settlement_data,
+    );
+
+    let channel = store
+        .get_watch_channels()
+        .into_iter()
+        .next()
+        .expect("stored watch channel");
+    assert!(channel.local_settlement_key.is_none());
+    assert!(channel
+        .remote_settlement_data
+        .tlcs
+        .iter()
+        .all(|tlc| tlc.local_key.is_none()));
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        fiber_types::WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState {
+            state: fiber_types::WatchtowerExternalState::Ready,
+            last_applied: None,
+        })
+    );
 }
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -539,7 +671,9 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
             payment_amount: 42,
             payment_hash,
             expiry: now_timestamp_as_millis_u64() + 60_000,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -548,7 +682,8 @@ fn test_store_watchtower_preimage_gc_waits_for_watched_tlc() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key,
+        Some(local_settlement_key.clone()),
+        local_settlement_key.pubkey(),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -602,12 +737,14 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         payment_amount: 21,
         payment_hash,
         expiry: now_timestamp_as_millis_u64() + 60_000,
-        local_key: Privkey::from(&[5; 32]),
+        local_key: Some(Privkey::from(&[5; 32])),
+        local_key_pubkey: None,
+        local_key_commitment_number: None,
         remote_key: Privkey::from(&[6; 32]).pubkey(),
     };
     let mut second_tlc = first_tlc.clone();
     second_tlc.tlc_id = TLCId::Offered(1);
-    second_tlc.local_key = Privkey::from(&[7; 32]);
+    second_tlc.local_key = Some(Privkey::from(&[7; 32]));
     second_tlc.remote_key = Privkey::from(&[8; 32]).pubkey();
     let settlement_data = SettlementData {
         local_amount: 100,
@@ -619,7 +756,8 @@ fn test_store_watchtower_preimage_gc_waits_for_same_hash_sibling_tlc() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key,
+        Some(local_settlement_key.clone()),
+        local_settlement_key.pubkey(),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -668,7 +806,9 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
             payment_amount: 42,
             payment_hash,
             expiry: now_timestamp_as_millis_u64() + 60_000,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -678,7 +818,8 @@ fn test_store_watchtower_preimage_gc_isolated_between_tenants() {
             node_id.clone(),
             channel_id,
             None,
-            Privkey::from(&[1; 32]),
+            Some(Privkey::from(&[1; 32])),
+            Privkey::from(&[1; 32]).pubkey(),
             Privkey::from(&[2; 32]).pubkey(),
             Privkey::from(&[3; 32]).pubkey(),
             Privkey::from(&[4; 32]).pubkey(),
@@ -730,7 +871,9 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
             payment_amount: 42,
             payment_hash,
             expiry: now_timestamp_as_millis_u64() + 60_000,
-            local_key: Privkey::from(&[5; 32]),
+            local_key: Some(Privkey::from(&[5; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[6; 32]).pubkey(),
         }],
     };
@@ -739,7 +882,8 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
         node_id.clone(),
         channel_id,
         None,
-        Privkey::from(&[1; 32]),
+        Some(Privkey::from(&[1; 32])),
+        Privkey::from(&[1; 32]).pubkey(),
         Privkey::from(&[2; 32]).pubkey(),
         Privkey::from(&[3; 32]).pubkey(),
         Privkey::from(&[4; 32]).pubkey(),
@@ -1073,7 +1217,8 @@ fn test_store_watchtower_with_wrong_node_id() {
         node_id.clone(),
         channel_id,
         None,
-        local_settlement_key.clone(),
+        Some(local_settlement_key.clone()),
+        local_settlement_key.pubkey(),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -1082,7 +1227,8 @@ fn test_store_watchtower_with_wrong_node_id() {
     let expected_value = vec![ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: local_settlement_key.clone(),
+        local_settlement_key: Some(local_settlement_key.clone()),
+        local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
         remote_settlement_key,
         local_funding_pubkey,
         remote_funding_pubkey,
@@ -1149,6 +1295,9 @@ fn test_channel_actor_state_store() {
     let state = ChannelActorState {
         core: ChannelActorData {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            signer_state: fiber_types::ChannelSignerState::Internal,
+            local_commitment_points: HashMap::new(),
+            local_public_nonces: HashMap::new(),
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -1242,6 +1391,7 @@ fn test_channel_actor_state_store() {
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        signer_buffers: Default::default(),
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1298,6 +1448,9 @@ fn sample_channel_actor_state(
     ChannelActorState {
         core: ChannelActorData {
             state,
+            signer_state: fiber_types::ChannelSignerState::Internal,
+            local_commitment_points: HashMap::new(),
+            local_public_nonces: HashMap::new(),
             public_channel_info: Some(PublicChannelInfo {
                 local_channel_announcement_signature: Some((
                     mock_ecdsa_signature(),
@@ -1383,6 +1536,7 @@ fn sample_channel_actor_state(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        signer_buffers: Default::default(),
     }
 }
 
@@ -1818,6 +1972,27 @@ fn test_store_save_channel_update_and_get_timestamp() {
 #[derive(Debug, Default)]
 struct StoreChangeSaver {
     pub changes: std::sync::RwLock<Vec<crate::store::store_impl::StoreChange>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_node_namespace_does_not_inherit_public_store_watcher() {
+    use crate::store::store_impl::StoreChange;
+    use std::sync::Arc;
+
+    let (mut store, _dir) = generate_store();
+    let saver = Arc::new(StoreChangeSaver::default());
+    let saver_clone = saver.clone();
+    store.set_watcher(Arc::new(move |change: StoreChange| {
+        saver_clone.changes.write().unwrap().push(change);
+    }));
+    let tenant_store = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+
+    tenant_store.insert_preimage(gen_rand_sha256_hash(), gen_rand_sha256_hash());
+    assert!(saver.changes.read().unwrap().is_empty());
+
+    store.insert_preimage(gen_rand_sha256_hash(), gen_rand_sha256_hash());
+    assert_eq!(saver.changes.read().unwrap().len(), 1);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

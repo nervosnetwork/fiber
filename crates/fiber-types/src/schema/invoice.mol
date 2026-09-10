@@ -39,6 +39,10 @@ table PayeePublicKey {
     value: Bytes,
 }
 
+table TrampolineRouteHint {
+    node_id: Bytes,
+}
+
 // 0 - ckb hash (Default)
 // 1 - sha256
 struct HashAlgorithm {
@@ -61,6 +65,7 @@ union InvoiceAttr {
     PayeePublicKey,
     HashAlgorithm,
     PaymentSecret,
+    TrampolineRouteHint,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;

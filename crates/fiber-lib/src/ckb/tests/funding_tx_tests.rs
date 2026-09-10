@@ -19,6 +19,7 @@ fn dummy_funding_context() -> FundingContext {
         funding_source_lock_script_cell_deps: Vec::new(),
         funding_cell_lock_script: script,
         funding_udt_type_script: None,
+        allow_peer_funding_source_lock: false,
     }
 }
 

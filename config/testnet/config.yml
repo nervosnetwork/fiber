@@ -83,6 +83,15 @@ rpc:
   # Please strictly limit the access to only trusted machines.
   listening_addr: "127.0.0.1:8227"
 
+# Hosted LSP service configuration. This section is inert unless `lsp` is added
+# to `services`. Tenant state and signing keys are isolated below $BASE_DIR/lsp.
+lsp:
+  max_active_tenants: 64
+  # Requested durations are shortened to this operator policy cap (7 days).
+  max_buffer_duration_ms: 604800000
+  max_pending_deliveries: 1024
+  max_pending_deliveries_per_tenant: 64
+
 ckb:
   rpc_url: "https://testnet.ckbapp.dev/"
   udt_whitelist:
@@ -102,3 +111,4 @@ services:
   - fiber
   - rpc
   - ckb
+  # - lsp

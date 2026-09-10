@@ -45,8 +45,18 @@ pub struct SettlementTlc {
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub expiry: u64,
-    /// The local party's private key used to sign the TLC (hex without 0x prefix)
-    pub local_key: Privkey,
+    /// The local party's private key used to sign the TLC (hex without 0x prefix).
+    /// Omitted when an external signer owns the channel keys.
+    #[serde(default)]
+    pub local_key: Option<Privkey>,
+    /// The signer-owned TLC public key.
+    #[serde(default)]
+    pub local_key_pubkey: Option<Pubkey>,
+    /// Commitment point index used to derive an external TLC key.
+    #[serde_as(as = "Option<U64Hex>")]
+    #[schemars(schema_with = "schema_as_uint_hex_optional")]
+    #[serde(default)]
+    pub local_key_commitment_number: Option<u64>,
     /// The remote party's public key used to verify the TLC (hex without 0x prefix)
     pub remote_key: Pubkey,
 }
@@ -97,8 +107,14 @@ pub struct CreateWatchChannelParams {
     pub channel_id: Hash256,
     /// Funding UDT type script
     pub funding_udt_type_script: Option<Script>,
-    /// The local party's private key used to settle the commitment transaction (hex without 0x prefix)
-    pub local_settlement_key: Privkey,
+    /// The local party's private key used to settle the commitment transaction.
+    /// Omitted when an external signer owns the key.
+    #[serde(default)]
+    pub local_settlement_key: Option<Privkey>,
+    /// Public key committed to the local settlement path. Required when the
+    /// private key is omitted; legacy callers may omit it when providing the key.
+    #[serde(default)]
+    pub local_settlement_key_pubkey: Option<Pubkey>,
     /// The remote party's public key used to settle the commitment transaction (hex without 0x prefix)
     pub remote_settlement_key: Pubkey,
     /// The local party's funding public key (hex without 0x prefix)

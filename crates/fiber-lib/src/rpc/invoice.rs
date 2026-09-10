@@ -5,17 +5,21 @@
 //!
 
 use crate::fiber::config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{FiberActorCommand, FiberActorMessage, FiberActorRef, NetworkActorMessage};
 use crate::invoice::{
     CkbInvoice as InternalCkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore,
 };
 use crate::rpc::utils::rpc_error;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::utils::RpcResultExt;
 use crate::{gen_rand_sha256_hash, handle_actor_call, log_and_error, FiberConfig};
 use fiber_types::{FeatureVector, Privkey};
 
 #[cfg(not(target_arch = "wasm32"))]
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::ErrorObjectOwned;
+#[cfg(not(target_arch = "wasm32"))]
+use jsonrpsee::Extensions;
 use ractor::{call, ActorRef};
 use rand::Rng;
 use secp256k1::{PublicKey, SecretKey, SECP256K1};
@@ -33,7 +37,7 @@ pub use fiber_json_types::{
 #[rpc(server)]
 trait InvoiceRpc {
     /// Generates a new invoice.
-    #[method(name = "new_invoice")]
+    #[method(name = "new_invoice", with_extensions)]
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
@@ -47,21 +51,21 @@ trait InvoiceRpc {
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
 
     /// Retrieves an invoice.
-    #[method(name = "get_invoice")]
+    #[method(name = "get_invoice", with_extensions)]
     async fn get_invoice(
         &self,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
-    #[method(name = "cancel_invoice")]
+    #[method(name = "cancel_invoice", with_extensions)]
     async fn cancel_invoice(
         &self,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 
     /// Settles an invoice by saving the preimage to this invoice.
-    #[method(name = "settle_invoice")]
+    #[method(name = "settle_invoice", with_extensions)]
     async fn settle_invoice(
         &self,
         settle_invoice: SettleInvoiceParams,
@@ -70,16 +74,34 @@ trait InvoiceRpc {
 
 pub struct InvoiceRpcServerImpl<S> {
     store: S,
-    network_actor: Option<ActorRef<NetworkActorMessage>>,
+    fiber_actor: Option<FiberActorRef>,
     keypair: Option<(PublicKey, SecretKey)>,
     currency: Option<Currency>,
     node_features: Option<FeatureVector>,
+    trampoline_route_hint: Option<PublicKey>,
+    /// Hosted tenants must supply `payment_hash` or `payment_preimage` so the
+    /// LSP does not generate and store a settle secret.
+    require_client_payment_lock: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
     pub fn new(
         store: S,
         network_actor: Option<ActorRef<NetworkActorMessage>>,
+        config: Option<FiberConfig>,
+    ) -> Self {
+        Self::new_fiber(
+            store,
+            network_actor.map(|actor| FiberActorRef::from_network(&actor)),
+            config,
+        )
+    }
+
+    pub(crate) fn new_fiber(
+        store: S,
+        fiber_actor: Option<FiberActorRef>,
         config: Option<FiberConfig>,
     ) -> Self {
         let (keypair, currency, node_features) = if let Some(config) = config {
@@ -108,11 +130,43 @@ impl<S> InvoiceRpcServerImpl<S> {
         };
         Self {
             store,
-            network_actor,
+            fiber_actor,
             keypair,
             currency,
             node_features,
+            trampoline_route_hint: None,
+            require_client_payment_lock: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            lsp_actor: None,
         }
+    }
+
+    pub fn with_trampoline_route_hint(mut self, node_id: PublicKey) -> Self {
+        self.trampoline_route_hint = Some(node_id);
+        self
+    }
+
+    /// Require the caller to lock the invoice to a preimage they already know.
+    pub fn with_require_client_payment_lock(mut self, required: bool) -> Self {
+        self.require_client_payment_lock = required;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_lsp_actor(
+        mut self,
+        lsp_actor: Option<ActorRef<crate::lsp::LspServiceMessage>>,
+    ) -> Self {
+        self.lsp_actor = lsp_actor;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn tenant_rpc_context(
+        &self,
+        extensions: &Extensions,
+    ) -> Result<Option<crate::lsp::HostedTenantRpcContext>, ErrorObjectOwned> {
+        crate::rpc::tenant::resolve_tenant_rpc_context(extensions, self.lsp_actor.as_ref()).await
     }
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -124,8 +178,60 @@ where
     /// Generates a new invoice.
     async fn new_invoice(
         &self,
-        params: NewInvoiceParams,
+        extensions: &Extensions,
+        mut params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            if params.allow_mpp == Some(true) {
+                return Err(rpc_error("hosted tenant invoices do not support MPP"));
+            }
+            let tenant_id = context.tenant_id.clone();
+            let requested_buffer_duration_ms = params.lsp_buffer_duration_ms;
+            if requested_buffer_duration_ms
+                .is_some_and(|duration| duration > crate::lsp::MAX_LSP_BUFFER_DURATION_MS)
+            {
+                return Err(rpc_error(format!(
+                    "lsp_buffer_duration_ms exceeds maximum {}ms",
+                    crate::lsp::MAX_LSP_BUFFER_DURATION_MS
+                )));
+            }
+            // The hosted-tenant RPC layer consumes this policy. Do not let the
+            // common invoice builder mistake it for an unsupported public or
+            // WASM request.
+            params.lsp_buffer_duration_ms = None;
+            let mut result = InvoiceRpcServerImpl::new_fiber(
+                context.store,
+                Some(context.fiber_actor),
+                Some(context.config),
+            )
+            .with_trampoline_route_hint(context.public_node_id.into())
+            .with_require_client_payment_lock(true)
+            .new_invoice(params)
+            .await?;
+            let invoice = result
+                .invoice_address
+                .parse::<InternalCkbInvoice>()
+                .map_err(|error| {
+                    rpc_error(format!("failed to parse generated hosted invoice: {error}"))
+                })?;
+            let lsp_actor = self
+                .lsp_actor
+                .as_ref()
+                .ok_or_else(|| rpc_error("hosted LSP service is not enabled"))?;
+            let registration = call!(lsp_actor, |reply| {
+                crate::lsp::LspServiceMessage::RegisterInvoice {
+                    tenant_id,
+                    invoice,
+                    buffer_duration_ms: requested_buffer_duration_ms,
+                    reply,
+                }
+            })
+            .rpc_err()?
+            .rpc_err()?;
+            result.accepted_lsp_buffer_duration_ms =
+                Some(registration.hint.payload.buffer_duration_ms);
+            return Ok(result);
+        }
         self.new_invoice(params).await
     }
 
@@ -140,24 +246,54 @@ where
     /// Retrieves an invoice.
     async fn get_invoice(
         &self,
+        extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new_fiber(
+                context.store,
+                Some(context.fiber_actor),
+                Some(context.config),
+            )
+            .get_invoice(payment_hash)
+            .await;
+        }
         self.get_invoice(payment_hash).await
     }
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
     async fn cancel_invoice(
         &self,
+        extensions: &Extensions,
         payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new_fiber(
+                context.store,
+                Some(context.fiber_actor),
+                Some(context.config),
+            )
+            .cancel_invoice(payment_hash)
+            .await;
+        }
         self.cancel_invoice(payment_hash).await
     }
 
     /// Settles an invoice by saving the preimage to this invoice.
     async fn settle_invoice(
         &self,
+        extensions: &Extensions,
         settle_invoice: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
+        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+            return InvoiceRpcServerImpl::new_fiber(
+                context.store,
+                Some(context.fiber_actor),
+                Some(context.config),
+            )
+            .settle_invoice(settle_invoice)
+            .await;
+        }
         self.settle_invoice(settle_invoice).await
     }
 }
@@ -171,6 +307,10 @@ where
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
         let error = |msg: &str| Err(rpc_error(msg.to_string()));
+
+        if params.lsp_buffer_duration_ms.is_some() {
+            return error("lsp_buffer_duration_ms is only valid for a hosted tenant");
+        }
 
         let params_currency = params.currency.into();
 
@@ -188,9 +328,16 @@ where
         let preimage_hash = params.payment_preimage.map(fiber_types::Hash256::from);
         let payment_hash = params.payment_hash.map(fiber_types::Hash256::from);
 
-        // If both preimage and hash are absent, a random preimage is generated.
+        // If both preimage and hash are absent, a random preimage is generated
+        // unless this is a hosted tenant invoice. Hosted invoices must be
+        // locked to a client-owned secret so the LSP cannot settle them.
         let preimage_opt = match (preimage_hash, payment_hash) {
             (Some(preimage), _) => Some(preimage),
+            (None, None) if self.require_client_payment_lock => {
+                return error(
+                    "hosted invoices require payment_hash or payment_preimage from the client",
+                );
+            }
             (None, None) => Some(gen_rand_sha256_hash()),
             _ => None,
         };
@@ -239,6 +386,10 @@ where
             }
         };
 
+        if let Some(node_id) = self.trampoline_route_hint {
+            invoice_builder = invoice_builder.trampoline_route_hint(node_id);
+        }
+
         let final_expiry_delta = params.final_expiry_delta.unwrap_or(MIN_TLC_EXPIRY_DELTA);
         if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
             return error(&format!(
@@ -278,6 +429,7 @@ where
                     Ok(_) => Ok(InvoiceResult {
                         invoice_address: invoice.to_string(),
                         invoice: invoice.clone().into(),
+                        accepted_lsp_buffer_duration_ms: None,
                     }),
                     Err(e) => error(&e.to_string()),
                 }
@@ -329,21 +481,21 @@ where
         &self,
         params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let network_actor = self
-            .network_actor
+        let fiber_actor = self
+            .fiber_actor
             .as_ref()
             .ok_or_else(|| rpc_error("network actor not initialized"))?;
 
         let payment_hash = params.payment_hash.into();
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
-                let message = move |rpc_reply| -> NetworkActorMessage {
-                    NetworkActorMessage::Command(NetworkActorCommand::CancelInvoice(
+                let message = move |rpc_reply| -> FiberActorMessage {
+                    FiberActorMessage::new_command(FiberActorCommand::CancelInvoice(
                         payment_hash,
                         rpc_reply,
                     ))
                 };
-                handle_actor_call!(network_actor, message, params)?;
+                handle_actor_call!(fiber_actor, message, params)?;
 
                 let status = match self
                     .store
@@ -368,22 +520,22 @@ where
         &self,
         params: SettleInvoiceParams,
     ) -> Result<SettleInvoiceResult, ErrorObjectOwned> {
-        let network_actor = self
-            .network_actor
+        let fiber_actor = self
+            .fiber_actor
             .as_ref()
             .ok_or_else(|| rpc_error("network actor not initialized"))?;
 
         let payment_hash = params.payment_hash.into();
         let payment_preimage = params.payment_preimage.into();
 
-        let message = move |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::SettleInvoice(
+        let message = move |rpc_reply| -> FiberActorMessage {
+            FiberActorMessage::new_command(FiberActorCommand::SettleInvoice(
                 payment_hash,
                 payment_preimage,
                 rpc_reply,
             ))
         };
 
-        handle_actor_call!(network_actor, message, params).map(|_| SettleInvoiceResult {})
+        handle_actor_call!(fiber_actor, message, params).map(|_| SettleInvoiceResult {})
     }
 }
