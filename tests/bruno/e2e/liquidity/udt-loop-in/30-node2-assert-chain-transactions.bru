@@ -104,8 +104,9 @@ script:post-response {
   if (!outputData || decodeUdtAmount(outputData) !== BigInt(bru.getVar("QUOTE_GROSS_UDT"))) {
     throw new Error(`claim output data must decode to the gross UDT amount ${bru.getVar("QUOTE_GROSS_UDT")}, got: ${outputData}`);
   }
-  if (BigInt(output.capacity) !== BigInt(bru.getVar("QUOTE_CAPACITY_CKB"))) {
-    throw new Error(`claim output capacity must equal the lock cell capacity ${bru.getVar("QUOTE_CAPACITY_CKB")}, got: ${output.capacity}`);
+  const expectedClaimCapacity = BigInt(bru.getVar("QUOTE_CAPACITY_CKB")) - BigInt("0x3e8");
+  if (BigInt(output.capacity) !== expectedClaimCapacity) {
+    throw new Error(`claim output capacity must equal the occupied capacity ${expectedClaimCapacity}, got: ${output.capacity}`);
   }
 
   // The claimed UDT lands under the provider default funding lock (the quote

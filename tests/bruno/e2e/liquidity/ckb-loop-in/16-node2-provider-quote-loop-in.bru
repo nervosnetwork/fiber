@@ -78,8 +78,9 @@ script:post-response {
   // For CKB, the lock cell value includes the requested amount and provider
   // fee. The quoted capacity must therefore equal that gross value.
   const gross = BigInt(bru.getVar("SWAP_AMOUNT_HEX")) + expectedProviderFee;
-  if (envelope.capacity_requirement_ckb !== "0x" + gross.toString(16)) {
-    throw new Error(`capacity_requirement_ckb must equal the gross on-chain amount 0x${gross.toString(16)}, got: ${envelope.capacity_requirement_ckb}`);
+  const expectedCapacity = gross + BigInt(envelope.onchain_fee_estimate_ckb);
+  if (envelope.capacity_requirement_ckb !== "0x" + expectedCapacity.toString(16)) {
+    throw new Error(`capacity_requirement_ckb must include the on-chain fee 0x${expectedCapacity.toString(16)}, got: ${envelope.capacity_requirement_ckb}`);
   }
   // The payment hash comes from the client invoice.
   if (envelope.payment_hash !== bru.getVar("PAYMENT_HASH")) {

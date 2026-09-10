@@ -93,8 +93,9 @@ script:post-response {
     liveCell.result && liveCell.result.cell && liveCell.result.cell.output
       ? liveCell.result.cell.output.capacity
       : undefined;
-  if (BigInt(capacity) !== BigInt(bru.getVar("QUOTE_GROSS_ONCHAIN"))) {
-    throw new Error(`lock cell capacity must equal the gross on-chain amount ${bru.getVar("QUOTE_GROSS_ONCHAIN")}, got: ${capacity}`);
+  const expectedCapacity = BigInt(bru.getVar("QUOTE_GROSS_ONCHAIN")) + BigInt("0x3e8");
+  if (BigInt(capacity) !== expectedCapacity) {
+    throw new Error(`lock cell capacity must include the on-chain fee ${expectedCapacity}, got: ${capacity}`);
   }
   console.log("lock cell live with capacity:", capacity);
 }

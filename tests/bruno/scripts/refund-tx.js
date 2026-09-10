@@ -38,8 +38,6 @@ const QUOTE_EXPIRES_AFTER_SECONDS = "0x3c";
 // Median block time is the median of the past 37 block timestamps
 // (`median_time_block_count`): generating 4 dev-chain epochs (40 blocks)
 // after wall clock passed the maturity always fills the window.
-const MATURITY_MEDIAN_BLOCK_COUNT = 37;
-const MATURITY_GENESIS_EPOCH_LENGTH = 10;
 const MATURITY_EPOCHS_PER_GENERATION = "0x1";
 const MATURITY_MAX_GENERATED_EPOCHS = 12;
 const MATURITY_POLL_ATTEMPTS = 60;
@@ -113,25 +111,32 @@ async function waitRefundMaturity({ ckbRpcUrl, maturitySeconds }) {
   }
   const maturity = BigInt(maturitySeconds);
   let generatedEpochs = 0;
-  let lastTipSeconds = 0n;
+  let lastTipSeconds = BigInt(0);
   let lastMedianSeconds;
 
   for (let attempt = 0; attempt < MATURITY_POLL_ATTEMPTS; attempt++) {
-    const tip = await rpc(ckbRpcUrl, "get_tip_header", []);
+    const { result: tip } = await rpc(ckbRpcUrl, "get_tip_header", []);
     if (!tip || typeof tip.hash !== "string" || tip.timestamp === undefined) {
       throw new Error(`get_tip_header returned no usable header: ${JSON.stringify(tip)}`);
     }
     lastTipSeconds = BigInt(tip.timestamp) / BigInt(1000);
     if (lastTipSeconds >= maturity) {
-      lastMedianSeconds = await rpc(ckbRpcUrl, "get_block_median_time", [tip.hash]);
-      if (lastMedianSeconds === undefined) {
+      const { result: medianMs } = await rpc(ckbRpcUrl, "get_block_median_time", [tip.hash]);
+      if (medianMs == null) {
         throw new Error(
-          `get_block_median_time returned no median: ${JSON.stringify(lastMedianSeconds)}`,
+          `get_block_median_time returned no median: ${JSON.stringify(medianMs)}`,
         );
       }
+      lastMedianSeconds = (BigInt(medianMs) / BigInt(1000)).toString();
       if (BigInt(lastMedianSeconds) >= maturity) {
         return { tip, medianSeconds: lastMedianSeconds, generatedEpochs, attempts: attempt + 1 };
       }
+    }
+    // Mining before wall-clock maturity only fills the median window with
+    // immature timestamps and can exhaust the bounded generation budget.
+    if (BigInt(Date.now()) / BigInt(1000) < maturity) {
+      await new Promise((resolve) => setTimeout(resolve, MATURITY_POLL_INTERVAL_MS));
+      continue;
     }
     if (generatedEpochs >= MATURITY_MAX_GENERATED_EPOCHS) {
       throw new Error(
@@ -140,7 +145,7 @@ async function waitRefundMaturity({ ckbRpcUrl, maturitySeconds }) {
       );
     }
     await rpc(ckbRpcUrl, "generate_epochs", [MATURITY_EPOCHS_PER_GENERATION]);
-    generatedEpochs += MATURITY_GENESIS_EPOCH_LENGTH;
+    generatedEpochs += 1;
     await new Promise((resolve) => setTimeout(resolve, MATURITY_POLL_INTERVAL_MS));
   }
   throw new Error(

@@ -110,15 +110,21 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length).decode("utf-8", "replace")
         try:
-            method = json.loads(body).get("method", "")
+            request = json.loads(body)
+            method = request.get("method", "")
         except ValueError:
             method = ""
         self._log(method)
-        payload = json.dumps({
-            "id": 1,
+        response = {
+            "id": request.get("id"),
             "jsonrpc": "2.0",
             "result": result_for(method),
-        }).encode()
+        }
+        if not isinstance(request.get("params"), list):
+            self._log("INVALID_PARAMS")
+            response.pop("result")
+            response["error"] = {"code": -32602, "message": "expected positional params"}
+        payload = json.dumps(response).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))

@@ -421,6 +421,8 @@ pub fn build_loop_in_quote_terms(
     let capacity_requirement_ckb = match asset.kind {
         LiquidityAssetKind::Ckb => u64::try_from(gross_amount)
             .map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?
+            .checked_add(onchain_fee_estimate_ckb)
+            .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?
             .max(1),
         LiquidityAssetKind::Udt => onchain_fee_estimate_ckb.max(1),
     };
@@ -925,7 +927,7 @@ mod tests {
         assert_ne!(quote.capacity_requirement_ckb, 0);
         assert_eq!(
             quote.capacity_requirement_ckb,
-            loop_in_gross_onchain_amount(&quote).unwrap() as u64
+            loop_in_gross_onchain_amount(&quote).unwrap() as u64 + quote.onchain_fee_estimate_ckb
         );
     }
 

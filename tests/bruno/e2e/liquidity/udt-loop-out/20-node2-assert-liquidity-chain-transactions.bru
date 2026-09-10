@@ -54,12 +54,11 @@ script:post-response {
     throw new Error(`provider payout outpoint index mismatch: ${payout.outpoint}`);
   }
 
-  // The provider observes the client claim through an outpoint spend tracer;
-  // the client payment cannot settle in the covered prefix (see README), so
-  // the provider must not record a claim or a refund here either.
+  // The provider may observe a client claim before this assertion; a refund
+  // must never coexist with the successful payout path.
   const claim = transactions.find((tx) => tx.role === "claim");
-  if (claim) {
-    throw new Error(`provider must not record a claim transaction: ${JSON.stringify(claim)}`);
+  if (claim && !["broadcast", "confirmed"].includes(claim.status)) {
+    throw new Error(`provider claim record has an invalid status: ${JSON.stringify(claim)}`);
   }
   const refund = transactions.find((tx) => tx.role === "refund");
   if (refund) {

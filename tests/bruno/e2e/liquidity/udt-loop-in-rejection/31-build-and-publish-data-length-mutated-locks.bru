@@ -58,20 +58,16 @@ script:post-response {
   const ckbRpcUrl = bru.getEnvVar("CKB_RPC_URL");
 
   const lengths = [0, 15, 17];
-  const builds = [res.body];
-  for (const length of [15, 17]) {
-    builds.push(
-      await buildMutatedLockTx({
-        mutatorUrl,
-        request: { ...baseRequest, mutation: { kind: "data_length", length } },
-      }),
-    );
-  }
-
   const txHashes = [];
-  for (let i = 0; i < builds.length; i++) {
-    const published = await publishSignedLockTx({ ckbRpcUrl, built: builds[i] });
-    if (published.txHash !== builds[i].tx_hash) {
+  for (let i = 0; i < lengths.length; i++) {
+    const built = i === 0
+      ? res.body
+      : await buildMutatedLockTx({
+        mutatorUrl,
+        request: { ...baseRequest, mutation: { kind: "data_length", length: lengths[i] } },
+      });
+    const published = await publishSignedLockTx({ ckbRpcUrl, built });
+    if (published.txHash !== built.tx_hash) {
       throw new Error(`data length ${lengths[i]} publish must return its own tx hash: ${published.txHash}`);
     }
     txHashes.push(published.txHash);

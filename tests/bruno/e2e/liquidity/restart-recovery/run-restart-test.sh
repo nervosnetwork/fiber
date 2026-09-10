@@ -195,15 +195,15 @@ collect_node_diagnostics() {
   swaps="$(rpc_call "$url" list_swaps '[{"limit":"0x64"}]' 2>/dev/null)" || swaps="null"
   [[ -n "$swaps" ]] || swaps="null"
   if [[ -n "$HANDOFF_SWAP_ID" ]]; then
-    swap="$(rpc_call "$url" get_swap "{\"swap_id\":\"$HANDOFF_SWAP_ID\"}" 2>/dev/null)" || swap="null"
+    swap="$(rpc_call "$url" get_swap "[{\"swap_id\":\"$HANDOFF_SWAP_ID\"}]" 2>/dev/null)" || swap="null"
     [[ -n "$swap" ]] || swap="null"
-    transactions="$(rpc_call "$url" list_liquidity_chain_transactions "{\"swap_id\":\"$HANDOFF_SWAP_ID\"}" 2>/dev/null)" || transactions="null"
+    transactions="$(rpc_call "$url" list_liquidity_chain_transactions "[{\"swap_id\":\"$HANDOFF_SWAP_ID\"}]" 2>/dev/null)" || transactions="null"
     [[ -n "$transactions" ]] || transactions="null"
   fi
   if [[ -n "$HANDOFF_PAYMENT_HASH" ]]; then
-    payment="$(rpc_call "$url" get_payment "{\"payment_hash\":\"$HANDOFF_PAYMENT_HASH\"}" 2>/dev/null)" || payment="null"
+    payment="$(rpc_call "$url" get_payment "[{\"payment_hash\":\"$HANDOFF_PAYMENT_HASH\"}]" 2>/dev/null)" || payment="null"
     [[ -n "$payment" ]] || payment="null"
-    invoice="$(rpc_call "$url" get_invoice "{\"payment_hash\":\"$HANDOFF_PAYMENT_HASH\"}" 2>/dev/null)" || invoice="null"
+    invoice="$(rpc_call "$url" get_invoice "[{\"payment_hash\":\"$HANDOFF_PAYMENT_HASH\"}]" 2>/dev/null)" || invoice="null"
     [[ -n "$invoice" ]] || invoice="null"
   fi
   jq -n \
@@ -433,7 +433,7 @@ discover_handoff() {
     || failure "provider swap is not in the expected payout_pending state: $provider_swap"
 
   local provider_transactions payout_record
-  provider_transactions="$(rpc_call "$NODE2_RPC_URL" list_liquidity_chain_transactions "{\"swap_id\":\"$HANDOFF_SWAP_ID\"}")" \
+  provider_transactions="$(rpc_call "$NODE2_RPC_URL" list_liquidity_chain_transactions "[{\"swap_id\":\"$HANDOFF_SWAP_ID\"}]")" \
     || failure "provider list_liquidity_chain_transactions failed"
   payout_record="$(jq -ec '[.result.transactions[]? | select(.role == "payout")]' <<<"$provider_transactions")" \
     || failure "provider chain transaction response was not parseable"

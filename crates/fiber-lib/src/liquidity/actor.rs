@@ -600,17 +600,20 @@ where
         let refund_after_lock_time =
             absolute_timestamp_since(validated.expires_at.saturating_add(20_000))?;
         let asset_type_script = asset.udt_type_script.clone().map(Into::into);
+        let occupied_capacity = liquidity_lock_capacity_requirement(
+            payment_hash.into(),
+            &claimant_lock,
+            &self.provider_funding_lock_script,
+            refund_after_lock_time,
+            params.amount,
+            asset_type_script.as_ref(),
+        )?;
         let capacity_requirement_ckb = match asset.kind {
-            LiquidityAssetKind::Ckb | LiquidityAssetKind::Udt => {
-                liquidity_lock_capacity_requirement(
-                    payment_hash.into(),
-                    &claimant_lock,
-                    &self.provider_funding_lock_script,
-                    refund_after_lock_time,
-                    params.amount,
-                    asset_type_script.as_ref(),
-                )?
-            }
+            LiquidityAssetKind::Ckb => occupied_capacity.max(
+                u64::try_from(params.amount)
+                    .map_err(|_| LiquidityLoopOutError::GrossAmountOverflow)?,
+            ),
+            LiquidityAssetKind::Udt => occupied_capacity,
         }
         .checked_add(1_000)
         .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
@@ -664,19 +667,20 @@ where
         )?;
         terms.claimant_lock = self.provider_funding_lock_script.clone();
         terms.refund_lock = parse_script_hex(&params.refund_lock, "refund_lock")?;
-        if terms.asset.kind == LiquidityAssetKind::Udt {
-            let asset_type_script = terms.asset.udt_type_script.clone().map(Into::into);
-            terms.capacity_requirement_ckb = liquidity_lock_capacity_requirement(
-                terms.payment_hash.into(),
-                &terms.claimant_lock,
-                &terms.refund_lock,
-                terms.refund_after_lock_time,
-                terms.amount,
-                asset_type_script.as_ref(),
-            )?
-            .checked_add(1_000)
-            .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?;
-        }
+        let asset_type_script = terms.asset.udt_type_script.clone().map(Into::into);
+        let occupied_capacity = liquidity_lock_capacity_requirement(
+            terms.payment_hash.into(),
+            &terms.claimant_lock,
+            &terms.refund_lock,
+            terms.refund_after_lock_time,
+            terms.amount,
+            asset_type_script.as_ref(),
+        )?;
+        terms.capacity_requirement_ckb = terms.capacity_requirement_ckb.max(
+            occupied_capacity
+                .checked_add(terms.onchain_fee_estimate_ckb)
+                .ok_or(LiquidityLoopOutError::GrossAmountOverflow)?,
+        );
         if terms.provider_fee > params.max_provider_fee {
             return Err(LiquidityLoopOutError::ProviderFeeTooHigh);
         }
@@ -7334,6 +7338,30 @@ mod tests {
         assert_eq!(persisted_quote.amount, quote.amount);
         assert_eq!(persisted_quote.provider_fee, quote.provider_fee);
         assert_eq!(persisted_quote.routing_fee_limit, quote.routing_fee_limit);
+    }
+
+    #[tokio::test]
+    async fn provider_ckb_quote_reserves_principal_and_terminal_fee() {
+        let harness = RuntimeActorHarness::new_provider_with_asset();
+        let mut asset = harness.store.get_liquidity_asset("ckb").unwrap().unwrap();
+        asset.max_amount = 100_000_000_000;
+        asset.available_capacity = 100_000_000_000;
+        harness.store.upsert_liquidity_asset(asset).unwrap();
+        let quote = harness
+            .call_provider_quote(ProviderQuoteLoopOutParams {
+                asset_id: "ckb".to_string(),
+                amount: 50_000_000_000,
+                claimant_lock: script_hex(&script("claimant")),
+                max_provider_fee: 100_000_000_000,
+                max_routing_fee: 0,
+                expires_after_seconds: 60,
+            })
+            .await
+            .unwrap();
+        assert!(
+            u128::from(quote.capacity_requirement_ckb - quote.onchain_fee_estimate_ckb)
+                >= quote.amount
+        );
     }
 
     #[tokio::test]

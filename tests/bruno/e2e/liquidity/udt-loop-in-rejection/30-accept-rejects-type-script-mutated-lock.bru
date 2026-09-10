@@ -37,7 +37,8 @@ assert {
 script:post-response {
   const { assertQuoteUnconsumed } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
 
-  // The cell type script keeps the UDT code hash but carries different args, so the cell is no longer the quoted UDT asset.
+  // The cell carries a different UDT type script, so it is no longer the
+  // quoted UDT asset while remaining valid to publish on chain.
   // The provider accept must reject the observed cell during validation and
   // must not persist any swap state: the quote stays consumable, the client
   // invoice stays Open and the provider holds no payment record.

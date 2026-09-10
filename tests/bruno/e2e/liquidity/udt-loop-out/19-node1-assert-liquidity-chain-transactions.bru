@@ -54,13 +54,11 @@ script:post-response {
     throw new Error(`client payout outpoint index mismatch: ${payout.outpoint}`);
   }
 
-  // This suite covers the deterministic provider-funded prefix of the UDT
-  // Loop Out swap (see README): the client channel payment cannot route
-  // through a UDT channel yet, so the swap never reaches the settlement that
-  // reveals the preimage. No claim and no refund can exist at this point.
+  // A claim may already be broadcast when the payment settles before this
+  // assertion. It is valid as long as the client has not requested a refund.
   const claim = transactions.find((tx) => tx.role === "claim");
-  if (claim) {
-    throw new Error(`udt loop out prefix must not record a claim transaction: ${JSON.stringify(claim)}`);
+  if (claim && !["broadcast", "confirmed"].includes(claim.status)) {
+    throw new Error(`udt loop out claim record has an invalid status: ${JSON.stringify(claim)}`);
   }
   const refund = transactions.find((tx) => tx.role === "refund");
   if (refund) {

@@ -342,15 +342,12 @@ pub fn apply_mutation(base: &BaseLockParams, mutation: &Mutation) -> Result<Muta
             ..valid_cell
         }),
         Mutation::TypeScript => {
-            // The mutated type script forms its own (empty) UDT conservation
-            // group, so the lock cell must carry empty data, while the change
-            // output conserves the full gross amount under the real type
-            // script. The provider rejects the cell on the type script
-            // comparison before looking at the data.
+            // Keep the mutated UDT cell valid on chain; the provider rejects it
+            // because its type script differs from the quoted asset.
             Ok(MutatedCellSpec {
                 type_script: mutated_type_script(&base.udt_type_script),
-                data: Vec::new(),
-                conservation_amount: 0,
+                data: gross_le.to_vec(),
+                conservation_amount: base.gross_amount,
                 ..valid_cell
             })
         }
@@ -1263,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn type_script_mutation_swaps_type_args_and_clears_data() {
+    fn type_script_mutation_swaps_type_args_and_preserves_udt_data() {
         let base = base_params();
         let mutated = apply_mutation(&base, &Mutation::TypeScript).expect("applies");
         assert_eq!(build_lock_args(&base), mutated.args);
@@ -1276,8 +1273,8 @@ mod tests {
             mutated.type_script.args().raw_data().to_vec(),
             vec![0xEE; 32]
         );
-        assert!(mutated.data.is_empty());
-        assert_eq!(mutated.conservation_amount, 0);
+        assert_eq!(mutated.data, base.gross_amount.to_le_bytes());
+        assert_eq!(mutated.conservation_amount, base.gross_amount);
     }
 
     #[test]
@@ -1365,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn type_script_mutation_change_output_conserves_full_gross() {
+    fn type_script_mutation_change_output_conserves_remaining_udt() {
         let base = base_params();
         let mutated = apply_mutation(&base, &Mutation::TypeScript).expect("applies");
         let tx = assemble_lock_transaction(
@@ -1377,20 +1374,22 @@ mod tests {
         )
         .expect("assembles");
 
-        // The lock cell data is empty for the mutated type script group.
+        // The mutated lock cell carries the full UDT amount; any extra input
+        // amount remains in the regular UDT change output.
         assert_eq!(
             tx.outputs_data()
                 .get(0)
                 .expect("lock data")
                 .raw_data()
                 .len(),
-            0
+            16
         );
+        assert_eq!(tx.outputs().len(), 2);
         let change = tx.outputs().get(1).expect("change output").clone();
         let change_data = tx.outputs_data().get(1).expect("change data").raw_data();
         assert_eq!(
             u128::from_le_bytes(change_data.as_ref().try_into().expect("16 bytes")),
-            1100
+            99
         );
         assert_eq!(change.type_().to_opt(), Some(base.udt_type_script));
     }

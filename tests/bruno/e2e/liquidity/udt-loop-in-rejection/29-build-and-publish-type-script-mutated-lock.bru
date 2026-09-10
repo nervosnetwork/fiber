@@ -39,7 +39,7 @@ script:post-response {
   const { publishSignedLockTx } = require(process.cwd() + "/scripts/liquidity-lock-tx-publisher");
 
   // The helper (tests/liquidity-lock-mutator) funds a real liquidity-lock
-  // output from the node1 dev wallet with the type script mutated and signs the
+  // output from the node1 dev wallet with the UDT type script mutated and signs the
   // funding transaction. The suite submits it through the CKB JSON-RPC,
   // mines it and waits (bounded) for the mutated cell to commit.
   const published = await publishSignedLockTx({
