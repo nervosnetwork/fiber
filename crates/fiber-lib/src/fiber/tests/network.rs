@@ -13,12 +13,16 @@ use crate::{
         CkbChainMessage, CkbTxTracingResult,
     },
     fiber::{
-        config::{DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT, DEFAULT_TLC_EXPIRY_DELTA},
+        config::{
+            FiberConfig, DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT, DEFAULT_LISTENING_ADDR,
+            DEFAULT_TLC_EXPIRY_DELTA,
+        },
         gossip::{GossipActorMessage, GossipMessageStore},
         graph::ChannelUpdateInfo,
         network::{
-            select_connect_peer_address, AcceptChannelCommand, DebugEvent, FiberMessageWithTarget,
-            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason, TestFiberMessageKind,
+            select_connect_peer_address, select_outbound_address, AcceptChannelCommand, DebugEvent,
+            FiberMessageWithTarget, NetworkActorStateStore, OpenChannelCommand,
+            PeerDisconnectReason, TestFiberMessageKind,
         },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
@@ -514,12 +518,25 @@ fn build_ws_multiaddr(use_wss: bool) -> Multiaddr {
 }
 
 #[test]
+fn test_select_connect_peer_address_by_quic_transport() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+
+    assert_eq!(tentacle::utils::find_type(&quic), TransportType::QuicV1);
+    assert_eq!(
+        select_connect_peer_address(vec![tcp, quic.clone()], Some(TransportType::QuicV1), false,),
+        Some(quic)
+    );
+}
+
+#[test]
 fn test_select_connect_peer_address_respects_explicit_transport_filter() {
     let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
     let wss = build_ws_multiaddr(true);
 
-    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss], Some(TransportType::Ws));
+    let selected =
+        select_connect_peer_address(vec![tcp, ws.clone(), wss], Some(TransportType::Ws), false);
 
     assert_eq!(selected, Some(ws));
 }
@@ -531,7 +548,7 @@ fn test_select_connect_peer_address_defaults_to_tcp_on_native() {
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
     let wss = build_ws_multiaddr(true);
 
-    let selected = select_connect_peer_address(vec![tcp.clone(), ws, wss], None);
+    let selected = select_connect_peer_address(vec![tcp.clone(), ws, wss], None, false);
 
     assert_eq!(selected, Some(tcp));
 }
@@ -543,9 +560,176 @@ fn test_select_connect_peer_address_defaults_to_websocket_on_wasm() {
     let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
     let wss = build_ws_multiaddr(true);
 
-    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss.clone()], None);
+    let selected = select_connect_peer_address(vec![tcp, ws.clone(), wss.clone()], None, false);
 
     assert!(matches!(selected, Some(addr) if addr == ws || addr == wss));
+}
+
+#[test]
+fn test_select_connect_peer_address_rejects_quic_with_proxy() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+
+    assert_eq!(
+        select_connect_peer_address(
+            vec![tcp.clone(), quic.clone()],
+            Some(TransportType::Tcp),
+            true,
+        ),
+        Some(tcp)
+    );
+    assert_eq!(
+        select_connect_peer_address(vec![quic], Some(TransportType::QuicV1), true),
+        None
+    );
+}
+
+#[test]
+fn test_automatic_address_selection_rejects_quic_with_proxy() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+
+    assert_eq!(
+        select_outbound_address(vec![quic.clone(), tcp.clone()], true),
+        Some(tcp)
+    );
+    assert_eq!(select_outbound_address(vec![quic], true), None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_outbound_address_selection_prefers_default_transport_on_native() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+    let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
+
+    // TCP wins whenever the peer publishes one.
+    assert_eq!(
+        select_outbound_address(vec![quic.clone(), ws.clone(), tcp.clone()], false),
+        Some(tcp.clone())
+    );
+    // The manual `connect_peer` path without an explicit transport uses the very same policy.
+    assert_eq!(
+        select_connect_peer_address(vec![quic, ws, tcp.clone()], None, false),
+        Some(tcp)
+    );
+}
+
+/// A peer that only publishes non-default (but dialable) transports must still be reachable,
+/// and the automatic and manual dial paths must agree about it.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_outbound_address_selection_falls_back_to_other_transports() {
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+    let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
+
+    assert_eq!(
+        select_outbound_address(vec![quic.clone()], false),
+        Some(quic.clone())
+    );
+    assert_eq!(
+        select_connect_peer_address(vec![quic.clone()], None, false),
+        Some(quic)
+    );
+    assert_eq!(
+        select_connect_peer_address(vec![ws.clone()], None, false),
+        Some(ws)
+    );
+}
+
+/// Both dial paths must skip transports the current build cannot dial at all.
+#[cfg(target_arch = "wasm32")]
+#[test]
+fn test_outbound_address_selection_skips_undialable_transports_on_wasm() {
+    let tcp = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8346").expect("valid tcp multiaddr");
+    let quic = Multiaddr::from_str("/ip4/1.1.1.1/udp/8346/quic-v1").expect("valid QUIC multiaddr");
+    let ws = Multiaddr::from_str("/ip4/1.1.1.1/tcp/8347/ws").expect("valid ws multiaddr");
+
+    assert_eq!(
+        select_outbound_address(vec![tcp.clone(), quic.clone(), ws.clone()], false),
+        Some(ws)
+    );
+    assert_eq!(select_outbound_address(vec![tcp, quic], false), None);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_resolve_listening_addresses_deduplicates_and_appends_websocket() {
+    use crate::fiber::network::resolve_listening_addresses;
+
+    let mut config = FiberConfig {
+        listening_addr: Some("/ip4/0.0.0.0/tcp/8228".to_string()),
+        listening_addrs: vec![
+            // Duplicated on purpose, it must not produce a second listener.
+            "/ip4/0.0.0.0/tcp/8228".to_string(),
+            "/ip4/0.0.0.0/udp/8228/quic-v1".to_string(),
+        ],
+        reuse_port_for_websocket: false,
+        ..Default::default()
+    };
+
+    let addresses = resolve_listening_addresses(&config).expect("valid listening addresses");
+    assert_eq!(
+        addresses,
+        vec![
+            Multiaddr::from_str("/ip4/0.0.0.0/tcp/8228").unwrap(),
+            Multiaddr::from_str("/ip4/0.0.0.0/udp/8228/quic-v1").unwrap(),
+        ]
+    );
+
+    // Only the TCP listener gets a websocket companion, QUIC is left alone.
+    config.reuse_port_for_websocket = true;
+    let addresses = resolve_listening_addresses(&config).expect("valid listening addresses");
+    assert_eq!(
+        addresses,
+        vec![
+            Multiaddr::from_str("/ip4/0.0.0.0/tcp/8228").unwrap(),
+            Multiaddr::from_str("/ip4/0.0.0.0/udp/8228/quic-v1").unwrap(),
+            Multiaddr::from_str("/ip4/0.0.0.0/tcp/8228/ws").unwrap(),
+        ]
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_resolve_listening_addresses_reports_invalid_address() {
+    use crate::fiber::network::resolve_listening_addresses;
+
+    let config = FiberConfig {
+        listening_addr: Some("not-a-multiaddr".to_string()),
+        ..Default::default()
+    };
+
+    let err = resolve_listening_addresses(&config).expect_err("invalid address must be rejected");
+    assert!(
+        err.to_string().contains("Invalid listening address"),
+        "unexpected error: {err}"
+    );
+}
+
+/// `listening_addr` must not be forced into the listener set when the operator only configured
+/// `listening_addrs`, otherwise a QUIC-only (or websocket-only) node is impossible.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_listening_addrs_allows_opting_out_of_the_default_listener() {
+    let mut config = FiberConfig {
+        reuse_port_for_websocket: false,
+        ..Default::default()
+    };
+
+    assert_eq!(config.listening_addrs(), vec![DEFAULT_LISTENING_ADDR]);
+
+    config.listening_addrs = vec!["/ip4/0.0.0.0/udp/8228/quic-v1".to_string()];
+    assert_eq!(
+        config.listening_addrs(),
+        vec!["/ip4/0.0.0.0/udp/8228/quic-v1"]
+    );
+
+    config.listening_addr = Some("/ip4/0.0.0.0/tcp/8228".to_string());
+    assert_eq!(
+        config.listening_addrs(),
+        vec!["/ip4/0.0.0.0/tcp/8228", "/ip4/0.0.0.0/udp/8228/quic-v1"]
+    );
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -704,6 +888,76 @@ async fn test_set_announced_addrs_without_p2p() {
     assert_eq!(
         nodes[0].addresses.iter().find(|x| *x == &multiaddr),
         Some(&multiaddr)
+    );
+}
+
+#[tokio::test]
+async fn test_public_quic_announced_address_is_saved_to_graph() {
+    let addr = "/ip4/1.1.1.1/udp/8346/quic-v1".to_string();
+    let announced_addr = addr.clone();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.announce_listening_addr = Some(false);
+                config.announce_private_addr = Some(false);
+                config.announced_addrs = vec![announced_addr];
+            })
+            .build(),
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+
+    let peer_id = PeerId::from_public_key(&crate::fiber::types::pubkey_to_tentacle(node.pubkey));
+    let expected_addr = Multiaddr::from_str(&format!("{addr}/p2p/{peer_id}"))
+        .expect("valid announced QUIC multiaddr");
+    let nodes = node.get_network_graph_nodes().await;
+
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, node.get_public_key());
+    assert!(nodes[0].addresses.contains(&expected_addr));
+}
+
+/// A SOCKS5 proxy hides the real node location, but QUIC bypasses it. Announcing a QUIC address
+/// would therefore disclose exactly what the proxy is supposed to hide, while being unusable for
+/// proxied peers anyway.
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_quic_announced_address_is_dropped_when_proxy_is_configured() {
+    let quic_addr = "/ip4/1.1.1.1/udp/8346/quic-v1".to_string();
+    let tcp_addr = "/ip4/1.1.1.1/tcp/8346".to_string();
+    let announced_addrs = vec![quic_addr.clone(), tcp_addr.clone()];
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.announce_listening_addr = Some(false);
+                config.announce_private_addr = Some(false);
+                config.announced_addrs = announced_addrs;
+                config.proxy.proxy_url = Some("socks5://127.0.0.1:65535".to_string());
+            })
+            .build(),
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+
+    let peer_id = PeerId::from_public_key(&crate::fiber::types::pubkey_to_tentacle(node.pubkey));
+    let quic_addr = Multiaddr::from_str(&format!("{quic_addr}/p2p/{peer_id}"))
+        .expect("valid announced QUIC multiaddr");
+    let tcp_addr = Multiaddr::from_str(&format!("{tcp_addr}/p2p/{peer_id}"))
+        .expect("valid announced tcp multiaddr");
+    let nodes = node.get_network_graph_nodes().await;
+
+    assert_eq!(nodes.len(), 1);
+    assert!(
+        !nodes[0].addresses.contains(&quic_addr),
+        "QUIC address must not be announced while a proxy is configured: {:?}",
+        nodes[0].addresses
+    );
+    assert!(
+        nodes[0].addresses.contains(&tcp_addr),
+        "proxyable addresses must still be announced: {:?}",
+        nodes[0].addresses
     );
 }
 

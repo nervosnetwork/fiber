@@ -20,6 +20,7 @@ fn to_transport_type(t: fiber_json_types::TransportType) -> TransportType {
         fiber_json_types::TransportType::Tcp => TransportType::Tcp,
         fiber_json_types::TransportType::Ws => TransportType::Ws,
         fiber_json_types::TransportType::Wss => TransportType::Wss,
+        fiber_json_types::TransportType::QuicV1 => TransportType::QuicV1,
     }
 }
 

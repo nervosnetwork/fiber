@@ -20,6 +20,7 @@ docker run --rm -it \
   -e RUST_LOG='info' \
   -v "$(pwd)/fiber-node:/fiber" \
   -p 8228:8228 \
+  -p 8228:8228/udp \
   nervos/fiber:<release-tag>
 ```
 
