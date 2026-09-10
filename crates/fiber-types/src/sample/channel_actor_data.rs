@@ -123,6 +123,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         pending_replay_updates: vec![],
         last_was_revoke: false,
         external_funding: None,
+        commitment_contract_version: Default::default(),
         created_at: SystemTime::UNIX_EPOCH,
     }
 }
@@ -349,6 +350,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         pending_replay_updates: vec![],
         last_was_revoke: true,
         external_funding: None,
+        commitment_contract_version: Default::default(),
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
     }
 }

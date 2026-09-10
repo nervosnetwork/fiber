@@ -12568,6 +12568,7 @@ mod udt_funding_cell_capacity {
                 last_was_revoke: false,
                 created_at: SystemTime::now(),
                 external_funding: None,
+                commitment_contract_version: Default::default(),
             },
             waiting_peer_response: None,
             reestablish_started_at: None,

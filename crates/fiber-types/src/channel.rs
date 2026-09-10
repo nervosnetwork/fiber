@@ -1475,6 +1475,29 @@ impl PendingNotifySettleTlc {
     }
 }
 
+/// Which commitment-lock settlement witness layout a channel uses.
+///
+/// Decided once at channel-open negotiation and never changed afterwards.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CommitmentContractVersion {
+    /// 20-byte prefix commitment (57-byte args, pre-upgrade channels).
+    #[default]
+    Legacy,
+    /// 32-byte payment hash committed on-chain, 97-byte HTLC witness, 58-byte args.
+    V1,
+}
+
+impl CommitmentContractVersion {
+    /// V1 only when BOTH peers advertise support of the feature bit.
+    pub fn for_negotiated(ours_supports: bool, peer_supports: Option<bool>) -> Self {
+        if ours_supports && peer_supports == Some(true) {
+            Self::V1
+        } else {
+            Self::Legacy
+        }
+    }
+}
+
 /// The core serializable state of a channel actor.
 ///
 /// This struct contains all the persistable fields of a channel.
@@ -1615,6 +1638,11 @@ pub struct ChannelActorData {
     /// Persisted state for an in-progress external funding flow.
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
+
+    /// Which commitment-lock settlement witness layout this channel uses,
+    /// decided once at channel-open and never changed.
+    #[serde(default)]
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
