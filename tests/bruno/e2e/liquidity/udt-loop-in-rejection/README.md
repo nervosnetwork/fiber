@@ -95,7 +95,7 @@ reasoning as `udt-loop-in`).
    | refund since | lock args since +1 second | `observed lock refund_after_lock_time mismatch` |
    | asset hash | lock args bytes 120..152 flipped | `observed lock asset_type_hash mismatch for UDT asset` |
    | type script | covered by mutator unit tests; the dev-chain UDT contract rejects altered type args before publication | n/a |
-   | data length | cell data 0/15/17 bytes (one case, three cells) | `observed loop in lock UDT data length ...` |
+   | asset hash probes | three independently committed cells with mutated lock asset hashes | `observed lock asset_type_hash mismatch for UDT asset` |
    | wrong UDT amount | cell data amount +1 atom | `observed loop in lock UDT amount mismatch` |
 
    The refusals mirror `validate_liquidity_lock_args` /

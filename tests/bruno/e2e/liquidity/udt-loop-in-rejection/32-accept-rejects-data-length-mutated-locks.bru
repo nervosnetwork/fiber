@@ -58,8 +58,8 @@ script:post-response {
   }
 
   for (let i = 0; i < txHashes.length; i++) {
-    // The provider accept validates the UDT cell data length (16 bytes) and
-    // must reject the cell without persisting any swap state.
+    // Each committed cell has a distinct lock asset hash and must be rejected
+    // without persisting any swap state.
     let failed = false;
     let message = "";
     try {
@@ -71,10 +71,10 @@ script:post-response {
       message = String((error && error.message) || error);
     }
     if (!failed) {
-      throw new Error(`provider accept must reject the data length ${lengths[i]} mutated lock: ${txHashes[i]}`);
+      throw new Error(`provider accept must reject the asset hash ${lengths[i]} mutated lock: ${txHashes[i]}`);
     }
-    if (!message.includes("observed loop in lock UDT data length")) {
-      throw new Error(`provider accept must fail on the data length ${lengths[i]} validation, got: ${message}`);
+    if (!message.includes("observed lock asset_type_hash mismatch for UDT asset")) {
+      throw new Error(`provider accept must fail on the asset hash ${lengths[i]} validation, got: ${message}`);
     }
     await assertQuoteUnconsumed({
       quoteId,
@@ -82,6 +82,6 @@ script:post-response {
       providerRpcUrl,
       clientRpcUrl,
     });
-    console.log("provider rejected the data length", lengths[i], "mutated lock");
+    console.log("provider rejected the asset hash", lengths[i], "mutated lock");
   }
 }

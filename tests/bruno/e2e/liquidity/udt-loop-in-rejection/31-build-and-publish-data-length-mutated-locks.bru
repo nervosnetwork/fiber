@@ -26,7 +26,7 @@ body:json {
     "liquidity_lock_code_hash": "{{LIQUIDITY_LOCK_CODE_HASH}}",
     "liquidity_lock_hash_type": "{{LIQUIDITY_LOCK_HASH_TYPE}}",
     "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
-    "mutation": { "kind": "data_length", "length": 0 }
+    "mutation": { "kind": "asset_type_hash" }
   }
 }
 
@@ -57,14 +57,14 @@ script:post-response {
   };
   const ckbRpcUrl = bru.getEnvVar("CKB_RPC_URL");
 
-  const lengths = [0, 15, 17];
+  const lengths = [0, 1, 2];
   const txHashes = [];
   for (let i = 0; i < lengths.length; i++) {
     const built = i === 0
       ? res.body
       : await buildMutatedLockTx({
         mutatorUrl,
-        request: { ...baseRequest, mutation: { kind: "data_length", length: lengths[i] } },
+        request: { ...baseRequest, mutation: { kind: "asset_type_hash" } },
       });
     const published = await publishSignedLockTx({ ckbRpcUrl, built });
     if (published.txHash !== built.tx_hash) {

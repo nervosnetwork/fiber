@@ -77,7 +77,8 @@ script:post-response {
 
   // Capacity: unchanged operational capacity of the terminal output
   // (build_loop_in_terminal_output).
-  const expectedCapacity = BigInt(bru.getVar("QUOTE_CAPACITY_CKB"));
+  // The refund transaction pays its own 1,000-shannon fee from the lock cell.
+  const expectedCapacity = BigInt(bru.getVar("QUOTE_CAPACITY_CKB")) - BigInt(1000);
   if (BigInt(cell.output.capacity) !== expectedCapacity) {
     throw new Error(`refund cell capacity must equal ${expectedCapacity}, got: ${cell.output.capacity}`);
   }
