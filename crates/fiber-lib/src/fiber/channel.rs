@@ -970,10 +970,22 @@ where
             }
             FiberChannelMessage::TxAbort(tx_abort) => {
                 if state.state.can_abort_funding() {
-                    if !tx_abort.message.is_empty() {
-                        state.funding_abort_detail =
-                            Some(String::from_utf8_lossy(&tx_abort.message).into_owned());
-                    }
+                    let peer_msg = String::from_utf8_lossy(&tx_abort.message);
+                    let detail = if !tx_abort.message.is_empty() {
+                        format!(
+                            "[Channel {}] Received TxAbort from peer during state {:?}: {}",
+                            state.get_id(),
+                            state.state,
+                            peer_msg
+                        )
+                    } else {
+                        format!(
+                            "[Channel {}] Received TxAbort from peer during state {:?}",
+                            state.get_id(),
+                            state.state
+                        )
+                    };
+                    state.funding_abort_detail = Some(detail);
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     myself.stop(Some("Funding abort".to_string()));
                 }
@@ -3658,17 +3670,25 @@ where
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
                     }
-                    let abort_detail = state
-                        .funding_abort_detail
-                        .clone()
-                        .unwrap_or_else(|| "funding aborted".to_string());
+                    // Do not send local diagnostics to the peer. The detailed reason is
+                    // retained for the local RPC/history path, while the wire message is
+                    // deliberately stable and public-safe.
+                    let public_abort_message = match reason {
+                        StopReason::FundingFailed | StopReason::FundingFailedWithDetail(_) => {
+                            "Funding failed"
+                        }
+                        StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_) => {
+                            "Funding aborted"
+                        }
+                        _ => "Funding aborted",
+                    };
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     let abort_message = FiberMessageWithTarget {
                         target: state.get_remote_pubkey(),
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id: state.get_id(),
-                                message: abort_detail.into_bytes(),
+                                message: public_abort_message.as_bytes().to_vec(),
                             }),
                         ),
                     };
@@ -3760,9 +3780,20 @@ where
                 // the currently applicable timeout has actually elapsed.
                 if state.has_funding_timeout_elapsed() {
                     info!("Abort funding on timeout for channel {}", state.get_id());
+                    let timeout_type = if state.ephemeral_config.external_funding.enabled {
+                        "External funding transaction submission timed out"
+                    } else {
+                        "Funding collaboration timed out"
+                    };
+                    let detail = format!(
+                        "[Channel {}] {} in state {:?}",
+                        state.get_id(),
+                        timeout_type,
+                        state.state
+                    );
                     myself
                         .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                            StopReason::AbortFunding,
+                            StopReason::AbortFundingWithDetail(detail),
                         )))
                         .expect("myself alive");
                 } else {
@@ -4949,6 +4980,7 @@ pub enum StopReason {
     AbortFunding,
     AbortFundingWithDetail(String),
     FundingFailed,
+    FundingFailedWithDetail(String),
     Closed,
     PeerDisConnected,
 }
@@ -4960,6 +4992,7 @@ impl StopReason {
             StopReason::AbortFunding
                 | StopReason::AbortFundingWithDetail(_)
                 | StopReason::FundingFailed
+                | StopReason::FundingFailedWithDetail(_)
         )
     }
 
@@ -4972,7 +5005,8 @@ impl StopReason {
 
     pub(crate) fn funding_abort_detail(&self) -> Option<&str> {
         match self {
-            StopReason::AbortFundingWithDetail(detail) => Some(detail),
+            StopReason::AbortFundingWithDetail(detail)
+            | StopReason::FundingFailedWithDetail(detail) => Some(detail),
             _ => None,
         }
     }
