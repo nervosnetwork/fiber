@@ -979,7 +979,7 @@ Return one persisted liquidity swap.
 
 ##### Returns
 
-* `Option` - <em>Option</em>, 
+* `Option` - <em>Option</em>,
 
 ---
 
@@ -1144,7 +1144,7 @@ Disable a provider asset registry entry.
 
 ##### Params
 
-* `String` - <em>String</em>, 
+* `String` - <em>String</em>,
 
 ##### Returns
 
@@ -2419,4 +2419,3 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node.
 * `hash_type` - <em>`ScriptHashType`</em>, The hash type of the script.
 * `args` - <em>`String`</em>, The arguments of the script.
 ---
-
