@@ -35,17 +35,28 @@ For external funding:
 
 ## Example
 
+Install `yaml` before running the example: `npm install yaml`.
+
 ```js
 import { Fiber, randomSecretKey } from "@nervosnetwork/fiber-js";
+import { parseDocument } from "yaml";
 
 const fiber = new Fiber();
-const config = fiber.getDefaultConfig(
-  "testnet",
-  "https://testnet.ckbapp.dev/",
+const config = parseDocument(
+  fiber.getDefaultConfig("testnet", "https://testnet.ckbapp.dev/"),
+  { schema: "failsafe" },
 );
 
+// Browser nodes cannot connect to the TCP bootnodes from the default config.
+config.setIn(["fiber", "listening_addr"], "/ip4/127.0.0.1/tcp/8228");
+config.setIn(["fiber", "bootnode_addrs"], [
+  "/dns4/thrall.fiber.channel/tcp/443/wss/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy",
+  "/dns4/onyxia.fiber.channel/tcp/443/wss/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV",
+]);
+config.setIn(["fiber", "announce_listening_addr"], false);
+
 await fiber.start(
-  config,
+  config.toString({ lineWidth: 0 }),
   randomSecretKey(),
   randomSecretKey(),
   undefined,
