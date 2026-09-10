@@ -47,8 +47,8 @@ use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
-    SettlementTlc, TLCId, TlcInfo, TlcStatus,
+    AddTlcCommand, AppliedFlags, CommitmentContractVersion, CommitmentNumbers, OutboundTlcStatus,
+    RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
     Attempt, AttemptStatus, CloseFlags, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute,
@@ -447,6 +447,43 @@ fn test_store_watchtower() {
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_watchtower_v1_registration_round_trip() {
+    let path = TempDir::new("test-watchtower-v1-store");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+
+    store.insert_watch_channel_with_version(
+        node_id,
+        channel_id,
+        None,
+        Privkey::from(&[1; 32]),
+        Privkey::from(&[2; 32]).pubkey(),
+        Privkey::from(&[3; 32]).pubkey(),
+        Privkey::from(&[4; 32]).pubkey(),
+        settlement_data,
+        CommitmentContractVersion::V1,
+    );
+
+    assert_eq!(
+        store
+            .get_watch_channels()
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id)
+            .expect("stored channel")
+            .commitment_contract_version,
+        CommitmentContractVersion::V1
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

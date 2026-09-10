@@ -34,7 +34,19 @@ pub trait WatchtowerStore {
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
-    );
+    ) {
+        self.insert_watch_channel_with_version(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
+            CommitmentContractVersion::Legacy,
+        );
+    }
 
     /// Insert a channel while retaining its negotiated witness layout.
     #[allow(clippy::too_many_arguments)]
@@ -49,19 +61,7 @@ pub trait WatchtowerStore {
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
         commitment_contract_version: CommitmentContractVersion,
-    ) {
-        let _ = commitment_contract_version;
-        self.insert_watch_channel(
-            node_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-        );
-    }
+    );
     /// Remove a channel from the store, the watchtower will stop monitoring the channel
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);
     /// Update the revocation data of a channel, the watchtower will use this data to revoke an old version commitment transaction and settle the remote commitment transaction of a force closed channel
