@@ -476,8 +476,10 @@ pub(crate) fn collect_onchain_excluded_tlcs(
     state: &ChannelActorState,
     store: &impl ChannelActorStateStore,
 ) -> Vec<OnChainTimeoutSettledTlc> {
-    // Wait until on-chain settlement is confirmed before failing excluded TLCs.
-    if !state.is_onchain_settlement_confirmed() {
+    // This state is entered only after the force-close transaction is confirmed.
+    // Together with its verified snapshot it proves exclusion, independently of
+    // whether the peer has withdrawn its remaining commitment balance cells.
+    if !state.is_waiting_onchain_settlement() {
         return vec![];
     }
     // A missing or mismatched shutdown snapshot cannot prove exclusion.

@@ -3793,6 +3793,8 @@ where
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
                     self.finalize_onchain_settlement(myself, state).await?;
+                } else if state.is_waiting_onchain_settlement() {
+                    self.fail_onchain_excluded_tlcs(state);
                 }
             }
             ChannelEvent::OnChainSettlementCompleted => {
@@ -3821,6 +3823,8 @@ where
                 }
                 if state.is_onchain_settlement_confirmed() {
                     self.finalize_onchain_settlement(myself, state).await?;
+                } else {
+                    self.fail_onchain_excluded_tlcs(state);
                 }
             }
             ChannelEvent::CheckFundingTimeout => {
