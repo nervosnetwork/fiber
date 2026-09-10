@@ -120,7 +120,8 @@ pub use fiber_types::HopRequire;
 use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, CommitmentContractVersion,
+    EcdsaSignature, EntityHex,
     FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
     PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
@@ -5891,6 +5892,8 @@ where
                         .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                    commitment_contract_version: self
+                        .negotiated_commitment_contract_version(&remote_pubkey),
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6010,6 +6013,8 @@ where
                             .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                         max_tlc_number_in_flight: max_tlc_number_in_flight
                             .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                        commitment_contract_version: self
+                            .negotiated_commitment_contract_version(&remote_pubkey),
                     },
                 ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -6104,6 +6109,8 @@ where
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
+                    commitment_contract_version: self
+                        .negotiated_commitment_contract_version(&remote_pubkey),
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6175,6 +6182,24 @@ where
             )));
         }
         Ok(())
+    }
+
+    /// Decide which commitment-lock contract layout a new channel with the
+    /// given peer will use, based on both peers' negotiated feature vectors.
+    /// V1 only when both peers advertise `onchain_full_payment_hash` support.
+    fn negotiated_commitment_contract_version(
+        &self,
+        peer_pubkey: &Pubkey,
+    ) -> CommitmentContractVersion {
+        let peer_supports = self
+            .peer_session_map
+            .get(peer_pubkey)
+            .and_then(|peer| peer.features.as_ref())
+            .map(|features| features.supports_onchain_full_payment_hash());
+        CommitmentContractVersion::for_negotiated(
+            self.features.supports_onchain_full_payment_hash(),
+            peer_supports,
+        )
     }
 
     pub async fn trace_tx(
@@ -7254,6 +7279,7 @@ where
             open_channel.reserved_ckb_amount,
             open_channel.funding_fee_rate,
             open_channel.commitment_fee_rate,
+            self.negotiated_commitment_contract_version(&peer_pubkey),
             open_channel.commitment_delay_epoch,
             open_channel.max_tlc_number_in_flight,
         )

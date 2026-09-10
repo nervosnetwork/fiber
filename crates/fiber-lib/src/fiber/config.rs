@@ -610,7 +610,12 @@ impl FiberConfig {
     pub fn gen_node_features(&self) -> FeatureVector {
         // TODO: override default features from config settings
         // ...
-        FeatureVector::default()
+        let mut fv = FeatureVector::default();
+        // Advertise support for committing the full 32-byte payment hash
+        // on-chain; channels are only upgraded to the V1 commitment contract
+        // layout when the peer also advertises this feature.
+        fv.set_onchain_full_payment_hash_optional();
+        fv
     }
 }
 

@@ -57,7 +57,8 @@ use crate::{
     },
 };
 use fiber_types::{
-    ChannelData, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey, RevocationData, SettlementData,
+    ChannelData, CommitmentContractVersion, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey,
+    RevocationData, SettlementData, TLCId,
 };
 
 use super::WatchtowerStore;
@@ -770,6 +771,81 @@ struct WatchedSettlementScan {
     tracked_tlcs_by_outpoint: HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
 }
 
+fn settlement_data_for_commitment(
+    channel_data: &ChannelData,
+    for_remote: bool,
+    commitment_number: u64,
+) -> &SettlementData {
+    if for_remote {
+        if channel_data
+            .revocation_data
+            .as_ref()
+            .and_then(|revocation| {
+                commitment_number
+                    .checked_sub(1)
+                    .map(|previous| revocation.commitment_number == previous)
+            })
+            .unwrap_or(false)
+        {
+            &channel_data.remote_settlement_data
+        } else {
+            &channel_data.pending_remote_settlement_data
+        }
+    } else {
+        &channel_data.local_settlement_data
+    }
+}
+
+fn tracked_settlement_tlcs(
+    commitment_lock: &Script,
+    channel_data: &ChannelData,
+    for_remote: bool,
+) -> Option<Vec<TrackedSettlementTlc>> {
+    let lock_args = commitment_lock.args().raw_data();
+    if lock_args.len() < 56 {
+        return None;
+    }
+    let commitment_number = u64::from_be_bytes(lock_args[28..36].try_into().ok()?);
+    let settlement_data =
+        settlement_data_for_commitment(channel_data, for_remote, commitment_number);
+    let committed_witness_hash = &lock_args[36..56];
+    let settlement_witness = settlement_data_to_witness(
+        settlement_data,
+        for_remote,
+        CommitmentContractVersion::Legacy,
+        channel_data.local_settlement_key.clone(),
+        channel_data.remote_settlement_key,
+    );
+    if blake160(&settlement_witness).as_ref() != committed_witness_hash {
+        warn!(
+            "Settlement snapshot hash does not match commitment lock for channel {:?}, commitment {}",
+            channel_data.channel_id, commitment_number
+        );
+        return None;
+    }
+
+    Some(
+        settlement_data
+            .tlcs
+            .iter()
+            .map(|tlc| TrackedSettlementTlc {
+                tlc_id: if for_remote {
+                    tlc.tlc_id
+                } else {
+                    tlc.tlc_id.flip()
+                },
+                payment_hash: tlc.payment_hash,
+                hash_algorithm: tlc.hash_algorithm,
+                witness: settlement_tlc_to_witness(
+                    tlc,
+                    for_remote,
+                    CommitmentContractVersion::Legacy,
+                ),
+            })
+            .collect(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_watched_settlement_txs<S: WatchtowerStore>(
     search_key: SearchKey,
@@ -1117,7 +1193,8 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
     let since = u64::from_le_bytes(lock_script_args[20..28].try_into().expect("u64 from slice"));
-
+    let commitment_number =
+        u64::from_be_bytes(lock_script_args[28..36].try_into().expect("u64 from slice"));
     let delay_epoch = {
         let since = Since::from_raw_value(since);
         since
@@ -1380,7 +1457,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
             if settlement_data.tlcs.len() != tracked_tlcs.len()
                 || settlement_data.tlcs.iter().zip(tracked_tlcs).any(
                     |(settlement_tlc, tracked_tlc)| {
-                        settlement_tlc_to_witness(settlement_tlc, for_remote) != tracked_tlc.witness
+                        settlement_tlc_to_witness(
+                            settlement_tlc,
+                            for_remote,
+                            CommitmentContractVersion::Legacy,
+                        ) != tracked_tlc.witness
                     },
                 )
             {
@@ -1481,6 +1562,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     settlement_data_to_witness(
                         settlement_data,
                         for_remote,
+                        CommitmentContractVersion::Legacy,
                         channel_data.local_settlement_key.clone(),
                         channel_data.remote_settlement_key,
                     ),
@@ -1503,6 +1585,11 @@ fn build_settlement_tx<S: WatchtowerStore>(
     };
     new_commitment_lock_script_args.extend_from_slice(&new_script_hash);
     new_commitment_lock_script_args.extend_from_slice(&[0x01]);
+    // Propagate the commitment contract features bitmap so a V1 commitment
+    // cell stays V1 after settlement.
+    if lock_script_args.len() > 57 {
+        new_commitment_lock_script_args.extend_from_slice(&lock_script_args[57..]);
+    }
 
     let placeholder_witness_for_change = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
@@ -2590,7 +2677,11 @@ mod tests {
             tlc_id: settlement_tlc.tlc_id.flip(),
             payment_hash: settlement_tlc.payment_hash,
             hash_algorithm: settlement_tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(&settlement_tlc, false),
+            witness: settlement_tlc_to_witness(
+                &settlement_tlc,
+                false,
+                CommitmentContractVersion::Legacy,
+            ),
         }];
         let settlement_data = SettlementData {
             local_amount: 100_000_000_000,
@@ -2615,6 +2706,7 @@ mod tests {
                 settlement_data_to_witness(
                     &settlement_data,
                     false,
+                    CommitmentContractVersion::Legacy,
                     local_settlement_key,
                     remote_settlement_key,
                 )

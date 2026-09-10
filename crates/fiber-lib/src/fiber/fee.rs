@@ -19,12 +19,23 @@ use ckb_types::{
     packed::{CellInput, CellOutput},
     prelude::Pack,
 };
+use fiber_types::CommitmentContractVersion;
 use molecule::prelude::Entity;
 
 const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
 
-fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
-    let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 57]);
+fn commitment_tx_size(
+    udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
+) -> usize {
+    let commitment_lock_args_len = match commitment_contract_version {
+        CommitmentContractVersion::Legacy => 57,
+        CommitmentContractVersion::V1 => 58,
+    };
+    let commitment_lock_script = get_script_by_contract(
+        Contract::CommitmentLock,
+        &vec![0u8; commitment_lock_args_len],
+    );
     let cell_deps_count = get_cell_deps_count(vec![Contract::FundingLock], udt_type_script);
     let cell_deps = vec![CellDep::default(); cell_deps_count].pack();
 
@@ -104,9 +115,10 @@ pub(crate) fn shutdown_tx_size(
 pub(crate) fn checked_calculate_commitment_tx_fee(
     fee_rate: u64,
     udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
 ) -> Result<u64, ProcessingChannelError> {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
-    let tx_size = commitment_tx_size(udt_type_script) as u64;
+    let tx_size = commitment_tx_size(udt_type_script, commitment_contract_version) as u64;
     checked_fee_from_rate(fee_rate, tx_size, "Commitment")
 }
 
@@ -176,9 +188,14 @@ pub(crate) fn calculate_tlc_forward_fee(
 pub(crate) fn check_commitment_reserved_fee(
     commitment_fee_rate: u64,
     udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
     reserved_fee: u64,
 ) -> ProcessingChannelResult {
-    let commitment_fee = checked_calculate_commitment_tx_fee(commitment_fee_rate, udt_type_script)?;
+    let commitment_fee = checked_calculate_commitment_tx_fee(
+        commitment_fee_rate,
+        udt_type_script,
+        commitment_contract_version,
+    )?;
     let required_reserved_fee = commitment_fee.checked_mul(2).ok_or_else(|| {
         ProcessingChannelError::InvalidParameter(format!(
             "Commitment fee {} overflows while checking twice the reserved fee",
@@ -208,12 +225,14 @@ fn minimum_acceptor_reserved_ckb_amount(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_open_channel_parameters(
     udt_type_script: &Option<Script>,
     shutdown_script: &Script,
     reserved_ckb_amount: u64,
     funding_fee_rate: u64,
     commitment_fee_rate: u64,
+    commitment_contract_version: CommitmentContractVersion,
     commitment_delay_epoch: u64,
     max_tlc_number_in_flight: u64,
 ) -> ProcessingChannelResult {
@@ -268,7 +287,12 @@ pub(crate) fn check_open_channel_parameters(
                 reserved_ckb_amount, occupied_capacity
             ))
         })?;
-    check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
+    check_commitment_reserved_fee(
+        commitment_fee_rate,
+        udt_type_script,
+        commitment_contract_version,
+        reserved_fee,
+    )?;
 
     // commitment_delay_epoch
     let epoch = EpochNumberWithFraction::from_full_value_unchecked(commitment_delay_epoch);
