@@ -10518,16 +10518,11 @@ pub fn create_witness_for_funding_cell(
 pub fn create_witness_for_commitment_cell_with_pending_tlcs(
     index: u8,
     pending_tlcs: &[u8],
-    commitment_contract_version: CommitmentContractVersion,
 ) -> Vec<u8> {
-    let htlc_witness_len = match commitment_contract_version {
-        CommitmentContractVersion::Legacy => 85,
-        CommitmentContractVersion::V1 => 97,
-    };
     let mut witness = Vec::new();
     witness.extend_from_slice(&XUDT_COMPATIBLE_WITNESS);
     witness.extend_from_slice(&[index]);
-    witness.extend_from_slice(&[(pending_tlcs.len() / htlc_witness_len) as u8]);
+    witness.extend_from_slice(&[(pending_tlcs.len() / 85) as u8]);
     witness.extend_from_slice(pending_tlcs);
     witness.extend_from_slice(&[0u8; 65]);
     witness
