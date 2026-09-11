@@ -2963,6 +2963,71 @@ mod tests {
     }
 
     #[test]
+    fn settlement_transaction_v1_witness_is_12_bytes_larger_per_pending_htlc() {
+        let local_settlement_key = Privkey::from(&[3u8; 32]);
+        let remote_settlement_key = Privkey::from(&[4u8; 32]).pubkey();
+        let payment_hash: Hash256 = [8u8; 32].into();
+        let settlement_data = SettlementData {
+            local_amount: 2_000,
+            remote_amount: 3_000,
+            tlcs: vec![fiber_types::SettlementTlc {
+                tlc_id: TLCId::Offered(0),
+                hash_algorithm: HashAlgorithm::CkbHash,
+                payment_amount: 1_000,
+                payment_hash,
+                expiry: 0,
+                local_key: Privkey::from(&[1u8; 32]),
+                remote_key: Privkey::from(&[2u8; 32]).pubkey(),
+            }],
+        };
+        let unlock = Unlock {
+            unlock_type: 0,
+            with_preimage: false,
+            signature: [0u8; 65],
+            preimage: None,
+        };
+
+        let settlement_transaction = |version| {
+            let settlement_witness = first_settlement_witness(
+                &settlement_data,
+                false,
+                version,
+                local_settlement_key.clone(),
+                remote_settlement_key,
+            );
+            let commitment_witness = [
+                XUDT_COMPATIBLE_WITNESS.as_slice(),
+                &[1u8],
+                settlement_witness.as_slice(),
+                unlock.to_witness().as_slice(),
+            ]
+            .concat();
+            Transaction::default()
+                .as_advanced_builder()
+                .input(CellInput::default())
+                .output(CellOutput::new_builder().lock(Script::default()).build())
+                .output_data(Bytes::default())
+                .witness(commitment_witness.pack())
+                .witness(WitnessArgs::default().as_bytes().pack())
+                .build()
+        };
+
+        let legacy_tx = settlement_transaction(CommitmentContractVersion::Legacy);
+        let v1_tx = settlement_transaction(CommitmentContractVersion::V1);
+        let legacy_witness_len = legacy_tx.witnesses().get(0).unwrap().raw_data().len();
+        let v1_witness_len = v1_tx.witnesses().get(0).unwrap().raw_data().len();
+
+        assert_eq!(v1_witness_len - legacy_witness_len, 12);
+        assert_eq!(
+            v1_tx.data().serialized_size_in_block() - legacy_tx.data().serialized_size_in_block(),
+            12
+        );
+        // checked_calculate_commitment_tx_fee is intentionally not the assertion target:
+        // it estimates commitment/funding transaction overhead before this settlement witness
+        // is built, whereas build_settlement_tx serializes this witness in the actual settlement.
+    }
+
+    #[test]
     fn versioned_watch_channel_registration_reaches_store() {
         let store = TestWatchtowerStore::default();
         let settlement_data = SettlementData {
