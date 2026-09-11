@@ -34,11 +34,13 @@ use fiber_store::migration::{
     MigrateConfirmFn, MigrateProgressFn, INIT_DB_VERSION, MIGRATION_VERSION_KEY,
 };
 use fiber_types::schema::*;
+#[cfg(feature = "watchtower")]
+use fiber_types::CommitmentContractVersion;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
-    ChannelState, CommitmentContractVersion, Cursor, Direction, Hash256, PaymentCustomRecords,
-    PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey, SettlementData,
-    ShutdownSettlementRecord, TLCId, TimedResult, CURSOR_SIZE,
+    ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord, TLCId,
+    TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};

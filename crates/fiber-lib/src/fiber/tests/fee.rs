@@ -1,15 +1,23 @@
 use crate::fiber::fee::checked_calculate_commitment_tx_fee;
+#[cfg(feature = "watchtower")]
 use crate::watchtower::build_settlement_transaction;
+#[cfg(feature = "watchtower")]
 use ckb_types::core::TransactionBuilder;
+#[cfg(feature = "watchtower")]
 use ckb_types::packed::{Bytes, CellInput, CellOutput, Script, WitnessArgs};
+#[cfg(feature = "watchtower")]
 use ckb_types::prelude::Builder;
 use fiber_types::CommitmentContractVersion;
+#[cfg(feature = "watchtower")]
 use fiber_types::{Hash256, HashAlgorithm, Privkey, SettlementData, TLCId};
+#[cfg(feature = "watchtower")]
 use molecule::prelude::Entity;
 
+#[cfg(feature = "watchtower")]
 use crate::fiber::channel::{settlement_data_to_witness, XUDT_COMPATIBLE_WITNESS};
 
 #[test]
+#[cfg(feature = "watchtower")]
 fn settlement_transaction_v1_witness_is_12_bytes_larger_per_pending_htlc() {
     let settlement_data = SettlementData {
         local_amount: 2_000,
