@@ -127,11 +127,11 @@ use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
     ChannelOpenSignerMaterial, ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags,
-    EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords,
-    PaymentSession, PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState,
-    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
-    RetryableTlcOperation, RevocationData, RouterHop, SettlementData, ShuttingDownFlags, TLCId,
-    TlcErr, TlcErrPacket, TlcErrorCode, UdtCfgInfos, NO_SHARED_SECRET,
+    EcdsaSignature, EntityHex, FeatureVector, Hash256, InMemorySigner, NodeAnnouncement,
+    PaymentCustomRecords, PaymentSession, PaymentStatus, PeeledPaymentOnionPacket,
+    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
+    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -6713,7 +6713,9 @@ where
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
 
-        let seed = self.generate_channel_seed();
+        let channel_signer = ChannelSigner::local(InMemorySigner::generate_from_seed(
+            &self.generate_channel_seed(),
+        ));
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(
@@ -6730,7 +6732,7 @@ where
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
-                    seed,
+                    channel_signer,
                     tlc_info: ChannelTlcInfo::new(
                         tlc_min_value.unwrap_or(self.tlc_min_value),
                         tlc_expiry_delta,
@@ -6829,7 +6831,13 @@ where
         );
         check_tlc_delta_with_epochs(tlc_expiry_delta, commitment_delay_epochs)?;
 
-        let seed = self.generate_channel_seed();
+        let channel_signer = if external_channel_signer.is_some() {
+            ChannelSigner::external()
+        } else {
+            ChannelSigner::local(InMemorySigner::generate_from_seed(
+                &self.generate_channel_seed(),
+            ))
+        };
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(
@@ -6847,7 +6855,7 @@ where
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
                         funding_amount,
-                        seed,
+                        channel_signer,
                         tlc_info: ChannelTlcInfo::new(
                             tlc_min_value.unwrap_or(self.tlc_min_value),
                             tlc_expiry_delta,
@@ -6928,7 +6936,9 @@ where
             return Ok((channel.clone(), temp_channel_id, id));
         }
 
-        let seed = self.generate_channel_seed();
+        let channel_signer = ChannelSigner::local(InMemorySigner::generate_from_seed(
+            &self.generate_channel_seed(),
+        ));
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(
@@ -6956,7 +6966,7 @@ where
                     public_channel_info: open_channel
                         .is_public()
                         .then_some(PublicChannelInfo::new()),
-                    seed,
+                    channel_signer,
                     open_channel,
                     shutdown_script,
                     channel_id_sender: Some(tx),

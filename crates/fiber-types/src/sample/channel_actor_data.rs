@@ -69,7 +69,6 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
 
     ChannelActorData {
         state: ChannelState::ChannelReady,
-        signer_state: crate::ChannelSignerState::Internal,
         local_commitment_points: HashMap::new(),
         local_public_nonces: HashMap::new(),
         public_channel_info: None,
@@ -90,7 +89,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         commitment_fee_rate: 0,
         commitment_delay_epoch: 0,
         funding_fee_rate: 0,
-        signer,
+        signer: Some(signer),
         local_channel_public_keys,
         commitment_numbers: CommitmentNumbers::default(),
         local_constraints: ChannelConstraints::default(),
@@ -127,6 +126,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         last_was_revoke: false,
         external_funding: None,
         created_at: SystemTime::UNIX_EPOCH,
+        signing_context: Default::default(),
     }
 }
 
@@ -276,7 +276,6 @@ fn sample_full(seed: u64) -> ChannelActorData {
 
     ChannelActorData {
         state: ChannelState::ChannelReady,
-        signer_state: crate::ChannelSignerState::Internal,
         local_commitment_points: HashMap::new(),
         local_public_nonces: HashMap::new(),
         public_channel_info: Some(public_channel_info),
@@ -313,7 +312,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         commitment_fee_rate: 1000,
         commitment_delay_epoch: 40,
         funding_fee_rate: 1000,
-        signer,
+        signer: Some(signer),
         local_channel_public_keys,
         commitment_numbers: CommitmentNumbers::default(),
         local_constraints: ChannelConstraints::default(),
@@ -356,6 +355,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         last_was_revoke: true,
         external_funding: None,
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
+        signing_context: Default::default(),
     }
 }
 

@@ -27,6 +27,11 @@ impl ChannelActorState {
             .expect("ChannelActorData samples should not be empty");
 
         ChannelActorState {
+            channel_signer: crate::fiber::channel_signer::ChannelSigner::restore(
+                core.signer.as_ref(),
+                &core.local_channel_public_keys,
+            )
+            .unwrap(),
             core,
             waiting_peer_response: None,
             reestablish_started_at: None,
@@ -53,6 +58,11 @@ impl ChannelActorState {
             .expect("ChannelActorData samples should have at least 2 elements");
 
         ChannelActorState {
+            channel_signer: crate::fiber::channel_signer::ChannelSigner::restore(
+                core.signer.as_ref(),
+                &core.local_channel_public_keys,
+            )
+            .unwrap(),
             core,
             waiting_peer_response: None,
             reestablish_started_at: None,

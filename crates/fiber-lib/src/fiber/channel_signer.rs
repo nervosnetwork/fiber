@@ -6,7 +6,7 @@
 //! continuation still goes through [`SignerNotification`], so local and remote
 //! paths stay uniform without a shared signer actor.
 //!
-//! Distinct from persistable [`fiber_types::ChannelSignerState`], which tracks
+//! Distinct from persistable [`fiber_types::ChannelSigningContext`], which tracks
 //! awaiting/signed receipts on disk.
 //!
 //! Morphologically aligned with [`crate::watchtower::WatchtowerSigner`]:
@@ -33,7 +33,7 @@ pub struct SubmitChannelSignatureCommand {
 /// Asynchronous channel-signature result delivered to the channel actor.
 ///
 /// The outstanding plaintext is always recovered from
-/// [`fiber_types::ChannelSignerState`]; this notification only carries the
+/// [`fiber_types::ChannelSigningContext`]; this notification only carries the
 /// signature result (and optional RPC reply port).
 #[derive(Debug)]
 pub enum SignerNotification {
@@ -57,7 +57,7 @@ pub enum SignerNotification {
 pub enum ChannelSignOutcome {
     /// Local key material produced a notification immediately.
     Ready(SignerNotification),
-    /// No local keys; wait for an external submit against `ChannelSignerState`.
+    /// No local keys; wait for an external submit against `ChannelSigningContext`.
     AwaitingExternal,
 }
 
@@ -84,11 +84,37 @@ impl ChannelSigner {
         Self::External
     }
 
-    /// Build from optional local signer material (e.g. `get_local_signer()`).
-    pub fn from_local_material(signer: Option<InMemorySigner>) -> Self {
-        match signer {
-            Some(signer) => Self::Local(signer),
-            None => Self::External,
+    /// Restore once when loading a channel, rejecting inconsistent local keys.
+    pub fn restore(
+        material: Option<&InMemorySigner>,
+        public_keys: &fiber_types::ChannelBasePublicKeys,
+    ) -> Result<Self, String> {
+        match material {
+            Some(signer) if signer.get_base_public_keys() == *public_keys => {
+                Ok(Self::Local(signer.clone()))
+            }
+            Some(_) => Err("Local signer does not match channel public keys".into()),
+            None => Ok(Self::External),
+        }
+    }
+
+    /// Local key material, when this signer owns it.
+    pub fn local_material(&self) -> Option<&InMemorySigner> {
+        match self {
+            Self::Local(signer) => Some(signer),
+            Self::External => None,
+        }
+    }
+
+    /// Adapt the pending request to the external RPC without changing channel progress.
+    pub fn signing_status(
+        &self,
+        context: &fiber_types::ChannelSigningContext,
+    ) -> fiber_types::ChannelSigningStatus {
+        if self.is_local() {
+            fiber_types::ChannelSigningStatus::NoSignatureRequired
+        } else {
+            context.signing_status()
         }
     }
 
@@ -100,7 +126,7 @@ impl ChannelSigner {
     ///
     /// Local signers return [`ChannelSignOutcome::Ready`] immediately. External
     /// signers return [`ChannelSignOutcome::AwaitingExternal`]; the caller must
-    /// already have recorded the request in [`fiber_types::ChannelSignerState`].
+    /// already have recorded the request in [`fiber_types::ChannelSigningContext`].
     pub fn request_signature(
         &self,
         channel_id: Hash256,

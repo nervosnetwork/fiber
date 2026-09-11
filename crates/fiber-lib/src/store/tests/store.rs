@@ -1293,9 +1293,10 @@ fn test_channel_actor_state_store() {
     let channel_id = gen_rand_sha256_hash();
 
     let state = ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
-            signer_state: fiber_types::ChannelSignerState::Internal,
+            signing_context: Default::default(),
             local_commitment_points: HashMap::new(),
             local_public_nonces: HashMap::new(),
             public_channel_info: Some(PublicChannelInfo {
@@ -1336,11 +1337,8 @@ fn test_channel_actor_state_store() {
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script: Script::default(),
-            local_channel_public_keys: ChannelBasePublicKeys {
-                funding_pubkey: gen_rand_fiber_public_key(),
-                tlc_base_key: gen_rand_fiber_public_key(),
-            },
-            signer,
+            local_channel_public_keys: signer.get_base_public_keys(),
+            signer: Some(signer),
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
@@ -1446,9 +1444,10 @@ fn sample_channel_actor_state(
     let pub_nonce = sec_nonce.public_nonce();
 
     ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state,
-            signer_state: fiber_types::ChannelSignerState::Internal,
+            signing_context: Default::default(),
             local_commitment_points: HashMap::new(),
             local_public_nonces: HashMap::new(),
             public_channel_info: Some(PublicChannelInfo {
@@ -1489,11 +1488,8 @@ fn sample_channel_actor_state(
             retryable_tlc_operations: Default::default(),
             waiting_forward_tlc_tasks: Default::default(),
             local_shutdown_script: Script::default(),
-            local_channel_public_keys: ChannelBasePublicKeys {
-                funding_pubkey: gen_rand_fiber_public_key(),
-                tlc_base_key: gen_rand_fiber_public_key(),
-            },
-            signer,
+            local_channel_public_keys: signer.get_base_public_keys(),
+            signer: Some(signer),
             remote_channel_public_keys: Some(ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),

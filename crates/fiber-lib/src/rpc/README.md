@@ -1720,13 +1720,12 @@ Public channel-signer material required to send Fiber's `OpenChannel` message.
 <a id="#type-channelsigningstatus"></a>
 ### Type `ChannelSigningStatus`
 
-Read-only projection of a channel's signer sub-state.
+Read-only projection of a channel's external signing requests.
 
 
 #### Enum with values of
 
-* `Internal` - This channel uses the node's local signer.
-* `NoSignatureRequired` - This channel uses an external signer, but no signature is currently required.
+* `NoSignatureRequired` - No external signature is currently required for this channel.
 * `SignatureRequired` - Channel processing is paused until this exact signature is submitted.
 ---
 

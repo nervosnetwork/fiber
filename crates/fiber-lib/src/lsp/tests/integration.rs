@@ -649,7 +649,7 @@ async fn submit_hosted_signature(
 }
 
 fn persisted_signer_state(node: &NetworkNode, channel_id: crate::fiber_types::Hash256) -> Vec<u8> {
-    bincode::serialize(&node.get_channel_actor_state(channel_id).signer_state)
+    bincode::serialize(&node.get_channel_actor_state(channel_id).signing_context)
         .expect("serialize persisted signer state")
 }
 

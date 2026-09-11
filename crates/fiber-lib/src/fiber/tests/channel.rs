@@ -1770,13 +1770,12 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
 
     let state = node_a.get_channel_actor_state(channel_id);
     assert!(matches!(
-        state.signer_state.signing_status(),
+        state.channel_signing_status(),
         fiber_types::ChannelSigningStatus::NoSignatureRequired
     ));
-    assert_ne!(
-        state.local_channel_public_keys.funding_pubkey,
-        state.signer.funding_key.pubkey(),
-        "the node must not fall back to its local channel funding key"
+    assert!(
+        state.signer.is_none(),
+        "an external signer channel must not retain local channel private keys"
     );
 
     let payment = node_a
@@ -1969,7 +1968,7 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
         .and_then(|info| info.channel_announcement.as_ref())
         .is_some_and(|announcement| announcement.is_signed()));
     assert!(matches!(
-        state.signer_state.signing_status(),
+        state.channel_signing_status(),
         fiber_types::ChannelSigningStatus::NoSignatureRequired
     ));
 }
@@ -2187,7 +2186,7 @@ async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSig
                 && state_b.tlc_state.all_tlcs().count() == 0
                 && !state_a.tlc_state.waiting_ack
                 && !state_b.tlc_state.waiting_ack
-                && !state_a.signer_state.is_awaiting_signature()
+                && !state_a.signing_context.is_awaiting_signature()
             {
                 break;
             }
@@ -2232,7 +2231,7 @@ async fn wait_for_external_signer_recovery(
                 && state_b.tlc_state.all_tlcs().count() == 0
                 && !state_a.tlc_state.waiting_ack
                 && !state_b.tlc_state.waiting_ack
-                && !state_a.signer_state.is_awaiting_signature()
+                && !state_a.signing_context.is_awaiting_signature()
             {
                 break;
             }
@@ -2353,7 +2352,7 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
         live_external_signer_buffers(&tenant, channel_id)
             .await
             .pending_received_commitment_tail
-            && state.signer_state.is_awaiting_signature()
+            && state.signing_context.is_awaiting_signature()
     })
     .await;
     public_node.restart().await;
@@ -2389,7 +2388,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
         .expect("start payment for pending revoke tail");
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
-        state.signer_state.is_awaiting_signature() && !state.tlc_state.waiting_ack
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
     })
     .await;
     ExternalSignerHttpClient {
@@ -2400,7 +2399,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
     .await;
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
-        state.signer_state.is_awaiting_signature() && state.tlc_state.waiting_ack
+        state.signing_context.is_awaiting_signature() && state.tlc_state.waiting_ack
     })
     .await;
     wait_until_async_timeout(|| async {
@@ -2420,7 +2419,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
         live_external_signer_buffers(&tenant, channel_id)
             .await
             .pending_received_revoke_tail
-            && state.signer_state.is_awaiting_signature()
+            && state.signing_context.is_awaiting_signature()
     })
     .await;
     public_node.restart().await;
@@ -13521,9 +13520,10 @@ mod udt_funding_cell_capacity {
         let remote_funding = gen_rand_fiber_public_key();
 
         ChannelActorState {
+            channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
             core: ChannelActorData {
                 state: ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty()),
-                signer_state: fiber_types::ChannelSignerState::Internal,
+                signing_context: Default::default(),
                 local_commitment_points: HashMap::new(),
                 local_public_nonces: HashMap::new(),
                 public_channel_info: None,
@@ -13544,7 +13544,7 @@ mod udt_funding_cell_capacity {
                 commitment_fee_rate: 0,
                 commitment_delay_epoch: 0,
                 funding_fee_rate: 0,
-                signer,
+                signer: Some(signer),
                 local_channel_public_keys: ChannelBasePublicKeys {
                     funding_pubkey: local_funding,
                     tlc_base_key: gen_rand_fiber_public_key(),

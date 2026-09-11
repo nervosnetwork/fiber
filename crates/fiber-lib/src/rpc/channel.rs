@@ -865,8 +865,7 @@ where
 fn to_rpc_channel_signing_status(
     state: &crate::fiber::channel::ChannelActorState,
 ) -> Result<ChannelSigningStatus, String> {
-    Ok(match state.signer_state.signing_status() {
-        InternalChannelSigningStatus::Internal => ChannelSigningStatus::Internal,
+    Ok(match state.channel_signing_status() {
         InternalChannelSigningStatus::NoSignatureRequired => {
             ChannelSigningStatus::NoSignatureRequired
         }

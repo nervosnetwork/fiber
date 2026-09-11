@@ -387,24 +387,19 @@ pub enum ChannelSigningTransition {
     SignChannelAnnouncement,
 }
 
-/// Persisted signer sub-state for a channel.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub enum ChannelSignerState {
-    /// The node owns and invokes the channel signer directly.
-    #[default]
-    Internal,
-    /// The node only holds public channel material and waits for external signatures.
-    External(ExternalChannelSignerState),
+/// Immutable request to resume after signer unavailability or node restart.
+/// This is not a channel lifecycle or an idle/busy state.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PendingChannelSignature {
+    pub request_id: SignatureRequestId,
+    pub request: ChannelSignatureRequest,
 }
 
-/// Persisted state for one external channel signer.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExternalChannelSignerState {
-    state: ExternalSignerState,
-    /// Last signature that successfully resumed this channel.
-    ///
-    /// Used to answer identical network retries with `AlreadyApplied`.
-    #[serde(default)]
+/// Signing context, separate from the channel lifecycle. Only `pending_signature`
+/// represents unfinished signing; the last applied result identifies submission retries.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ChannelSigningContext {
+    pub pending_signature: Option<PendingChannelSignature>,
     last_applied: Option<LastAppliedChannelSignature>,
 }
 
@@ -428,19 +423,6 @@ pub enum SubmitSignatureOutcome {
     Applied,
     /// The same signature was already applied for this request.
     AlreadyApplied,
-}
-
-/// Current state-machine location of an external signer channel.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub enum ExternalSignerState {
-    /// No signature is currently required.
-    #[default]
-    Ready,
-    /// Channel processing is paused until this exact signature is submitted.
-    AwaitingSignature {
-        request_id: SignatureRequestId,
-        request: ChannelSignatureRequest,
-    },
 }
 
 /// Public channel-signer material required to send Fiber's `OpenChannel` message.
@@ -481,10 +463,9 @@ pub struct NextChannelSignerMaterial {
     pub next_revocation_nonce: Option<PubNonce>,
 }
 
-/// Read-only public projection returned by the future signing-status RPC.
+/// Read-only projection of a channel's external signing requests.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum ChannelSigningStatus {
-    Internal,
     NoSignatureRequired,
     SignatureRequired {
         request_id: SignatureRequestId,
@@ -496,14 +477,12 @@ pub enum ChannelSigningStatus {
     },
 }
 
-/// Invalid transition attempted on the channel signer sub-state machine.
+/// Invalid operation on the channel signing context.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum ChannelSignerStateError {
-    #[error("channel does not use an external signer")]
-    InternalSigner,
-    #[error("channel is already waiting for an external signature")]
+pub enum ChannelSigningContextError {
+    #[error("channel already has a pending signature")]
     AlreadyAwaitingSignature,
-    #[error("channel is not waiting for an external signature")]
+    #[error("channel is not waiting for a signature")]
     NoSignatureRequired,
     #[error("signature request id does not match the current request")]
     RequestMismatch,
@@ -511,151 +490,97 @@ pub enum ChannelSignerStateError {
     ResultMismatch,
 }
 
-impl ChannelSignerState {
-    /// Construct an external signer in its idle state.
-    pub fn external() -> Self {
-        Self::External(ExternalChannelSignerState {
-            state: ExternalSignerState::Ready,
-            last_applied: None,
-        })
-    }
-
-    /// Begin waiting for an external signature.
+impl ChannelSigningContext {
+    /// Install one immutable request without displacing an outstanding signature.
     pub fn request_signature(
         &mut self,
         request_id: SignatureRequestId,
         request: ChannelSignatureRequest,
-    ) -> Result<(), ChannelSignerStateError> {
-        let Self::External(external) = self else {
-            return Err(ChannelSignerStateError::InternalSigner);
-        };
-        if !matches!(external.state, ExternalSignerState::Ready) {
-            return Err(ChannelSignerStateError::AlreadyAwaitingSignature);
+    ) -> Result<(), ChannelSigningContextError> {
+        if self.is_awaiting_signature() {
+            return Err(ChannelSigningContextError::AlreadyAwaitingSignature);
         }
-        external.state = ExternalSignerState::AwaitingSignature {
+        self.pending_signature = Some(PendingChannelSignature {
             request_id,
             request,
-        };
+        });
         Ok(())
     }
 
-    /// Validate and clone the current request without changing state.
+    /// Validate a response without changing execution progress.
     pub fn pending_request(
         &self,
-        request_id: SignatureRequestId,
-    ) -> Result<ChannelSignatureRequest, ChannelSignerStateError> {
-        let Self::External(external) = self else {
-            return Err(ChannelSignerStateError::InternalSigner);
-        };
-        let ExternalSignerState::AwaitingSignature {
-            request_id: expected_id,
-            request,
-        } = &external.state
-        else {
-            return Err(ChannelSignerStateError::NoSignatureRequired);
-        };
-        if *expected_id != request_id {
-            return Err(ChannelSignerStateError::RequestMismatch);
+        id: SignatureRequestId,
+    ) -> Result<ChannelSignatureRequest, ChannelSigningContextError> {
+        match &self.pending_signature {
+            Some(PendingChannelSignature {
+                request_id,
+                request,
+                ..
+            }) if *request_id == id => Ok(request.clone()),
+            Some(PendingChannelSignature { .. }) => {
+                Err(ChannelSigningContextError::RequestMismatch)
+            }
+            _ => Err(ChannelSigningContextError::NoSignatureRequired),
         }
-        Ok(request.clone())
     }
 
-    /// Return the pending request, or `AlreadyApplied` when this receipt is a retry.
+    /// Recognize a retry even while the next request is outstanding.
     pub fn replay_or_pending(
         &self,
         receipt: &LastAppliedChannelSignature,
-    ) -> Result<Option<ChannelSignatureRequest>, ChannelSignerStateError> {
-        let Self::External(external) = self else {
-            return Err(ChannelSignerStateError::InternalSigner);
-        };
-        if let Some(applied) = &external.last_applied {
+    ) -> Result<Option<ChannelSignatureRequest>, ChannelSigningContextError> {
+        if let Some(applied) = &self.last_applied {
             if applied == receipt {
                 return Ok(None);
             }
             if applied.request_id == receipt.request_id {
-                return Err(ChannelSignerStateError::ResultMismatch);
+                return Err(ChannelSigningContextError::ResultMismatch);
             }
         }
-        match &external.state {
-            ExternalSignerState::AwaitingSignature {
-                request_id,
-                request,
-            } => {
-                if *request_id != receipt.request_id {
-                    return Err(ChannelSignerStateError::RequestMismatch);
-                }
-                Ok(Some(request.clone()))
-            }
-            ExternalSignerState::Ready => Err(ChannelSignerStateError::NoSignatureRequired),
-        }
+        self.pending_request(receipt.request_id).map(Some)
     }
 
-    /// Mark the validated current request complete and remember its receipt.
+    /// Clear the request and install its receipt with the caller's protocol update.
+    /// The caller must persist the complete channel before acknowledging the result.
     pub fn complete_request(
         &mut self,
         receipt: LastAppliedChannelSignature,
-    ) -> Result<(), ChannelSignerStateError> {
+    ) -> Result<(), ChannelSigningContextError> {
         self.pending_request(receipt.request_id)?;
-        let Self::External(external) = self else {
-            unreachable!("pending_request already checked external state")
-        };
-        external.last_applied = Some(receipt);
-        external.state = ExternalSignerState::Ready;
+        self.last_applied = Some(receipt);
+        self.pending_signature = None;
         Ok(())
     }
 
-    /// Last signature that successfully resumed this channel, if any.
+    /// Most recently committed signature response.
     pub fn last_applied(&self) -> Option<&LastAppliedChannelSignature> {
-        match self {
-            Self::External(external) => external.last_applied.as_ref(),
-            Self::Internal => None,
-        }
+        self.last_applied.as_ref()
     }
 
-    /// Whether this channel is paused waiting for an external signature.
+    /// Whether the current step needs a signature response.
     pub fn is_awaiting_signature(&self) -> bool {
-        matches!(
-            self,
-            Self::External(ExternalChannelSignerState {
-                state: ExternalSignerState::AwaitingSignature { .. },
-                ..
-            })
-        )
+        self.pending_signature.is_some()
     }
 
-    /// The currently awaited signature request, if any.
-    ///
-    /// Used to re-drive a persisted request after a process restart: local
-    /// signing is deterministic, so re-submitting the same request yields the
-    /// same signature and the idempotency receipt keeps the completion safe.
+    /// The exact request to redrive after restart.
     pub fn awaiting_signature(&self) -> Option<(SignatureRequestId, ChannelSignatureRequest)> {
-        match self {
-            Self::External(ExternalChannelSignerState {
-                state:
-                    ExternalSignerState::AwaitingSignature {
-                        request_id,
-                        request,
-                    },
+        match &self.pending_signature {
+            Some(PendingChannelSignature {
+                request_id,
+                request,
                 ..
             }) => Some((*request_id, request.clone())),
             _ => None,
         }
     }
 
-    /// Public projection of the current signer state.
+    /// Project the pending request independently of the signer implementation.
     pub fn signing_status(&self) -> ChannelSigningStatus {
-        match self {
-            Self::Internal => ChannelSigningStatus::Internal,
-            Self::External(ExternalChannelSignerState {
-                state: ExternalSignerState::Ready,
-                ..
-            }) => ChannelSigningStatus::NoSignatureRequired,
-            Self::External(ExternalChannelSignerState {
-                state:
-                    ExternalSignerState::AwaitingSignature {
-                        request_id,
-                        request,
-                    },
+        match &self.pending_signature {
+            Some(PendingChannelSignature {
+                request_id,
+                request,
                 ..
             }) => ChannelSigningStatus::SignatureRequired {
                 request_id: *request_id,
@@ -663,6 +588,7 @@ impl ChannelSignerState {
                 content: request.content().clone(),
                 settlement_data: request.settlement_data().cloned(),
             },
+            _ => ChannelSigningStatus::NoSignatureRequired,
         }
     }
 }
@@ -730,7 +656,7 @@ mod tests {
 
     #[test]
     fn external_signer_state_requires_matching_request() {
-        let mut state = ChannelSignerState::external();
+        let mut state = ChannelSigningContext::default();
         let request_id = SignatureRequestId(Hash256::from([1; 32]));
         let request = ChannelSignatureRequest::SendCommitmentSigned {
             content: content(),
@@ -742,7 +668,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state.request_signature(SignatureRequestId(Hash256::from([4; 32])), request.clone()),
-            Err(ChannelSignerStateError::AlreadyAwaitingSignature)
+            Err(ChannelSigningContextError::AlreadyAwaitingSignature)
         );
         assert!(matches!(
             state.signing_status(),
@@ -754,7 +680,7 @@ mod tests {
         ));
         assert_eq!(
             state.complete_request(receipt(SignatureRequestId(Hash256::from([2; 32])), 1)),
-            Err(ChannelSignerStateError::RequestMismatch)
+            Err(ChannelSigningContextError::RequestMismatch)
         );
         state.complete_request(receipt(request_id, 1)).unwrap();
         assert!(matches!(
@@ -768,7 +694,7 @@ mod tests {
 
     #[test]
     fn completing_a_request_makes_identical_retries_already_applied() {
-        let mut state = ChannelSignerState::external();
+        let mut state = ChannelSigningContext::default();
         let request_id = SignatureRequestId(Hash256::from([1; 32]));
         let request = ChannelSignatureRequest::SendCommitmentSigned {
             content: content(),
@@ -783,7 +709,7 @@ mod tests {
 
     #[test]
     fn identical_retry_is_already_applied_while_waiting_for_the_next_request() {
-        let mut state = ChannelSignerState::external();
+        let mut state = ChannelSigningContext::default();
         let first = SignatureRequestId(Hash256::from([1; 32]));
         let second = SignatureRequestId(Hash256::from([2; 32]));
         state
@@ -809,13 +735,13 @@ mod tests {
         assert!(state.replay_or_pending(&applied).unwrap().is_none());
         assert!(matches!(
             state.replay_or_pending(&receipt(first, 2)),
-            Err(ChannelSignerStateError::ResultMismatch)
+            Err(ChannelSigningContextError::ResultMismatch)
         ));
     }
 
     #[test]
     fn replay_of_the_same_request_with_a_different_result_is_rejected() {
-        let mut state = ChannelSignerState::external();
+        let mut state = ChannelSigningContext::default();
         let request_id = SignatureRequestId(Hash256::from([1; 32]));
         state
             .request_signature(
@@ -829,13 +755,13 @@ mod tests {
         state.complete_request(receipt(request_id, 1)).unwrap();
         assert!(matches!(
             state.replay_or_pending(&receipt(request_id, 2)),
-            Err(ChannelSignerStateError::ResultMismatch)
+            Err(ChannelSigningContextError::ResultMismatch)
         ));
     }
 
     #[test]
     fn older_request_after_a_later_apply_is_no_longer_pending() {
-        let mut state = ChannelSignerState::external();
+        let mut state = ChannelSigningContext::default();
         let first = SignatureRequestId(Hash256::from([1; 32]));
         let second = SignatureRequestId(Hash256::from([2; 32]));
         state
@@ -860,38 +786,32 @@ mod tests {
         state.complete_request(receipt(second, 2)).unwrap();
         assert!(matches!(
             state.replay_or_pending(&receipt(first, 1)),
-            Err(ChannelSignerStateError::NoSignatureRequired)
+            Err(ChannelSigningContextError::NoSignatureRequired)
         ));
     }
 
     #[test]
-    fn internal_signer_rejects_external_state_transitions() {
-        let mut state = ChannelSignerState::Internal;
-        let request_id = SignatureRequestId(Hash256::from([6; 32]));
-
-        assert_eq!(
-            state.request_signature(
-                request_id,
+    fn processing_exposes_pending_request_independently_of_signer() {
+        let mut state = ChannelSigningContext::default();
+        state
+            .request_signature(
+                SignatureRequestId(Hash256::from([6; 32])),
                 ChannelSignatureRequest::SendCommitmentSigned {
                     content: content(),
                     settlement_data: settlement_data(),
-                }
-            ),
-            Err(ChannelSignerStateError::InternalSigner)
-        );
-        assert_eq!(
-            state.complete_request(receipt(request_id, 1)),
-            Err(ChannelSignerStateError::InternalSigner)
-        );
+                },
+            )
+            .unwrap();
+        assert!(state.is_awaiting_signature());
         assert!(matches!(
             state.signing_status(),
-            ChannelSigningStatus::Internal
+            ChannelSigningStatus::SignatureRequired { .. }
         ));
     }
 
     #[test]
-    fn signer_state_roundtrips_while_waiting() {
-        let mut state = ChannelSignerState::external();
+    fn signing_context_roundtrips_while_waiting() {
+        let mut state = ChannelSigningContext::default();
         let request_id = SignatureRequestId(Hash256::from([3; 32]));
         state
             .request_signature(
@@ -904,7 +824,7 @@ mod tests {
             .unwrap();
 
         let encoded = bincode::serialize(&state).unwrap();
-        let restored: ChannelSignerState = bincode::deserialize(&encoded).unwrap();
+        let restored: ChannelSigningContext = bincode::deserialize(&encoded).unwrap();
         assert!(matches!(
             restored.signing_status(),
             ChannelSigningStatus::SignatureRequired {

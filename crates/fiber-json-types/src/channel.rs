@@ -616,15 +616,13 @@ pub struct GetChannelSigningStatusResult {
     pub status: ChannelSigningStatus,
 }
 
-/// Read-only projection of a channel's signer sub-state.
+/// Read-only projection of a channel's external signing requests.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
 pub enum ChannelSigningStatus {
-    /// This channel uses the node's local signer.
-    Internal,
-    /// This channel uses an external signer, but no signature is currently required.
+    /// No external signature is currently required for this channel.
     NoSignatureRequired,
     /// Channel processing is paused until this exact signature is submitted.
     SignatureRequired {

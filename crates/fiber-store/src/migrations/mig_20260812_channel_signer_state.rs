@@ -14,11 +14,7 @@ pub use fiber_types_current::channel::ChannelActorData as NewChannelActorData;
 fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActorData, String> {
     Ok(NewChannelActorData {
         state: decode_as_new(old.state)?,
-        signer_state: fiber_types_current::ChannelSignerState::Internal,
-        public_channel_info: old
-            .public_channel_info
-            .map(decode_as_new)
-            .transpose()?,
+        public_channel_info: old.public_channel_info.map(decode_as_new).transpose()?,
         local_tlc_info: decode_as_new(old.local_tlc_info)?,
         remote_tlc_info: old.remote_tlc_info.map(decode_as_new).transpose()?,
         local_pubkey: decode_as_new(old.local_pubkey)?,
@@ -36,7 +32,7 @@ fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActo
         commitment_fee_rate: old.commitment_fee_rate,
         commitment_delay_epoch: old.commitment_delay_epoch,
         funding_fee_rate: old.funding_fee_rate,
-        signer: decode_as_new(old.signer)?,
+        signer: Some(decode_as_new(old.signer)?),
         local_channel_public_keys: decode_as_new(old.local_channel_public_keys)?,
         local_commitment_points: Default::default(),
         local_public_nonces: Default::default(),
@@ -72,6 +68,9 @@ fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActo
         last_was_revoke: old.last_was_revoke,
         connectivity_state: decode_as_new(old.connectivity_state)?,
         external_funding: old.external_funding.map(decode_as_new).transpose()?,
+        // The pre-LSP format signs synchronously; there is no external-signing continuation
+        // to recover. An absent pending signature does not clear waiting_ack or TLCs.
+        signing_context: Default::default(),
     })
 }
 
@@ -96,7 +95,7 @@ impl MigrationObj {
 impl Migration for MigrationObj {
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String> {
         info!(
-            "Migrating to {}: adding signer_state to ChannelActorData ...",
+            "Migrating to {}: adding optional local signing material and signing context to ChannelActorData ...",
             MIGRATION_DB_VERSION
         );
 
@@ -136,7 +135,6 @@ impl Migration for MigrationObj {
 #[cfg(test)]
 mod tests {
     use fiber_types_090::sample::StoreSample;
-    use fiber_types_current::ChannelSignerState;
 
     use crate::backend::StorageBackend;
 
@@ -153,26 +151,19 @@ mod tests {
     }
 
     #[test]
-    fn migrates_existing_channels_to_internal_signer_state() {
+    fn migrates_channels_without_losing_pending_protocol_work() {
         let store = gen_store();
         let old_samples = OldChannelActorData::samples(42);
-        let expected = old_samples
+        assert!(old_samples
             .iter()
-            .map(|old| {
-                (
-                    old.id,
-                    old.to_local_amount,
-                    bincode::serialize(&old.commitment_numbers).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
+            .any(|old| old.tlc_state.waiting_ack && old.tlc_state.all_tlcs().next().is_some()));
+        let expected = old_samples.clone();
         let keys = old_samples
             .into_iter()
             .enumerate()
             .map(|(index, old)| {
                 let key = vec![CHANNEL_ACTOR_STATE_PREFIX, index as u8 + 1];
-                let old_bytes =
-                    bincode::serialize(&old).expect("serialize old channel actor data");
+                let old_bytes = bincode::serialize(&old).expect("serialize old channel actor data");
                 StorageBackend::put(&store, &key, &old_bytes);
                 key
             })
@@ -184,16 +175,77 @@ mod tests {
         let migrated_bytes = keys
             .iter()
             .zip(expected)
-            .map(|(key, (expected_id, expected_to_local_amount, expected_commitment_numbers))| {
+            .map(|(key, old)| {
                 let new_bytes = StorageBackend::get(&store, key).expect("migrated value");
                 let new: NewChannelActorData = bincode::deserialize(&new_bytes)
                     .expect("deserialize migrated channel actor data");
-                assert!(matches!(new.signer_state, ChannelSignerState::Internal));
-                assert_eq!(new.id.as_ref(), expected_id.as_ref());
-                assert_eq!(new.to_local_amount, expected_to_local_amount);
+                assert!(new.signer.is_some());
+                assert_eq!(bincode::serialize(&old.signer).unwrap(), bincode::serialize(new.signer.as_ref().unwrap()).unwrap());
+                assert!(!new.signing_context.is_awaiting_signature());
+                assert!(new.signing_context.last_applied().is_none());
+                // Added execution fields must not reset any persisted protocol work.
+                macro_rules! assert_preserved {
+                    ($($field:ident),+ $(,)?) => { $(
+                        assert_eq!(bincode::serialize(&old.$field).unwrap(),
+                            bincode::serialize(&new.$field).unwrap(), stringify!($field));
+                    )+ };
+                }
+                assert_preserved!(
+                    state,
+                    public_channel_info,
+                    local_tlc_info,
+                    remote_tlc_info,
+                    local_pubkey,
+                    remote_pubkey,
+                    id,
+                    funding_tx_confirmed_at,
+                    is_acceptor,
+                    is_one_way,
+                    to_local_amount,
+                    to_remote_amount,
+                    local_reserved_ckb_amount,
+                    remote_reserved_ckb_amount,
+                    commitment_fee_rate,
+                    commitment_delay_epoch,
+                    funding_fee_rate,
+                    local_channel_public_keys,
+                    commitment_numbers,
+                    local_constraints,
+                    remote_constraints,
+                    tlc_state,
+                    retryable_tlc_operations,
+                    waiting_forward_tlc_tasks,
+                    last_committed_remote_nonce,
+                    remote_revocation_nonce_for_verify,
+                    remote_revocation_nonce_for_send,
+                    remote_revocation_nonce_for_next,
+                    remote_commitment_points,
+                    remote_channel_public_keys,
+                    local_shutdown_info,
+                    remote_shutdown_info,
+                    shutdown_transaction_hash,
+                    reestablishing,
+                    last_revoke_ack_msg,
+                    created_at,
+                    pending_replay_updates,
+                    last_was_revoke,
+                    connectivity_state,
+                    external_funding
+                );
                 assert_eq!(
-                    bincode::serialize(&new.commitment_numbers).unwrap(),
-                    expected_commitment_numbers
+                    old.funding_tx.as_ref().map(|tx| format!("{tx:x}")),
+                    new.funding_tx.as_ref().map(|tx| format!("{tx:x}"))
+                );
+                assert_eq!(old.funding_udt_type_script, new.funding_udt_type_script);
+                assert_eq!(old.remote_shutdown_script, new.remote_shutdown_script);
+                assert_eq!(old.local_shutdown_script, new.local_shutdown_script);
+                assert_eq!(
+                    old.latest_commitment_transaction
+                        .as_ref()
+                        .map(|tx| format!("{tx:x}")),
+                    new.latest_commitment_transaction
+                        .as_ref()
+                        .map(|tx| format!("{tx:x}"))
                 );
                 new_bytes
             })
