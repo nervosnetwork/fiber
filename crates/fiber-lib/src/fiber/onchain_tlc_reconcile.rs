@@ -151,6 +151,7 @@ pub fn verify_and_select_settlement_data<'a>(
         let settlement_witness = settlement_data_to_witness(
             settlement_data,
             parsed.for_remote,
+            channel_data.commitment_contract_version,
             channel_data.local_settlement_key.clone(),
             channel_data.remote_settlement_key,
         );
@@ -228,7 +229,11 @@ pub fn tracked_settlement_tlcs(
                 },
                 payment_hash: tlc.payment_hash,
                 hash_algorithm: tlc.hash_algorithm,
-                witness: settlement_tlc_to_witness(tlc, for_remote),
+                witness: settlement_tlc_to_witness(
+                    tlc,
+                    for_remote,
+                    channel_data.commitment_contract_version,
+                ),
             })
             .collect(),
     )

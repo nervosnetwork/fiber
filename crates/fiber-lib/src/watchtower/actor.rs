@@ -39,10 +39,7 @@ use crate::{
         settlement_data_to_witness, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
         XUDT_COMPATIBLE_WITNESS,
     },
-    fiber::onchain_tlc_reconcile::{
-        tracked_settlement_tlcs, verify_and_select_settlement_data, OnChainTlcSettlement,
-        TrackedSettlementTlc,
-    },
+    fiber::onchain_tlc_reconcile::{verify_and_select_settlement_data, OnChainTlcSettlement},
     now_timestamp_as_millis_u64,
     utils::{
         actor::ActorHandleLogGuard,
@@ -1266,8 +1263,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
     let since = u64::from_le_bytes(lock_script_args[20..28].try_into().expect("u64 from slice"));
-    let commitment_number =
-        u64::from_be_bytes(lock_script_args[28..36].try_into().expect("u64 from slice"));
     let delay_epoch = {
         let since = Since::from_raw_value(since);
         since
@@ -1633,7 +1628,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock_amount,
                     private_key,
                     first_settlement_witness(
-                        &settlement_data,
+                        settlement_data,
                         for_remote,
                         channel_data.commitment_contract_version,
                         channel_data.local_settlement_key.clone(),
@@ -3586,10 +3581,12 @@ mod tests {
             pending_remote_settlement_data: pending,
             local_settlement_data: preceding.clone(),
             revocation_data: None,
+            commitment_contract_version: CommitmentContractVersion::Legacy,
         };
         let witness = settlement_data_to_witness(
             &preceding,
             true,
+            CommitmentContractVersion::Legacy,
             channel_data.local_settlement_key.clone(),
             channel_data.remote_settlement_key,
         );

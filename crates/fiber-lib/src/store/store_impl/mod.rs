@@ -36,9 +36,9 @@ use fiber_store::migration::{
 use fiber_types::schema::*;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
-    ChannelState, CommitmentContractVersion, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord, TLCId,
-    TimedResult, CURSOR_SIZE,
+    ChannelState, CommitmentContractVersion, Cursor, Direction, Hash256, PaymentCustomRecords,
+    PaymentSession, PaymentStatus, PersistentNetworkActorState, Pubkey, SettlementData,
+    ShutdownSettlementRecord, TLCId, TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};

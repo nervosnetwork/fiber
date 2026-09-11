@@ -17,10 +17,11 @@ use ckb_types::prelude::*;
 #[cfg(feature = "watchtower")]
 use fiber_types::NodeId;
 use fiber_types::{
-    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
-    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, SettlementData, SettlementTlc,
-    ShutdownSettlementRecord, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags,
+    CommitmentContractVersion, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus,
+    OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
 use ractor::Actor;
@@ -1170,6 +1171,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
         pending_remote_settlement_data: pending_remote.clone(),
         local_settlement_data: local.clone(),
         revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // When revocation_data is None, remote commitment falls back to pending_remote_settlement_data
@@ -1204,6 +1206,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // Commitment 0 with revocation for 0: checked_sub(1) underflows safely to None -> returns pending
@@ -1598,6 +1601,7 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // A revoked remote lock needs no historical TLC snapshot. The same number in
@@ -1703,12 +1707,14 @@ fn test_tracked_settlement_tlcs_extraction() {
             tlcs: vec![],
         },
         revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // Commitment 2 = pending
     let pending_witness = settlement_data_to_witness(
         &pending_settlement,
         true,
+        CommitmentContractVersion::Legacy,
         local_settlement_key,
         remote_settlement_key,
     );
@@ -1855,6 +1861,7 @@ fn create_test_commitment_lock_with_keys(
     let witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
+        CommitmentContractVersion::Legacy,
         local_settlement_privkey.clone(),
         remote_settlement_pubkey,
     );
@@ -2925,6 +2932,7 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
         pending_remote_settlement_data: pending_settlement.clone(),
         local_settlement_data: local_settlement.clone(),
         revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     for (for_remote, number, expected) in [
@@ -3558,6 +3566,7 @@ fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
                 output: CellOutput::default(),
                 output_data: Default::default(),
             }),
+            commitment_contract_version: CommitmentContractVersion::Legacy,
         },
     );
     for for_remote in [false, true] {
