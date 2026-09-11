@@ -1176,7 +1176,7 @@ fn reconcile_settlement_witness<S: WatchtowerStore>(
             if discovered_payment_hash == tlc.payment_hash {
                 store.insert_watch_preimage(self_node_id.clone(), tlc.payment_hash, preimage);
             } else {
-                warn!(
+                error!(
                     "On-chain preimage for channel {:?} tlc {:?} tx {:?} hashes to {:?}, expected full hash {:?}",
                     channel_id,
                     tlc.tlc_id,

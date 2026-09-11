@@ -1395,6 +1395,9 @@ pub struct ChannelOpenRecord {
     pub created_at: u64,
     /// Timestamp (milliseconds since UNIX epoch) of the last status update.
     pub last_updated_at: u64,
+    /// Commitment-lock layout selected when the channel-open request was received or sent.
+    #[serde(default)]
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 impl ChannelOpenRecord {
@@ -1410,7 +1413,20 @@ impl ChannelOpenRecord {
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
+            commitment_contract_version: CommitmentContractVersion::default(),
         }
+    }
+
+    /// Create a new opening record with the negotiated commitment-lock layout.
+    pub fn new_with_version(
+        channel_id: Hash256,
+        pubkey: Pubkey,
+        funding_amount: u128,
+        commitment_contract_version: CommitmentContractVersion,
+    ) -> Self {
+        let mut record = Self::new(channel_id, pubkey, funding_amount);
+        record.commitment_contract_version = commitment_contract_version;
+        record
     }
 
     /// Create a new inbound record in the `WaitingForPeer` state.
@@ -1419,6 +1435,27 @@ impl ChannelOpenRecord {
         let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
+    }
+
+    /// Create a new inbound record with the negotiated commitment-lock layout.
+    pub fn new_inbound_with_version(
+        channel_id: Hash256,
+        pubkey: Pubkey,
+        remote_funding_amount: u128,
+        commitment_contract_version: CommitmentContractVersion,
+    ) -> Self {
+        Self::new_with_version(
+            channel_id,
+            pubkey,
+            remote_funding_amount,
+            commitment_contract_version,
+        )
+        .with_acceptor()
+    }
+
+    fn with_acceptor(mut self) -> Self {
+        self.is_acceptor = true;
+        self
     }
 
     /// Transition to a new status.
