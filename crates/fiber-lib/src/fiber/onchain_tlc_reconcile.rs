@@ -16,7 +16,7 @@ use fiber_types::{
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{error, warn};
 
 // Used by Watchtower scanning; builds without the watchtower feature may leave it unused.
 #[allow(dead_code)]
@@ -151,6 +151,7 @@ pub fn verify_and_select_settlement_data<'a>(
         let settlement_witness = settlement_data_to_witness(
             settlement_data,
             parsed.for_remote,
+            channel_data.commitment_contract_version,
             channel_data.local_settlement_key.clone(),
             channel_data.remote_settlement_key,
         );
@@ -228,7 +229,11 @@ pub fn tracked_settlement_tlcs(
                 },
                 payment_hash: tlc.payment_hash,
                 hash_algorithm: tlc.hash_algorithm,
-                witness: settlement_tlc_to_witness(tlc, for_remote),
+                witness: settlement_tlc_to_witness(
+                    tlc,
+                    for_remote,
+                    channel_data.commitment_contract_version,
+                ),
             })
             .collect(),
     )
@@ -278,6 +283,9 @@ pub(crate) enum OnChainTlcResolution {
     Unknown,
     Fulfilled(Hash256),
     SettledWithoutPreimage,
+    /// The output was consumed with a preimage matching the committed 20-byte prefix but not
+    /// the full payment hash, so the settlement must fail forward rather than remain unresolved.
+    SettledWithInvalidPreimage,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -363,11 +371,11 @@ pub(crate) fn resolve_onchain_tlc(
             if discovered_payment_hash == payment_hash {
                 return OnChainTlcResolution::Fulfilled(preimage);
             }
-            warn!(
-                "Ignoring invalid on-chain preimage for channel {:?} tlc {:?} tx {:?}: derived hash {:?}, expected {:?}",
+            error!(
+                "On-chain preimage for channel {:?} tlc {:?} tx {:?} hashes to {:?}, expected full hash {:?}: treat as failed settlement",
                 channel_id, tlc_id, settlement.tx_hash, discovered_payment_hash, payment_hash
             );
-            OnChainTlcResolution::Unknown
+            OnChainTlcResolution::SettledWithInvalidPreimage
         }
         StoredOnChainTlcSettlement::Legacy(legacy) => {
             let Some(preimage) = legacy.preimage else {
@@ -399,7 +407,9 @@ pub(crate) fn onchain_fulfilled_preimage(
         tlc.hash_algorithm,
     ) {
         OnChainTlcResolution::Fulfilled(preimage) => Some(preimage),
-        OnChainTlcResolution::Unknown | OnChainTlcResolution::SettledWithoutPreimage => None,
+        OnChainTlcResolution::Unknown
+        | OnChainTlcResolution::SettledWithoutPreimage
+        | OnChainTlcResolution::SettledWithInvalidPreimage => None,
     }
 }
 
@@ -558,19 +568,18 @@ pub(crate) fn collect_onchain_timeout_settled_tlcs(
         .offered_tlcs
         .tlcs
         .iter()
-        .filter(|tlc| tlc.removed_confirmed_at.is_none() && tlc.expiry < expect_expiry)
+        .filter(|tlc| tlc.removed_confirmed_at.is_none())
         .filter_map(|tlc| {
-            if !matches!(
-                resolve_onchain_tlc(
-                    &channel_id,
-                    store,
-                    tlc.tlc_id,
-                    tlc.payment_hash,
-                    tlc.hash_algorithm,
-                ),
-                OnChainTlcResolution::SettledWithoutPreimage
+            match resolve_onchain_tlc(
+                &channel_id,
+                store,
+                tlc.tlc_id,
+                tlc.payment_hash,
+                tlc.hash_algorithm,
             ) {
-                return None;
+                OnChainTlcResolution::SettledWithoutPreimage if tlc.expiry < expect_expiry => {}
+                OnChainTlcResolution::SettledWithInvalidPreimage => {}
+                _ => return None,
             }
 
             let role = match tlc.forwarding_tlc {
@@ -616,6 +625,7 @@ pub(crate) fn collect_onchain_received_timeout_settled_tlcs(
                     tlc.hash_algorithm,
                 ),
                 OnChainTlcResolution::SettledWithoutPreimage
+                    | OnChainTlcResolution::SettledWithInvalidPreimage
             )
         })
         .map(|tlc| {

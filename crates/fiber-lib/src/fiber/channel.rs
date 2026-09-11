@@ -70,14 +70,14 @@ use fiber_types::{
     ChannelActorData, ChannelAnnouncement, ChannelBasePublicKeys, ChannelConnectivityState,
     ChannelConstraints, ChannelFlags, ChannelOpenRecord, ChannelState, ChannelTlcInfo,
     ChannelUpdate, ChannelUpdateChannelFlags, ChannelUpdateMessageFlags, CloseFlags,
-    CollaboratingFundingTxFlags, CommitmentNumbers, EcdsaSignature, ExternalFundingPersistState,
-    Hash256, InMemorySigner, InboundTlcStatus, Musig2Context, NegotiatingFundingFlags,
-    OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket, PendingNotifySettleTlc,
-    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
-    RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData, SettlementTlc,
-    ShutdownInfo, ShutdownSettlementRecord, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
-    TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER,
-    NO_SHARED_SECRET,
+    CollaboratingFundingTxFlags, CommitmentContractVersion, CommitmentNumbers, EcdsaSignature,
+    ExternalFundingPersistState, Hash256, InMemorySigner, InboundTlcStatus, Musig2Context,
+    NegotiatingFundingFlags, OutboundTlcStatus, PaymentCustomRecords, PeeledPaymentOnionPacket,
+    PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
+    RemoveTlcReason, RetryableTlcOperation, RevocationData, RevokeAndAck, SettlementData,
+    SettlementTlc, ShutdownInfo, ShutdownSettlementRecord, ShuttingDownFlags,
+    SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -334,6 +334,7 @@ pub struct OpenChannelParameter {
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 pub struct AcceptChannelParameter {
@@ -347,6 +348,7 @@ pub struct AcceptChannelParameter {
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 /// Parameters for opening a channel with external funding.
@@ -368,6 +370,7 @@ pub struct OpenChannelWithExternalFundingParameter {
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 /// Runtime state for external funding flow; this is intentionally not persisted.
@@ -4032,6 +4035,7 @@ where
                 channel_id_sender,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
+                commitment_contract_version,
             }) => {
                 let pubkey = self.get_remote_pubkey();
                 debug!(
@@ -4102,6 +4106,7 @@ where
                     shutdown_script,
                     max_tlc_number_in_flight,
                     *remote_max_tlc_number_in_flight,
+                    commitment_contract_version,
                 )?;
 
                 if !is_tlc_key_derivation_safe(
@@ -4147,6 +4152,7 @@ where
                     tlc_info,
                     self.network.clone(),
                     args.private_key.clone(),
+                    commitment_contract_version,
                 );
                 state.check_accept_channel_parameters()?;
 
@@ -4219,6 +4225,7 @@ where
                 funding_fee_rate,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
+                commitment_contract_version,
             }) => {
                 let public = public_channel_info.is_some();
                 let pubkey = self.get_remote_pubkey();
@@ -4258,6 +4265,7 @@ where
                     tlc_info,
                     self.network.clone(),
                     args.private_key.clone(),
+                    commitment_contract_version,
                 );
 
                 check_open_channel_parameters(
@@ -4266,6 +4274,7 @@ where
                     channel.local_reserved_ckb_amount,
                     channel.funding_fee_rate,
                     channel.commitment_fee_rate,
+                    channel.commitment_contract_version,
                     channel.commitment_delay_epoch,
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
@@ -4398,6 +4407,7 @@ where
                     funding_fee_rate,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
+                    commitment_contract_version,
                 },
             ) => {
                 let public = public_channel_info.is_some();
@@ -4443,6 +4453,7 @@ where
                     tlc_info,
                     self.network.clone(),
                     args.private_key.clone(),
+                    commitment_contract_version,
                 );
 
                 // Mark this channel as using external funding.
@@ -4462,6 +4473,7 @@ where
                     channel.local_reserved_ckb_amount,
                     channel.funding_fee_rate,
                     channel.commitment_fee_rate,
+                    channel.commitment_contract_version,
                     channel.commitment_delay_epoch,
                     channel.local_constraints.max_tlc_number_in_flight,
                 )?;
@@ -4750,6 +4762,7 @@ impl From<TlcInfo> for TlcNotifyInfo {
 pub fn settlement_data_to_witness(
     data: &SettlementData,
     for_remote: bool,
+    commitment_contract_version: CommitmentContractVersion,
     local_settlement_key: Privkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
@@ -4758,7 +4771,11 @@ pub fn settlement_data_to_witness(
         u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
     vec.push(len);
     for tlc in &data.tlcs {
-        vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
+        vec.extend_from_slice(&settlement_tlc_to_witness(
+            tlc,
+            for_remote,
+            commitment_contract_version,
+        ));
     }
     if for_remote {
         vec.extend_from_slice(blake160(&remote_settlement_key.serialize()).as_ref());
@@ -4780,15 +4797,32 @@ pub enum DeferredPeerTlcUpdate {
     Remove(RemoveTlc),
 }
 
+/// The features bitmap byte appended to the commitment lock script args when
+/// the negotiated commitment contract version exceeds the legacy layout.
+pub fn contract_feature_flags(version: CommitmentContractVersion) -> u8 {
+    match version {
+        CommitmentContractVersion::Legacy => 0x00,
+        CommitmentContractVersion::V1 => 0x01,
+    }
+}
+
 /// Build the witness bytes for a single TLC in a settlement transaction.
 ///
 /// Free function replacement for `SettlementTlc::to_witness()`.
-pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
+pub fn settlement_tlc_to_witness(
+    tlc: &SettlementTlc,
+    for_remote: bool,
+    commitment_contract_version: CommitmentContractVersion,
+) -> Vec<u8> {
+    let payment_hash_len = match commitment_contract_version {
+        CommitmentContractVersion::Legacy => 20,
+        CommitmentContractVersion::V1 => 32,
+    };
     let mut vec = Vec::new();
     let offered_flag = if tlc.tlc_id.is_offered() { 0u8 } else { 1u8 };
     vec.push(((tlc.hash_algorithm as u8) << 1) + offered_flag);
     vec.extend_from_slice(&tlc.payment_amount.to_le_bytes());
-    vec.extend_from_slice(&tlc.payment_hash.as_ref()[0..20]);
+    vec.extend_from_slice(&tlc.payment_hash.as_ref()[..payment_hash_len]);
     if for_remote {
         vec.extend_from_slice(blake160(&tlc.remote_key.serialize()).as_ref());
         vec.extend_from_slice(blake160(&tlc.local_key.pubkey().serialize()).as_ref());
@@ -5987,6 +6021,7 @@ impl ChannelActorState {
         local_tlc_info: ChannelTlcInfo,
         network: ActorRef<NetworkActorMessage>,
         private_key: Privkey,
+        commitment_contract_version: CommitmentContractVersion,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -6057,6 +6092,7 @@ impl ChannelActorState {
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
                 external_funding: None,
+                commitment_contract_version,
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
@@ -6098,6 +6134,7 @@ impl ChannelActorState {
         local_tlc_info: ChannelTlcInfo,
         network: ActorRef<NetworkActorMessage>,
         private_key: Privkey,
+        commitment_contract_version: CommitmentContractVersion,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
@@ -6153,6 +6190,7 @@ impl ChannelActorState {
                 pending_replay_updates: vec![],
                 last_was_revoke: false,
                 external_funding: None,
+                commitment_contract_version,
                 created_at: SystemTime::now(),
             },
             waiting_peer_response: None,
@@ -6197,6 +6235,7 @@ impl ChannelActorState {
         remote_shutdown_script: &Script,
         local_max_tlc_number_in_flight: u64,
         remote_max_tlc_number_in_flight: u64,
+        commitment_contract_version: CommitmentContractVersion,
     ) -> ProcessingChannelResult {
         if local_max_tlc_number_in_flight > MAX_TLC_NUMBER_IN_FLIGHT {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -6267,7 +6306,12 @@ impl ChannelActorState {
                     remote_reserved_ckb_amount, occupied_capacity,
                 ))
             })?;
-        check_commitment_reserved_fee(commitment_fee_rate, udt_type_script, reserved_fee)?;
+        check_commitment_reserved_fee(
+            commitment_fee_rate,
+            udt_type_script,
+            commitment_contract_version,
+            reserved_fee,
+        )?;
 
         Ok(())
     }
@@ -6283,6 +6327,7 @@ impl ChannelActorState {
             &self.get_remote_shutdown_script(),
             self.local_constraints.max_tlc_number_in_flight,
             self.remote_constraints.max_tlc_number_in_flight,
+            self.commitment_contract_version,
         )
     }
 
@@ -6698,6 +6743,7 @@ impl ChannelActorState {
             let commitment_tx_fee = checked_calculate_commitment_tx_fee(
                 self.commitment_fee_rate,
                 &self.funding_udt_type_script,
+                self.commitment_contract_version,
             )?;
             let lock_script = self.get_remote_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
@@ -6738,7 +6784,6 @@ impl ChannelActorState {
                 commitment_number.to_be_bytes().as_slice(),
             ]
             .concat();
-
             let message = blake2b_256(
                 [
                     output.as_slice(),
@@ -7862,6 +7907,7 @@ impl ChannelActorState {
             &accept_channel.shutdown_script,
             self.local_constraints.max_tlc_number_in_flight,
             accept_channel.max_tlc_number_in_flight,
+            self.commitment_contract_version,
         )?;
 
         if !is_tlc_key_derivation_safe(
@@ -8116,6 +8162,7 @@ impl ChannelActorState {
                             *self.get_local_funding_pubkey(),
                             *self.get_remote_funding_pubkey(),
                             settlement_data,
+                            self.commitment_contract_version,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -8694,6 +8741,7 @@ impl ChannelActorState {
             let commitment_tx_fee = checked_calculate_commitment_tx_fee(
                 self.commitment_fee_rate,
                 &self.funding_udt_type_script,
+                self.commitment_contract_version,
             )?;
             let lock_script = self.get_local_shutdown_script();
             let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script
@@ -8733,7 +8781,6 @@ impl ChannelActorState {
                 commitment_number.to_be_bytes().as_slice(),
             ]
             .concat();
-
             let message = blake2b_256(
                 [
                     output.as_slice(),
@@ -9851,12 +9898,17 @@ impl ChannelActorState {
             blake160(&settlement_data_to_witness(
                 &settlement_data,
                 for_remote,
+                self.commitment_contract_version,
                 local_settlement_key,
                 remote_settlement_key,
             ))
             .as_ref(),
         );
         commitment_lock_script_args.push(0x00);
+        if self.commitment_contract_version == CommitmentContractVersion::V1 {
+            commitment_lock_script_args
+                .push(contract_feature_flags(self.commitment_contract_version));
+        }
 
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &commitment_lock_script_args);
@@ -9864,6 +9916,7 @@ impl ChannelActorState {
         let commitment_tx_fee = checked_calculate_commitment_tx_fee(
             self.commitment_fee_rate,
             &self.funding_udt_type_script,
+            self.commitment_contract_version,
         )?;
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
@@ -10670,6 +10723,7 @@ mod tests {
                 last_was_revoke: false,
                 connectivity_state: ChannelConnectivityState::Online,
                 external_funding: None,
+                commitment_contract_version: Default::default(),
             },
             pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,

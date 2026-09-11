@@ -120,12 +120,12 @@ pub use fiber_types::HopRequire;
 use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
-    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, CommitmentContractVersion,
+    EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords,
+    PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey,
+    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1223,6 +1223,7 @@ pub enum NetworkServiceEvent {
         Pubkey,
         Pubkey,
         SettlementData,
+        CommitmentContractVersion,
     ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
@@ -3341,11 +3342,14 @@ where
                     .map
                     .iter()
                     .map(
-                        |(channel_id, (pubkey, open_channel))| PendingAcceptChannel {
+                        |(channel_id, (pubkey, pending_open))| PendingAcceptChannel {
                             channel_id: *channel_id,
                             pubkey: *pubkey,
-                            funding_amount: open_channel.funding_amount,
-                            udt_type_script: open_channel.funding_udt_type_script.clone(),
+                            funding_amount: pending_open.open_channel.funding_amount,
+                            udt_type_script: pending_open
+                                .open_channel
+                                .funding_udt_type_script
+                                .clone(),
                             created_at: state
                                 .store
                                 .get_channel_open_record(channel_id)
@@ -5853,6 +5857,8 @@ where
 
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
+        let commitment_contract_version =
+            self.negotiated_commitment_contract_version(&remote_pubkey);
 
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -5891,6 +5897,7 @@ where
                         .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                    commitment_contract_version,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -5904,7 +5911,12 @@ where
         self.on_channel_created(temp_channel_id, remote_pubkey, channel.clone());
 
         // Record the channel opening attempt so it can be queried via RPC.
-        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
+        let record = ChannelOpenRecord::new_with_version(
+            temp_channel_id,
+            remote_pubkey,
+            funding_amount,
+            commitment_contract_version,
+        );
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -5947,6 +5959,8 @@ where
             )))?;
 
         self.check_feature_compatibility(&remote_pubkey)?;
+        let commitment_contract_version =
+            self.negotiated_commitment_contract_version(&remote_pubkey);
 
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
@@ -6010,6 +6024,7 @@ where
                             .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                         max_tlc_number_in_flight: max_tlc_number_in_flight
                             .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                        commitment_contract_version,
                     },
                 ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -6025,7 +6040,12 @@ where
 
         // Record the external-funding opening attempt under the temporary id.
         // It will be re-keyed once the peer accepts and the final channel id is known.
-        let record = ChannelOpenRecord::new(temp_channel_id, remote_pubkey, funding_amount);
+        let record = ChannelOpenRecord::new_with_version(
+            temp_channel_id,
+            remote_pubkey,
+            funding_amount,
+            commitment_contract_version,
+        );
         self.store.insert_channel_open_record(record);
 
         Ok((channel, temp_channel_id))
@@ -6047,7 +6067,7 @@ where
             tlc_expiry_delta,
         } = accept_channel;
 
-        let (remote_pubkey, open_channel) = self
+        let (remote_pubkey, pending_open) = self
             .to_be_accepted_channels
             .remove(&temp_channel_id)
             .ok_or(ProcessingChannelError::InvalidParameter(
@@ -6059,11 +6079,11 @@ where
         let (funding_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
             funding_amount,
             &shutdown_script,
-            &open_channel.funding_udt_type_script,
+            &pending_open.open_channel.funding_udt_type_script,
         )?;
 
         let network = self.network.clone();
-        let id = open_channel.channel_id;
+        let id = pending_open.open_channel.channel_id;
         if let Some(channel) = self.channels.get(&id) {
             warn!("A channel of id {:?} is already created, returning it", &id);
             return Ok((channel.clone(), temp_channel_id, id));
@@ -6094,16 +6114,18 @@ where
                             .unwrap_or(self.tlc_fee_proportional_millionths),
                         now_timestamp_as_millis_u64(),
                     ),
-                    public_channel_info: open_channel
+                    public_channel_info: pending_open
+                        .open_channel
                         .is_public()
                         .then_some(PublicChannelInfo::new()),
                     seed,
-                    open_channel,
+                    open_channel: pending_open.open_channel,
                     shutdown_script,
                     channel_id_sender: Some(tx),
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
+                    commitment_contract_version: pending_open.commitment_contract_version,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6175,6 +6197,24 @@ where
             )));
         }
         Ok(())
+    }
+
+    /// Decide which commitment-lock contract layout a new channel with the
+    /// given peer will use, based on both peers' negotiated feature vectors.
+    /// V1 only when both peers advertise `onchain_full_payment_hash` support.
+    fn negotiated_commitment_contract_version(
+        &self,
+        peer_pubkey: &Pubkey,
+    ) -> CommitmentContractVersion {
+        let peer_supports = self
+            .peer_session_map
+            .get(peer_pubkey)
+            .and_then(|peer| peer.features.as_ref())
+            .map(|features| features.supports_onchain_full_payment_hash());
+        CommitmentContractVersion::for_negotiated(
+            self.features.supports_onchain_full_payment_hash(),
+            peer_supports,
+        )
     }
 
     pub async fn trace_tx(
@@ -7248,12 +7288,14 @@ where
             )));
         }
 
+        let commitment_contract_version = self.negotiated_commitment_contract_version(&peer_pubkey);
         let result = check_open_channel_parameters(
             &open_channel.funding_udt_type_script,
             &open_channel.shutdown_script,
             open_channel.reserved_ckb_amount,
             open_channel.funding_fee_rate,
             open_channel.commitment_fee_rate,
+            commitment_contract_version,
             open_channel.commitment_delay_epoch,
             open_channel.max_tlc_number_in_flight,
         )
@@ -7261,15 +7303,24 @@ where
             if !self.to_be_accepted_channels.map.contains_key(&id) {
                 self.check_pending_channel_limit(peer_pubkey)?;
             }
-            self.to_be_accepted_channels
-                .try_insert(id, peer_pubkey, open_channel)
+            self.to_be_accepted_channels.try_insert(
+                id,
+                peer_pubkey,
+                open_channel,
+                commitment_contract_version,
+            )
         });
 
         match result {
             Ok(_) => {
                 // Create a persistent record so the accepting side can see this pending channel
                 // via list_channels(only_pending=true) and across node restarts.
-                let record = ChannelOpenRecord::new_inbound(id, peer_pubkey, remote_funding_amount);
+                let record = ChannelOpenRecord::new_inbound_with_version(
+                    id,
+                    peer_pubkey,
+                    remote_funding_amount,
+                    commitment_contract_version,
+                );
                 self.store.insert_channel_open_record(record);
 
                 // Notify outside observers.
@@ -8377,7 +8428,13 @@ fn target_default_transport_matches(addr: &Multiaddr) -> bool {
 struct ToBeAcceptedChannels {
     total_number_limit: usize,
     total_bytes_limit: usize,
-    map: HashMap<Hash256, (Pubkey, OpenChannel)>,
+    map: HashMap<Hash256, (Pubkey, PendingOpenChannel)>,
+}
+
+#[derive(Debug)]
+struct PendingOpenChannel {
+    open_channel: OpenChannel,
+    commitment_contract_version: CommitmentContractVersion,
 }
 
 impl Default for ToBeAcceptedChannels {
@@ -8410,7 +8467,7 @@ impl ToBeAcceptedChannels {
         }
     }
 
-    fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, OpenChannel)> {
+    fn remove(&mut self, id: &Hash256) -> Option<(Pubkey, PendingOpenChannel)> {
         self.map.remove(id)
     }
 
@@ -8427,6 +8484,7 @@ impl ToBeAcceptedChannels {
         id: Hash256,
         pubkey: Pubkey,
         open_channel: OpenChannel,
+        commitment_contract_version: CommitmentContractVersion,
     ) -> ProcessingChannelResult {
         if let Some(existing_value) = self.map.get(&id) {
             let err_message = format!(
@@ -8446,7 +8504,7 @@ impl ToBeAcceptedChannels {
             .fold(
                 (1, open_channel.mem_size()),
                 |(count, size), (_, saved_open_channel)| {
-                    (count + 1, size + saved_open_channel.mem_size())
+                    (count + 1, size + saved_open_channel.open_channel.mem_size())
                 },
             );
 
@@ -8465,7 +8523,65 @@ impl ToBeAcceptedChannels {
             "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
             &pubkey, &id, &open_channel
         );
-        self.map.insert(id, (pubkey, open_channel));
+        self.map.insert(
+            id,
+            (
+                pubkey,
+                PendingOpenChannel {
+                    open_channel,
+                    commitment_contract_version,
+                },
+            ),
+        );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pending_open_tests {
+    use super::*;
+    use musig2::SecNonce;
+
+    #[test]
+    fn pending_open_retains_contract_version_selected_at_receipt() {
+        let mut pending = ToBeAcceptedChannels::default();
+        let channel_id = [1u8; 32].into();
+        let peer = Privkey::from_slice(&[2u8; 32]).pubkey();
+        let open_channel = OpenChannel {
+            chain_hash: get_chain_hash(),
+            channel_id,
+            funding_udt_type_script: None,
+            funding_amount: 1,
+            shutdown_script: Default::default(),
+            reserved_ckb_amount: 0,
+            funding_fee_rate: 0,
+            commitment_fee_rate: 0,
+            commitment_delay_epoch: 0,
+            max_tlc_value_in_flight: 0,
+            max_tlc_number_in_flight: 0,
+            channel_flags: fiber_types::ChannelFlags::empty(),
+            first_per_commitment_point: peer,
+            second_per_commitment_point: peer,
+            funding_pubkey: peer,
+            tlc_basepoint: peer,
+            next_commitment_nonce: SecNonce::build([3u8; 32]).build().public_nonce(),
+            next_revocation_nonce: SecNonce::build([4u8; 32]).build().public_nonce(),
+            channel_announcement_nonce: None,
+        };
+
+        pending
+            .try_insert(
+                channel_id,
+                peer,
+                open_channel,
+                CommitmentContractVersion::V1,
+            )
+            .expect("pending open should be inserted");
+
+        let (_, pending_open) = pending.remove(&channel_id).expect("pending open exists");
+        assert_eq!(
+            pending_open.commitment_contract_version,
+            CommitmentContractVersion::V1
+        );
     }
 }

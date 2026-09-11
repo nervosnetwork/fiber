@@ -5,7 +5,10 @@ use musig2::{secp::Point, KeyAggContext};
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::onchain_tlc_reconcile::{OnChainTlcSettlement, StoredOnChainTlcSettlement};
 use fiber_types::TLCId;
-use fiber_types::{ChannelData, Hash256, NodeId, Privkey, Pubkey, RevocationData, SettlementData};
+use fiber_types::{
+    ChannelData, CommitmentContractVersion, Hash256, NodeId, Privkey, Pubkey, RevocationData,
+    SettlementData,
+};
 
 pub trait WatchtowerStore {
     /// Get the channels currently being watched together with their owning node.
@@ -31,6 +34,33 @@ pub trait WatchtowerStore {
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
+    ) {
+        self.insert_watch_channel_with_version(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            local_settlement_key,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
+            CommitmentContractVersion::Legacy,
+        );
+    }
+
+    /// Insert a channel while retaining its negotiated witness layout.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_watch_channel_with_version(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        local_settlement_key: Privkey,
+        remote_settlement_key: Pubkey,
+        local_funding_pubkey: Pubkey,
+        remote_funding_pubkey: Pubkey,
+        settlement_data: SettlementData,
+        commitment_contract_version: CommitmentContractVersion,
     );
     /// Remove a channel from the store, the watchtower will stop monitoring the channel
     fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);

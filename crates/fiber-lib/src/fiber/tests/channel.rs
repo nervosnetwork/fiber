@@ -3,9 +3,9 @@ use crate::ckb::tests::test_utils::{
 };
 use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxResponse};
 use crate::fiber::channel::{
-    funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse, ChannelActor,
-    ChannelActorMessage, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
-    ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
+    funding_timeout_check_delay, merge_external_funding_witnesses, settlement_tlc_to_witness,
+    AddTlcResponse, ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
+    ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     XUDT_COMPATIBLE_WITNESS,
@@ -59,11 +59,11 @@ use ckb_types::{
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
-    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
-    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
-    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
-    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, CommitmentContractVersion,
+    HashAlgorithm, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus,
+    PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevokeAndAck, SettlementTlc, ShuttingDownFlags, SigningCommitmentFlags,
+    TLCId, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 
 use fiber_types::{CloseFlags, FeatureVector};
@@ -5421,6 +5421,7 @@ async fn test_revoke_old_commitment_transaction() {
                 _,
                 local_funding_pubkey,
                 remote_funding_pubkey,
+                _,
                 _,
             ) => {
                 let key_agg_ctx =
@@ -12404,6 +12405,7 @@ fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
+            CommitmentContractVersion::Legacy,
         ),
         "Total reserved CKB amount overflows",
     );
@@ -12423,6 +12425,7 @@ fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
+            CommitmentContractVersion::Legacy,
         ),
         "overflows commitment fee",
     );
@@ -12441,6 +12444,7 @@ fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
+            CommitmentContractVersion::Legacy,
         ),
         "The total funding amount",
     );
@@ -12455,6 +12459,7 @@ fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
         u64::MAX - 1_000_000_000_000,
         DEFAULT_FEE_RATE,
         u64::MAX,
+        CommitmentContractVersion::Legacy,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -12474,6 +12479,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
         u64::MAX,
         DEFAULT_FEE_RATE,
         DEFAULT_COMMITMENT_FEE_RATE,
+        CommitmentContractVersion::Legacy,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -12568,6 +12574,7 @@ mod udt_funding_cell_capacity {
                 last_was_revoke: false,
                 created_at: SystemTime::now(),
                 external_funding: None,
+                commitment_contract_version: Default::default(),
             },
             waiting_peer_response: None,
             reestablish_started_at: None,
@@ -12856,4 +12863,37 @@ mod udt_funding_cell_capacity {
 
         assert!(expired.is_empty());
     }
+}
+
+#[test]
+fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
+    let tlc = SettlementTlc {
+        tlc_id: TLCId::Offered(0),
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_amount: 1_000,
+        payment_hash: gen_rand_sha256_hash(),
+        expiry: 60_000,
+        local_key: Privkey::from(&[5; 32]),
+        remote_key: Privkey::from(&[6; 32]).pubkey(),
+    };
+    let legacy = settlement_tlc_to_witness(&tlc, false, CommitmentContractVersion::Legacy);
+    assert_eq!(legacy.len(), 85); // htlc_type(1) + amount(16) + hash(20) + keys(40) + expiry(8)
+
+    let v1 = settlement_tlc_to_witness(&tlc, false, CommitmentContractVersion::V1);
+    assert_eq!(v1.len(), 97);
+    // the first 17 bytes are identical; the hash field is the difference
+    assert_eq!(&legacy[0..17], &v1[0..17]);
+    assert_eq!(&v1[17..49], tlc.payment_hash.as_ref());
+    assert_eq!(&legacy[17..37], &tlc.payment_hash.as_ref()[0..20]);
+    // keys and expiry match after the different-length hash field (49 vs 37 offset)
+    assert_eq!(&legacy[37..], &v1[49..]);
+    // amount and htlc_type are the same for for_remote = true and false
+    assert_eq!(
+        &settlement_tlc_to_witness(&tlc, true, CommitmentContractVersion::V1)[0..17],
+        &v1[0..17]
+    );
+    assert_eq!(
+        &settlement_tlc_to_witness(&tlc, true, CommitmentContractVersion::V1)[1..17],
+        &tlc.payment_amount.to_le_bytes()
+    );
 }

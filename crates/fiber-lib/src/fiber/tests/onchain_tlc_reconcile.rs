@@ -17,10 +17,11 @@ use ckb_types::prelude::*;
 #[cfg(feature = "watchtower")]
 use fiber_types::NodeId;
 use fiber_types::{
-    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags, CommitmentNumbers,
-    Hash256, HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, SettlementData, SettlementTlc,
-    ShutdownSettlementRecord, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
+    AppliedFlags, ChannelBasePublicKeys, ChannelData, ChannelState, CloseFlags,
+    CommitmentContractVersion, CommitmentNumbers, Hash256, HashAlgorithm, InboundTlcStatus,
+    OutboundTlcStatus, Privkey, Pubkey, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, SettlementData, SettlementTlc, ShutdownSettlementRecord, TLCId, TlcErr,
+    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus,
 };
 use musig2::{secp::Point, CompactSignature, KeyAggContext};
 use ractor::Actor;
@@ -109,6 +110,16 @@ fn payment_hash_for(preimage: Hash256, hash_algorithm: HashAlgorithm) -> Hash256
     hash_algorithm.hash(preimage).into()
 }
 
+fn payment_hash_with_invalid_full_hash(
+    preimage: Hash256,
+    hash_algorithm: HashAlgorithm,
+) -> Hash256 {
+    let discovered_hash = hash_algorithm.hash(preimage);
+    let mut payment_hash = discovered_hash;
+    payment_hash[31] ^= 1;
+    payment_hash.into()
+}
+
 fn empty_channel_state(channel_id: Hash256) -> crate::fiber::channel::ChannelActorState {
     let mut state =
         create_test_channel_state_with_tlc(channel_id, 0, 1000, gen_rand_sha256_hash(), None);
@@ -171,18 +182,17 @@ fn resolve_returns_fulfilled_when_preimage_matches() {
 }
 
 #[test]
-fn resolve_returns_unknown_when_preimage_mismatches() {
+fn resolve_prefix_valid_full_hash_invalid_preimage_is_failed_settlement() {
     let channel_id = gen_rand_sha256_hash();
-    let correct_preimage = gen_rand_sha256_hash();
-    let wrong_preimage = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
     let hash_algorithm = HashAlgorithm::CkbHash;
-    let payment_hash = payment_hash_for(correct_preimage, hash_algorithm);
+    let payment_hash = payment_hash_with_invalid_full_hash(preimage, hash_algorithm);
     let store = MockStore::new().with_onchain_preimage(
         channel_id,
         TLCId::Offered(0),
         payment_hash,
         hash_algorithm,
-        wrong_preimage,
+        preimage,
     );
 
     assert_eq!(
@@ -193,7 +203,7 @@ fn resolve_returns_unknown_when_preimage_mismatches() {
             payment_hash,
             hash_algorithm,
         ),
-        OnChainTlcResolution::Unknown
+        OnChainTlcResolution::SettledWithInvalidPreimage
     );
 }
 
@@ -559,6 +569,98 @@ fn collect_timeout_settled_includes_forwarded_and_origin_payer() {
         expired[1].role,
         OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
     );
+}
+
+#[test]
+fn collect_timeout_invalid_preimage_is_immediate_for_forwarded_and_origin_payer() {
+    let channel_id = gen_rand_sha256_hash();
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let forwarded_preimage = gen_rand_sha256_hash();
+    let origin_preimage = gen_rand_sha256_hash();
+    let forwarded_hash = payment_hash_with_invalid_full_hash(forwarded_preimage, hash_algorithm);
+    let origin_hash = payment_hash_with_invalid_full_hash(origin_preimage, hash_algorithm);
+
+    let mut forwarded = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        forwarded_hash,
+        hash_algorithm,
+    );
+    forwarded.expiry = 1_000;
+    forwarded.forwarding_tlc = Some((upstream_channel_id, 42));
+
+    let mut origin = tlc_info(
+        TLCId::Offered(1),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        origin_hash,
+        hash_algorithm,
+    );
+    origin.expiry = 1_000;
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.offered_tlcs.tlcs = vec![forwarded, origin];
+    let store = MockStore::new()
+        .with_onchain_preimage(
+            channel_id,
+            TLCId::Offered(0),
+            forwarded_hash,
+            hash_algorithm,
+            forwarded_preimage,
+        )
+        .with_onchain_preimage(
+            channel_id,
+            TLCId::Offered(1),
+            origin_hash,
+            hash_algorithm,
+            origin_preimage,
+        );
+
+    let settled = collect_onchain_timeout_settled_tlcs(&state, &store, 100);
+
+    assert_eq!(settled.len(), 2);
+    assert_eq!(settled[0].tlc_id, TLCId::Offered(0));
+    assert_eq!(
+        settled[0].role,
+        OnChainTimeoutTlcRole::Forwarded {
+            forwarding_channel_id: upstream_channel_id,
+            forwarding_tlc_id: 42,
+        }
+    );
+    assert_eq!(settled[1].tlc_id, TLCId::Offered(1));
+    assert_eq!(
+        settled[1].role,
+        OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
+    );
+}
+
+#[test]
+fn collect_received_timeout_accepts_invalid_preimage_settlement() {
+    let channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_with_invalid_full_hash(preimage, hash_algorithm);
+    let tlc = tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        payment_hash,
+        hash_algorithm,
+    );
+
+    let mut state = empty_channel_state(channel_id);
+    state.tlc_state.received_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_preimage(
+        channel_id,
+        TLCId::Received(0),
+        payment_hash,
+        hash_algorithm,
+        preimage,
+    );
+
+    let settled = collect_onchain_received_timeout_settled_tlcs(&state, &store);
+
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].tlc_id, 0);
 }
 
 #[test]
@@ -1069,6 +1171,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
         pending_remote_settlement_data: pending_remote.clone(),
         local_settlement_data: local.clone(),
         revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // When revocation_data is None, remote commitment falls back to pending_remote_settlement_data
@@ -1103,6 +1206,7 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // Commitment 0 with revocation for 0: checked_sub(1) underflows safely to None -> returns pending
@@ -1497,6 +1601,7 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
             output: CellOutput::default(),
             output_data: Default::default(),
         }),
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // A revoked remote lock needs no historical TLC snapshot. The same number in
@@ -1602,12 +1707,14 @@ fn test_tracked_settlement_tlcs_extraction() {
             tlcs: vec![],
         },
         revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     // Commitment 2 = pending
     let pending_witness = settlement_data_to_witness(
         &pending_settlement,
         true,
+        CommitmentContractVersion::Legacy,
         local_settlement_key,
         remote_settlement_key,
     );
@@ -1754,6 +1861,7 @@ fn create_test_commitment_lock_with_keys(
     let witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
+        CommitmentContractVersion::Legacy,
         local_settlement_privkey.clone(),
         remote_settlement_pubkey,
     );
@@ -2824,6 +2932,7 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
         pending_remote_settlement_data: pending_settlement.clone(),
         local_settlement_data: local_settlement.clone(),
         revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
     };
 
     for (for_remote, number, expected) in [
@@ -3457,6 +3566,7 @@ fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
                 output: CellOutput::default(),
                 output_data: Default::default(),
             }),
+            commitment_contract_version: CommitmentContractVersion::Legacy,
         },
     );
     for for_remote in [false, true] {

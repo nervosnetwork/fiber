@@ -1395,6 +1395,9 @@ pub struct ChannelOpenRecord {
     pub created_at: u64,
     /// Timestamp (milliseconds since UNIX epoch) of the last status update.
     pub last_updated_at: u64,
+    /// Commitment-lock layout selected when the channel-open request was received or sent.
+    #[serde(default)]
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 impl ChannelOpenRecord {
@@ -1410,7 +1413,20 @@ impl ChannelOpenRecord {
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
+            commitment_contract_version: CommitmentContractVersion::default(),
         }
+    }
+
+    /// Create a new opening record with the negotiated commitment-lock layout.
+    pub fn new_with_version(
+        channel_id: Hash256,
+        pubkey: Pubkey,
+        funding_amount: u128,
+        commitment_contract_version: CommitmentContractVersion,
+    ) -> Self {
+        let mut record = Self::new(channel_id, pubkey, funding_amount);
+        record.commitment_contract_version = commitment_contract_version;
+        record
     }
 
     /// Create a new inbound record in the `WaitingForPeer` state.
@@ -1419,6 +1435,27 @@ impl ChannelOpenRecord {
         let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
+    }
+
+    /// Create a new inbound record with the negotiated commitment-lock layout.
+    pub fn new_inbound_with_version(
+        channel_id: Hash256,
+        pubkey: Pubkey,
+        remote_funding_amount: u128,
+        commitment_contract_version: CommitmentContractVersion,
+    ) -> Self {
+        Self::new_with_version(
+            channel_id,
+            pubkey,
+            remote_funding_amount,
+            commitment_contract_version,
+        )
+        .with_acceptor()
+    }
+
+    fn with_acceptor(mut self) -> Self {
+        self.is_acceptor = true;
+        self
     }
 
     /// Transition to a new status.
@@ -1472,6 +1509,29 @@ impl PendingNotifySettleTlc {
                 .unwrap_or_default()
                 .saturating_sub(now_millis_since_unix_epoch),
         )
+    }
+}
+
+/// Which commitment-lock settlement witness layout a channel uses.
+///
+/// Decided once at channel-open negotiation and never changed afterwards.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CommitmentContractVersion {
+    /// 20-byte prefix commitment (57-byte args, pre-upgrade channels).
+    #[default]
+    Legacy,
+    /// 32-byte payment hash committed on-chain, 97-byte HTLC witness, 58-byte args.
+    V1,
+}
+
+impl CommitmentContractVersion {
+    /// V1 only when BOTH peers advertise support of the feature bit.
+    pub fn for_negotiated(ours_supports: bool, peer_supports: Option<bool>) -> Self {
+        if ours_supports && peer_supports == Some(true) {
+            Self::V1
+        } else {
+            Self::Legacy
+        }
     }
 }
 
@@ -1615,6 +1675,11 @@ pub struct ChannelActorData {
     /// Persisted state for an in-progress external funding flow.
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
+
+    /// Which commitment-lock settlement witness layout this channel uses,
+    /// decided once at channel-open and never changed.
+    #[serde(default)]
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
