@@ -5,8 +5,8 @@ use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxRespon
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse, ChannelActor,
     ChannelActorMessage, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
-    ProcessingChannelResult, ReloadParams, ReplayOrderHint, TestChannelSignerBuffers,
-    UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+    ProcessingChannelResult, ReloadParams, ReplayOrderHint, TestPendingMessages, UpdateCommand,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     XUDT_COMPATIBLE_WITNESS,
 };
@@ -66,6 +66,7 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
     H256,
 };
+use fiber_types::ChannelSignatureRequest;
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
@@ -2243,15 +2244,12 @@ async fn wait_for_external_signer_recovery(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn live_external_signer_buffers(
-    node: &NetworkNode,
-    channel_id: Hash256,
-) -> TestChannelSignerBuffers {
+async fn live_pending_messages(node: &NetworkNode, channel_id: Hash256) -> TestPendingMessages {
     let actor = node
         .get_channel_actor(channel_id)
         .await
         .expect("channel actor is running");
-    call!(actor, ChannelActorMessage::TestGetSignerBuffers).expect("channel actor is alive")
+    call!(actor, ChannelActorMessage::TestGetPendingMessages).expect("channel actor is alive")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2297,7 +2295,7 @@ async fn test_external_signer_pending_update_tlc_info_after_peer_restart() {
         ))
         .expect("queue peer update behind external signature");
     wait_until_async_timeout(|| async {
-        live_external_signer_buffers(&tenant, channel_id)
+        live_pending_messages(&tenant, channel_id)
             .await
             .pending_peer_message_count
             > 0
@@ -2322,7 +2320,7 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
     init_tracing();
 
     // Completing an incoming commitment first starts the revoke signature.
-    // The commitment tail remains runtime-only until that signature returns.
+    // The commitment completion remains in-flight until that signature returns.
     let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
     let commitment_tail_payment = public_node
         .send_payment_keysend(&tenant, 10_003, false)
@@ -2349,10 +2347,10 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
     .await;
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
-        live_external_signer_buffers(&tenant, channel_id)
-            .await
-            .pending_received_commitment_tail
-            && state.signing_context.is_awaiting_signature()
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| matches!(req, ChannelSignatureRequest::SendRevokeAndAck { .. }))
     })
     .await;
     public_node.restart().await;
@@ -2365,12 +2363,7 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
     )
     .await;
 
-    // NOTE(lsp-review): This can recover in isolation, but fails under the
-    // combined signer-restart test run with a replayed TLC id followed by a
-    // BadSignature force-close. Keep the scenario active while the replay
-    // semantics are reviewed, then re-enable the expected recovery assertion.
-    // assert!(recovered, "external-signer channel and TLC state recover");
-    let _ = recovered;
+    assert!(recovered, "external-signer channel and TLC state recover");
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2380,7 +2373,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
 
     // While completion of a received revoke waits for an external signature,
     // queue the peer's next commitment. Draining it creates another signature
-    // request before the received-revoke tail can run.
+    // request before the received-revoke processing completes.
     let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
     let revoke_tail_tenant_payment = tenant
         .send_payment_keysend(&public_node, 10_004, false)
@@ -2403,7 +2396,7 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
     })
     .await;
     wait_until_async_timeout(|| async {
-        live_external_signer_buffers(&tenant, channel_id)
+        live_pending_messages(&tenant, channel_id)
             .await
             .has_pending_peer_commitment
     })
@@ -2416,10 +2409,15 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
     .await;
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
-        live_external_signer_buffers(&tenant, channel_id)
-            .await
-            .pending_received_revoke_tail
-            && state.signing_context.is_awaiting_signature()
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| {
+                matches!(
+                    req,
+                    ChannelSignatureRequest::CompleteReceivedCommitment { .. }
+                )
+            })
     })
     .await;
     public_node.restart().await;
@@ -2432,16 +2430,136 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
     )
     .await;
 
-    // NOTE(lsp-review): Without the proposed replay/idempotency changes, the
-    // replayed CommitmentSigned fails with BadSignature and the channel closes.
-    // Keep the scenario and its expected outcome visible while protocol behavior
-    // is reviewed; re-enable these assertions together with the production fix.
-    // assert!(recovered, "external-signer channel and TLC state recover");
-    // let signer_buffers = live_external_signer_buffers(&tenant, channel_id).await;
-    // assert_eq!(signer_buffers.pending_peer_message_count, 0);
-    // assert!(!signer_buffers.pending_received_commitment_tail);
-    // assert!(!signer_buffers.pending_received_revoke_tail);
-    let _ = recovered;
+    assert!(recovered, "external-signer channel and TLC state recover");
+    let pending_messages = live_pending_messages(&tenant, channel_id).await;
+    assert_eq!(pending_messages.pending_peer_message_count, 0);
+    assert!(!tenant
+        .get_channel_actor_state(channel_id)
+        .signing_context
+        .is_awaiting_signature());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_cooperative_shutdown() {
+    init_tracing();
+
+    let ([tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(public_node.network_actor, message)
+        .expect("public_node alive")
+        .expect("successfully shutdown channel");
+
+    let sdk = ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    };
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+
+    sdk.try_sign_pending(channel_id).await;
+
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        matches!(
+            state.state,
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+                | ChannelState::Closed(_)
+        )
+    })
+    .await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_shutdown_after_tlc_resolved() {
+    init_tracing();
+
+    let ([tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+    let sdk = ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    };
+
+    let payment = public_node
+        .send_payment_keysend(&tenant, 10_000, false)
+        .await
+        .expect("start payment");
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if public_node.get_payment_status(payment.payment_hash).await == PaymentStatus::Success
+            {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("payment should complete");
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(public_node.network_actor, message)
+        .expect("public_node alive")
+        .expect("successfully shutdown channel");
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+
+    sdk.try_sign_pending(channel_id).await;
+
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        matches!(
+            state.state,
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+                | ChannelState::Closed(_)
+        )
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -13590,7 +13708,7 @@ mod udt_funding_cell_capacity {
             private_key: None,
             funding_abort_detail: None,
             needs_backup: false,
-            signer_buffers: Default::default(),
+            pending_messages: Default::default(),
         }
     }
 

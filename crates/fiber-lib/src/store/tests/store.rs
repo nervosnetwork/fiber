@@ -1389,7 +1389,7 @@ fn test_channel_actor_state_store() {
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
-        signer_buffers: Default::default(),
+        pending_messages: Default::default(),
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1532,7 +1532,7 @@ fn sample_channel_actor_state(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
-        signer_buffers: Default::default(),
+        pending_messages: Default::default(),
     }
 }
 

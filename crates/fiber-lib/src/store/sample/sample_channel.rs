@@ -45,7 +45,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
-            signer_buffers: Default::default(),
+            pending_messages: Default::default(),
         }
     }
 
@@ -76,7 +76,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
-            signer_buffers: Default::default(),
+            pending_messages: Default::default(),
         }
     }
 }
