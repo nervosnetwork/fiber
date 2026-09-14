@@ -5,7 +5,7 @@ use crate::fiber::{
     channel::ChannelActorStateStore, payment::SendPaymentCommand, NetworkActorCommand,
     NetworkActorMessage,
 };
-use crate::rpc::utils::RpcResultExt;
+use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
 #[cfg(debug_assertions)]
 use fiber_json_types::SessionRoute as JsonSessionRoute;
@@ -21,8 +21,9 @@ use ractor::{call, ActorRef};
 
 pub use fiber_json_types::{
     BuildPaymentRouterResult, BuildRouterParams, GetPaymentCommandParams, GetPaymentCommandResult,
-    HopHint, ListPaymentsParams, ListPaymentsResult, PaymentCustomRecords,
-    SendPaymentCommandParams, SendPaymentWithRouterParams,
+    GetPaymentDiagnosticsResult, HopHint, ListPaymentsParams, ListPaymentsResult,
+    PaymentAttemptDiagnostic, PaymentCustomRecords, SendPaymentCommandParams,
+    SendPaymentWithRouterParams,
 };
 
 /// RPC module for channel management.
@@ -42,6 +43,13 @@ trait PaymentRpc {
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    /// Retrieves redacted payment attempts and routes in both debug and release builds.
+    #[method(name = "get_payment_diagnostics")]
+    async fn get_payment_diagnostics(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentDiagnosticsResult, ErrorObjectOwned>;
 
     /// Builds a router with a list of pubkeys and required channels.
     #[method(name = "build_router")]
@@ -77,6 +85,29 @@ trait PaymentRpc {
     ) -> Result<ListPaymentsResult, ErrorObjectOwned>;
 }
 
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::redact_payment_failure;
+
+    #[test]
+    fn diagnostic_failure_text_is_bounded_and_sensitive_detail_is_redacted() {
+        assert_eq!(
+            redact_payment_failure(&Some("route unavailable".to_owned())).as_deref(),
+            Some("route unavailable")
+        );
+        assert_eq!(
+            redact_payment_failure(&Some("invoice=fibt...".to_owned())).as_deref(),
+            Some("[redacted sensitive payment failure detail]")
+        );
+        assert_eq!(
+            redact_payment_failure(&Some("x".repeat(600)))
+                .unwrap()
+                .len(),
+            512
+        );
+    }
+}
+
 pub struct PaymentRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
@@ -107,6 +138,13 @@ where
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         self.get_payment(params).await
+    }
+
+    async fn get_payment_diagnostics(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentDiagnosticsResult, ErrorObjectOwned> {
+        self.get_payment_diagnostics(params).await
     }
 
     /// Builds a router with a list of pubkeys and required channels.
@@ -161,6 +199,28 @@ fn send_payment_response_to_json(
             .map(JsonSessionRoute::from)
             .collect(),
     }
+}
+
+fn redact_payment_failure(error: &Option<String>) -> Option<String> {
+    error.as_ref().map(|message| {
+        let normalized = message.to_ascii_lowercase();
+        if [
+            "invoice",
+            "preimage",
+            "session_key",
+            "session key",
+            "custom_records",
+            "custom records",
+            "onion payload",
+        ]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+        {
+            return "[redacted sensitive payment failure detail]".to_owned();
+        }
+
+        message.chars().take(512).collect()
+    })
 }
 
 impl<S> PaymentRpcServerImpl<S>
@@ -243,6 +303,47 @@ where
         };
         handle_actor_call!(self.actor, message, params)
             .map(|response| send_payment_response_to_json(&response))
+    }
+
+    pub async fn get_payment_diagnostics(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentDiagnosticsResult, ErrorObjectOwned> {
+        let payment_hash = params.payment_hash.into();
+        let session = self
+            .store
+            .get_payment_session(payment_hash)
+            .ok_or_else(|| rpc_error(format!("Payment session not found: {payment_hash:?}")))?;
+
+        let attempts = session
+            .attempts()
+            .map(|attempt| {
+                let first_amount = attempt.route.nodes.first().map_or(0, |node| node.amount);
+                let receiver_amount = attempt.route.receiver_amount();
+                PaymentAttemptDiagnostic {
+                    attempt_id: attempt.id,
+                    status: attempt.status.into(),
+                    retry_count: attempt.tried_times,
+                    retry_limit: attempt.try_limit,
+                    created_at: attempt.created_at,
+                    last_updated_at: attempt.last_updated_at,
+                    receiver_amount,
+                    fee: first_amount.saturating_sub(receiver_amount),
+                    failed_error: redact_payment_failure(&attempt.last_error),
+                    route: attempt.route.clone().into(),
+                }
+            })
+            .collect();
+
+        Ok(GetPaymentDiagnosticsResult {
+            payment_hash: session.payment_hash().into(),
+            status: session.status.into(),
+            created_at: session.created_at,
+            last_updated_at: session.last_updated_at,
+            failed_error_code: session.last_error_code.map(|code| code.as_ref().to_owned()),
+            failed_error: redact_payment_failure(&session.last_error),
+            attempts,
+        })
     }
 
     pub async fn build_router(
