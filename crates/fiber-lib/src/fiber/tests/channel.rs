@@ -2569,6 +2569,61 @@ async fn test_external_signer_pending_send_revoke_peer_restart_race() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
+async fn test_external_signer_pending_add_tlc_peer_restart() {
+    init_tracing();
+
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    // 1. Tenant initiates a payment, pausing in SendCommitmentSigned awaiting external signature
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+
+    // 2. While tenant is awaiting signature, public_node initiates a payment to tenant
+    let public_payment = public_node
+        .send_payment_keysend(&tenant, 20_000, false)
+        .await
+        .expect("start payment from public_node");
+
+    // Wait until tenant buffers public_node's peer messages (AddTlc, CommitmentSigned)
+    wait_until_async_timeout(|| async {
+        live_pending_messages(&tenant, channel_id)
+            .await
+            .pending_peer_message_count
+            > 0
+    })
+    .await;
+
+    // 3. Now public_node restarts!
+    public_node.restart().await;
+
+    // 4. Try to recover with external signer
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[
+            (&tenant, tenant_payment.payment_hash),
+            (&public_node, public_payment.payment_hash),
+        ],
+    )
+    .await;
+
+    assert!(
+        recovered,
+        "channel and both payments must recover without TLC ID mismatch or force close"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
 async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestablish() {
     init_tracing();
 

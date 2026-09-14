@@ -521,12 +521,17 @@ where
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> ProcessingChannelResult {
+        // When awaiting an external signature, the local commitment state is uncommitted
+        // and cannot process peer messages directly. We must buffer them in FIFO order.
         if state.signing_context.is_awaiting_signature() {
             if matches!(&message, FiberChannelMessage::ReestablishChannel(_))
                 && state.reestablishing
             {
+                // The peer's ReestablishChannel wire message can overtake our internal PeerReconnected event.
+                // Calling on_peer_reconnected() transitions connectivity_state from Offline to Syncing,
+                // purges stale uncommitted peer messages from the previous session, and defers sending
+                // our own ReestablishChannel until the signature completes.
                 state.on_peer_reconnected();
-                state.pending_messages.pending_reestablish_send = true;
             }
             state.queue_pending_peer_message(message);
             return Ok(());
@@ -1809,18 +1814,7 @@ where
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
     ) -> ProcessingChannelResult {
-        // TODO: here we only check the error which sender didn't follow agreed rules,
-        //       if any error happened here we need go to shutdown procedure
-
-        state.check_for_tlc_update(TlcUpdateAction::AddTlcPeer {
-            amount: add_tlc.amount,
-        })?;
-        state.check_tlc_expiry(add_tlc.expiry)?;
-        let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
-        state.check_insert_tlc(&tlc_info)?;
-        state.tlc_state.add_received_tlc(tlc_info);
-        state.increment_next_received_tlc_id();
-        Ok(())
+        state.handle_add_tlc_peer_message(add_tlc)
     }
 
     fn handle_remove_tlc_peer_message(
@@ -1839,8 +1833,22 @@ where
                 "Plaintext TLC failure is not accepted from peers".to_string(),
             ));
         }
-        state
-            .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
+
+        let tlc_id = TLCId::Offered(remove_tlc.tlc_id);
+        if let Some(existing_tlc) = state.get_offered_tlc(tlc_id) {
+            if let Some(existing_reason) = &existing_tlc.removed_reason {
+                if *existing_reason == remove_tlc.reason {
+                    debug!(
+                        "channel {}: idempotent replay of already removed TLC {:?}",
+                        state.get_id(),
+                        tlc_id
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        state.check_remove_tlc_with_reason(tlc_id, &remove_tlc.reason)?;
         let payment_hash = state
             .tlc_state
             .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason.clone());
@@ -6624,6 +6632,7 @@ impl ChannelActorState {
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.pending_messages.pending_reestablish_send = false;
+        self.pending_messages.peer_messages.clear();
         self.reestablishing = true;
         self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
         self.connectivity_state = ChannelConnectivityState::Offline;
@@ -6635,6 +6644,7 @@ impl ChannelActorState {
     pub(crate) fn mark_watching_chain_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.pending_messages.pending_reestablish_send = false;
+        self.pending_messages.peer_messages.clear();
         self.reestablishing = false;
         self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Offline;
@@ -6663,6 +6673,7 @@ impl ChannelActorState {
     fn on_peer_reconnected(&mut self) {
         if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
+            self.pending_messages.peer_messages.clear();
             if !self.signing_context.is_awaiting_signature() {
                 self.send_reestablish_message();
             } else {
@@ -8635,6 +8646,42 @@ impl ChannelActorState {
             payment_secret: None,
         };
         Ok(tlc_info)
+    }
+
+    pub(crate) fn handle_add_tlc_peer_message(
+        &mut self,
+        add_tlc: AddTlc,
+    ) -> ProcessingChannelResult {
+        let tlc_id = TLCId::Received(add_tlc.tlc_id);
+        if let Some(existing_tlc) = self.get_received_tlc(tlc_id) {
+            if existing_tlc.amount == add_tlc.amount
+                && existing_tlc.payment_hash == add_tlc.payment_hash
+                && existing_tlc.expiry == add_tlc.expiry
+                && existing_tlc.hash_algorithm == add_tlc.hash_algorithm
+            {
+                debug!(
+                    "channel {}: idempotent replay of already received TLC {:?}",
+                    self.get_id(),
+                    tlc_id
+                );
+                return Ok(());
+            } else {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Duplicate received tlc id {:?} with conflicting parameters",
+                    tlc_id
+                )));
+            }
+        }
+
+        self.check_for_tlc_update(TlcUpdateAction::AddTlcPeer {
+            amount: add_tlc.amount,
+        })?;
+        self.check_tlc_expiry(add_tlc.expiry)?;
+        let tlc_info = self.create_inbounding_tlc(add_tlc.clone())?;
+        self.check_insert_tlc(&tlc_info)?;
+        self.tlc_state.add_received_tlc(tlc_info);
+        self.increment_next_received_tlc_id();
+        Ok(())
     }
 
     fn aggregate_partial_signatures_to_consume_funding_cell(
@@ -12101,5 +12148,122 @@ mod tests {
         assert!(state
             .apply_next_signer_material(&req_commit_2, Some(valid_mat))
             .is_ok());
+    }
+
+    #[test]
+    fn test_pending_messages_cleared_on_peer_disconnect() {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+
+        // Simulate awaiting external signature
+        let secret_key = secp256k1::SecretKey::from_byte_array(&[42; 32]).unwrap();
+        let public_key = secret_key.public_key(secp256k1::SECP256K1);
+        let nonce = musig2::SecNonceBuilder::new([99; 32])
+            .build()
+            .public_nonce();
+        let content = Musig2SigningContent {
+            slot: NonceSlot {
+                purpose: NoncePurpose::Commitment,
+                commitment_number: 1,
+            },
+            commitment_counter: Some(CommitmentCounter::Local),
+            key_agg_ctx: musig2::KeyAggContext::new([public_key]).unwrap(),
+            agg_nonce: musig2::AggNonce::sum([nonce]),
+            content: Musig2SignableContent::CommitmentTransaction(Transaction::default()),
+        };
+        state.signing_context.pending_signature = Some(fiber_types::PendingChannelSignature {
+            request_id: fiber_types::SignatureRequestId(Hash256::default()),
+            request: ChannelSignatureRequest::SendClosingSigned { content },
+        });
+
+        // Simulate a message received from peer while awaiting external signature
+        let dummy_add_tlc = FiberChannelMessage::AddTlc(AddTlc {
+            channel_id: state.get_id(),
+            tlc_id: 0,
+            amount: 10_000,
+            payment_hash: Hash256::default(),
+            expiry: 1000,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+        });
+        state.queue_pending_peer_message(dummy_add_tlc);
+        assert_eq!(state.pending_messages.peer_messages.len(), 1);
+
+        // Peer disconnects!
+        state.mark_reestablishing_offline();
+
+        // Stale peer messages from disconnected session are cleanly cleared!
+        assert_eq!(
+            state.pending_messages.peer_messages.len(),
+            0,
+            "stale peer messages must be cleared on disconnect"
+        );
+        assert!(!state.pending_messages.pending_reestablish_send);
+
+        // Even if messages arrived while offline, on_peer_reconnected clears them as well
+        let dummy_add_tlc2 = FiberChannelMessage::AddTlc(AddTlc {
+            channel_id: state.get_id(),
+            tlc_id: 0,
+            amount: 10_000,
+            payment_hash: Hash256::default(),
+            expiry: 1000,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+        });
+        state.queue_pending_peer_message(dummy_add_tlc2);
+        assert_eq!(state.pending_messages.peer_messages.len(), 1);
+
+        state.on_peer_reconnected();
+        assert_eq!(
+            state.pending_messages.peer_messages.len(),
+            0,
+            "stale peer messages must be cleared on reconnect"
+        );
+        assert!(
+            state.pending_messages.pending_reestablish_send,
+            "pending_reestablish_send must be set on reconnect while awaiting signature"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_add_tlc_handled_idempotently_during_reestablish() {
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 10),
+            ChannelConstraints::new(1_000_000, 10),
+        );
+
+        let add_tlc = AddTlc {
+            channel_id: state.get_id(),
+            tlc_id: 0,
+            amount: 10_000,
+            payment_hash: Hash256::default(),
+            expiry: now_timestamp_as_millis_u64() + 100_000,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            onion_packet: None,
+        };
+
+        // First ingestion of AddTlc(0)
+        let res = state.handle_add_tlc_peer_message(add_tlc.clone());
+        assert!(res.is_ok(), "first add_tlc failed with: {res:?}");
+        assert_eq!(
+            state.get_next_received_tlc_id(),
+            fiber_types::TLCId::Received(1)
+        );
+
+        // Peer restarts and re-sends AddTlc(0) per resend_tlcs_on_reestablish
+        // Idempotent replay succeeds without error!
+        assert!(state.handle_add_tlc_peer_message(add_tlc.clone()).is_ok());
+        assert_eq!(
+            state.get_next_received_tlc_id(),
+            fiber_types::TLCId::Received(1)
+        );
+
+        // Conflicting replay with different amount must fail
+        let mut conflicting_add_tlc = add_tlc;
+        conflicting_add_tlc.amount = 20_000;
+        let err = state
+            .handle_add_tlc_peer_message(conflicting_add_tlc)
+            .unwrap_err();
+        assert!(err.to_string().contains("conflicting parameters"));
     }
 }
