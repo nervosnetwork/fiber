@@ -374,6 +374,18 @@ impl ChannelSignatureRequest {
             }
         }
     }
+
+    /// Returns true if this signing request advances commitment state and
+    /// strictly requires follow-up public material from an external signer.
+    pub fn requires_next_signer_material(&self) -> bool {
+        matches!(
+            self,
+            Self::SendCommitmentSigned { .. }
+                | Self::CompleteReceivedCommitment { .. }
+                | Self::SendRevokeAndAck { .. }
+                | Self::CompleteReceivedRevokeAndAck { .. }
+        )
+    }
 }
 
 /// Public semantic label for a channel signing transition.
@@ -832,5 +844,53 @@ mod tests {
                 ..
             } if id == request_id
         ));
+    }
+
+    #[test]
+    fn test_requires_next_signer_material() {
+        let dummy_content = content();
+        let dummy_settlement = settlement_data();
+        let peer_partial_signature = musig2::PartialSignature::from_slice(&[1u8; 32]).unwrap();
+        let nonce = musig2::SecNonceBuilder::new([7; 32]).build().public_nonce();
+        let pubkey = secp256k1::SecretKey::from_byte_array(&[42; 32])
+            .unwrap()
+            .public_key(secp256k1::SECP256K1);
+
+        assert!(ChannelSignatureRequest::SendCommitmentSigned {
+            content: dummy_content.clone(),
+            settlement_data: dummy_settlement.clone(),
+        }
+        .requires_next_signer_material());
+
+        assert!(ChannelSignatureRequest::CompleteReceivedCommitment {
+            content: dummy_content.clone(),
+            peer_partial_signature,
+            peer_next_commitment_nonce: nonce.clone(),
+            settlement_data: dummy_settlement,
+        }
+        .requires_next_signer_material());
+
+        assert!(ChannelSignatureRequest::SendRevokeAndAck {
+            content: dummy_content.clone(),
+        }
+        .requires_next_signer_material());
+
+        assert!(ChannelSignatureRequest::CompleteReceivedRevokeAndAck {
+            content: dummy_content.clone(),
+            peer_partial_signature,
+            next_per_commitment_point: pubkey.into(),
+            next_revocation_nonce: nonce,
+        }
+        .requires_next_signer_material());
+
+        assert!(!ChannelSignatureRequest::SendClosingSigned {
+            content: dummy_content.clone(),
+        }
+        .requires_next_signer_material());
+
+        assert!(!ChannelSignatureRequest::SignChannelAnnouncement {
+            content: dummy_content,
+        }
+        .requires_next_signer_material());
     }
 }

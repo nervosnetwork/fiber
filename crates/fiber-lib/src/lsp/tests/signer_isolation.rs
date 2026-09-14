@@ -749,6 +749,111 @@ async fn channel_signature_submission_rejects_invalid_input_and_is_idempotent() 
         "error must state conflicts with persisted material, got {err}"
     );
 
+    // 3a. Missing next material when required by commitment progression
+    let mut missing_mat = valid_submission.clone();
+    missing_mat.next_material = None;
+    let err = sdk
+        .submit(missing_mat)
+        .await
+        .expect_err("missing next material must fail");
+    assert!(
+        err.to_string().contains("must provide next_material"),
+        "error must state must provide next_material, got {err}"
+    );
+
+    // 3b. Partial next material: missing commitment point
+    let mut missing_point = valid_submission.clone();
+    missing_point
+        .next_material
+        .as_mut()
+        .unwrap()
+        .next_commitment_point = None;
+    let err = sdk
+        .submit(missing_point)
+        .await
+        .expect_err("missing commitment point must fail");
+    assert!(
+        err.to_string().contains("missing next_commitment_point"),
+        "error must state missing next_commitment_point, got {err}"
+    );
+
+    // 3c. Partial next material: missing commitment nonce
+    let mut missing_c_nonce = valid_submission.clone();
+    missing_c_nonce
+        .next_material
+        .as_mut()
+        .unwrap()
+        .next_commitment_nonce = None;
+    let err = sdk
+        .submit(missing_c_nonce)
+        .await
+        .expect_err("missing commitment nonce must fail");
+    assert!(
+        err.to_string().contains("missing next_commitment_nonce"),
+        "error must state missing next_commitment_nonce, got {err}"
+    );
+
+    // 3d. Partial next material: missing revocation nonce
+    let mut missing_r_nonce = valid_submission.clone();
+    missing_r_nonce
+        .next_material
+        .as_mut()
+        .unwrap()
+        .next_revocation_nonce = None;
+    let err = sdk
+        .submit(missing_r_nonce)
+        .await
+        .expect_err("missing revocation nonce must fail");
+    assert!(
+        err.to_string().contains("missing next_revocation_nonce"),
+        "error must state missing next_revocation_nonce, got {err}"
+    );
+
+    // 3e. Nonce reuse: identical commitment and revocation nonce in same submission
+    let mut reused_in_submission = valid_submission.clone();
+    let c_nonce = reused_in_submission
+        .next_material
+        .as_ref()
+        .unwrap()
+        .next_commitment_nonce
+        .clone();
+    reused_in_submission
+        .next_material
+        .as_mut()
+        .unwrap()
+        .next_revocation_nonce = c_nonce;
+    let err = sdk
+        .submit(reused_in_submission)
+        .await
+        .expect_err("identical commitment and revocation nonces must fail");
+    assert!(
+        err.to_string().contains("must be distinct"),
+        "error must state nonces must be distinct, got {err}"
+    );
+
+    // 3f. Fail-closed nonce reuse: reusing an already assigned nonce from earlier slot
+    let mut reused_historical = valid_submission.clone();
+    let open_c_nonce = sdk
+        .signer
+        .channel_open_material(false)
+        .await
+        .unwrap()
+        .commitment_nonce;
+    reused_historical
+        .next_material
+        .as_mut()
+        .unwrap()
+        .next_commitment_nonce = Some(open_c_nonce.serialize().to_vec());
+    let err = sdk
+        .submit(reused_historical)
+        .await
+        .expect_err("historical nonce reuse must fail");
+    assert!(
+        err.to_string()
+            .contains("reuses a nonce already assigned to another slot"),
+        "error must state reuses nonce already assigned, got {err}"
+    );
+
     // 4. Valid submission succeeds
     let applied = sdk
         .submit(valid_submission.clone())

@@ -5683,9 +5683,20 @@ impl ChannelActorState {
         request: &ChannelSignatureRequest,
         material: Option<NextChannelSignerMaterial>,
     ) -> ProcessingChannelResult {
+        let requires_material = request.requires_next_signer_material();
+
+        // 1. Missing next_material check
+        if requires_material && material.is_none() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "channel signer must provide next_material for transition {:?}",
+                request.transition()
+            )));
+        }
+
         let Some(material) = material else {
             return Ok(());
         };
+
         let commitment_number = request
             .content()
             .slot
@@ -5693,9 +5704,42 @@ impl ChannelActorState {
             .checked_add(1)
             .ok_or_else(|| {
                 ProcessingChannelError::InvalidParameter(
-                    "external signer commitment number overflow".to_string(),
+                    "channel signer commitment number overflow".to_string(),
                 )
             })?;
+
+        // 2. Partial next_material check
+        if requires_material {
+            if material.next_commitment_point.is_none() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "channel signer next_material missing next_commitment_point for commitment {commitment_number}"
+                )));
+            }
+            if material.next_commitment_nonce.is_none() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "channel signer next_material missing next_commitment_nonce for commitment {commitment_number}"
+                )));
+            }
+            if material.next_revocation_nonce.is_none() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "channel signer next_material missing next_revocation_nonce for commitment {commitment_number}"
+                )));
+            }
+        }
+
+        // 3. Prevent cross-purpose nonce reuse within the same material
+        if let (Some(c_nonce), Some(r_nonce)) = (
+            &material.next_commitment_nonce,
+            &material.next_revocation_nonce,
+        ) {
+            if c_nonce == r_nonce {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "channel signer commitment and revocation nonces must be distinct".to_string(),
+                ));
+            }
+        }
+
+        // 4. Validate commitment point
         if let Some(point) = material.next_commitment_point {
             if self
                 .core
@@ -5704,13 +5748,12 @@ impl ChannelActorState {
                 .is_some_and(|existing| *existing != point)
             {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "external signer commitment point {commitment_number} conflicts with persisted material"
+                    "channel signer commitment point {commitment_number} conflicts with persisted material"
                 )));
             }
-            self.core
-                .local_commitment_points
-                .insert(commitment_number, point);
         }
+
+        // 5. Validate nonces against conflicts and cross-slot reuse
         for (purpose, submitted) in [
             (NoncePurpose::Commitment, &material.next_commitment_nonce),
             (NoncePurpose::Revocation, &material.next_revocation_nonce),
@@ -5719,20 +5762,60 @@ impl ChannelActorState {
                 purpose,
                 commitment_number,
             };
-            if submitted.as_ref().is_some_and(|nonce| {
-                self.core
+            if let Some(nonce) = submitted {
+                // Check conflict against the same slot
+                if self
+                    .core
                     .local_public_nonces
                     .get(&slot)
                     .is_some_and(|existing| existing != nonce)
-            }) {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "external signer nonce {slot:?} conflicts with persisted material"
-                )));
-            }
-            if let Some(nonce) = submitted {
-                self.core.local_public_nonces.insert(slot, nonce.clone());
+                {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "channel signer nonce {slot:?} conflicts with persisted material"
+                    )));
+                }
+
+                // Check fail-closed nonce-reuse against different slots
+                if self
+                    .core
+                    .local_public_nonces
+                    .iter()
+                    .any(|(existing_slot, existing_nonce)| {
+                        existing_slot != &slot && existing_nonce == nonce
+                    })
+                {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "channel signer nonce {slot:?} reuses a nonce already assigned to another slot"
+                    )));
+                }
             }
         }
+
+        // 6. All checks passed — commit updates to state
+        if let Some(point) = material.next_commitment_point {
+            self.core
+                .local_commitment_points
+                .insert(commitment_number, point);
+        }
+        if let Some(nonce) = material.next_commitment_nonce {
+            self.core.local_public_nonces.insert(
+                NonceSlot {
+                    purpose: NoncePurpose::Commitment,
+                    commitment_number,
+                },
+                nonce,
+            );
+        }
+        if let Some(nonce) = material.next_revocation_nonce {
+            self.core.local_public_nonces.insert(
+                NonceSlot {
+                    purpose: NoncePurpose::Revocation,
+                    commitment_number,
+                },
+                nonce,
+            );
+        }
+
         Ok(())
     }
 
@@ -11710,5 +11793,289 @@ mod tests {
             .expect("UDT packed Bytes should restore");
         assert_eq!(restored, udt_amount);
         assert_ne!(udt_amount.as_slice().to_vec().pack(), udt_amount);
+    }
+
+    #[test]
+    fn test_apply_next_signer_material_validation() {
+        let dummy_pubkey = |seed: u8| -> Pubkey {
+            secp256k1::SecretKey::from_byte_array(&[seed; 32])
+                .unwrap()
+                .public_key(secp256k1::SECP256K1)
+                .into()
+        };
+        let dummy_nonce = |seed: u8| -> PubNonce {
+            musig2::SecNonceBuilder::new([seed; 32])
+                .build()
+                .public_nonce()
+        };
+        let dummy_settlement = || -> SettlementData {
+            SettlementData {
+                local_amount: 0,
+                remote_amount: 0,
+                tlcs: Vec::new(),
+            }
+        };
+        let dummy_content =
+            |purpose: NoncePurpose, commitment_number: u64| -> Musig2SigningContent {
+                let secret_key = secp256k1::SecretKey::from_byte_array(&[42; 32]).unwrap();
+                let public_key = secret_key.public_key(secp256k1::SECP256K1);
+                let nonce = dummy_nonce(99);
+                Musig2SigningContent {
+                    slot: NonceSlot {
+                        purpose,
+                        commitment_number,
+                    },
+                    commitment_counter: Some(CommitmentCounter::Local),
+                    key_agg_ctx: musig2::KeyAggContext::new([public_key]).unwrap(),
+                    agg_nonce: musig2::AggNonce::sum([nonce]),
+                    content: Musig2SignableContent::CommitmentTransaction(Transaction::default()),
+                }
+            };
+
+        let mut state = channel_state_with_limits(
+            ChannelConstraints::new(1_000_000, 1),
+            ChannelConstraints::new(1_000_000, 1),
+        );
+        state.channel_signer = ChannelSigner::external();
+
+        let req_commit_1 = ChannelSignatureRequest::SendCommitmentSigned {
+            content: dummy_content(NoncePurpose::Commitment, 1),
+            settlement_data: dummy_settlement(),
+        };
+        let req_closing = ChannelSignatureRequest::SendClosingSigned {
+            content: dummy_content(NoncePurpose::Commitment, 1),
+        };
+        let req_announce = ChannelSignatureRequest::SignChannelAnnouncement {
+            content: dummy_content(NoncePurpose::ChannelAnnouncement, 0),
+        };
+
+        // 1. Channel signer requires next_material on state-advancing transitions (external signer)
+        let err = state
+            .apply_next_signer_material(&req_commit_1, None)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("channel signer must provide next_material"),
+            "expected must provide next_material error, got {err:?}"
+        );
+
+        // 2. Local signer also requires next_material on state-advancing transitions (uniform requirement)
+        let local_signer = InMemorySigner::generate_from_seed(b"test-local");
+        state.channel_signer = ChannelSigner::local(local_signer);
+        let err_local = state
+            .apply_next_signer_material(&req_commit_1, None)
+            .unwrap_err();
+        assert!(
+            err_local
+                .to_string()
+                .contains("channel signer must provide next_material"),
+            "expected must provide next_material error for local signer, got {err_local:?}"
+        );
+        state.channel_signer = ChannelSigner::external();
+
+        // 3. Non-advancing transitions do not require next_material
+        assert!(state.apply_next_signer_material(&req_closing, None).is_ok());
+        assert!(state
+            .apply_next_signer_material(&req_announce, None)
+            .is_ok());
+
+        // 4. Commitment number overflow
+        let req_overflow = ChannelSignatureRequest::SendCommitmentSigned {
+            content: dummy_content(NoncePurpose::Commitment, u64::MAX),
+            settlement_data: dummy_settlement(),
+        };
+        let err = state
+            .apply_next_signer_material(
+                &req_overflow,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(1)),
+                    next_commitment_nonce: Some(dummy_nonce(1)),
+                    next_revocation_nonce: Some(dummy_nonce(2)),
+                }),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("commitment number overflow"),
+            "expected overflow error, got {err:?}"
+        );
+
+        // 5. Partial next_material checks
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_1,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: None,
+                    next_commitment_nonce: Some(dummy_nonce(1)),
+                    next_revocation_nonce: Some(dummy_nonce(2)),
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("missing next_commitment_point"));
+
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_1,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(1)),
+                    next_commitment_nonce: None,
+                    next_revocation_nonce: Some(dummy_nonce(2)),
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("missing next_commitment_nonce"));
+
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_1,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(1)),
+                    next_commitment_nonce: Some(dummy_nonce(1)),
+                    next_revocation_nonce: None,
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("missing next_revocation_nonce"));
+
+        // 6. Cross-purpose nonce reuse within the same material
+        let nonce_shared = dummy_nonce(10);
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_1,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(1)),
+                    next_commitment_nonce: Some(nonce_shared.clone()),
+                    next_revocation_nonce: Some(nonce_shared),
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("must be distinct"));
+
+        // 7. Commitment point conflict check
+        state
+            .core
+            .local_commitment_points
+            .insert(2, dummy_pubkey(20));
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_1,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(21)),
+                    next_commitment_nonce: Some(dummy_nonce(1)),
+                    next_revocation_nonce: Some(dummy_nonce(2)),
+                }),
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("commitment point 2 conflicts with persisted material"));
+
+        // 8. Same-slot nonce conflict check
+        let slot_c_2 = NonceSlot {
+            purpose: NoncePurpose::Commitment,
+            commitment_number: 2,
+        };
+        state
+            .core
+            .local_public_nonces
+            .insert(slot_c_2, dummy_nonce(30));
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_1,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(20)),
+                    next_commitment_nonce: Some(dummy_nonce(31)),
+                    next_revocation_nonce: Some(dummy_nonce(2)),
+                }),
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("conflicts with persisted material"));
+
+        // 9. Fail-closed cross-slot nonce reuse check
+        let historical_nonce = dummy_nonce(40);
+        state.core.local_public_nonces.insert(
+            NonceSlot {
+                purpose: NoncePurpose::Commitment,
+                commitment_number: 0,
+            },
+            historical_nonce.clone(),
+        );
+
+        // Advance to commitment 3 (where both commitment and revocation slots are unpopulated)
+        let req_commit_2 = ChannelSignatureRequest::SendCommitmentSigned {
+            content: dummy_content(NoncePurpose::Commitment, 2),
+            settlement_data: dummy_settlement(),
+        };
+
+        // Reusing historical nonce in commitment nonce
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_2,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(30)),
+                    next_commitment_nonce: Some(historical_nonce.clone()),
+                    next_revocation_nonce: Some(dummy_nonce(50)),
+                }),
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("reuses a nonce already assigned to another slot"));
+
+        // Reusing historical nonce in revocation nonce
+        let err = state
+            .apply_next_signer_material(
+                &req_commit_2,
+                Some(NextChannelSignerMaterial {
+                    next_commitment_point: Some(dummy_pubkey(30)),
+                    next_commitment_nonce: Some(dummy_nonce(51)),
+                    next_revocation_nonce: Some(historical_nonce),
+                }),
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("reuses a nonce already assigned to another slot"));
+
+        // 10. Transactional atomicity: partial material is NOT committed when validation fails
+        assert!(!state.core.local_commitment_points.contains_key(&3));
+        assert!(!state.core.local_public_nonces.contains_key(&NonceSlot {
+            purpose: NoncePurpose::Commitment,
+            commitment_number: 3,
+        }));
+
+        // 11. Valid application installs material
+        let valid_mat = NextChannelSignerMaterial {
+            next_commitment_point: Some(dummy_pubkey(30)),
+            next_commitment_nonce: Some(dummy_nonce(51)),
+            next_revocation_nonce: Some(dummy_nonce(52)),
+        };
+        assert!(state
+            .apply_next_signer_material(&req_commit_2, Some(valid_mat.clone()))
+            .is_ok());
+        assert_eq!(
+            state.core.local_commitment_points.get(&3),
+            Some(&dummy_pubkey(30))
+        );
+        assert_eq!(
+            state.core.local_public_nonces.get(&NonceSlot {
+                purpose: NoncePurpose::Commitment,
+                commitment_number: 3,
+            }),
+            Some(&dummy_nonce(51))
+        );
+        assert_eq!(
+            state.core.local_public_nonces.get(&NonceSlot {
+                purpose: NoncePurpose::Revocation,
+                commitment_number: 3,
+            }),
+            Some(&dummy_nonce(52))
+        );
+
+        // 12. Idempotent re-application of the same material succeeds
+        assert!(state
+            .apply_next_signer_material(&req_commit_2, Some(valid_mat))
+            .is_ok());
     }
 }
