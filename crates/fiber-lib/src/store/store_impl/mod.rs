@@ -1759,10 +1759,7 @@ impl WatchtowerStore for Store {
             "ChannelData",
         );
         let signer_state = if external {
-            WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState {
-                state: fiber_types::WatchtowerExternalState::Ready,
-                last_applied: None,
-            })
+            WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState::default())
         } else {
             WatchtowerSignerState::Internal
         };

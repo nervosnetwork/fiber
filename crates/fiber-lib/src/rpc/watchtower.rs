@@ -380,9 +380,7 @@ where
         ctx: RpcContext,
         params: SubmitWatchtowerSignatureParams,
     ) -> Result<SubmitWatchtowerSignatureResult, ErrorObjectOwned> {
-        use fiber_types::{
-            LastAppliedWatchtowerSignature, WatchtowerExternalState, WatchtowerSignerState,
-        };
+        use fiber_types::{LastAppliedWatchtowerSignature, WatchtowerSignerState};
 
         let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id: fiber_types::Hash256 = params.channel_id.into();
@@ -415,20 +413,19 @@ where
                 "submitted signature does not match the previously applied result",
             ));
         }
-        let WatchtowerExternalState::AwaitingSignature {
-            request_id: expected,
-            content,
-        } = external.state
-        else {
+        if let Some((_, existing_sig)) = external.signed_signatures.get(&request_id) {
+            if existing_sig == &signature {
+                return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
+            }
             return Err(rpc_error(
-                "watched channel is not waiting for an external signature",
-            ));
-        };
-        if expected != request_id {
-            return Err(rpc_error(
-                "signature request id does not match the current request",
+                "submitted signature does not match the previously applied result",
             ));
         }
+        let Some(content) = external.pending_requests.remove(&request_id) else {
+            return Err(rpc_error(
+                "signature request id not found in pending requests",
+            ));
+        };
         let expected_pubkey = channel
             .expected_onchain_pubkey(&content.key_purpose)
             .map_err(rpc_error)?;
@@ -438,11 +435,9 @@ where
             request_id,
             signature,
         });
-        external.state = WatchtowerExternalState::Signed {
-            request_id,
-            content,
-            signature,
-        };
+        external
+            .signed_signatures
+            .insert(request_id, (content, signature));
         self.store.put_watchtower_signer(
             &node_id,
             &channel_id,
@@ -456,32 +451,30 @@ where
 fn to_rpc_watchtower_signing_status(
     state: fiber_types::WatchtowerSignerState,
 ) -> WatchtowerSigningStatus {
-    use fiber_types::{OnchainKeyPurpose, WatchtowerExternalState, WatchtowerSignerState};
+    use fiber_types::{OnchainKeyPurpose, WatchtowerSignerState};
 
     match state {
         WatchtowerSignerState::Internal => WatchtowerSigningStatus::Internal,
-        WatchtowerSignerState::External(external) => match external.state {
-            WatchtowerExternalState::Ready | WatchtowerExternalState::Signed { .. } => {
+        WatchtowerSignerState::External(external) => {
+            if let Some((request_id, content)) = external.first_pending() {
+                WatchtowerSigningStatus::SignatureRequired {
+                    request_id: request_id.into(),
+                    content: fiber_json_types::OnchainSigningContent {
+                        key_purpose: match content.key_purpose {
+                            OnchainKeyPurpose::Settlement => {
+                                fiber_json_types::OnchainKeyPurpose::Settlement
+                            }
+                            OnchainKeyPurpose::Tlc { commitment_number } => {
+                                fiber_json_types::OnchainKeyPurpose::Tlc { commitment_number }
+                            }
+                        },
+                        transaction: content.transaction.clone().into(),
+                    },
+                }
+            } else {
                 WatchtowerSigningStatus::NoSignatureRequired
             }
-            WatchtowerExternalState::AwaitingSignature {
-                request_id,
-                content,
-            } => WatchtowerSigningStatus::SignatureRequired {
-                request_id: request_id.into(),
-                content: fiber_json_types::OnchainSigningContent {
-                    key_purpose: match content.key_purpose {
-                        OnchainKeyPurpose::Settlement => {
-                            fiber_json_types::OnchainKeyPurpose::Settlement
-                        }
-                        OnchainKeyPurpose::Tlc { commitment_number } => {
-                            fiber_json_types::OnchainKeyPurpose::Tlc { commitment_number }
-                        }
-                    },
-                    transaction: content.transaction.into(),
-                },
-            },
-        },
+        }
     }
 }
 

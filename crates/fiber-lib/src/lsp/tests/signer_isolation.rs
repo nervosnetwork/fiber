@@ -488,10 +488,7 @@ async fn tenant_cannot_query_or_sign_another_tenants_channel() {
 #[tokio::test]
 async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     use crate::watchtower::WatchtowerStore;
-    use fiber_types::{
-        OnchainKeyPurpose, OnchainSigningContent, WatchtowerExternalSignerState,
-        WatchtowerExternalState, WatchtowerSignerState,
-    };
+    use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerExternalSignerState};
 
     let fixture = TestLspFixture::new("isolation-watchtower").await;
     let (_, _, _, other) = fixture.register_tenant(1).await;
@@ -534,16 +531,14 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         transaction: Transaction::default(),
     };
     let request_id = Hash256::from([0x88; 32]);
+    let mut external = WatchtowerExternalSignerState::default();
+    external
+        .pending_requests
+        .insert(request_id, content.clone());
     fixture.public_t.store.put_watchtower_signer(
         &crate::lsp::tenant_watchtower_node_id(&owner_pubkey),
         &channel_id,
-        WatchtowerSignerState::External(WatchtowerExternalSignerState {
-            state: WatchtowerExternalState::AwaitingSignature {
-                request_id,
-                content: content.clone(),
-            },
-            last_applied: None,
-        }),
+        fiber_types::WatchtowerSignerState::External(external),
     );
     let query = GetWatchtowerSigningStatusParams {
         channel_id: channel_id.into(),

@@ -3,6 +3,8 @@
 //! Contains the data structures used by the watchtower service to monitor channels
 //! and handle force-close scenarios.
 
+use std::collections::BTreeMap;
+
 use crate::channel::TLCId;
 use crate::channel_signer::OnchainSigningContent;
 use crate::invoice::HashAlgorithm;
@@ -131,39 +133,30 @@ pub enum WatchtowerSignerState {
 }
 
 /// External watchtower signer state machine.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde_as]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct WatchtowerExternalSignerState {
-    /// Current pause point.
-    pub state: WatchtowerExternalState,
-    /// Last signature that successfully resumed this watch channel.
+    /// Outstanding requests awaiting external signature: request_id -> OnchainSigningContent.
+    #[serde(default)]
+    pub pending_requests: BTreeMap<Hash256, OnchainSigningContent>,
+    /// Verified signatures received from external signer, awaiting application:
+    /// request_id -> (OnchainSigningContent, [u8; 65]).
+    #[serde_as(as = "BTreeMap<_, (_, SliceHex)>")]
+    #[serde(default)]
+    pub signed_signatures: BTreeMap<Hash256, (OnchainSigningContent, [u8; 65])>,
+    /// Last signature that successfully resumed this watch channel (kept simple for persistence).
     #[serde(default)]
     pub last_applied: Option<LastAppliedWatchtowerSignature>,
 }
 
-/// Current location of an external watchtower signer.
-#[serde_as]
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub enum WatchtowerExternalState {
-    /// No signature is currently required.
-    #[default]
-    Ready,
-    /// Settlement or TLC spend is paused until this signature is submitted.
-    AwaitingSignature {
-        /// Identifier of the outstanding request.
-        request_id: Hash256,
-        /// Unsigned spend the client must sign.
-        content: OnchainSigningContent,
-    },
-    /// A matching signature is stored and can be applied on the next settle attempt.
-    Signed {
-        /// Identifier of the signed request.
-        request_id: Hash256,
-        /// Unsigned spend that was signed.
-        content: OnchainSigningContent,
-        /// Recoverable ECDSA signature.
-        #[serde_as(as = "SliceHex")]
-        signature: [u8; 65],
-    },
+impl WatchtowerExternalSignerState {
+    pub fn is_empty(&self) -> bool {
+        self.pending_requests.is_empty() && self.signed_signatures.is_empty()
+    }
+
+    pub fn first_pending(&self) -> Option<(Hash256, &OnchainSigningContent)> {
+        self.pending_requests.iter().next().map(|(id, c)| (*id, c))
+    }
 }
 
 /// Receipt for one applied watchtower signature.

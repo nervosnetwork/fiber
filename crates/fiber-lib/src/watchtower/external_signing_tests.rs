@@ -1,9 +1,6 @@
 use ckb_sdk::traits::{CellCollectorError, LiveCell};
 use ckb_types::{core::ScriptHashType, packed::Byte32};
-use fiber_types::{
-    OnchainKeyPurpose, OnchainSigningContent, SettlementTlc, WatchtowerExternalState,
-    WatchtowerSignerState,
-};
+use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, SettlementTlc, WatchtowerSignerState};
 use tempfile::TempDir;
 
 use crate::{
@@ -229,16 +226,10 @@ impl Fixture {
             .store
             .get_watchtower_signer(&self.node_id, &self.channel.channel_id)
         else {
-            panic!("external signer")
+            panic!("expected external signer state");
         };
-        let WatchtowerExternalState::AwaitingSignature {
-            request_id,
-            content,
-        } = state.state
-        else {
-            panic!("pending request")
-        };
-        (request_id, content)
+        let (request_id, content) = state.first_pending().expect("pending request");
+        (request_id, content.clone())
     }
 
     fn submit(
@@ -348,12 +339,9 @@ fn external_tlc_signing_rejects_missing_derivation_index_and_public_key() {
             .store
             .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
         else {
-            panic!("external signer")
+            panic!("expected external signer state");
         };
-        assert!(!matches!(
-            state.state,
-            WatchtowerExternalState::AwaitingSignature { .. }
-        ));
+        assert!(state.pending_requests.is_empty());
     }
 }
 
@@ -366,13 +354,8 @@ fn external_tlc_rpc_rejects_unknown_derivation_index_without_settlement_key_fall
         commitment_number: 99,
     };
     let signature = sign_onchain_request(&fixture.base_key, &content).expect("base-key signature");
-    let state = fiber_types::WatchtowerExternalSignerState {
-        state: WatchtowerExternalState::AwaitingSignature {
-            request_id,
-            content,
-        },
-        last_applied: None,
-    };
+    let mut state = fiber_types::WatchtowerExternalSignerState::default();
+    state.pending_requests.insert(request_id, content);
     fixture.store.put_watchtower_signer(
         &fixture.node_id,
         &fixture.channel.channel_id,
@@ -462,30 +445,22 @@ fn external_tlc_signing_replaces_stale_request_purpose_for_same_transaction() {
         };
         let wrong_signature =
             sign_onchain_request(&fixture.base_key, &stale).expect("old signature");
-        let state = if already_signed {
-            WatchtowerExternalState::Signed {
+        let mut state = fiber_types::WatchtowerExternalSignerState::default();
+        if already_signed {
+            state
+                .signed_signatures
+                .insert(request_id, (stale, wrong_signature));
+            state.last_applied = Some(fiber_types::LastAppliedWatchtowerSignature {
                 request_id,
-                content: stale,
                 signature: wrong_signature,
-            }
+            });
         } else {
-            WatchtowerExternalState::AwaitingSignature {
-                request_id,
-                content: stale,
-            }
-        };
+            state.pending_requests.insert(request_id, stale);
+        }
         fixture.store.put_watchtower_signer(
             &fixture.node_id,
             &fixture.channel.channel_id,
-            WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState {
-                state,
-                last_applied: already_signed.then_some(
-                    fiber_types::LastAppliedWatchtowerSignature {
-                        request_id,
-                        signature: wrong_signature,
-                    },
-                ),
-            }),
+            WatchtowerSignerState::External(state),
         );
         assert!(fixture.build().expect("replace stale request").is_none());
         assert_eq!(fixture.pending(), (request_id, expected.clone()));
@@ -515,4 +490,94 @@ fn external_tlc_signing_rejects_conflicting_public_keys_for_same_index() {
         error.contains("conflicting TLC signing public keys"),
         "{error}"
     );
+}
+
+#[test]
+fn test_watchtower_signature_request_overwrite_repro() {
+    let fixture = Fixture::new(false, false, false, false);
+
+    // 1. Initial build creates request 1 (req_1)
+    assert!(fixture.build().expect("build 1").is_none());
+    let (req_1, content_1) = fixture.pending();
+
+    // 2. Simulate a second transaction/cell being built for the SAME channel
+    // before req_1 is signed.
+    let mut modified_fixture = Fixture::new(false, false, false, false);
+    modified_fixture.store = fixture.store.clone();
+    // Point to a distinct outpoint so that the constructed transaction differs
+    modified_fixture.cell.out_point = OutPoint::new(Byte32::from([99; 32]), 1).into();
+
+    assert!(modified_fixture.build().expect("build 2").is_none());
+    let WatchtowerSignerState::External(signer_state) =
+        modified_fixture.store.get_watchtower_signer(
+            &modified_fixture.node_id,
+            &modified_fixture.channel.channel_id,
+        )
+    else {
+        panic!("expected external signer state");
+    };
+    assert_eq!(
+        signer_state.pending_requests.len(),
+        2,
+        "both requests must be pending"
+    );
+    let (req_2, content_2) = signer_state
+        .pending_requests
+        .iter()
+        .find(|(k, _)| **k != req_1)
+        .map(|(k, v)| (*k, v.clone()))
+        .expect("second pending request");
+    assert_ne!(
+        req_1, req_2,
+        "two distinct transactions must produce distinct request_ids"
+    );
+
+    // 3. Client signs req_1 and submits via RPC
+    let sig_1 = sign_onchain_request(&fixture.tlc_key, &content_1).expect("TLC signature 1");
+    let submit_1_res = fixture.submit(req_1, sig_1);
+
+    // In current buggy code: submit_1_res fails with:
+    // "signature request id does not match the current request"
+    // With our fix: submit_1_res MUST succeed with SubmitWatchtowerSignatureResult::Applied!
+    assert_eq!(
+        submit_1_res.expect("submit req_1 must succeed without being overwritten"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+
+    // 4. Client also signs req_2 and submits via RPC
+    let sig_2 = sign_onchain_request(&fixture.tlc_key, &content_2).expect("TLC signature 2");
+    let submit_2_res = fixture.submit(req_2, sig_2);
+    assert_eq!(
+        submit_2_res.expect("submit req_2 must succeed"),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+
+    // 5. Watchtower loop can now consume signatures for both transactions successfully
+    let tx_1 = fixture
+        .build()
+        .expect("build signed tx 1")
+        .expect("tx 1 signed");
+    assert_applied_signature(&tx_1, &content_1, &fixture.tlc_key);
+
+    let tx_2 = modified_fixture
+        .build()
+        .expect("build signed tx 2")
+        .expect("tx 2 signed");
+    assert_applied_signature(&tx_2, &content_2, &fixture.tlc_key);
+
+    // 6. Test idempotency & persistence across scan cycles before on-chain confirmation:
+    // Retrying submission for req_1 must return AlreadyApplied
+    assert_eq!(
+        fixture
+            .submit(req_1, sig_1)
+            .expect("retry submit req_1 after build"),
+        SubmitWatchtowerSignatureResult::AlreadyApplied
+    );
+
+    // Re-building tx_1 before onchain confirmation must still return the signed tx and not re-ask
+    let tx_1_second = fixture
+        .build()
+        .expect("build signed tx 1 again")
+        .expect("tx 1 still signed");
+    assert_applied_signature(&tx_1_second, &content_1, &fixture.tlc_key);
 }

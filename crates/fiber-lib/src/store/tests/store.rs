@@ -571,10 +571,9 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
         .all(|tlc| tlc.local_key.is_none()));
     assert_eq!(
         store.get_watchtower_signer(&node_id, &channel_id),
-        fiber_types::WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState {
-            state: fiber_types::WatchtowerExternalState::Ready,
-            last_applied: None,
-        })
+        fiber_types::WatchtowerSignerState::External(
+            fiber_types::WatchtowerExternalSignerState::default()
+        )
     );
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -907,6 +906,64 @@ fn test_store_watchtower_preimage_gc_ignores_ambiguous_legacy_settlement() {
         store.get_watch_preimage(&node_id, &payment_hash),
         Some(preimage),
         "a prefix-keyed legacy record cannot prove that this TLC no longer needs the preimage"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_store_watchtower_signer_roundtrip() {
+    use fiber_types::{
+        LastAppliedWatchtowerSignature, OnchainKeyPurpose, OnchainSigningContent,
+        WatchtowerExternalSignerState, WatchtowerSignerState,
+    };
+    use std::collections::BTreeMap;
+
+    let path = TempDir::new("test-watchtower-signer-roundtrip");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::local();
+    let channel_id = gen_rand_sha256_hash();
+
+    // 1. Initial lookup on non-existent record returns Internal
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        WatchtowerSignerState::Internal
+    );
+
+    // 2. Put and get format with pending and signed requests
+    let req_id_1 = Hash256::from([1u8; 32]);
+    let req_id_2 = Hash256::from([2u8; 32]);
+    let content_1 = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: Transaction::default(),
+    };
+    let content_2 = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Tlc {
+            commitment_number: 5,
+        },
+        transaction: Transaction::default(),
+    };
+    let sig_2 = [77u8; 65];
+
+    let mut pending = BTreeMap::new();
+    pending.insert(req_id_1, content_1);
+    let mut signed = BTreeMap::new();
+    signed.insert(req_id_2, (content_2, sig_2));
+    let last_applied = Some(LastAppliedWatchtowerSignature {
+        request_id: req_id_2,
+        signature: sig_2,
+    });
+
+    let new_state = WatchtowerSignerState::External(WatchtowerExternalSignerState {
+        pending_requests: pending,
+        signed_signatures: signed,
+        last_applied,
+    });
+
+    store.put_watchtower_signer(&node_id, &channel_id, new_state.clone());
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        new_state
     );
 }
 

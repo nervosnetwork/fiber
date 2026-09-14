@@ -53,7 +53,7 @@ pub use watchtower::{
     settlement_matches_commitment_lock_args, settlement_matches_commitment_tx,
     settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness, settlement_witness_hash,
     ChannelData, LastAppliedWatchtowerSignature, RevocationData, SettlementData, SettlementTlc,
-    WatchtowerExternalSignerState, WatchtowerExternalState, WatchtowerSignerState,
+    WatchtowerExternalSignerState, WatchtowerSignerState,
 };
 
 pub mod watchtower;

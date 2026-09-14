@@ -269,10 +269,7 @@ mod tests {
         assert_eq!(
             store.get_watchtower_signer(&node_id, &channel_id),
             fiber_types::WatchtowerSignerState::External(
-                fiber_types::WatchtowerExternalSignerState {
-                    state: fiber_types::WatchtowerExternalState::Ready,
-                    last_applied: None,
-                }
+                fiber_types::WatchtowerExternalSignerState::default()
             )
         );
         assert!(store
