@@ -2624,6 +2624,111 @@ async fn test_external_signer_pending_add_tlc_peer_restart() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
+async fn test_external_signer_tenant_restart_while_awaiting_signature() {
+    init_tracing();
+
+    let ([mut tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    // 1. Tenant initiates a payment
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+
+    // Sign tenant's SendCommitmentSigned
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // Wait for tenant to reach SendRevokeAndAck
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        if let Some((_, req)) = state.signing_context.awaiting_signature() {
+            if matches!(req, ChannelSignatureRequest::SendRevokeAndAck { .. }) {
+                return true;
+            }
+            ExternalSignerHttpClient {
+                node: &tenant,
+                signer: &signer,
+            }
+            .try_sign_pending(channel_id)
+            .await;
+        }
+        false
+    })
+    .await;
+
+    println!("Tenant reached SendRevokeAndAck awaiting signature!");
+
+    // 2. Tenant restarts while awaiting SendRevokeAndAck! (Simulates cold tenant / eviction)
+    tenant.restart().await;
+
+    // 3. Now submit the signature to the restarted tenant
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(
+        recovered,
+        "channel and payment must recover after tenant restart while awaiting SendRevokeAndAck"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_tenant_restart_while_awaiting_commitment_signature() {
+    init_tracing();
+
+    let ([mut tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    // 1. Tenant initiates a payment, reaching awaiting signature for SendCommitmentSigned
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+
+    println!("Tenant is awaiting SendCommitmentSigned signature!");
+
+    // 2. Tenant restarts while awaiting SendCommitmentSigned (cold tenant wake-up)
+    tenant.restart().await;
+
+    // 3. Now submit the signature to the restarted tenant
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(
+        recovered,
+        "channel and payment must recover after tenant restart while awaiting SendCommitmentSigned"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
 async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestablish() {
     init_tracing();
 

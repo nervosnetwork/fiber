@@ -2136,14 +2136,16 @@ where
             commitment_signed,
             state.get_current_commitment_numbers()
         );
-        self.network
-            .send_message(FiberActorMessage::new_command(
-                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    state.get_remote_pubkey(),
-                    FiberMessage::commitment_signed(commitment_signed),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if !state.reestablishing {
+            self.network
+                .send_message(FiberActorMessage::new_command(
+                    FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        state.get_remote_pubkey(),
+                        FiberMessage::commitment_signed(commitment_signed),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
 
         match flags {
             CommitmentSignedFlags::SigningCommitment(_) => {
@@ -2368,7 +2370,10 @@ where
             && !state.signing_context.is_awaiting_signature()
         {
             state.pending_messages.pending_reestablish_send = false;
-            if state.reestablishing && !state.is_closed() {
+            if state.reestablishing
+                && !state.is_closed()
+                && state.connectivity_state != ChannelConnectivityState::Offline
+            {
                 state.connectivity_state = ChannelConnectivityState::Syncing;
                 state.send_reestablish_message();
             }
@@ -4643,19 +4648,23 @@ where
                     }
                     OfflineChannelRestoreMode::WatchChain => channel.mark_watching_chain_offline(),
                 }
+                let awaiting_signature = channel.signing_context.is_awaiting_signature();
+                if awaiting_signature {
+                    channel.pending_messages.pending_reestablish_send = true;
+                }
                 channel.network = Some(self.network.clone());
                 channel.ephemeral_config = args.ephemeral_config.clone();
                 channel.hydrate_external_funding_runtime();
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());
 
-                let reestablish_channel = ReestablishChannel {
-                    channel_id,
-                    local_commitment_number: channel.get_local_commitment_number(),
-                    remote_commitment_number: channel.get_remote_commitment_number(),
-                };
+                if channel.state != ChannelState::Stale && !awaiting_signature {
+                    let reestablish_channel = ReestablishChannel {
+                        channel_id,
+                        local_commitment_number: channel.get_local_commitment_number(),
+                        remote_commitment_number: channel.get_remote_commitment_number(),
+                    };
 
-                if channel.state != ChannelState::Stale {
                     self.network
                         .send_message(FiberActorMessage::new_command(
                             FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
@@ -6001,16 +6010,18 @@ impl ChannelActorState {
             self.remote_revocation_nonce_for_send = None;
         }
         self.log_ack_state("[ack] send_revoke_and_ack_message");
-        self.network()
-            .send_message(FiberActorMessage::new_command(
-                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                    self.get_remote_pubkey(),
-                    FiberMessage::revoke_and_ack(
-                        self.last_revoke_ack_msg.as_ref().unwrap().clone(),
-                    ),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if !self.reestablishing {
+            self.network()
+                .send_message(FiberActorMessage::new_command(
+                    FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+                        self.get_remote_pubkey(),
+                        FiberMessage::revoke_and_ack(
+                            self.last_revoke_ack_msg.as_ref().unwrap().clone(),
+                        ),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
         self.last_was_revoke = true;
         Ok(())
     }
