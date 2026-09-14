@@ -521,6 +521,17 @@ where
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> ProcessingChannelResult {
+        if state.signing_context.is_awaiting_signature() {
+            if matches!(&message, FiberChannelMessage::ReestablishChannel(_))
+                && state.reestablishing
+            {
+                state.on_peer_reconnected();
+                state.pending_messages.pending_reestablish_send = true;
+            }
+            state.queue_pending_peer_message(message);
+            return Ok(());
+        }
+
         if state.reestablishing {
             match message {
                 FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
@@ -544,11 +555,6 @@ where
                     debug!("Ignoring message while reestablishing: {:?}", message);
                 }
             }
-            return Ok(());
-        }
-
-        if state.signing_context.is_awaiting_signature() {
-            state.queue_pending_peer_message(message);
             return Ok(());
         }
 
@@ -2347,6 +2353,16 @@ where
             }
             ChannelSignatureRequest::SignChannelAnnouncement { content } => {
                 state.finish_sign_channel_announcement(myself, partial_signature, &content)?;
+            }
+        }
+
+        if state.pending_messages.pending_reestablish_send
+            && !state.signing_context.is_awaiting_signature()
+        {
+            state.pending_messages.pending_reestablish_send = false;
+            if state.reestablishing && !state.is_closed() {
+                state.connectivity_state = ChannelConnectivityState::Syncing;
+                state.send_reestablish_message();
             }
         }
 
@@ -5275,6 +5291,7 @@ pub struct ChannelActorState {
 #[derive(Clone, Default, Debug)]
 pub(crate) struct PendingMessages {
     pub(crate) peer_messages: VecDeque<FiberChannelMessage>,
+    pub(crate) pending_reestablish_send: bool,
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
@@ -6606,6 +6623,7 @@ impl ChannelActorState {
 
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.clear_waiting_peer_response();
+        self.pending_messages.pending_reestablish_send = false;
         self.reestablishing = true;
         self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
         self.connectivity_state = ChannelConnectivityState::Offline;
@@ -6616,6 +6634,7 @@ impl ChannelActorState {
 
     pub(crate) fn mark_watching_chain_offline(&mut self) {
         self.clear_waiting_peer_response();
+        self.pending_messages.pending_reestablish_send = false;
         self.reestablishing = false;
         self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Offline;
@@ -6644,7 +6663,11 @@ impl ChannelActorState {
     fn on_peer_reconnected(&mut self) {
         if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
-            self.send_reestablish_message();
+            if !self.signing_context.is_awaiting_signature() {
+                self.send_reestablish_message();
+            } else {
+                self.pending_messages.pending_reestablish_send = true;
+            }
         }
     }
 
@@ -9848,6 +9871,7 @@ impl ChannelActorState {
         reestablish_channel: &ReestablishChannel,
         pending_commit_diff: Option<CommitDiff>,
     ) -> ProcessingChannelResult {
+        self.assert_not_awaiting_signature()?;
         debug!(
             "peer: {:?} Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}, has_commit_diff: {}",
             self.get_local_pubkey(),

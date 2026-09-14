@@ -2441,6 +2441,272 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
+async fn test_external_signer_pending_send_revoke_peer_restart_race() {
+    init_tracing();
+
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+    let payment = tenant
+        .send_payment_keysend(&public_node, 10_003, false)
+        .await
+        .expect("start payment from tenant");
+
+    // 1. Sign tenant's SendCommitmentSigned
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // 2. Wait for tenant to receive public_node's RevokeAndAck and sign CompleteReceivedRevokeAndAck
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| {
+                matches!(
+                    req,
+                    ChannelSignatureRequest::CompleteReceivedRevokeAndAck { .. }
+                )
+            })
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // 3. Complete received commitment from public_node
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| {
+                matches!(
+                    req,
+                    ChannelSignatureRequest::CompleteReceivedCommitment { .. }
+                )
+            })
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // 4. Now tenant is awaiting SendRevokeAndAck!
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| matches!(req, ChannelSignatureRequest::SendRevokeAndAck { .. }))
+    })
+    .await;
+
+    // Delete CommitDiff on public_node to simulate peer rebooting where waiting_ack will be cleared upon reestablish
+    public_node.store.delete_pending_commit_diff(&channel_id);
+    public_node.restart().await;
+
+    // Allow reestablish handshake to complete between public_node and tenant while tenant is STILL awaiting signature
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Tenant must still be reestablishing and buffer the handshake until SendRevokeAndAck is signed
+    let tenant_state = tenant.get_channel_actor_state(channel_id);
+    assert!(
+        tenant_state.reestablishing,
+        "tenant must remain in reestablishing state while awaiting signature"
+    );
+    assert!(
+        tenant_state.signing_context.is_awaiting_signature(),
+        "tenant must still be awaiting SendRevokeAndAck signature"
+    );
+
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, payment.payment_hash)],
+    )
+    .await;
+    assert!(
+        recovered,
+        "external-signer channel and payment recover without bad signature or force close"
+    );
+
+    let final_tenant_state = tenant.get_channel_actor_state(channel_id);
+    assert!(
+        !final_tenant_state.reestablishing,
+        "tenant should no longer be reestablishing after recovery"
+    );
+    assert_eq!(
+        final_tenant_state.state,
+        ChannelState::ChannelReady,
+        "channel should return to ChannelReady"
+    );
+    assert!(
+        !final_tenant_state.signing_context.is_awaiting_signature(),
+        "signing context must not be awaiting signature"
+    );
+    let pending_messages = live_pending_messages(&tenant, channel_id).await;
+    assert_eq!(
+        pending_messages.pending_peer_message_count, 0,
+        "all pending messages must be drained"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestablish() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    node_a
+        .send_payment_keysend(&node_b, 2000, false)
+        .await
+        .expect("start keysend payment");
+    node_b.wait_for_held_fiber_messages(1).await;
+
+    let live_state_a = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            let state = node_a.get_channel_actor_state(channel_id);
+            if state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_none()
+                && state.remote_revocation_nonce_for_next.is_some()
+                && state.remote_revocation_nonce_for_send != state.remote_revocation_nonce_for_next
+            {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("A must reach the revoke-owing nonce boundary");
+
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a.remote_revocation_nonce_for_send,
+        live_state_a.remote_revocation_nonce_for_send
+    );
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network_a, _network_handle) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .expect("spawn capture network actor");
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
+    state_a.private_key = Some(node_a.private_key.clone());
+
+    let signer_notifications = Arc::new(Mutex::new(Vec::new()));
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network_a),
+        node_a.store.clone(),
+        None,
+    );
+    let (channel_actor_ref, _channel_actor_handle) =
+        Actor::spawn(None, SignerNotificationProbe, signer_notifications.clone())
+            .await
+            .expect("spawn notification probe");
+
+    state_a
+        .send_revoke_and_ack_message(&channel_actor_ref, false)
+        .await
+        .expect("revoke delegated to channel signer");
+    assert!(state_a.signing_context.is_awaiting_signature());
+
+    state_a.mark_reestablishing_offline();
+    assert_eq!(
+        state_a.connectivity_state,
+        ChannelConnectivityState::Offline
+    );
+    assert!(state_a.reestablishing);
+    assert!(!state_a.pending_messages.pending_reestablish_send);
+
+    let local_commitment_number = state_a.get_local_commitment_number();
+    let remote_commitment_number = state_a.get_remote_commitment_number();
+    channel
+        .handle_peer_message(
+            &channel_actor_ref,
+            &mut state_a,
+            FiberChannelMessage::ReestablishChannel(ReestablishChannel {
+                channel_id,
+                local_commitment_number,
+                remote_commitment_number,
+            }),
+        )
+        .await
+        .expect("peer reestablish queued while awaiting signature");
+
+    assert_eq!(
+        state_a.connectivity_state,
+        ChannelConnectivityState::Syncing
+    );
+    assert!(state_a.pending_messages.pending_reestablish_send);
+    assert_eq!(state_a.pending_messages.peer_messages.len(), 1);
+
+    let initial_messages = take_captured_actor_messages(&network_a, &captured).await;
+    assert!(initial_messages.is_empty());
+
+    let notification = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            if let Some(notification) = signer_notifications.lock().expect("probe lock").pop() {
+                return notification;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("signature notification within timeout");
+
+    channel
+        .handle_signer_notification(&channel_actor_ref, &mut state_a, notification)
+        .await
+        .expect("signer notification completes successfully");
+
+    let messages = take_captured_actor_messages(&network_a, &captured).await;
+    let reestablish_count = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(_))
+            )
+        })
+        .count();
+    assert_eq!(
+        reestablish_count, 1,
+        "must emit exactly one ReestablishChannel message, but found {}",
+        reestablish_count
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
 async fn test_external_signer_cooperative_shutdown() {
     init_tracing();
 
