@@ -547,6 +547,43 @@ If readiness is lost before step 5, remain `Deferred`. If it is lost after step
 6, normal TLC deadlines and the payment state machine own recovery; the system
 must not create a second downstream payment.
 
+### TLC safety deadline while awaiting a signature
+
+The pending signer cannot extend a TLC's normal on-chain safety window. Use
+`min(unresolved_tlc.expiry.saturating_sub(tlc_expiry_delay(commitment_delay_epoch)))`,
+where `tlc_expiry_delay` is the existing 2/3 commitment-delay reserve used by
+`check_tlc_expiry`, channel parameter validation, and offered-TLC maintenance.
+Only acknowledgement-confirmed removals are excluded. Unsigned incoming and
+outgoing updates count too; inspecting only committed TLCs misses the stalled
+commitment exchange. At equality the signer request is no longer accepted.
+
+Both maintenance and signature submission check this deadline in the channel
+actor. Submission checks it after request/idempotency validation and before
+applying new signer material or resuming the protocol. Consequently a submission
+after the actual TLC expiry is rejected even if maintenance has not run. There
+is no grace period after expiry. Before the safety deadline, normal final-hop
+validation can still fail a payment whose required remaining expiry is not met;
+accepting a commitment signature is not a promise that the payment will succeed.
+
+Force close uses the latest stored signed commitment, which depends on the
+signing checkpoint (it is not always the previous commitment number). The
+timeout handler clears the request only when its force close succeeds, and
+persists the terminal state before the expired submission receives its error.
+A failed shutdown retains the request. The timeout handler also discards buffered
+peer messages so they cannot resume the abandoned off-chain exchange. These
+side effects are explicit in timeout handling, not in the generic state setter.
+
+The hosted buffer deadline remains a dispatch budget, not permission to fail an
+in-flight downstream payment upstream. Existing payment reconciliation and
+on-chain outcome handling still own that settlement. Store-only signing-status
+queries remain read-only and may show an outstanding request until its actor
+processes the safety deadline; submission always rechecks it.
+
+This change does not relax eviction gates. Sleeping with active TLCs additionally
+requires a live-actor check for volatile work and a host-owned durable wakeup
+mechanism, including restart recovery and capacity handling. A stopped channel's
+maintenance timer cannot provide that guarantee.
+
 ### Eviction
 
 A tenant runtime may be evicted only when it has no:
@@ -572,7 +609,7 @@ checks, or crash recovery.
 | 1. Shared types and SDK signer core | Implemented | `fiber-lsp-sdk`, canonical registration payloads, RootSigner restore, channel-key isolation, signer persistence, native tests, and WASM compilation are present. |
 | 2. Tenant registration | Implemented prototype | Nonce issuance/consumption, RootSigner proof, server-derived TenantId, and tenant Biscuit issuance are implemented. Production credential recovery and rotation remain open. |
 | 3. Channel signer state | Implemented prototype | Persistent internal/external channel signer states, migrations, signature verification, and idempotent receipts are present. Missing/partial next material and fail-closed nonce-reuse tests remain release gates. |
-| 4. Tenant-scoped signer RPC | Partially implemented | Namespace authorization and hydrated submission are implemented. Status polling currently hydrates a cold runtime; store-only reads and stronger cross-tenant concurrency coverage remain. |
+| 4. Tenant-scoped signer RPC | Partially implemented | Namespace authorization and hydrated submission are implemented. Status polling reads the namespaced store without hydration; stronger cross-tenant concurrency coverage remains. |
 | 5. Hosted U-T external signer E2E | Implemented prototype | Registration, external funding, polling/signing, SDK restart, cooperative close, hosted incoming payments, and watchtower scenarios are covered. Production `Auto` policy and a complete external-signer outbound payment E2E remain. |
 | 6. Gateway and readiness | Not implemented | There is no durable push mailbox, session fencing, or `TenantSignReady` delivery gate; the SDK agent polls RPC state. |
 | 7. Remaining signer policy | Partially implemented | External watchtower signing, tenant eviction recovery, preimage claim, and revocation E2Es are present. Strict nonce behavior, invoice authorization policy, and crash/race coverage remain. |

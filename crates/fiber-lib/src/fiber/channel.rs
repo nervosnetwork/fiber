@@ -2178,8 +2178,10 @@ where
 
     async fn validate_and_apply_signer_notification(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         notification: SignerNotification,
+        now: u64,
     ) -> Result<Option<(ChannelSignatureRequest, PartialSignature)>, ProcessingChannelError> {
         let (channel_id, request_id, signature, next_material, rpc_reply) = match notification {
             SignerNotification::ChannelSignatureReady {
@@ -2235,6 +2237,20 @@ where
             return Ok(None);
         };
 
+        if state.signature_tlc_deadline_reached(now) {
+            let result = self.force_close_expired_signature(myself, state).await;
+            let err = result.err().unwrap_or_else(|| {
+                ProcessingChannelError::InvalidState(
+                    "signature request expired: TLC reached its on-chain safety deadline"
+                        .to_string(),
+                )
+            });
+            if let Some(reply) = rpc_reply {
+                let _ = reply.send(Err(err.to_string()));
+            }
+            return Err(err);
+        }
+
         if let Err(err) =
             state.verify_external_musig2_signature(request.content(), partial_signature)
         {
@@ -2274,8 +2290,24 @@ where
         state: &mut ChannelActorState,
         notification: SignerNotification,
     ) -> ProcessingChannelResult {
+        self.handle_signer_notification_at(
+            myself,
+            state,
+            notification,
+            now_timestamp_as_millis_u64(),
+        )
+        .await
+    }
+
+    pub(crate) async fn handle_signer_notification_at(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        notification: SignerNotification,
+        now: u64,
+    ) -> ProcessingChannelResult {
         let Some((request, partial_signature)) = self
-            .validate_and_apply_signer_notification(state, notification)
+            .validate_and_apply_signer_notification(myself, state, notification, now)
             .await?
         else {
             return Ok(());
@@ -3300,6 +3332,31 @@ where
         Ok(())
     }
 
+    async fn force_close_expired_signature(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        warn!(channel_id = %state.get_id(), "Pending signature reached TLC on-chain safety deadline");
+        // Do not discard the request until a usable commitment has been obtained
+        // and shutdown has succeeded. No self-message may interleave this transition.
+        self.handle_shutdown_command(
+            myself,
+            state,
+            ShutdownCommand {
+                close_script: None,
+                fee_rate: None,
+                force: true,
+            },
+        )
+        .await?;
+        state.signing_context.cancel_request();
+        state.pending_messages = Default::default();
+        state.deferred_peer_tlc_updates.clear();
+        self.store.insert_channel_actor_state(state.clone());
+        Ok(())
+    }
+
     async fn maintain_ready_channel_tlcs(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -4121,6 +4178,10 @@ where
             }
             ChannelEvent::MaintainChannelTlcs => {
                 let now = now_timestamp_as_millis_u64();
+                if state.signature_tlc_deadline_reached(now) {
+                    self.force_close_expired_signature(myself, state).await?;
+                    return Ok(());
+                }
                 if state.is_ready() {
                     self.maintain_ready_channel_tlcs(myself, state).await;
                 } else {
@@ -6209,6 +6270,32 @@ impl ChannelActorState {
 
     pub fn is_public(&self) -> bool {
         self.public_channel_info.is_some()
+    }
+
+    /// Earliest safety deadline among TLCs whose removal is not yet confirmed.
+    /// Reserve the same 2/3 commitment delay used by normal offered-TLC force close.
+    /// Unsigned updates also count: the peer may already have advanced its commitment.
+    pub(crate) fn pending_tlc_signature_deadline(&self) -> Option<u64> {
+        let reserve = tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
+            self.commitment_delay_epoch,
+        ));
+        self.tlc_state
+            .all_tlcs()
+            .filter(|tlc| tlc.removed_confirmed_at.is_none())
+            .map(|tlc| tlc.expiry.saturating_sub(reserve))
+            .min()
+    }
+
+    pub(crate) fn signature_tlc_deadline_reached(&self, now: u64) -> bool {
+        self.signing_context.is_awaiting_signature()
+            && matches!(
+                self.state,
+                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+            )
+            && !matches!(self.state, ChannelState::ShuttingDown(flags) if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+            && self
+                .pending_tlc_signature_deadline()
+                .is_some_and(|deadline| now >= deadline)
     }
 
     pub fn is_ready(&self) -> bool {
@@ -11093,10 +11180,11 @@ impl ChannelActorState {
     pub async fn get_latest_commitment_transaction(
         &self,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let tx = self
-            .latest_commitment_transaction
-            .clone()
-            .expect("latest_commitment_transaction should exist");
+        let tx = self.latest_commitment_transaction.clone().ok_or_else(|| {
+            ProcessingChannelError::InvalidState(
+                "No signed commitment transaction is available for force close".to_string(),
+            )
+        })?;
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script)
             .await
             .map_err(|e| ProcessingChannelError::InternalError(e.to_string()))?;
@@ -11726,6 +11814,36 @@ mod tests {
             removed_confirmed_at: None,
             applied_flags: AppliedFlags::ADD,
         }
+    }
+
+    #[test]
+    fn signature_deadline_reserves_normal_onchain_delay() {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        state.commitment_delay_epoch = EpochNumberWithFraction::new(6, 0, 1).full_value();
+        let reserve = tlc_expiry_delay(&EpochNumberWithFraction::from_full_value(
+            state.commitment_delay_epoch,
+        ));
+        let mut tlc = committed_tlc(TLCId::Received(0), 10);
+        tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
+        tlc.expiry = 100_000 + reserve;
+        state.tlc_state.received_tlcs.tlcs.push(tlc);
+        assert_eq!(state.pending_tlc_signature_deadline(), Some(100_000));
+        // A removal is still at risk until its acknowledgement is confirmed.
+        state.tlc_state.received_tlcs.tlcs[0].removed_reason =
+            Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+                &NO_SHARED_SECRET,
+            )));
+        assert_eq!(state.pending_tlc_signature_deadline(), Some(100_000));
+        state.tlc_state.received_tlcs.tlcs[0].removed_confirmed_at = Some(1);
+        assert_eq!(state.pending_tlc_signature_deadline(), None);
+        // Include outgoing updates not yet signed, unlike normal committed-TLC maintenance.
+        let mut offered = committed_tlc(TLCId::Offered(0), 10);
+        offered.status = TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced);
+        offered.expiry = reserve - 1;
+        state.tlc_state.offered_tlcs.tlcs.push(offered);
+        assert_eq!(state.pending_tlc_signature_deadline(), Some(0));
     }
 
     #[test]

@@ -18,8 +18,9 @@ use fiber_types::{ChannelState, Hash256, PaymentStatus, ShuttingDownFlags};
 use crate::fiber::channel::{
     ChannelCommand, ChannelCommandWithId, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
 };
-use crate::fiber::config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT;
+use crate::fiber::config::{DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT, MIN_TLC_EXPIRY_DELTA};
 use crate::fiber::network::{FiberActorCommand, NetworkActorMessage};
+use crate::fiber::payment::SendPaymentCommand;
 use crate::rpc::channel::to_rpc_channel_open_signer_material;
 use crate::test_utils::{gen_rpc_config, init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::wait_until_async_timeout;
@@ -1190,5 +1191,293 @@ async fn test_signer_restart_sign_channel_announcement() {
         let state = tenant.get_channel_actor_state(channel_id);
         matches!(state.state, ChannelState::ChannelReady)
     })
+    .await;
+}
+
+// A hand-driven actor makes the deadline/submission ordering deterministic: live
+// nodes are stopped after the immutable signing checkpoint, before advancing time.
+struct DeadlineChannelProbe;
+
+#[async_trait::async_trait]
+impl ractor::Actor for DeadlineChannelProbe {
+    type Msg = crate::fiber::channel::ChannelActorMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        _: (),
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+struct DeadlineNetworkProbe;
+
+#[async_trait::async_trait]
+impl ractor::Actor for DeadlineNetworkProbe {
+    type Msg = NetworkActorMessage;
+    type State = tokio::sync::mpsc::UnboundedSender<NetworkActorMessage>;
+    type Arguments = Self::State;
+
+    async fn pre_start(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        sender: Self::Arguments,
+    ) -> Result<Self::State, ractor::ActorProcessingErr> {
+        Ok(sender)
+    }
+
+    async fn handle(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        message: Self::Msg,
+        sender: &mut Self::State,
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        let _ = sender.send(message);
+        Ok(())
+    }
+}
+
+async fn check_signature_deadline(
+    submit_first: bool,
+    after_expiry: bool,
+    checkpoint: ChannelSigningTransition,
+) {
+    use crate::fiber::channel::{ChannelActor, ChannelActorStateStore, ChannelEvent};
+    use crate::fiber::channel_signer::SignerNotification;
+    use crate::fiber::network::FiberActorEvent;
+    use crate::fiber::{FiberActorMessage, FiberActorRef};
+    use fiber_types::SignatureRequestId;
+    use ractor::Actor;
+
+    init_tracing();
+    let (_restartable, signer) = RestartableExternalSigner::create().await;
+    let ([mut tenant, mut public_node], channel_id) =
+        setup_restartable_external_channel(false, &signer).await;
+    public_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(tenant.pubkey),
+            amount: Some(10_000),
+            keysend: Some(true),
+            max_fee_rate: Some(1000),
+            final_tlc_expiry_delta: Some(MIN_TLC_EXPIRY_DELTA + 120_000),
+            ..Default::default()
+        })
+        .await
+        .expect("start inbound payment");
+    wait_until_async_timeout(|| async {
+        let status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        if let ChannelSigningStatus::SignatureRequired { transition, .. } = &status {
+            if *transition == checkpoint {
+                return true;
+            }
+            sign_and_submit(&tenant, &signer, channel_id, status).await;
+        }
+        false
+    })
+    .await;
+    let status = get_signing_status(&tenant, channel_id)
+        .await
+        .unwrap()
+        .status;
+    let submission = prepare_hosted_signature(&signer, channel_id, status).await;
+    tenant.stop().await;
+    public_node.stop().await;
+    let mut state = tenant.get_channel_actor_state(channel_id);
+    let deadline = state.pending_tlc_signature_deadline().unwrap();
+    assert!(!state.signature_tlc_deadline_reached(deadline - 1));
+    assert!(state.signature_tlc_deadline_reached(deadline));
+    let previous_tx = state.latest_commitment_transaction.clone().unwrap();
+    let previous_numbers = state.commitment_numbers;
+    let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
+    let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+        .await
+        .unwrap();
+    let network_ref = FiberActorRef::from_network(&network);
+    state.network = Some(network_ref.clone());
+    let channel = ChannelActor::new(
+        tenant.pubkey,
+        public_node.pubkey,
+        network_ref,
+        tenant.store.clone(),
+        None,
+    );
+    let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+    // A rejected shutdown must leave the immutable request available for retry.
+    let ready_state = state.state;
+    state.state = ChannelState::NegotiatingFunding(fiber_types::NegotiatingFundingFlags::empty());
+    assert!(channel
+        .handle_shutdown_command(
+            &myself,
+            &mut state,
+            ShutdownCommand {
+                close_script: None,
+                fee_rate: None,
+                force: true,
+            }
+        )
+        .await
+        .is_err());
+    assert!(state.signing_context.is_awaiting_signature());
+    state.state = ready_state;
+    let signed_tx = state.latest_commitment_transaction.take();
+    assert!(channel
+        .handle_shutdown_command(
+            &myself,
+            &mut state,
+            ShutdownCommand {
+                close_script: None,
+                fee_rate: None,
+                force: true,
+            }
+        )
+        .await
+        .is_err());
+    assert!(state.signing_context.is_awaiting_signature());
+    state.latest_commitment_transaction = signed_tx;
+
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    let notification = SignerNotification::ChannelSignatureReady {
+        channel_id,
+        request_id: SignatureRequestId(submission.request_id.into()),
+        signature: Ok(musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap()),
+        next_material: None,
+        rpc_reply: Some(reply.into()),
+    };
+    if !submit_first {
+        // Move only the stored TLC clock boundary for maintenance, which reads wall time.
+        // The original signed commitment is retained and must be broadcast unchanged.
+        for tlc in &mut state.tlc_state.received_tlcs.tlcs {
+            tlc.expiry = 0;
+        }
+        channel
+            .handle_event(&myself, &mut state, ChannelEvent::MaintainChannelTlcs)
+            .await
+            .unwrap();
+    }
+    let submitted_at = if after_expiry {
+        state
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .map(|tlc| tlc.expiry)
+            .min()
+            .unwrap()
+            .saturating_add(1)
+    } else {
+        deadline
+    };
+    let error = channel
+        .handle_signer_notification_at(&myself, &mut state, notification, submitted_at)
+        .await
+        .unwrap_err();
+    if submit_first {
+        assert!(error.to_string().contains("signature request expired"));
+    }
+    assert!(receive.await.unwrap().is_err());
+    assert!(matches!(
+        state.state,
+        ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+    ));
+    assert!(!state.signing_context.is_awaiting_signature());
+    assert_eq!(state.commitment_numbers, previous_numbers);
+    assert_eq!(
+        state
+            .latest_commitment_transaction
+            .as_ref()
+            .unwrap()
+            .as_slice(),
+        previous_tx.as_slice()
+    );
+    assert!(!tenant
+        .store
+        .get_channel_actor_state(&channel_id)
+        .unwrap()
+        .signing_context
+        .is_awaiting_signature());
+    let closing_tx = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                FiberActorEvent::ClosingTransactionPending(id, _, tx, true),
+            ))) = messages.recv().await
+            {
+                assert_eq!(id, channel_id);
+                break tx;
+            }
+        }
+    })
+    .await
+    .expect("force close emits a transaction");
+    assert_eq!(
+        closing_tx.data().witnesses().as_slice(),
+        previous_tx.witnesses().as_slice()
+    );
+    assert_eq!(
+        closing_tx.data().raw().outputs().as_slice(),
+        previous_tx.raw().outputs().as_slice()
+    );
+    assert_eq!(
+        closing_tx.data().raw().inputs().as_slice(),
+        previous_tx.raw().inputs().as_slice()
+    );
+    myself.stop(None);
+    network.stop(None);
+    actor_task.await.unwrap();
+    network_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_signature_submitted_at_safety_deadline_before_maintenance() {
+    check_signature_deadline(
+        true,
+        false,
+        ChannelSigningTransition::CompleteReceivedCommitment,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_maintenance_before_signature_rejects_stale_request() {
+    check_signature_deadline(
+        false,
+        false,
+        ChannelSigningTransition::CompleteReceivedCommitment,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_signature_submitted_after_tlc_expiry_before_maintenance() {
+    check_signature_deadline(
+        true,
+        true,
+        ChannelSigningTransition::CompleteReceivedCommitment,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_signature_deadline_while_awaiting_send_revoke_uses_latest_commitment() {
+    check_signature_deadline(true, false, ChannelSigningTransition::SendRevokeAndAck).await;
+}
+
+#[tokio::test]
+async fn test_signature_deadline_while_awaiting_send_commitment() {
+    check_signature_deadline(true, false, ChannelSigningTransition::SendCommitmentSigned).await;
+}
+
+#[tokio::test]
+async fn test_signature_deadline_while_awaiting_received_revoke() {
+    check_signature_deadline(
+        true,
+        false,
+        ChannelSigningTransition::CompleteReceivedRevokeAndAck,
+    )
     .await;
 }

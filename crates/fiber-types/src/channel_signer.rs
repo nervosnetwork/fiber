@@ -565,6 +565,11 @@ impl ChannelSigningContext {
         Ok(())
     }
 
+    /// Clear the pending signature request (e.g. on channel force-close, expiry, or cancellation).
+    pub fn cancel_request(&mut self) -> Option<PendingChannelSignature> {
+        self.pending_signature.take()
+    }
+
     /// Most recently committed signature response.
     pub fn last_applied(&self) -> Option<&LastAppliedChannelSignature> {
         self.last_applied.as_ref()
@@ -717,6 +722,41 @@ mod tests {
         assert!(state.replay_or_pending(&applied).unwrap().is_some());
         state.complete_request(applied.clone()).unwrap();
         assert!(state.replay_or_pending(&applied).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancelling_a_request_clears_awaiting_signature() {
+        let mut state = ChannelSigningContext::default();
+        let request_id = SignatureRequestId(Hash256::from([1; 32]));
+        let request = ChannelSignatureRequest::SendCommitmentSigned {
+            content: content(),
+            settlement_data: settlement_data(),
+        };
+        state
+            .request_signature(request_id, request.clone())
+            .unwrap();
+        assert!(state.is_awaiting_signature());
+        assert!(matches!(
+            state.signing_status(),
+            ChannelSigningStatus::SignatureRequired { .. }
+        ));
+
+        let cancelled = state.cancel_request().unwrap();
+        assert_eq!(cancelled.request_id, request_id);
+        assert!(!state.is_awaiting_signature());
+        assert!(matches!(
+            state.signing_status(),
+            ChannelSigningStatus::NoSignatureRequired
+        ));
+        assert!(matches!(
+            state.pending_request(request_id),
+            Err(ChannelSigningContextError::NoSignatureRequired)
+        ));
+
+        // Can install another request after cancellation
+        let next_request_id = SignatureRequestId(Hash256::from([2; 32]));
+        state.request_signature(next_request_id, request).unwrap();
+        assert!(state.is_awaiting_signature());
     }
 
     #[test]
