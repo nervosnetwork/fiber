@@ -1,0 +1,67 @@
+meta {
+  name: refund since decoder rejects non timestamp metrics
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const { decodeSinceSeconds } = require(process.cwd() + "/scripts/refund-tx");
+
+  // Absolute timestamp since values as produced by the runtime
+  // (`absolute_timestamp_since` in crates/fiber-lib/src/liquidity/quote.rs):
+  // metric flag 0x40 in bits 61-62, relative bit 63 clear, remain bits 56-60
+  // clear, unix seconds in bits 0-55.
+  const decoded = decodeSinceSeconds("0x4000000000012600");
+  if (decoded !== BigInt(0x12600)) {
+    throw new Error(`expected seconds 0x12600, got ${decoded}`);
+  }
+  if (decodeSinceSeconds("0x4000000000000001") !== BigInt(1)) {
+    throw new Error("smallest timestamp since must decode to 1 second");
+  }
+
+  const rejects = [
+    "0x1000000000012600", // block number metric
+    "0x6000000000012600", // epoch metric
+    "0xc000000000012600", // relative timestamp (relative bit set)
+    "0x4100000000012600", // reserved remain bit 56 set
+    "0x5100000000012600", // reserved remain bit 60 set
+  ];
+  for (const raw of rejects) {
+    let rejected = false;
+    try {
+      decodeSinceSeconds(raw);
+    } catch (error) {
+      rejected = true;
+    }
+    if (!rejected) {
+      throw new Error(`decodeSinceSeconds must reject ${raw}`);
+    }
+  }
+  console.log("refund since decoder round trip ok");
+}

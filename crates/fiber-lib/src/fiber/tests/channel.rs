@@ -999,10 +999,7 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
         .await;
 
     let node1_pubkey = node1.pubkey;
-    node1.stop().await;
     let node2_pubkey = node2.pubkey;
-    node2.stop().await;
-
     let node1_channels = node1.get_network_graph_channels().await;
     assert_eq!(node1_channels.len(), 1);
     let node1_channel = &node1_channels[0];
@@ -1032,6 +1029,9 @@ async fn do_test_owned_channel_saved_to_the_owner_graph(public: bool) {
     for node in node2_nodes {
         assert!(node.node_id == node2_channel.node1() || node.node_id == node2_channel.node2());
     }
+
+    node1.stop().await;
+    node2.stop().await;
 }
 
 #[tokio::test]

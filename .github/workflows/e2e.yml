@@ -74,6 +74,32 @@ jobs:
             release: "0.202.0"
             extra_bru_args: "--env-var FUNDING_TX_VERIFICATION_CASE=missing_inputs"
 
+          ######################################
+          # Liquidity E2E suites (each matrix job starts from a fresh VM, so the
+          # dev chain is always provisioned clean via the nilpotent
+          # init-dev-chain.sh). The rejection suite signs mutated lock
+          # transactions through the liquidity-lock-mutator sidecar, which its
+          # own run.sh starts (own PID) and stops after the Bruno run.
+          - workflow: "liquidity/ckb-loop-out"
+            test_env: "test"
+            release: "0.202.0"
+          - workflow: "liquidity/ckb-loop-in"
+            test_env: "test"
+            release: "0.202.0"
+          - workflow: "liquidity/udt-loop-out"
+            test_env: "test"
+            release: "0.202.0"
+          - workflow: "liquidity/udt-loop-in"
+            test_env: "test"
+            release: "0.202.0"
+          - workflow: "liquidity/udt-loop-in-rejection"
+            test_env: "test"
+            release: "0.202.0"
+            needs_mutator: "y"
+          - workflow: "liquidity/provider-mode"
+            test_env: "test"
+            release: "0.202.0"
+
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -94,6 +120,7 @@ jobs:
           path: |
             target/
             tests/deploy/udt-init/target/
+            tests/liquidity-lock-mutator/target/
           key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             e2e-build-${{ runner.os }}-
@@ -111,6 +138,12 @@ jobs:
           # Prebuild the program so that we can run the following script faster
           cargo build --locked
           cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          # Suites that sign mutated lock transactions need the
+          # liquidity-lock-mutator sidecar; prebuild it so their run.sh does
+          # not rebuild mid-run.
+          if [ "${{ matrix.needs_mutator }}" = "y" ]; then
+            cargo build --locked --manifest-path tests/liquidity-lock-mutator/Cargo.toml
+          fi
           export ON_GITHUB_ACTION=y
           # Pass it to tests/funding-tx-builder as args
           export EXTRA_BRU_ARGS="${{ matrix.extra_bru_args }}"
@@ -119,7 +152,14 @@ jobs:
           # when .ports file is not generated, we will retry 20 times to check if all ports are open
           ./tests/nodes/wait.sh
 
-          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
+          if [ "${{ matrix.needs_mutator }}" = "y" ]; then
+            # The suite runner owns the sidecar lifecycle: it starts the
+            # liquidity-lock-mutator with its own PID, exports CKB_MUTATOR_URL,
+            # runs the Bruno suite, and stops the sidecar on exit. No pkill.
+            ./tests/bruno/e2e/${{ matrix.workflow }}/run.sh &
+          else
+            (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
+          fi
 
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
@@ -130,3 +170,219 @@ jobs:
         with:
           name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-logs
           path: tests/nodes/*.log
+
+      # Write redacted failure diagnostics (node swap/chain-tx JSON plus the
+      # CKB tip header) under tests/artifacts/liquidity/<suite>/ for the
+      # liquidity matrix entries; the upload step below publishes them.
+      # Purely best-effort so the job failure and artifact upload are
+      # unaffected.
+      - name: Collect liquidity failure diagnostics
+        if: failure() && steps.e2eTests.outcome == 'failure' && startsWith(matrix.workflow, 'liquidity/')
+        run: |
+          source tests/bruno/scripts/resolve-node-urls.sh
+          suite_dir="${{ matrix.workflow }}"
+          bash tests/bruno/scripts/collect-liquidity-failure-diagnostics.sh "${suite_dir##*/}" || true
+
+      # Liquidity suites (and the collector step above) write node/CKB
+      # diagnostics, swap JSON and chain tx JSON under
+      # tests/artifacts/liquidity/<suite>/ on failure.
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.e2eTests.outcome == 'failure'
+        with:
+          name: e2e-test-${{ env.SAFE_WORKFLOW_NAME }}-${{ hashFiles('matrix.json') }}-diagnostics
+          path: tests/artifacts/liquidity/
+          if-no-files-found: ignore
+
+  # Dedicated sequential job: provision a clean dev chain + nodes, then invoke
+  # the refund suite runner, which owns the liquidity-lock-mutator sidecar
+  # lifecycle itself (chain and nodes must already be running, like the matrix
+  # suites).
+  e2e-liquidity-refund:
+    name: e2e test for liquidity refund suite
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-liquidity-refund-${{ runner.os }}
+      - uses: dsherret/rust-toolchain-file@v1
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: "0.202.0"
+          cache-prefix: 'e2e'
+
+      - name: Cache build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            target/
+            tests/deploy/udt-init/target/
+            tests/liquidity-lock-mutator/target/
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
+
+      - name: Run liquidity refund suite
+        id: refundTests
+        run: |
+          set -euo pipefail
+          # Prebuild so the suite runner does not rebuild mid-run
+          cargo build --locked
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          cargo build --locked --manifest-path tests/liquidity-lock-mutator/Cargo.toml
+          export ON_GITHUB_ACTION=y
+          # Fresh runner: REMOVE_OLD_STATE=y makes the clean-chain intent
+          # explicit (on a fresh VM it is equivalent to the nilpotent init).
+          REMOVE_OLD_STATE=y ./tests/nodes/start.sh "e2e/liquidity/refund" &
+
+          ./tests/nodes/wait.sh
+
+          # The runner starts the sidecar with its own PID, exports
+          # CKB_MUTATOR_URL, runs the Bruno suite, and stops the sidecar.
+          ./tests/bruno/e2e/liquidity/refund/run.sh &
+
+          wait -n
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.refundTests.outcome == 'failure'
+        with:
+          name: e2e-liquidity-refund-logs
+          path: |
+            tests/nodes/*.log
+            tests/artifacts/liquidity/
+          if-no-files-found: ignore
+
+  # Dedicated sequential job for the restart-recovery suite: its supervisor
+  # owns the whole lifecycle (fresh dev chain provisioning, CKB, both FNN
+  # nodes, provider stop/restart, both Bruno phases), so it is invoked
+  # directly without tests/nodes/start.sh.
+  e2e-liquidity-restart-recovery:
+    name: e2e test for liquidity restart-recovery suite
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-liquidity-restart-recovery-${{ runner.os }}
+      - uses: dsherret/rust-toolchain-file@v1
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: "0.202.0"
+          cache-prefix: 'e2e'
+
+      - name: Cache build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            target/
+            tests/deploy/udt-init/target/
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
+
+      - name: Run liquidity restart-recovery suite
+        id: restartTests
+        run: |
+          set -euo pipefail
+          export ON_GITHUB_ACTION=y
+          # On a fresh runner the supervisor provisions a clean dev chain via
+          # the one-time init (which gates the liquidity module in the node
+          # configs) and builds the fnn binary itself.
+          ./tests/bruno/e2e/liquidity/restart-recovery/run-restart-test.sh
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.restartTests.outcome == 'failure'
+        with:
+          name: e2e-liquidity-restart-recovery-logs
+          path: tests/artifacts/liquidity/restart-recovery/
+          if-no-files-found: ignore
+
+  # Prove the liquidity suites are independent of prior chain/node state:
+  # run ckb-loop-out once from a clean chain (REMOVE_OLD_STATE=y), then run it
+  # again against the exact state the first run left behind (same chain, same
+  # nodes, no reset).
+  e2e-liquidity-existing-state-rerun:
+    name: e2e test for liquidity/ckb-loop-out --env test (existing state rerun)
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-liquidity-existing-state-rerun-${{ runner.os }}
+      - uses: dsherret/rust-toolchain-file@v1
+      - name: Setup Dependencies
+        uses: ./.github/actions/setup-dependencies
+        with:
+          ckb-version: "0.202.0"
+          cache-prefix: 'e2e'
+
+      - name: Cache build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            target/
+            tests/deploy/udt-init/target/
+          key: e2e-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            e2e-build-${{ runner.os }}-
+
+      - name: Run ckb-loop-out from a clean chain, then against existing state
+        id: rerunTests
+        run: |
+          set -euo pipefail
+          # Prebuild the program so that we can run the following script faster
+          cargo build --locked
+          cd ./tests/deploy/udt-init && cargo build --locked && cd -
+          export ON_GITHUB_ACTION=y
+          # First run: REMOVE_OLD_STATE=y forces a clean chain and fiber stores.
+          REMOVE_OLD_STATE=y ./tests/nodes/start.sh "e2e/liquidity/ckb-loop-out" &
+          start_sh_pid=$!
+
+          ./tests/nodes/wait.sh
+
+          collect_failure() {
+            source tests/bruno/scripts/resolve-node-urls.sh
+            bash tests/bruno/scripts/collect-liquidity-failure-diagnostics.sh ckb-loop-out || true
+          }
+
+          set +e
+          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/liquidity/ckb-loop-out -r --env test)
+          first_status=$?
+          set -e
+
+          if [ "$first_status" -ne 0 ]; then
+            collect_failure
+            exit "$first_status"
+          fi
+
+          # Second run: same chain and nodes, no reset - the suite must be
+          # independent of the state the first run left behind.
+          if ! kill -0 "$start_sh_pid"; then
+            echo "node monitor exited after the first run" >&2
+            exit 1
+          fi
+          echo "first run passed; re-running against existing chain and node state"
+
+          set +e
+          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/liquidity/ckb-loop-out -r --env test)
+          second_status=$?
+          set -e
+
+          if [ "$second_status" -ne 0 ]; then
+            collect_failure
+            exit "$second_status"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.rerunTests.outcome == 'failure'
+        with:
+          name: e2e-liquidity-existing-state-rerun-logs
+          path: |
+            tests/nodes/*.log
+            tests/artifacts/liquidity/
+          if-no-files-found: ignore

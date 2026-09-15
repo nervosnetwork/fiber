@@ -11,6 +11,7 @@ pub mod dev;
 pub mod graph;
 pub mod info;
 pub mod invoice;
+pub mod liquidity;
 #[cfg(not(target_arch = "wasm32"))]
 mod middleware;
 pub mod payment;
@@ -23,8 +24,12 @@ pub mod utils;
 pub mod watchtower;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server {
+    use crate::ckb::contracts::{get_cell_deps_by_contracts, try_get_script_by_contract, Contract};
+    use crate::ckb::CkbChainMessage;
     use crate::ckb::CkbConfig;
     use crate::fiber::gossip::GossipMessageStore;
+    #[cfg(debug_assertions)]
+    use crate::fiber::types::Hash256;
     #[cfg(feature = "watchtower")]
     use crate::invoice::PreimageStore;
     use crate::rpc::admin::{AdminRpcServer, AdminRpcServerImpl};
@@ -36,6 +41,7 @@ pub mod server {
     use crate::rpc::graph::{GraphRpcServer, GraphRpcServerImpl};
     use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
+    use crate::rpc::liquidity::{LiquidityRpcServer, LiquidityRpcServerImpl};
     use crate::rpc::middleware::BiscuitAuthMiddleware;
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
@@ -50,10 +56,14 @@ pub mod server {
             NetworkActorMessage,
         },
         invoice::InvoiceStore,
+        liquidity::{
+            actor::{LiquidityActor, LiquidityActorArguments, LiquidityActorMessage},
+            chain::CkbLiquidityChainWatcher,
+            payment::NetworkLoopOutPaymentAdapter,
+            store::LiquidityStore,
+        },
         FiberConfig,
     };
-    #[cfg(debug_assertions)]
-    use crate::{ckb::CkbChainMessage, fiber::types::Hash256};
     #[cfg(feature = "watchtower")]
     use crate::{
         rpc::watchtower::{WatchtowerRpcServer, WatchtowerRpcServerImpl},
@@ -67,7 +77,7 @@ pub mod server {
     };
     use jsonrpsee::ws_client::RpcServiceBuilder;
     use jsonrpsee::{Methods, RpcModule};
-    use ractor::ActorRef;
+    use ractor::{Actor, ActorRef};
     #[cfg(debug_assertions)]
     use std::collections::HashMap;
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -90,6 +100,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + LiquidityStore
         + WatchtowerStore
         + PreimageStore
     {
@@ -101,6 +112,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + LiquidityStore
             + WatchtowerStore
             + PreimageStore
     {
@@ -112,6 +124,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + LiquidityStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -121,6 +134,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + LiquidityStore
     {
     }
 
@@ -267,6 +281,16 @@ pub mod server {
         }))
     }
 
+    fn liquidity_provider_pubkey(
+        fiber_config: Option<&FiberConfig>,
+    ) -> Result<fiber_types::Pubkey> {
+        let fiber_config = fiber_config
+            .ok_or_else(|| anyhow::anyhow!("liquidity RPC requires Fiber configuration"))?;
+        Ok(crate::fiber::types::pubkey_from_tentacle(
+            fiber_config.public_key(),
+        ))
+    }
+
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
@@ -280,11 +304,15 @@ pub mod server {
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
         store_change_port: Option<Arc<OutputPort<StoreChange>>>,
-        #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
+        ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
         >,
-    ) -> Result<(ServerHandle, SocketAddr)> {
+    ) -> Result<(
+        ServerHandle,
+        SocketAddr,
+        Option<ActorRef<LiquidityActorMessage>>,
+    )> {
         let listening_addr = config.listening_addr.as_deref().unwrap_or("[::1]:0");
         if config.biscuit_public_key.is_none() && is_public_addr(listening_addr)? {
             bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
@@ -318,6 +346,101 @@ pub mod server {
                     .merge(GraphRpcServerImpl::new(network_graph.clone(), store.clone()).into_rpc())
                     .unwrap();
             }
+        }
+        let liquidity_actor = if config.is_module_enabled("liquidity") {
+            {
+                let provider_pubkey = liquidity_provider_pubkey(fiber_config.as_ref())?;
+                let provider_funding_lock_script = ckb_config
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("liquidity RPC requires CKB configuration"))?
+                    .get_default_funding_lock_script()
+                    .map_err(|error| {
+                        anyhow::anyhow!("cannot derive provider funding lock script: {error}")
+                    })?;
+                match (network_actor.clone(), ckb_chain_actor.clone()) {
+                    (Some(network_actor), Some(ckb_chain_actor)) => {
+                        if let Some(liquidity_lock_script) =
+                            try_get_script_by_contract(Contract::LiquidityLock, &[])
+                        {
+                            match get_cell_deps_by_contracts(vec![Contract::LiquidityLock]).await {
+                                Ok(cell_deps) => {
+                                    let liquidity_lock_cell_deps: Vec<_> =
+                                        cell_deps.into_iter().collect();
+                                    if liquidity_lock_cell_deps.is_empty() {
+                                        tracing::warn!(
+                                            "liquidity-lock cell deps are not configured; mutation RPCs will be unavailable"
+                                        );
+                                        None
+                                    } else {
+                                        let (actor, _handle) = Actor::spawn_linked(
+                                            None,
+                                            LiquidityActor::<_, _, _>(std::marker::PhantomData),
+                                            LiquidityActorArguments {
+                                                store: store.clone(),
+                                                payment: NetworkLoopOutPaymentAdapter::with_currency(
+                                                    network_actor,
+                                                    fiber_config
+                                                        .as_ref()
+                                                        .map(FiberConfig::currency)
+                                                        .unwrap_or_default(),
+                                                ),
+                                                chain: CkbLiquidityChainWatcher::new_with_liquidity_lock_script(
+                                                    ckb_chain_actor,
+                                                    store.clone(),
+                                                    liquidity_lock_script,
+                                                    liquidity_lock_cell_deps,
+                                                ),
+                                                provider_pubkey,
+                                                provider_funding_lock_script,
+                                            },
+                                            supervisor.clone(),
+                                        )
+                                        .await?;
+                                        match ractor::call!(
+                                            actor,
+                                            LiquidityActorMessage::ResumeNonTerminal
+                                        ) {
+                                            Ok(Ok(resumed)) => {
+                                                tracing::info!(
+                                                    resumed,
+                                                    "resumed non-terminal liquidity swaps"
+                                                );
+                                            }
+                                            Ok(Err(error)) => {
+                                                tracing::warn!(%error, "failed to resume non-terminal liquidity swaps");
+                                            }
+                                            Err(error) => {
+                                                tracing::warn!(%error, "failed to call liquidity actor recovery");
+                                            }
+                                        }
+                                        Some(actor)
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "failed to load liquidity-lock cell deps; mutation RPCs will be unavailable");
+                                    None
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "liquidity module enabled but liquidity-lock script is not configured; mutation RPCs will be unavailable"
+                            );
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        } else {
+            None
+        };
+
+        if config.is_module_enabled("liquidity") {
+            modules
+                .merge(
+                    LiquidityRpcServerImpl::new(store.clone(), liquidity_actor.clone()).into_rpc(),
+                )
+                .unwrap();
         }
         if let Some(network_actor) = network_actor {
             if config.is_module_enabled("info") {
@@ -418,7 +541,7 @@ pub mod server {
         )
         .await?;
         debug!("started listen to RPC addr {:?}", &listening_addr);
-        Ok((handle, addr))
+        Ok((handle, addr, liquidity_actor))
     }
 
     #[test]
@@ -427,5 +550,25 @@ pub mod server {
         assert!(!is_public_addr("[::1]:0").unwrap());
         assert!(is_public_addr("0.0.0.0:0").unwrap());
         assert!(!is_public_addr("127.0.0.1:0").unwrap());
+    }
+
+    #[test]
+    fn liquidity_startup_provider_identity_matches_fiber_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fiber_config = crate::tests::get_fiber_config(temp_dir.path(), None);
+        let expected = crate::fiber::types::pubkey_from_tentacle(fiber_config.public_key());
+
+        let actual = liquidity_provider_pubkey(Some(&fiber_config)).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn liquidity_startup_requires_fiber_config() {
+        let error = liquidity_provider_pubkey(None).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("liquidity RPC requires Fiber configuration"));
     }
 }

@@ -1,0 +1,71 @@
+meta {
+  name: client resolves the restarted swap
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_swaps",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // The supervisor injects the phase-1 handoff via --env-var. The fallback
+  // discovery keeps the phase runnable by hand: exactly one non-terminal
+  // loop_out swap must exist on the client.
+  const swaps = res.body.result.swaps || [];
+  const injected = bru.getEnvVar("RESTART_SWAP_ID");
+  const terminal = new Set(["success", "failed", "refunded"]);
+  let record;
+  if (injected) {
+    record = swaps.find((item) => item.swap_id === injected);
+    if (!record) {
+      throw new Error(`supervisor handoff swap ${injected} missing from the client swap list`);
+    }
+  } else {
+    const candidates = swaps.filter(
+      (item) => item.swap_kind === "loop_out" && !terminal.has(item.state),
+    );
+    if (candidates.length !== 1) {
+      throw new Error(`expected exactly one non-terminal loop_out swap on the client, found ${candidates.length}`);
+    }
+    record = candidates[0];
+  }
+
+  // Nothing may have advanced the swap while the provider was down: the
+  // payout was never mined, so the client must still be parked in
+  // payout_pending with the same payment hash.
+  if (record.state !== "payout_pending") {
+    throw new Error(`client swap must still be payout_pending after the provider restart, got: ${record.state}`);
+  }
+  if (record.swap_kind !== "loop_out") {
+    throw new Error(`client swap_kind must be loop_out, got: ${record.swap_kind}`);
+  }
+  const injectedHash = bru.getEnvVar("RESTART_PAYMENT_HASH");
+  if (injectedHash && record.payment_hash !== injectedHash) {
+    throw new Error(`client payment_hash must match the phase-1 handoff: ${record.payment_hash} != ${injectedHash}`);
+  }
+
+  bru.setVar("SWAP_ID", record.swap_id);
+  bru.setVar("PAYMENT_HASH", record.payment_hash);
+  console.log("phase 2 swap:", record.swap_id, "state:", record.state);
+}

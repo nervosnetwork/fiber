@@ -1,0 +1,92 @@
+meta {
+  name: node2 update udt asset limits for loop in
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "update_liquidity_asset",
+    "params": [
+      {
+        "asset": {
+          "asset_id": "{{LIQUIDITY_SIMPLE_UDT_ASSET_ID}}",
+          "kind": "udt",
+          "udt_type_script": {{SIMPLE_UDT_TYPE_SCRIPT}},
+          "min_amount": "0x1",
+          "max_amount": "0x174876e800",
+          "available_capacity": "0x174876e800",
+          "base_fee": "0x1",
+          "proportional_fee_ppm": "0x0",
+          "enabled": true
+        }
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:pre-request {
+  // Single source for the swap amount and client fee caps consumed by the
+  // invoice (13), quote (16), import (17) and execute (19) requests below.
+  // 0x3e8 is 1000 simple UDT atoms: the UDT loop-in lock cell carries the
+  // gross UDT amount (swap amount + provider fee) in its cell data while its
+  // CKB capacity is only the operational capacity (see request 22).
+  bru.setVar("SWAP_AMOUNT_HEX", "0x3e8");
+  bru.setVar("MAX_PROVIDER_FEE_HEX", "0xa");
+  bru.setVar("MAX_ROUTING_FEE_HEX", "0x64");
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+
+  const asset = res.body.result;
+  const expectedAssetId = bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID");
+  if (asset.asset_id !== expectedAssetId) {
+    throw new Error(`updated asset_id must be ${expectedAssetId}, got: ${asset.asset_id}`);
+  }
+  if (asset.kind !== "udt") {
+    throw new Error(`unexpected updated asset kind: ${asset.kind}`);
+  }
+  if (!asset.udt_type_script
+    || asset.udt_type_script.code_hash !== expectedScript.code_hash
+    || asset.udt_type_script.hash_type !== expectedScript.hash_type
+    || asset.udt_type_script.args !== expectedScript.args) {
+    throw new Error(`updated udt_type_script must be preserved: ${JSON.stringify(asset.udt_type_script)}`);
+  }
+  if (asset.enabled !== true) {
+    throw new Error("updated udt asset must be enabled");
+  }
+  // The registry must cover the loop-in swap gross amount (amount + provider
+  // fee, the latter derived from this very entry's fee parameters): the lock
+  // cell data carries that gross UDT amount.
+  const amount = BigInt(bru.getVar("SWAP_AMOUNT_HEX"));
+  const providerFee =
+    BigInt(asset.base_fee) + (amount * BigInt(asset.proportional_fee_ppm)) / BigInt(1000000);
+  const gross = amount + providerFee;
+  if (BigInt(asset.max_amount) < gross || BigInt(asset.available_capacity) < gross) {
+    throw new Error(`updated udt asset limits are too small for the loop in swap gross 0x${gross.toString(16)}: ${JSON.stringify(asset)}`);
+  }
+  // Propagate the registry fee parameters so the quote assertion derives its
+  // expected provider fee from the registry response instead of duplicated
+  // constants.
+  bru.setVar("REGISTRY_BASE_FEE", asset.base_fee);
+  bru.setVar("REGISTRY_FEE_PPM", asset.proportional_fee_ppm);
+  console.log("udt asset limits updated for loop in, gross:", `0x${gross.toString(16)}`);
+}

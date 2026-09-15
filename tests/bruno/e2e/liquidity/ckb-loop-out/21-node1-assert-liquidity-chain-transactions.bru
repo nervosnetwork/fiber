@@ -1,0 +1,83 @@
+meta {
+  name: node1 assert liquidity chain transactions
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // A molecule OutPoint hex is tx_hash (32 bytes) followed by a LE u32 index.
+  const decodeOutpoint = (hex) => {
+    if (typeof hex !== "string" || !hex.startsWith("0x") || hex.length !== 74) {
+      throw new Error(`outpoint must be 36 molecule bytes: ${hex}`);
+    }
+    const bytes = hex.slice(2).match(/.{2}/g).map((b) => parseInt(b, 16));
+    const index = bytes[32] | (bytes[33] << 8) | (bytes[34] << 16) | (bytes[35] << 24);
+    return {
+      txHash: "0x" + bytes.slice(0, 32).map((b) => b.toString(16).padStart(2, "0")).join(""),
+      index,
+    };
+  };
+
+  const transactions = res.body.result.transactions || [];
+  const payout = transactions.find((tx) => tx.role === "payout");
+  if (!payout) {
+    throw new Error(`client must record the payout transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (payout.status !== "confirmed") {
+    throw new Error(`client payout record must be confirmed, got: ${payout.status}`);
+  }
+  if (payout.tx_hash !== bru.getVar("PAYOUT_TX_HASH")) {
+    throw new Error(`client payout tx_hash mismatch: ${payout.tx_hash}`);
+  }
+  const payoutOutpoint = decodeOutpoint(payout.outpoint);
+  if (payoutOutpoint.txHash !== bru.getVar("PAYOUT_TX_HASH")) {
+    throw new Error(`client payout outpoint tx_hash mismatch: ${payout.outpoint}`);
+  }
+  if (BigInt(payoutOutpoint.index) !== BigInt(bru.getVar("PAYOUT_INDEX"))) {
+    throw new Error(`client payout outpoint index mismatch: ${payout.outpoint}`);
+  }
+
+  const claim = transactions.find((tx) => tx.role === "claim");
+  if (!claim) {
+    throw new Error(`client must record the claim transaction: ${JSON.stringify(transactions)}`);
+  }
+  if (claim.status !== "confirmed") {
+    throw new Error(`client claim record must be confirmed, got: ${claim.status}`);
+  }
+  if (typeof claim.tx_hash !== "string" || claim.tx_hash.length !== 66) {
+    throw new Error(`client claim tx_hash must be a 32-byte hex: ${JSON.stringify(claim)}`);
+  }
+
+  const refund = transactions.find((tx) => tx.role === "refund");
+  if (refund) {
+    throw new Error(`successful loop out must not record a refund: ${JSON.stringify(refund)}`);
+  }
+}

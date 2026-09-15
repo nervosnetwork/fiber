@@ -1,0 +1,53 @@
+meta {
+  name: node2 list liquidity assets
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_assets",
+    "params": []
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const expectedAssetId = bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID");
+  const assets = res.body.result.assets || [];
+  const ckbAsset = assets.find((asset) => asset.asset_id === expectedAssetId);
+  if (!ckbAsset) {
+    throw new Error(`ckb asset ${expectedAssetId} missing from provider registry: ${JSON.stringify(assets)}`);
+  }
+  if (ckbAsset.enabled !== true) {
+    throw new Error(`ckb asset must be enabled: ${JSON.stringify(ckbAsset)}`);
+  }
+  if (ckbAsset.kind !== "ckb" || ckbAsset.udt_type_script !== null) {
+    throw new Error(`unexpected ckb asset shape: ${JSON.stringify(ckbAsset)}`);
+  }
+  if (ckbAsset.max_amount !== "0xf4240" || ckbAsset.available_capacity !== "0xf4240") {
+    throw new Error(`unexpected ckb asset capacity: ${JSON.stringify(ckbAsset)}`);
+  }
+
+  // Propagate the registry fee parameters so the quote request derives its
+  // expected provider fee from the registry response instead of duplicated
+  // constants.
+  bru.setVar("REGISTRY_BASE_FEE", ckbAsset.base_fee);
+  bru.setVar("REGISTRY_FEE_PPM", ckbAsset.proportional_fee_ppm);
+}
