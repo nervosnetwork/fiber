@@ -214,8 +214,14 @@ pub(crate) fn check_commitment_reserved_fee(
 
 fn minimum_acceptor_reserved_ckb_amount(
     udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
 ) -> Result<u64, ProcessingChannelError> {
-    let occupied_capacity = occupied_capacity(&Script::default(), udt_type_script)?.as_u64();
+    let occupied_capacity = occupied_capacity(
+        &Script::default(),
+        udt_type_script,
+        commitment_contract_version,
+    )?
+    .as_u64();
     occupied_capacity
         .checked_add(DEFAULT_MIN_SHUTDOWN_FEE)
         .ok_or_else(|| {
@@ -246,14 +252,20 @@ pub(crate) fn check_open_channel_parameters(
     }
 
     // reserved_ckb_amount
-    let occupied_capacity = occupied_capacity(shutdown_script, udt_type_script)?.as_u64();
+    let occupied_capacity = occupied_capacity(
+        shutdown_script,
+        udt_type_script,
+        commitment_contract_version,
+    )?
+    .as_u64();
     if reserved_ckb_amount < occupied_capacity {
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "Reserved CKB amount {} is less than {}",
             reserved_ckb_amount, occupied_capacity,
         )));
     }
-    let minimum_local_reserved_ckb_amount = minimum_acceptor_reserved_ckb_amount(udt_type_script)?;
+    let minimum_local_reserved_ckb_amount =
+        minimum_acceptor_reserved_ckb_amount(udt_type_script, commitment_contract_version)?;
     if reserved_ckb_amount
         .checked_add(minimum_local_reserved_ckb_amount)
         .is_none()

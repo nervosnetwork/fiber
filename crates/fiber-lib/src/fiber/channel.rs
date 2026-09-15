@@ -4239,6 +4239,7 @@ where
                     funding_amount,
                     &shutdown_script,
                     &funding_udt_type_script,
+                    commitment_contract_version,
                 )?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
@@ -4427,6 +4428,7 @@ where
                     funding_amount,
                     &shutdown_script,
                     &funding_udt_type_script,
+                    commitment_contract_version,
                 )?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
@@ -5268,8 +5270,14 @@ pub(crate) fn get_funding_and_reserved_amount(
     total_amount: u128,
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
 ) -> Result<(u128, u64), ProcessingChannelError> {
-    let reserved_capacity = reserved_capacity(shutdown_script, udt_type_script)?.as_u64();
+    let reserved_capacity = reserved_capacity(
+        shutdown_script,
+        udt_type_script,
+        commitment_contract_version,
+    )?
+    .as_u64();
     if udt_type_script.is_none() {
         if total_amount < reserved_capacity as u128 {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -5303,18 +5311,30 @@ pub(crate) fn get_funding_and_reserved_amount(
 pub(crate) fn reserved_capacity(
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
 ) -> Result<Capacity, CapacityError> {
-    occupied_capacity(shutdown_script, udt_type_script)?
-        .safe_add(Capacity::shannons(DEFAULT_MIN_SHUTDOWN_FEE))
+    occupied_capacity(
+        shutdown_script,
+        udt_type_script,
+        commitment_contract_version,
+    )?
+    .safe_add(Capacity::shannons(DEFAULT_MIN_SHUTDOWN_FEE))
 }
 
 pub(crate) fn occupied_capacity(
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
+    commitment_contract_version: CommitmentContractVersion,
 ) -> Result<Capacity, CapacityError> {
-    // commitment lock args is 57 bytes, when shutdown script args len is less than 57, we need reserve more capacity
-    let min_lock_script = if shutdown_script.args().len() < 57 {
-        Script::new_builder().args([0u8; 57].pack()).build()
+    // Reserve enough capacity for the negotiated commitment-lock args when shutdown args are shorter.
+    let commitment_lock_args_len = match commitment_contract_version {
+        CommitmentContractVersion::Legacy => 57,
+        CommitmentContractVersion::V1 => 58,
+    };
+    let min_lock_script = if shutdown_script.args().len() < commitment_lock_args_len {
+        Script::new_builder()
+            .args(vec![0u8; commitment_lock_args_len].pack())
+            .build()
     } else {
         shutdown_script.clone()
     };
@@ -6288,8 +6308,12 @@ impl ChannelActorState {
         }
 
         // reserved_ckb_amount
-        let occupied_capacity =
-            occupied_capacity(remote_shutdown_script, udt_type_script)?.as_u64();
+        let occupied_capacity = occupied_capacity(
+            remote_shutdown_script,
+            udt_type_script,
+            commitment_contract_version,
+        )?
+        .as_u64();
         if remote_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Reserved CKB amount {} is less than {}",
@@ -6349,8 +6373,12 @@ impl ChannelActorState {
             (self.get_remote_shutdown_script(), close_script.clone()),
         )?;
 
-        let occupied_capacity =
-            occupied_capacity(close_script, &self.funding_udt_type_script)?.as_u64();
+        let occupied_capacity = occupied_capacity(
+            close_script,
+            &self.funding_udt_type_script,
+            self.commitment_contract_version,
+        )?
+        .as_u64();
         let available_max_fee = if self.funding_udt_type_script.is_none() {
             Self::checked_ckb_amount_with_reserved(
                 self.to_local_amount,
@@ -7408,11 +7436,14 @@ impl ChannelActorState {
             Ok(fee) => fee,
             Err(_) => return false,
         };
-        let occupied_capacity =
-            match occupied_capacity(remote_close_script, &self.funding_udt_type_script) {
-                Ok(capacity) => capacity.as_u64(),
-                Err(_) => return false,
-            };
+        let occupied_capacity = match occupied_capacity(
+            remote_close_script,
+            &self.funding_udt_type_script,
+            self.commitment_contract_version,
+        ) {
+            Ok(capacity) => capacity.as_u64(),
+            Err(_) => return false,
+        };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             match Self::checked_ckb_amount_with_reserved(
                 self.to_remote_amount,

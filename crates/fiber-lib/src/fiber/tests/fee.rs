@@ -1,3 +1,4 @@
+use crate::fiber::channel::{occupied_capacity, reserved_capacity};
 use crate::fiber::fee::checked_calculate_commitment_tx_fee;
 #[cfg(feature = "watchtower")]
 use crate::watchtower::build_settlement_transaction;
@@ -88,4 +89,35 @@ fn checked_commitment_tx_fee_allows_intermediate_u64_overflow_when_final_fee_fit
             .expect("intermediate u64 overflow should be allowed when final fee fits");
 
     assert_eq!(actual_fee, expected_fee);
+}
+
+#[test]
+fn v1_commitment_reserve_accounts_for_the_extra_lock_arg_byte() {
+    let legacy_occupied = occupied_capacity(
+        &ckb_types::packed::Script::default(),
+        &None,
+        CommitmentContractVersion::Legacy,
+    )
+    .expect("Legacy occupied capacity should fit");
+    let v1_occupied = occupied_capacity(
+        &ckb_types::packed::Script::default(),
+        &None,
+        CommitmentContractVersion::V1,
+    )
+    .expect("V1 occupied capacity should fit");
+    let legacy_reserved = reserved_capacity(
+        &ckb_types::packed::Script::default(),
+        &None,
+        CommitmentContractVersion::Legacy,
+    )
+    .expect("Legacy reserved capacity should fit");
+    let v1_reserved = reserved_capacity(
+        &ckb_types::packed::Script::default(),
+        &None,
+        CommitmentContractVersion::V1,
+    )
+    .expect("V1 reserved capacity should fit");
+
+    assert!(v1_occupied > legacy_occupied);
+    assert!(v1_reserved > legacy_reserved);
 }

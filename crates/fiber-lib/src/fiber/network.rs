@@ -6080,6 +6080,7 @@ where
             funding_amount,
             &shutdown_script,
             &pending_open.open_channel.funding_udt_type_script,
+            pending_open.commitment_contract_version,
         )?;
 
         let network = self.network.clone();

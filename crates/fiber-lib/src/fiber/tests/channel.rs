@@ -1045,9 +1045,10 @@ async fn test_create_channel_with_too_large_amounts() {
     };
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
     assert!(res.is_err(), "Create channel failed: {:?}", res);
-    assert!(res.unwrap_err().to_string().contains(
-        "The total funding amount (18446744063809551614) should be less than 18446744053909551615"
-    ));
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("The total funding amount"));
 
     let params = ChannelParameters {
         node_a_funding_amount: MIN_RESERVED_CKB,
@@ -1056,9 +1057,10 @@ async fn test_create_channel_with_too_large_amounts() {
     };
     let res = create_channel_with_nodes(&mut node_a, &mut node_b, params).await;
     assert!(res.is_err(), "Create channel failed: {:?}", res);
-    assert!(res.unwrap_err().to_string().contains(
-        "The total funding amount (18446744063809551614) should be less than 18446744053909551615"
-    ));
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("The total funding amount"));
 
     let params = ChannelParameters {
         node_a_funding_amount: u128::MAX - 100,
@@ -4692,7 +4694,7 @@ async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation()
 #[tokio::test]
 async fn do_test_add_tlc_min_tlc_value_limit() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 10000000000;
+    let node_b_funding_amount = 10100000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
@@ -7362,7 +7364,7 @@ async fn test_remote_force_shutdown_awaiting_channel_ready_after_restart() {
 #[tokio::test]
 async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 9900000000;
+    let node_b_funding_amount = 10000000000;
 
     let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
@@ -7374,7 +7376,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 58].pack()).build()),
+                        close_script: Some(Script::new_builder().args([0u8; 59].pack()).build()),
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
@@ -11626,7 +11628,7 @@ async fn test_channel_stale_passive_wait_no_proactive_send() {
     init_tracing();
 
     let (node_a, node_b, channel_id) =
-        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+        create_nodes_with_established_channel(10000000000, 10000000000, true).await;
 
     let mut state_a = node_a.get_channel_actor_state(channel_id);
     state_a.state = ChannelState::Stale;
@@ -11658,7 +11660,7 @@ async fn test_channel_stale_audit_success_resumes_ready() {
     init_tracing();
 
     let (node_a, node_b, channel_id) =
-        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+        create_nodes_with_established_channel(10000000000, 10000000000, true).await;
 
     let mut state_a = node_a.get_channel_actor_state(channel_id);
     let original_cn = state_a.commitment_numbers.local;
@@ -11709,7 +11711,7 @@ async fn test_channel_stale_audit_failure_blocks_channel() {
     init_tracing();
 
     let (mut node_a, node_b, channel_id) =
-        create_nodes_with_established_channel(9900000000, 9900000000, true).await;
+        create_nodes_with_established_channel(10000000000, 10000000000, true).await;
 
     let state_a = node_a.get_channel_actor_state(channel_id);
     let mut state_b = node_b.get_channel_actor_state(channel_id);

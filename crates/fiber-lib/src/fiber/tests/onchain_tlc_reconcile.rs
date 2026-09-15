@@ -1733,14 +1733,87 @@ fn test_tracked_settlement_tlcs_extraction() {
 
     let lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
 
-    let tracked = tracked_settlement_tlcs(&lock, &channel_data, true)
-        .expect("should extract tracked settlement tlcs");
+    let (_, _, selected_settlement) = verify_and_select_settlement_data(&channel_data, &lock)
+        .expect("should select the committed settlement snapshot");
+    let tracked = tracked_settlement_tlcs(
+        selected_settlement,
+        true,
+        channel_data.commitment_contract_version,
+    );
     assert_eq!(tracked.len(), 1);
     assert_eq!(tracked[0].tlc_id, TLCId::Offered(5));
     assert_eq!(tracked[0].payment_hash, payment_hash);
 
-    // Direction mismatch: expected local, but lock is remote
-    assert!(tracked_settlement_tlcs(&lock, &channel_data, false).is_none());
+    let tracked_local = tracked_settlement_tlcs(
+        selected_settlement,
+        false,
+        channel_data.commitment_contract_version,
+    );
+    assert_eq!(tracked_local[0].tlc_id, TLCId::Received(5));
+}
+
+#[test]
+fn test_tracked_settlement_tlcs_preserves_verified_empty_snapshot() {
+    let local_privkey = Privkey::from([1u8; 32]);
+    let remote_privkey = Privkey::from([2u8; 32]);
+    let local_settlement_key = Privkey::from([3u8; 32]);
+    let remote_settlement_key = Privkey::from([4u8; 32]).pubkey();
+    let committed_settlement = SettlementData {
+        local_amount: 1_000,
+        remote_amount: 2_000,
+        tlcs: vec![],
+    };
+    let pending_settlement = SettlementData {
+        local_amount: 500,
+        remote_amount: 2_500,
+        tlcs: vec![SettlementTlc {
+            tlc_id: TLCId::Offered(7),
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_amount: 300,
+            payment_hash: gen_rand_sha256_hash(),
+            expiry: 200,
+            local_key: Privkey::from([5u8; 32]),
+            remote_key: Privkey::from([6u8; 32]).pubkey(),
+        }],
+    };
+    let channel_data = ChannelData {
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        local_settlement_key: local_settlement_key.clone(),
+        remote_settlement_key,
+        local_funding_pubkey: local_privkey.pubkey(),
+        remote_funding_pubkey: remote_privkey.pubkey(),
+        remote_settlement_data: committed_settlement.clone(),
+        pending_remote_settlement_data: pending_settlement,
+        local_settlement_data: committed_settlement.clone(),
+        revocation_data: None,
+        commitment_contract_version: CommitmentContractVersion::Legacy,
+    };
+    let witness = settlement_data_to_witness(
+        &committed_settlement,
+        true,
+        CommitmentContractVersion::Legacy,
+        local_settlement_key,
+        remote_settlement_key,
+    );
+    let context = KeyAggContext::new([local_privkey.pubkey(), remote_privkey.pubkey()]).unwrap();
+    let mut lock_args = Vec::new();
+    lock_args.extend_from_slice(
+        &blake2b_256(context.aggregated_pubkey::<Point>().serialize_xonly())[..20],
+    );
+    lock_args.extend_from_slice(&100u64.to_be_bytes());
+    lock_args.extend_from_slice(&1u64.to_be_bytes());
+    lock_args.extend_from_slice(&blake160(&witness).0);
+    lock_args.push(0);
+    let lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
+
+    let (_, _, selected) = verify_and_select_settlement_data(&channel_data, &lock)
+        .expect("the on-chain S0 snapshot should verify");
+    assert!(selected.tlcs.is_empty());
+    assert!(
+        tracked_settlement_tlcs(selected, true, channel_data.commitment_contract_version,)
+            .is_empty()
+    );
 }
 
 #[derive(Clone, Default)]
@@ -2954,8 +3027,12 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
                 .expect("fresh channel must recover the hash-matching snapshot without RAA");
         assert_eq!((direction, actual_number), (for_remote, number));
         assert_eq!(selected, expected);
-        assert!(tracked_settlement_tlcs(&lock, &channel_data, for_remote).is_some());
-        assert!(tracked_settlement_tlcs(&lock, &channel_data, !for_remote).is_none());
+        assert!(tracked_settlement_tlcs(
+            selected,
+            for_remote,
+            channel_data.commitment_contract_version,
+        )
+        .is_empty());
         let mut args = lock.args().raw_data().to_vec();
         args[40] ^= 0xff;
         let invalid = lock.as_builder().args(args.pack()).build();

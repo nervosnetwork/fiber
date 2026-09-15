@@ -11,21 +11,20 @@ use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use fiber_types::{
-    ChannelData, ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus,
-    OutboundTlcStatus, Pubkey, RemoveTlcReason, SettlementData, TLCId, TlcInfo,
+    ChannelData, ChannelState, CloseFlags, CommitmentContractVersion, Hash256, HashAlgorithm,
+    InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcReason, SettlementData, TLCId, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
-// Used by Watchtower scanning; builds without the watchtower feature may leave it unused.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackedSettlementTlc {
     pub tlc_id: TLCId,
     pub payment_hash: Hash256,
     pub hash_algorithm: HashAlgorithm,
     pub witness: Vec<u8>,
+    pub commitment_contract_version: CommitmentContractVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,39 +203,25 @@ pub(crate) fn recover_shutdown_settlement_data(
 /// converting TLC IDs to the local channel's direction.
 #[allow(dead_code)]
 pub fn tracked_settlement_tlcs(
-    commitment_lock: &Script,
-    channel_data: &ChannelData,
+    settlement_data: &SettlementData,
     for_remote: bool,
-) -> Option<Vec<TrackedSettlementTlc>> {
-    let (detected_for_remote, _commitment_number, settlement_data) =
-        verify_and_select_settlement_data(channel_data, commitment_lock)?;
-    if detected_for_remote != for_remote {
-        warn!(
-            "Commitment lock direction mismatch: detected for_remote={}, expected for_remote={}",
-            detected_for_remote, for_remote
-        );
-        return None;
-    }
-    Some(
-        settlement_data
-            .tlcs
-            .iter()
-            .map(|tlc| TrackedSettlementTlc {
-                tlc_id: if for_remote {
-                    tlc.tlc_id
-                } else {
-                    tlc.tlc_id.flip()
-                },
-                payment_hash: tlc.payment_hash,
-                hash_algorithm: tlc.hash_algorithm,
-                witness: settlement_tlc_to_witness(
-                    tlc,
-                    for_remote,
-                    channel_data.commitment_contract_version,
-                ),
-            })
-            .collect(),
-    )
+    commitment_contract_version: CommitmentContractVersion,
+) -> Vec<TrackedSettlementTlc> {
+    settlement_data
+        .tlcs
+        .iter()
+        .map(|tlc| TrackedSettlementTlc {
+            tlc_id: if for_remote {
+                tlc.tlc_id
+            } else {
+                tlc.tlc_id.flip()
+            },
+            payment_hash: tlc.payment_hash,
+            hash_algorithm: tlc.hash_algorithm,
+            witness: settlement_tlc_to_witness(tlc, for_remote, commitment_contract_version),
+            commitment_contract_version,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
