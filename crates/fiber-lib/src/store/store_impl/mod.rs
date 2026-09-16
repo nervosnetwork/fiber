@@ -161,6 +161,21 @@ impl Store {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone()
     }
+
+    #[cfg(feature = "watchtower")]
+    fn local_watchtower_node_id(&self, channel_id: &Hash256) -> Option<NodeId> {
+        // Hosted channel state is namespaced, but its host watchtower keeps
+        // snapshots and settlement proofs in the root store. Resolve ownership
+        // from this namespace before reading those shared rows.
+        if self.namespace.is_some() {
+            let state = self.get_channel_actor_state(channel_id)?;
+            Some(NodeId::from_bytes(
+                state.get_local_pubkey().serialize().to_vec(),
+            ))
+        } else {
+            Some(NodeId::local())
+        }
+    }
 }
 
 /// A write batch that applies one node namespace to every physical key.
@@ -1262,6 +1277,19 @@ impl ChannelActorStateStore for Store {
     ) -> Option<StoredOnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
+            if self.namespace.is_some() {
+                let node_id = self.local_watchtower_node_id(channel_id)?;
+                // Legacy proofs have no node identity and cannot establish
+                // tenant ownership. Hosted tenants only consume exact proofs
+                // from the host watchtower, never another namespace's fallback.
+                let key = Self::tlc_on_chain_settled_key(&node_id, channel_id, tlc_id);
+                return self.inner.get(key).map(|value| {
+                    StoredOnChainTlcSettlement::Exact(deserialize_from(
+                        value.as_ref(),
+                        "OnChainTlcSettlement",
+                    ))
+                });
+            }
             WatchtowerStore::get_onchain_tlc_settlement(
                 self,
                 &NodeId::local(),
@@ -1319,15 +1347,7 @@ impl ChannelActorStateStore for Store {
 
     #[cfg(feature = "watchtower")]
     fn get_local_watch_channel(&self, channel_id: &Hash256) -> Option<ChannelData> {
-        // Hosted channel state is namespaced, but its host watchtower keeps the
-        // immutable snapshots in the root store under the tenant's protocol key.
-        // Resolve ownership from this namespace before reading the shared row.
-        let node_id = if self.namespace.is_some() {
-            let state = self.get_channel_actor_state(channel_id)?;
-            NodeId::from_bytes(state.get_local_pubkey().serialize().to_vec())
-        } else {
-            NodeId::local()
-        };
+        let node_id = self.local_watchtower_node_id(channel_id)?;
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
             node_id.as_ref(),

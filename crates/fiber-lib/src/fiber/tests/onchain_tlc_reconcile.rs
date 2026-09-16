@@ -53,6 +53,8 @@ use crate::fiber::{
     network::check_channel_shutdown_settlement, onchain_tlc_reconcile::OnChainTlcSettlement,
 };
 use crate::store::open_store;
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+use crate::store::NodeNamespace;
 use crate::tests::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 // Browser tests disable Watchtower; gate its integration fixtures with the same feature.
 #[cfg(feature = "watchtower")]
@@ -347,6 +349,90 @@ fn resolve_ignores_locally_known_preimage_without_settlement_record() {
         ),
         OnChainTlcResolution::Unknown
     );
+}
+
+#[test]
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+fn collect_hosted_tenant_tlcs_from_root_watchtower_settlements() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root_store = open_store(temp_dir.path()).expect("open shared store");
+    let tenant_store = root_store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let fulfilled_hash = payment_hash_for(preimage, hash_algorithm);
+    let timeout_hash = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    for (id, payment_hash) in [(0, fulfilled_hash), (1, timeout_hash)] {
+        state.tlc_state.offered_tlcs.tlcs.push(tlc_info(
+            TLCId::Offered(id),
+            TlcStatus::Outbound(OutboundTlcStatus::Committed),
+            payment_hash,
+            hash_algorithm,
+        ));
+        state.tlc_state.received_tlcs.tlcs.push(tlc_info(
+            TLCId::Received(id),
+            TlcStatus::Inbound(InboundTlcStatus::Committed),
+            payment_hash,
+            hash_algorithm,
+        ));
+    }
+    tenant_store.insert_channel_actor_state(state);
+    let state = tenant_store
+        .get_channel_actor_state(&channel_id)
+        .expect("restore tenant channel state");
+
+    // Expiry alone must not finalize a TLC before the watchtower records its
+    // chain outcome, even after the rest of the channel has settled.
+    assert!(collect_onchain_fulfilled_tlcs(&state, &tenant_store).is_empty());
+    assert!(collect_onchain_timeout_settled_tlcs(&state, &tenant_store, 100).is_empty());
+    assert!(collect_onchain_received_timeout_settled_tlcs(&state, &tenant_store).is_empty());
+
+    // The host watchtower writes outside the tenant namespace and uses the
+    // tenant identity, not NodeId::local(). Reconciliation must bridge both
+    // differences without requiring a duplicate proof in the tenant store.
+    let tenant_node_id = NodeId::from_bytes(state.get_local_pubkey().serialize().to_vec());
+    for tlc in state.tlc_state.all_tlcs() {
+        root_store.insert_onchain_tlc_settlement(
+            &tenant_node_id,
+            &channel_id,
+            tlc.tlc_id,
+            OnChainTlcSettlement {
+                payment_hash: tlc.payment_hash,
+                hash_algorithm,
+                preimage: (tlc.payment_hash == fulfilled_hash).then_some(preimage),
+                tx_hash: gen_rand_sha256_hash(),
+                tlc_index: 0,
+            },
+        );
+    }
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &tenant_store);
+    assert_eq!(fulfilled.len(), 2);
+    for tlc_id in [TLCId::Offered(0), TLCId::Received(0)] {
+        let tlc = fulfilled
+            .iter()
+            .find(|tlc| tlc.tlc_id == tlc_id)
+            .expect("tenant fulfillment must be recovered from root watchtower proof");
+        assert_eq!(tlc.preimage, preimage);
+        assert_eq!(tlc.payment_hash, fulfilled_hash);
+    }
+    let offered_timeouts = collect_onchain_timeout_settled_tlcs(&state, &tenant_store, 100);
+    assert_eq!(offered_timeouts.len(), 1);
+    assert_eq!(offered_timeouts[0].tlc_id, TLCId::Offered(1));
+    assert_eq!(offered_timeouts[0].payment_hash, timeout_hash);
+    assert_eq!(
+        offered_timeouts[0].role,
+        OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
+    );
+    let received_timeouts = collect_onchain_received_timeout_settled_tlcs(&state, &tenant_store);
+    assert_eq!(received_timeouts.len(), 1);
+    assert_eq!(received_timeouts[0].tlc_id, 1);
 }
 
 #[test]

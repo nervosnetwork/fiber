@@ -1101,6 +1101,152 @@ fn test_onchain_tlc_settlement_roundtrip() {
     );
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[test]
+fn test_onchain_tlc_settlement_resolves_hosted_tenant_namespace() {
+    let path = TempDir::new("onchain_tlc_settlement_namespace");
+    let store = open_store(path).expect("create shared store");
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    let unowned_tenant = store.namespaced(NodeNamespace::hosted_tenant("u3"));
+    let u1_state = ChannelActorState::samples(42).remove(0);
+    let mut u2_state = ChannelActorState::samples(43).remove(0);
+    let channel_id = u1_state.get_id();
+    u2_state.id = channel_id;
+    let u1_node_id = NodeId::from_bytes(u1_state.get_local_pubkey().serialize().to_vec());
+    let u2_node_id = NodeId::from_bytes(u2_state.get_local_pubkey().serialize().to_vec());
+    assert_ne!(u1_node_id, u2_node_id);
+    tenant_u1.insert_channel_actor_state(u1_state);
+    tenant_u2.insert_channel_actor_state(u2_state);
+
+    let preimage = Hash256::from([9; 32]);
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let fulfilled = OnChainTlcSettlement {
+        payment_hash,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        preimage: Some(preimage),
+        tx_hash: Hash256::from([7; 32]),
+        tlc_index: 0,
+    };
+    let timed_out = OnChainTlcSettlement {
+        preimage: None,
+        tx_hash: Hash256::from([8; 32]),
+        ..fulfilled.clone()
+    };
+    let read = |reader: &crate::store::Store, channel_id: &Hash256, tlc_id| {
+        ChannelActorStateStore::get_onchain_tlc_settlement(
+            reader,
+            channel_id,
+            tlc_id,
+            &payment_hash,
+        )
+    };
+
+    // The host watchtower writes outside the tenant namespace. Even identical
+    // channel/TLC ids must select the proof belonging to this logical node.
+    for (tlc_id, u1_proof, u2_proof) in [
+        (TLCId::Offered(0), &fulfilled, &timed_out),
+        (TLCId::Received(0), &timed_out, &fulfilled),
+    ] {
+        store.insert_onchain_tlc_settlement(&u1_node_id, &channel_id, tlc_id, u1_proof.clone());
+        assert_eq!(
+            read(&tenant_u1, &channel_id, tlc_id),
+            Some(StoredOnChainTlcSettlement::Exact(u1_proof.clone()))
+        );
+        assert_eq!(read(&tenant_u2, &channel_id, tlc_id), None);
+        assert_eq!(read(&store, &channel_id, tlc_id), None);
+        assert_eq!(read(&unowned_tenant, &channel_id, tlc_id), None);
+
+        store.insert_onchain_tlc_settlement(&u2_node_id, &channel_id, tlc_id, u2_proof.clone());
+        let public_proof = OnChainTlcSettlement {
+            tx_hash: Hash256::from([6; 32]),
+            ..fulfilled.clone()
+        };
+        store.insert_onchain_tlc_settlement(
+            &NodeId::local(),
+            &channel_id,
+            tlc_id,
+            public_proof.clone(),
+        );
+        for (reader, expected) in [
+            (&tenant_u1, u1_proof),
+            (&tenant_u2, u2_proof),
+            (&store, &public_proof),
+        ] {
+            assert_eq!(
+                read(reader, &channel_id, tlc_id),
+                Some(StoredOnChainTlcSettlement::Exact(expected.clone()))
+            );
+            assert_eq!(read(reader, &channel_id, TLCId::Offered(1)), None);
+        }
+        assert_eq!(read(&unowned_tenant, &channel_id, tlc_id), None);
+    }
+
+    // A proof under U1's identity alone is not enough: the channel must also
+    // belong to U1's namespace before shared watchtower data can be read.
+    let unowned_channel_id = Hash256::from([91; 32]);
+    store.insert_onchain_tlc_settlement(
+        &u1_node_id,
+        &unowned_channel_id,
+        TLCId::Offered(0),
+        fulfilled,
+    );
+    assert_eq!(
+        read(&tenant_u1, &unowned_channel_id, TLCId::Offered(0)),
+        None
+    );
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[test]
+fn test_onchain_tlc_settlement_hosted_tenant_rejects_unscoped_legacy_proof() {
+    let path = TempDir::new("onchain_tlc_settlement_legacy_namespace");
+    let store = open_store(path).expect("create shared store");
+    let tenant = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let state = ChannelActorState::samples(42).remove(0);
+    let channel_id = state.get_id();
+    tenant.insert_channel_actor_state(state);
+    let payment_hash = Hash256::from([3; 32]);
+    let tlc_id = TLCId::Offered(0);
+    let legacy_key = [
+        &[WATCHTOWER_TLC_SETTLED_PREFIX],
+        channel_id.as_ref(),
+        &payment_hash.as_ref()[..20],
+    ]
+    .concat();
+    let legacy = LegacyOnChainTlcSettlement {
+        preimage: None,
+        tx_hash: None,
+        tlc_index: None,
+    };
+    for value in [
+        vec![],
+        serialize_to_vec(&legacy, "LegacyOnChainTlcSettlement"),
+    ] {
+        store.put(&legacy_key, value);
+        // Legacy records do not identify their owner. Preserve the public
+        // node's fallback without exposing its proof to a hosted tenant.
+        assert_eq!(
+            ChannelActorStateStore::get_onchain_tlc_settlement(
+                &store,
+                &channel_id,
+                tlc_id,
+                &payment_hash,
+            ),
+            Some(StoredOnChainTlcSettlement::Legacy(legacy.clone()))
+        );
+        assert_eq!(
+            ChannelActorStateStore::get_onchain_tlc_settlement(
+                &tenant,
+                &channel_id,
+                tlc_id,
+                &payment_hash,
+            ),
+            None
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
