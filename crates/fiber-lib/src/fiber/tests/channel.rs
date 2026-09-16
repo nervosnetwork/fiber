@@ -10835,6 +10835,16 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
 
     let messages_from_b = take_captured_actor_messages(&network_b, &captured_b).await;
     let message_count_from_b = messages_from_b.len();
+    // This is a public channel, so recovery also replays its stored announcement
+    // signature between the reciprocal handshake and the owed commitment.
+    let announcement_index = messages_from_b.iter().position(|message| {
+        matches!(
+            &message.message,
+            FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                announcement
+            )) if announcement.channel_id == channel_id
+        )
+    });
     let reestablish_messages = messages_from_b
         .iter()
         .enumerate()
@@ -10894,7 +10904,17 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
             .expect("A must process B's captured reestablish output");
     }
 
-    wait_until_async_timeout(|| async { !captured_a.lock().unwrap().is_empty() }).await;
+    // An announcement alone does not mean the asynchronously signed ack is ready.
+    wait_until_async_timeout(|| async {
+        captured_a.lock().unwrap().iter().any(|message| {
+            matches!(
+                &message.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke))
+                    if revoke.channel_id == channel_id
+            )
+        })
+    })
+    .await;
     let messages_from_a = take_captured_actor_messages(&network_a, &captured_a).await;
     let state_a = node_a
         .store
@@ -10912,9 +10932,14 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
         state_a.remote_revocation_nonce_for_next == original_a_next_nonce,
     );
     assert_eq!(
-        (message_count_from_b, reestablish_index, commitment_index),
-        (2, Some(0), 1),
-        "B must emit only reciprocal ReestablishChannel then persisted CommitmentSigned"
+        (
+            message_count_from_b,
+            reestablish_index,
+            announcement_index,
+            commitment_index,
+        ),
+        (3, Some(0), Some(1), 2),
+        "B must emit reciprocal ReestablishChannel, stored AnnouncementSignatures, then persisted CommitmentSigned"
     );
     assert_eq!(
         state_b.connectivity_state,
