@@ -192,6 +192,19 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
         export FIBER_BOOTNODE_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
     node2_args=(-d 2)
+    if [[ "$testcase_name" == "e2e/watchtower/force-close-with-pending-tlcs-and-stop-watchtower" ]]; then
+        # Use Node3 as Node2's standalone watchtower so this case can remove
+        # its watch without bypassing the built-in live-channel safety guard.
+        node3_rpc_addr="$(yaml_map_value "$nodes_dir/3/config.yml" rpc listening_addr)"
+        if [[ -z "$node3_rpc_addr" ]]; then
+            echo "failed to read rpc.listening_addr from $nodes_dir/3/config.yml" >&2
+            exit 1
+        fi
+        node2_args+=(
+            --fiber-disable-built-in-watchtower true
+            --fiber-standalone-watchtower-rpc-url "http://${node3_rpc_addr}"
+        )
+    fi
     if is_lsp_e2e; then
         node2_args+=(
             -s fiber,rpc,ckb,lsp
