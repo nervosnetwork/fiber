@@ -11799,6 +11799,14 @@ async fn test_channel_signer_signs_revocation_via_messages() {
     );
     let remote_commitment_number_before = state_a.get_remote_commitment_number();
 
+    // Stopping the nodes detaches the real actors but also persists an offline,
+    // reestablishing channel. This harness tests normal connected signing, not
+    // recovery: restore that connectivity before applying the notification.
+    assert!(state_a.reestablishing);
+    state_a.reestablishing = false;
+    state_a.reestablish_started_at = None;
+    state_a.connectivity_state = ChannelConnectivityState::Online;
+
     // Manual harness: capturing network + hand-driven channel.
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (network_a, _network_handle) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
