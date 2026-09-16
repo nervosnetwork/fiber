@@ -39,10 +39,9 @@ pub struct SubmitChannelSignatureCommand {
 pub enum SignerNotification {
     /// The requested channel signature is ready (or failed).
     ///
-    /// `next_material` fulfils the signer contract's nonce-publication
-    /// cadence: for commitment-counter requests the signer publishes the next
-    /// round's commitment point and nonces alongside the signature, exactly
-    /// like a remote device would.
+    /// External signers publish the next round's public material alongside
+    /// the signature. Local signers omit it because the channel can derive
+    /// its own commitment points and nonces on demand.
     ChannelSignatureReady {
         channel_id: Hash256,
         request_id: SignatureRequestId,
@@ -137,7 +136,6 @@ impl ChannelSigner {
             return ChannelSignOutcome::AwaitingExternal;
         };
         let signature = sign_channel_request(signer, &request);
-        let next_material = next_material(signer, &request);
         if let Err(error) = &signature {
             warn!(
                 "ChannelSigner: signing failed for channel {:?} request {:?}: {}",
@@ -148,7 +146,7 @@ impl ChannelSigner {
             channel_id,
             request_id,
             signature,
-            next_material,
+            next_material: None,
             rpc_reply: None,
         })
     }
@@ -169,32 +167,6 @@ impl ChannelSigner {
             rpc_reply,
         }
     }
-}
-
-/// Publish the next commitment round's material alongside a signature, the
-/// same way a remote device submits it. Requests without a commitment counter
-/// (channel announcements) publish nothing.
-fn next_material(
-    signer: &InMemorySigner,
-    request: &ChannelSignatureRequest,
-) -> Option<NextChannelSignerMaterial> {
-    let content = request.content();
-    // Channel announcements have no commitment counter and publish nothing.
-    content.commitment_counter?;
-    let commitment_number = content.slot.commitment_number.checked_add(1)?;
-    Some(NextChannelSignerMaterial {
-        next_commitment_point: Some(signer.get_commitment_point(commitment_number)),
-        next_commitment_nonce: Some(
-            signer
-                .derive_musig2_nonce(commitment_number, Musig2Context::Commitment)
-                .public_nonce(),
-        ),
-        next_revocation_nonce: Some(
-            signer
-                .derive_musig2_nonce(commitment_number, Musig2Context::Revoke)
-                .public_nonce(),
-        ),
-    })
 }
 
 /// Sign one typed channel request, deriving the secnonce exactly like the
@@ -305,8 +277,8 @@ mod tests {
             panic!("expected Ready notification");
         };
         assert!(
-            next_material.is_some(),
-            "commitment rounds publish material"
+            next_material.is_none(),
+            "local signing must not accumulate derivable public material"
         );
         assert_eq!(notified_channel, channel_id);
         assert_eq!(notified_request, request_id);

@@ -5524,10 +5524,18 @@ impl Serialize for ChannelActorState {
 
 impl<'de> Deserialize<'de> for ChannelActorState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let core = ChannelActorData::deserialize(deserializer)?;
+        let mut core = ChannelActorData::deserialize(deserializer)?;
         let channel_signer =
             ChannelSigner::restore(core.signer.as_ref(), &core.local_channel_public_keys)
                 .map_err(serde::de::Error::custom)?;
+        if channel_signer.is_local() {
+            // Earlier local signing persisted every round's derivable material.
+            // Drop that cache when restoring so subsequent snapshots and reads
+            // do not grow with the channel's entire payment history. External
+            // signers still need their published material and reuse checks.
+            core.local_commitment_points = HashMap::new();
+            core.local_public_nonces = HashMap::new();
+        }
         let mut state = Self {
             channel_signer,
             core,
@@ -5887,6 +5895,11 @@ impl ChannelActorState {
         request: &ChannelSignatureRequest,
         material: Option<NextChannelSignerMaterial>,
     ) -> ProcessingChannelResult {
+        // Local keys deterministically derive the same public material on
+        // demand. Only external signers must supply it to advance a round.
+        if self.channel_signer.is_local() && material.is_none() {
+            return Ok(());
+        }
         let requires_material = request.requires_next_signer_material();
 
         // 1. Missing next_material check
@@ -12223,18 +12236,14 @@ mod tests {
             "expected must provide next_material error, got {err:?}"
         );
 
-        // 2. Local signer also requires next_material on state-advancing transitions (uniform requirement)
+        // 2. Local signers derive material instead of retaining every round.
         let local_signer = InMemorySigner::generate_from_seed(b"test-local");
         state.channel_signer = ChannelSigner::local(local_signer);
-        let err_local = state
+        assert!(state
             .apply_next_signer_material(&req_commit_1, None)
-            .unwrap_err();
-        assert!(
-            err_local
-                .to_string()
-                .contains("channel signer must provide next_material"),
-            "expected must provide next_material error for local signer, got {err_local:?}"
-        );
+            .is_ok());
+        assert!(state.core.local_commitment_points.is_empty());
+        assert!(state.core.local_public_nonces.is_empty());
         state.channel_signer = ChannelSigner::external();
 
         // 3. Non-advancing transitions do not require next_material
@@ -12441,6 +12450,181 @@ mod tests {
         assert!(state
             .apply_next_signer_material(&req_commit_2, Some(valid_mat))
             .is_ok());
+    }
+
+    fn state_with_legacy_local_signing_history() -> ChannelActorState {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let signer = state.channel_signer.local_material().unwrap().clone();
+        let remote = InMemorySigner::generate_from_seed(b"tlc-limit-remote");
+        for commitment_number in 1..=2 {
+            state.commitment_numbers.local = commitment_number;
+            state.local_commitment_points.insert(
+                commitment_number,
+                signer.get_commitment_point(commitment_number),
+            );
+            for (purpose, context) in [
+                (NoncePurpose::Commitment, Musig2Context::Commitment),
+                (NoncePurpose::Revocation, Musig2Context::Revoke),
+            ] {
+                state.local_public_nonces.insert(
+                    NonceSlot {
+                        purpose,
+                        commitment_number,
+                    },
+                    signer
+                        .derive_musig2_nonce(commitment_number, context)
+                        .public_nonce(),
+                );
+            }
+            let request = ChannelSignatureRequest::SendCommitmentSigned {
+                content: Musig2SigningContent {
+                    slot: NonceSlot {
+                        purpose: NoncePurpose::Commitment,
+                        commitment_number,
+                    },
+                    commitment_counter: Some(CommitmentCounter::Local),
+                    key_agg_ctx: KeyAggContext::new([
+                        signer.funding_key.pubkey(),
+                        remote.funding_key.pubkey(),
+                    ])
+                    .unwrap(),
+                    agg_nonce: AggNonce::sum([
+                        signer
+                            .derive_musig2_nonce(commitment_number, Musig2Context::Commitment)
+                            .public_nonce(),
+                        remote
+                            .derive_musig2_nonce(commitment_number, Musig2Context::Commitment)
+                            .public_nonce(),
+                    ]),
+                    content: Musig2SignableContent::CommitmentTransaction(Transaction::default()),
+                },
+                settlement_data: SettlementData {
+                    local_amount: state.to_local_amount,
+                    remote_amount: state.to_remote_amount,
+                    tlcs: Vec::new(),
+                },
+            };
+            let request_id = SignatureRequestId(Hash256::from([commitment_number as u8; 32]));
+            state
+                .signing_context
+                .request_signature(request_id, request.clone())
+                .unwrap();
+            if commitment_number == 1 {
+                let ChannelSignOutcome::Ready(SignerNotification::ChannelSignatureReady {
+                    signature,
+                    ..
+                }) = state
+                    .channel_signer
+                    .request_signature(state.get_id(), request_id, request)
+                else {
+                    panic!("local signature must be ready");
+                };
+                // The old local path stored next material in its receipt as
+                // well as the maps. Leave round 2 pending across restoration.
+                state
+                    .signing_context
+                    .complete_request(LastAppliedChannelSignature {
+                        request_id,
+                        partial_signature: signature.unwrap(),
+                        next_material: Some(NextChannelSignerMaterial {
+                            next_commitment_point: Some(signer.get_commitment_point(2)),
+                            next_commitment_nonce: Some(
+                                signer
+                                    .derive_musig2_nonce(2, Musig2Context::Commitment)
+                                    .public_nonce(),
+                            ),
+                            next_revocation_nonce: Some(
+                                signer
+                                    .derive_musig2_nonce(2, Musig2Context::Revoke)
+                                    .public_nonce(),
+                            ),
+                        }),
+                    })
+                    .unwrap();
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn test_local_signer_restore_preserves_pending_request_and_legacy_receipt() {
+        let state = state_with_legacy_local_signing_history();
+        let (request_id, request) = state.signing_context.awaiting_signature().unwrap();
+        let sign = |state: &ChannelActorState| {
+            let ChannelSignOutcome::Ready(SignerNotification::ChannelSignatureReady {
+                signature,
+                next_material,
+                ..
+            }) =
+                state
+                    .channel_signer
+                    .request_signature(state.get_id(), request_id, request.clone())
+            else {
+                panic!("restored local signature must be ready");
+            };
+            assert!(next_material.is_none());
+            signature.unwrap()
+        };
+        let expected_signature = sign(&state);
+        let mut restored: ChannelActorState =
+            bincode::deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+        assert!(restored.local_commitment_points.is_empty());
+        assert!(restored.local_public_nonces.is_empty());
+        assert_eq!(restored.local_commitment_points.capacity(), 0);
+        assert_eq!(restored.local_public_nonces.capacity(), 0);
+        assert_eq!(
+            bincode::serialize(&restored.signing_context).unwrap(),
+            bincode::serialize(&state.signing_context).unwrap()
+        );
+        let legacy_receipt = state.signing_context.last_applied().unwrap();
+        assert!(legacy_receipt.next_material.is_some());
+        assert!(restored
+            .signing_context
+            .replay_or_pending(legacy_receipt)
+            .unwrap()
+            .is_none());
+        let signature = sign(&restored);
+        assert_eq!(signature, expected_signature);
+        restored
+            .verify_external_musig2_signature(request.content(), signature)
+            .unwrap();
+        let receipt = LastAppliedChannelSignature {
+            request_id,
+            partial_signature: signature,
+            next_material: None,
+        };
+        assert!(restored
+            .signing_context
+            .replay_or_pending(&receipt)
+            .unwrap()
+            .is_some());
+        restored.apply_next_signer_material(&request, None).unwrap();
+        restored.signing_context.complete_request(receipt).unwrap();
+        assert!(!restored.signing_context.is_awaiting_signature());
+        assert!(restored.local_commitment_points.is_empty());
+        assert!(restored.local_public_nonces.is_empty());
+    }
+
+    #[test]
+    fn test_external_signer_restore_preserves_public_material_and_signing_context() {
+        let mut state = state_with_legacy_local_signing_history();
+        state.core.signer = None;
+        state.channel_signer = ChannelSigner::external();
+        let restored: ChannelActorState =
+            bincode::deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+        assert!(!restored.channel_signer.is_local());
+        assert!(!restored.local_commitment_points.is_empty());
+        assert_eq!(
+            restored.local_commitment_points,
+            state.local_commitment_points
+        );
+        assert!(!restored.local_public_nonces.is_empty());
+        assert_eq!(restored.local_public_nonces, state.local_public_nonces);
+        assert_eq!(
+            bincode::serialize(&restored.signing_context).unwrap(),
+            bincode::serialize(&state.signing_context).unwrap()
+        );
     }
 
     #[test]

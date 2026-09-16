@@ -81,6 +81,8 @@ use fiber_types::{
 use fiber_lsp_sdk::{
     ChannelSignature, ChannelSigner, ChannelSigningContent, MemoryStore, RootSigner,
 };
+use fiber_store::backend::StorageBackend;
+use fiber_types::{ChannelActorData, Musig2Context, NoncePurpose, NonceSlot};
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};
@@ -1569,6 +1571,170 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert!(node_a.get_payment_preimage(&payment_hash).is_none());
 }
 
+async fn wait_for_local_signer_channel_idle(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    channel_id: Hash256,
+) {
+    wait_until(|| {
+        [node_a, node_b].into_iter().all(|node| {
+            let state = node.get_channel_actor_state(channel_id);
+            state.is_ready()
+                && !state.reestablishing
+                && state.tlc_state.all_tlcs().count() == 0
+                && !state.is_waiting_tlc_ack()
+                && !state.signing_context.is_awaiting_signature()
+                && !state.has_pending_operations()
+        })
+    })
+    .await;
+}
+
+fn assert_local_signer_has_no_material_history(node: &NetworkNode, channel_id: Hash256) {
+    // Inspect the persisted data directly: restoring ChannelActorState clears old
+    // local caches and would otherwise hide a regression in the live actor.
+    let key = [
+        &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+        channel_id.as_ref(),
+    ]
+    .concat();
+    let bytes = node.store.get(key).expect("persisted channel state");
+    let persisted: ChannelActorData =
+        bincode::deserialize(&bytes).expect("deserialize channel data without restoring it");
+    assert!(persisted.local_commitment_points.is_empty());
+    assert!(persisted.local_public_nonces.is_empty());
+
+    let state = node.get_channel_actor_state(channel_id);
+    let signer = state.channel_signer.local_material().expect("local signer");
+    assert_eq!(
+        state.get_next_commitment_nonce(),
+        signer
+            .derive_musig2_nonce(
+                state.get_next_commitment_number(true),
+                Musig2Context::Commitment
+            )
+            .public_nonce()
+    );
+    assert_eq!(
+        state.get_next_revocation_nonce(),
+        signer
+            .derive_musig2_nonce(
+                state.get_next_commitment_number(false),
+                Musig2Context::Revoke
+            )
+            .public_nonce()
+    );
+}
+
+#[tokio::test]
+async fn test_local_signer_payments_do_not_accumulate_public_material() {
+    init_tracing();
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true).await;
+    let initial_commitment = node_a
+        .get_channel_actor_state(channel_id)
+        .get_local_commitment_number();
+
+    for round in 0..6 {
+        let (payer, payee) = if round % 2 == 0 {
+            (&node_a, &node_b)
+        } else {
+            (&node_b, &node_a)
+        };
+        let payment = payer
+            .send_payment_keysend(payee, 10_000, false)
+            .await
+            .expect("local signer payment");
+        payer.wait_until_success(payment.payment_hash).await;
+        wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+        for node in [&node_a, &node_b] {
+            assert_local_signer_has_no_material_history(node, channel_id);
+        }
+    }
+
+    assert!(
+        node_a
+            .get_channel_actor_state(channel_id)
+            .get_local_commitment_number()
+            > initial_commitment
+    );
+}
+
+#[tokio::test]
+async fn test_local_signer_restart_discards_cached_public_material() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true).await;
+    let payment = node_a
+        .send_payment_keysend(&node_b, 10_000, false)
+        .await
+        .expect("payment before restart");
+    node_a.wait_until_success(payment.payment_hash).await;
+    wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+    let balances = [
+        node_a.get_local_balance_from_channel(channel_id),
+        node_b.get_local_balance_from_channel(channel_id),
+    ];
+    node_a.stop().await;
+    node_b.stop().await;
+
+    for node in [&node_a, &node_b] {
+        let mut state = node.get_channel_actor_state(channel_id);
+        let signer = state
+            .channel_signer
+            .local_material()
+            .expect("local signer")
+            .clone();
+        // Simulate the derivable history written by earlier local signing code.
+        let last_commitment = state
+            .get_local_commitment_number()
+            .max(state.get_remote_commitment_number())
+            + 1;
+        for commitment_number in 0..=last_commitment {
+            state.local_commitment_points.insert(
+                commitment_number,
+                signer.get_commitment_point(commitment_number),
+            );
+            for (purpose, context) in [
+                (NoncePurpose::Commitment, Musig2Context::Commitment),
+                (NoncePurpose::Revocation, Musig2Context::Revoke),
+            ] {
+                state.local_public_nonces.insert(
+                    NonceSlot {
+                        purpose,
+                        commitment_number,
+                    },
+                    signer
+                        .derive_musig2_nonce(commitment_number, context)
+                        .public_nonce(),
+                );
+            }
+        }
+        node.store.insert_channel_actor_state(state);
+    }
+
+    node_a.start().await;
+    node_b.start().await;
+    node_a.connect_to(&mut node_b).await;
+    wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+    for (node, balance) in [(&node_a, balances[0]), (&node_b, balances[1])] {
+        assert_local_signer_has_no_material_history(node, channel_id);
+        assert_eq!(node.get_local_balance_from_channel(channel_id), balance);
+    }
+
+    for (payer, payee) in [(&node_a, &node_b), (&node_b, &node_a)] {
+        let payment = payer
+            .send_payment_keysend(payee, 1_000, false)
+            .await
+            .expect("payment after restart without cached material");
+        payer.wait_until_success(payment.payment_hash).await;
+        wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+    }
+    for node in [&node_a, &node_b] {
+        assert_local_signer_has_no_material_history(node, channel_id);
+    }
+}
+
 #[tokio::test]
 async fn test_network_send_payment_send_each_other() {
     init_tracing();
@@ -1710,6 +1876,29 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
     .await;
     let first_status = sdk.get_signing_status(channel_id).await.status;
     let valid_submission = sdk.prepare_submission(channel_id, first_status).await;
+
+    let before_missing_material = node_a.get_channel_actor_state(channel_id);
+    let mut missing_material = valid_submission.clone();
+    missing_material.next_material = None;
+    assert!(sdk
+        .submit(missing_material)
+        .await
+        .expect_err("external signer must still publish next material")
+        .contains("must provide next_material"));
+    let after_missing_material = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        before_missing_material.local_commitment_points,
+        after_missing_material.local_commitment_points
+    );
+    assert_eq!(
+        before_missing_material.local_public_nonces,
+        after_missing_material.local_public_nonces
+    );
+    assert_eq!(
+        bincode::serialize(&before_missing_material.signing_context).unwrap(),
+        bincode::serialize(&after_missing_material.signing_context).unwrap(),
+        "rejected external material must not consume the pending signature"
+    );
 
     let mut wrong_request = valid_submission.clone();
     wrong_request.request_id = Hash256::from([0x11; 32]).into();
