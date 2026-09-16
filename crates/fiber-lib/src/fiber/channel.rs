@@ -16,10 +16,10 @@ use crate::fiber::fee::{
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
-    collect_onchain_confirmed_payer_tlcs, collect_onchain_fulfilled_tlcs,
-    collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
-    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
-    OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
+    collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
+    collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
+    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
+    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -79,9 +79,9 @@ use fiber_types::{
     NextChannelSignerMaterial, NoncePurpose, NonceSlot, OutboundTlcStatus, PaymentCustomRecords,
     PeeledPaymentOnionPacket, PendingNotifySettleTlc, PrevTlcInfo, Privkey, Pubkey,
     PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShuttingDownFlags,
-    SignatureRequestId, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
+    RevokeAndAck, SettlementData, SettlementTlc, ShutdownInfo, ShutdownSettlementRecord,
+    ShuttingDownFlags, SignatureRequestId, SigningCommitmentFlags, TLCId, TlcErr, TlcErrPacket,
+    TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
@@ -1044,10 +1044,22 @@ where
             }
             FiberChannelMessage::TxAbort(tx_abort) => {
                 if state.state.can_abort_funding() {
-                    if !tx_abort.message.is_empty() {
-                        state.funding_abort_detail =
-                            Some(String::from_utf8_lossy(&tx_abort.message).into_owned());
-                    }
+                    let peer_msg = String::from_utf8_lossy(&tx_abort.message);
+                    let detail = if !tx_abort.message.is_empty() {
+                        format!(
+                            "[Channel {}] Received TxAbort from peer during state {:?}: {}",
+                            state.get_id(),
+                            state.state,
+                            peer_msg
+                        )
+                    } else {
+                        format!(
+                            "[Channel {}] Received TxAbort from peer during state {:?}",
+                            state.get_id(),
+                            state.state
+                        )
+                    };
+                    state.funding_abort_detail = Some(detail);
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     myself.stop(Some("Funding abort".to_string()));
                 }
@@ -1979,6 +1991,7 @@ where
                             tlc_info.payment_hash,
                             tlc_info.attempt_id,
                             remove_reason,
+                            None,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3547,6 +3560,7 @@ where
                                 tlc.payment_hash,
                                 attempt_id,
                                 reason.clone(),
+                                None,
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3747,7 +3761,9 @@ where
             .filter_map(|tlc| {
                 if !matches!(
                     tlc.inbound_status(),
-                    InboundTlcStatus::AnnounceWaitAck | InboundTlcStatus::Committed
+                    InboundTlcStatus::AnnounceWaitPrevAck
+                        | InboundTlcStatus::AnnounceWaitAck
+                        | InboundTlcStatus::Committed
                 ) {
                     return None;
                 }
@@ -3800,12 +3816,59 @@ where
         }
     }
 
+    fn fail_onchain_excluded_tlcs(&self, state: &mut ChannelActorState) -> bool {
+        let mut applied = true;
+        for tlc in collect_onchain_excluded_tlcs(state, &self.store) {
+            let reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                TlcErr::new(TlcErrorCode::PermanentChannelFailure),
+                &tlc.shared_secret,
+            ));
+            match tlc.role {
+                OnChainTimeoutTlcRole::Forwarded {
+                    forwarding_channel_id,
+                    forwarding_tlc_id,
+                } => {
+                    self.network
+                        .send_message(FiberActorMessage::new_command(
+                            FiberActorCommand::RelayOnChainTlcRemove {
+                                downstream_channel_id: state.get_id(),
+                                downstream_tlc_id: tlc.tlc_id,
+                                forwarding_channel_id,
+                                forwarding_tlc_id,
+                                payment_hash: tlc.payment_hash,
+                                reason,
+                            },
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    applied = false;
+                }
+                OnChainTimeoutTlcRole::OriginPayer { attempt_id } => {
+                    self.network
+                        .send_message(FiberActorMessage::new_event(
+                            FiberActorEvent::TlcRemoveReceived(
+                                tlc.payment_hash,
+                                attempt_id,
+                                reason,
+                                Some((state.get_id(), tlc.tlc_id)),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    applied = false;
+                }
+            }
+        }
+        applied
+    }
+
     /// Returns true when no reconcilable TLC remains unresolved on this channel.
     async fn reconcile_onchain_tlcs(&self, state: &mut ChannelActorState, now: u64) -> bool {
         self.maintain_waiting_onchain_settlement_tlcs(state, now);
         let payer_effects_applied = self.settle_onchain_fulfilled_tlcs(state).await;
         self.finalize_onchain_timed_out_received_tlcs(state);
-        payer_effects_applied && !has_unresolved_onchain_tlcs(state)
+        let excluded_effects_applied = self.fail_onchain_excluded_tlcs(state);
+        payer_effects_applied
+            && excluded_effects_applied
+            && !has_unresolved_onchain_tlcs(state, &self.store)
     }
 
     async fn finalize_onchain_settlement(
@@ -3827,16 +3890,25 @@ where
         }
 
         flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
+        // Persist the chain signal before asking NetworkActor to validate exclusion evidence.
+        state.update_state(ChannelState::Closed(flags));
+        self.store.insert_channel_actor_state(state.clone());
         let now = now_timestamp_as_millis_u64();
         if self.reconcile_onchain_tlcs(state, now).await {
             flags.remove(
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
             state.update_state(ChannelState::Closed(flags));
+            self.store.insert_channel_actor_state(state.clone());
+            // Recovery no longer needs this snapshot. Persist completion first so a crash
+            // cannot leave a waiting channel without its snapshot.
+            self.store
+                .delete_shutdown_settlement_record(&state.get_id());
             info!("Channel {:?} on-chain settlement completed", state.get_id());
             myself.stop(Some("OnChainSettlementCompleted".to_string()));
         } else {
             state.update_state(ChannelState::Closed(flags));
+            self.store.insert_channel_actor_state(state.clone());
             info!(
                 "Channel {:?} on-chain settlement reconciliation incomplete; keeping ONCHAIN_SETTLEMENT_CONFIRMED",
                 state.get_id()
@@ -4118,17 +4190,25 @@ where
                     if let Some(detail) = reason.funding_abort_detail() {
                         state.funding_abort_detail = Some(detail.to_string());
                     }
-                    let abort_detail = state
-                        .funding_abort_detail
-                        .clone()
-                        .unwrap_or_else(|| "funding aborted".to_string());
+                    // Do not send local diagnostics to the peer. The detailed reason is
+                    // retained for the local RPC/history path, while the wire message is
+                    // deliberately stable and public-safe.
+                    let public_abort_message = match reason {
+                        StopReason::FundingFailed | StopReason::FundingFailedWithDetail(_) => {
+                            "Funding failed"
+                        }
+                        StopReason::AbortFunding | StopReason::AbortFundingWithDetail(_) => {
+                            "Funding aborted"
+                        }
+                        _ => "Funding aborted",
+                    };
                     state.update_state(ChannelState::Closed(CloseFlags::FUNDING_ABORTED));
                     let abort_message = FiberMessageWithTarget {
                         target: state.get_remote_pubkey(),
                         message: FiberMessage::ChannelNormalOperation(
                             FiberChannelMessage::TxAbort(TxAbort {
                                 channel_id: state.get_id(),
-                                message: abort_detail.into_bytes(),
+                                message: public_abort_message.as_bytes().to_vec(),
                             }),
                         ),
                     };
@@ -4198,6 +4278,8 @@ where
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {
                     self.finalize_onchain_settlement(myself, state).await?;
+                } else if state.is_waiting_onchain_settlement() {
+                    self.fail_onchain_excluded_tlcs(state);
                 }
             }
             ChannelEvent::OnChainSettlementCompleted => {
@@ -4218,15 +4300,38 @@ where
                     self.finalize_onchain_settlement(myself, state).await?;
                 }
             }
+            ChannelEvent::ShutdownSettlementRecovered(record) => {
+                if !state.is_waiting_onchain_settlement()
+                    || !state.matches_shutdown_settlement_record(&record)
+                {
+                    return Ok(());
+                }
+                if state.is_onchain_settlement_confirmed() {
+                    self.finalize_onchain_settlement(myself, state).await?;
+                } else {
+                    self.fail_onchain_excluded_tlcs(state);
+                }
+            }
             ChannelEvent::CheckFundingTimeout => {
                 // A stale timeout message may arrive after state transitions (e.g. external
                 // funding timeout scheduled before signed tx submission). Only abort when
                 // the currently applicable timeout has actually elapsed.
                 if state.has_funding_timeout_elapsed() {
                     info!("Abort funding on timeout for channel {}", state.get_id());
+                    let timeout_type = if state.ephemeral_config.external_funding.enabled {
+                        "External funding transaction submission timed out"
+                    } else {
+                        "Funding collaboration timed out"
+                    };
+                    let detail = format!(
+                        "[Channel {}] {} in state {:?}",
+                        state.get_id(),
+                        timeout_type,
+                        state.state
+                    );
                     myself
                         .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
-                            StopReason::AbortFunding,
+                            StopReason::AbortFundingWithDetail(detail),
                         )))
                         .expect("myself alive");
                 } else {
@@ -5454,6 +5559,7 @@ pub enum StopReason {
     AbortFunding,
     AbortFundingWithDetail(String),
     FundingFailed,
+    FundingFailedWithDetail(String),
     Closed,
     PeerDisConnected,
 }
@@ -5465,6 +5571,7 @@ impl StopReason {
             StopReason::AbortFunding
                 | StopReason::AbortFundingWithDetail(_)
                 | StopReason::FundingFailed
+                | StopReason::FundingFailedWithDetail(_)
         )
     }
 
@@ -5477,7 +5584,8 @@ impl StopReason {
 
     pub(crate) fn funding_abort_detail(&self) -> Option<&str> {
         match self {
-            StopReason::AbortFundingWithDetail(detail) => Some(detail),
+            StopReason::AbortFundingWithDetail(detail)
+            | StopReason::FundingFailedWithDetail(detail) => Some(detail),
             _ => None,
         }
     }
@@ -5499,6 +5607,7 @@ pub enum ChannelEvent {
     /// The network actor confirmed that the upstream RemoveTlc for this on-chain-resolved
     /// downstream TLC was delivered or durably queued.
     OnChainTlcRelayConfirmed(TLCId, RemoveTlcReason),
+    ShutdownSettlementRecovered(ShutdownSettlementRecord),
     CheckFundingTimeout,
 }
 
@@ -8060,7 +8169,10 @@ impl ChannelActorState {
     }
 
     /// Get the counterparty commitment point for the given commitment number.
-    fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
+    fn get_remote_commitment_point(
+        &self,
+        commitment_number: u64,
+    ) -> Result<Pubkey, ProcessingChannelError> {
         self.remote_commitment_points
             .iter()
             .find_map(|(number, point)| {
@@ -8070,11 +8182,11 @@ impl ChannelActorState {
                     None
                 }
             })
-            .unwrap_or_else(|| {
-                panic!(
-                    "remote commitment point: {} should exist, current list: {:?}",
-                    commitment_number, self.remote_commitment_points
-                )
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidParameter(format!(
+                    "remote commitment point: {:?} should exist",
+                    commitment_number
+                ))
             })
     }
 
@@ -8245,7 +8357,7 @@ impl ChannelActorState {
         .map_err(ProcessingChannelError::InvalidParameter)?;
         let remote_pubkey = try_derive_tlc_pubkey(
             &self.get_remote_channel_public_keys().tlc_base_key,
-            &self.get_remote_commitment_point(local_commitment_number),
+            &self.get_remote_commitment_point(local_commitment_number)?,
         )
         .map_err(ProcessingChannelError::InvalidParameter)?;
         Ok((local_pubkey, remote_pubkey))
@@ -8278,7 +8390,7 @@ impl ChannelActorState {
             local_key_commitment_number,
             try_derive_tlc_pubkey(
                 &self.get_remote_channel_public_keys().tlc_base_key,
-                &self.get_remote_commitment_point(local_commitment_number),
+                &self.get_remote_commitment_point(local_commitment_number)?,
             )
             .map_err(ProcessingChannelError::InvalidParameter)?,
         ))
@@ -10939,11 +11051,15 @@ impl ChannelActorState {
     // The function returns a tuple, the first element is the commitment transaction itself,
     // and the second element is the settlement data which can be used to construct the witness
     // to unlock the commitment transaction.
-    fn build_commitment_tx_and_settlement_data(
+    pub(crate) fn build_commitment_tx_and_settlement_data(
         &self,
         for_remote: bool,
     ) -> Result<(TransactionView, SettlementData), ProcessingChannelError> {
-        let funding_out_point = self.must_get_funding_transaction_outpoint();
+        let Some(funding_out_point) = self.get_funding_transaction_outpoint() else {
+            return Err(ProcessingChannelError::InvalidState(
+                "Funding transaction outpoint is missing".to_string(),
+            ));
+        };
         let (output, output_data, settlement_data) =
             self.build_commitment_transaction_output(for_remote)?;
 
@@ -11020,7 +11136,7 @@ impl ChannelActorState {
         }
     }
 
-    fn build_settlement_data(
+    pub(crate) fn build_settlement_data(
         &self,
         for_remote: bool,
     ) -> Result<SettlementData, ProcessingChannelError> {
@@ -11227,6 +11343,31 @@ impl ChannelActorState {
         }
     }
 
+    /// Check that a persisted snapshot belongs to this close, including its TLC direction.
+    pub(crate) fn matches_shutdown_settlement_record(
+        &self,
+        record: &ShutdownSettlementRecord,
+    ) -> bool {
+        let ChannelState::Closed(flags) = self.state else {
+            return false;
+        };
+        let local = flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL);
+        let remote = flags.contains(CloseFlags::UNCOOPERATIVE_REMOTE);
+        local != remote
+            && record.for_remote == remote
+            && self.shutdown_transaction_hash.as_ref() == Some(&record.shutdown_tx_hash)
+    }
+
+    /// Load the separately persisted snapshot only when its tx hash and close direction match.
+    pub(crate) fn load_shutdown_settlement_record(
+        &self,
+        store: &impl ChannelActorStateStore,
+    ) -> Option<ShutdownSettlementRecord> {
+        store
+            .get_shutdown_settlement_record(&self.get_id())
+            .filter(|record| self.matches_shutdown_settlement_record(record))
+    }
+
     pub(crate) async fn update_close_transaction_confirmed(
         &mut self,
         tx_hash: H256,
@@ -11265,6 +11406,8 @@ impl ChannelActorState {
         };
         self.update_state(closed_state);
         self.shutdown_transaction_hash.replace(tx_hash);
+        // Recover the immutable snapshot from the confirmed transaction. Current TLC
+        // state may have advanced since the local commitment was signed.
         // Broadcast the channel update message which disables the channel.
         if self.is_public() {
             let update = self.generate_disabled_channel_update();
@@ -11479,6 +11622,27 @@ pub trait ChannelActorStateStore {
 
     /// Delete the pending CommitDiff for a channel
     fn delete_pending_commit_diff(&self, channel_id: &Hash256);
+
+    /// Store shutdown settlement record snapshot for a closed channel
+    fn store_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+        record: &ShutdownSettlementRecord,
+    );
+
+    /// Get the shutdown settlement record snapshot for a closed channel
+    fn get_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<ShutdownSettlementRecord>;
+
+    /// Delete the shutdown settlement record snapshot for a closed channel
+    fn delete_shutdown_settlement_record(&self, channel_id: &Hash256);
+
+    /// Get watched channel data by channel ID for the local node, if available
+    fn get_local_watch_channel(&self, _channel_id: &Hash256) -> Option<fiber_types::ChannelData> {
+        None
+    }
 }
 
 /// Store trait for persisting and querying outbound channel-opening records.

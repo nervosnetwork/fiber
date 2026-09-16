@@ -36,16 +36,15 @@ use fiber_store::migration::{
 };
 use fiber_types::schema::*;
 use fiber_types::{
-    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelOpenRecord, ChannelState,
-    Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
-    PersistentNetworkActorState, Pubkey, TLCId, TimedResult, CURSOR_SIZE,
+    Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
+    ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
+    PersistentNetworkActorState, Pubkey, SettlementData, ShutdownSettlementRecord, TLCId,
+    TimedResult, CURSOR_SIZE,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
-use fiber_types::{
-    ChannelData, NodeId, Privkey, RevocationData, SettlementData, WatchtowerSignerState,
-};
+use fiber_types::{NodeId, Privkey, RevocationData, WatchtowerSignerState};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -439,6 +438,14 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &value,
                     "WATCHTOWER_CHANNEL_PREFIX",
                     &mut errors,
+                );
+            }
+            CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX
+                if bincode::deserialize::<ShutdownSettlementRecord>(&value).is_err()
+                    && bincode::deserialize::<SettlementData>(&value).is_err() =>
+            {
+                errors.insert(
+                    "CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX: deserialization failed".to_string(),
                 );
             }
             _ => {}
@@ -1124,6 +1131,8 @@ impl ChannelActorStateStore for Store {
             if let Some(outpoint) = state.get_funding_transaction_outpoint() {
                 batch.delete([&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat());
             }
+            batch.delete([&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], id.as_ref()].concat());
+            batch.delete([&[PENDING_COMMIT_DIFF_PREFIX], id.as_ref()].concat());
             batch.commit();
         }
     }
@@ -1282,6 +1291,57 @@ impl ChannelActorStateStore for Store {
     fn delete_pending_commit_diff(&self, channel_id: &Hash256) {
         let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
         self.delete(&key);
+    }
+
+    fn store_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+        record: &ShutdownSettlementRecord,
+    ) {
+        let key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel_id.as_ref()].concat();
+        let value = serialize_to_vec(record, "ShutdownSettlementRecord");
+        self.put(key, value);
+    }
+
+    fn get_shutdown_settlement_record(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<ShutdownSettlementRecord> {
+        let key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel_id.as_ref()].concat();
+        self.get(&key)
+            .and_then(|v| bincode::deserialize::<ShutdownSettlementRecord>(&v).ok())
+    }
+
+    fn delete_shutdown_settlement_record(&self, channel_id: &Hash256) {
+        let key = [&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], channel_id.as_ref()].concat();
+        self.delete(&key);
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn get_local_watch_channel(&self, channel_id: &Hash256) -> Option<ChannelData> {
+        // Hosted channel state is namespaced, but its host watchtower keeps the
+        // immutable snapshots in the root store under the tenant's protocol key.
+        // Resolve ownership from this namespace before reading the shared row.
+        let node_id = if self.namespace.is_some() {
+            let state = self.get_channel_actor_state(channel_id)?;
+            NodeId::from_bytes(state.get_local_pubkey().serialize().to_vec())
+        } else {
+            NodeId::local()
+        };
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.inner
+            .get(&key)
+            .map(|v| deserialize_from(&v, "ChannelData"))
+    }
+
+    #[cfg(not(feature = "watchtower"))]
+    fn get_local_watch_channel(&self, _channel_id: &Hash256) -> Option<ChannelData> {
+        None
     }
 }
 

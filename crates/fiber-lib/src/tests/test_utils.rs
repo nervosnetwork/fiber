@@ -301,7 +301,7 @@ impl NetworkNodeConfig {
         NetworkNodeConfigBuilder::new()
     }
 
-    /// Uses a supplied store so hosted test nodes can share the host's tenant namespaces.
+    /// Use a supplied store, including a reopened database or a hosted tenant namespace.
     pub fn with_store(mut self, store: Store) -> Self {
         self.store = store;
         self

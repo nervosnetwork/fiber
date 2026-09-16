@@ -280,6 +280,7 @@ pub struct MockChainState {
     pub tx_tracing_tasks: HashMap<Hash256, Vec<ActorRef<CkbTxTracingResult>>>,
     pub tx_notifications: Arc<OutputPort<CkbTxTracingResult>>,
     pub cell_status: HashMap<OutPoint, CellStatus>,
+    pub indexer_cells: Vec<ckb_sdk::rpc::ckb_indexer::Cell>,
 }
 
 impl Default for MockChainState {
@@ -295,6 +296,7 @@ impl MockChainState {
             tx_tracing_tasks: HashMap::new(),
             tx_notifications: Arc::new(OutputPort::default()),
             cell_status: HashMap::new(),
+            indexer_cells: Vec::new(),
         }
     }
 }
@@ -921,7 +923,7 @@ impl CkbChainClient for MockCkbChainClient {
     ) -> Result<ckb_sdk::rpc::ckb_indexer::Pagination<ckb_sdk::rpc::ckb_indexer::Cell>, anyhow::Error>
     {
         Ok(ckb_sdk::rpc::ckb_indexer::Pagination {
-            objects: vec![],
+            objects: self.state.read().unwrap().indexer_cells.clone(),
             last_cursor: ckb_jsonrpc_types::JsonBytes::default(),
         })
     }

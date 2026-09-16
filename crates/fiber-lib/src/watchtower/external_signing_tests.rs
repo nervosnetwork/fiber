@@ -1,6 +1,8 @@
 use ckb_sdk::traits::{CellCollectorError, LiveCell};
-use ckb_types::{core::ScriptHashType, packed::Byte32};
-use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, SettlementTlc, WatchtowerSignerState};
+use ckb_types::packed::Byte32;
+use fiber_types::{
+    OnchainKeyPurpose, OnchainSigningContent, SettlementTlc, TLCId, WatchtowerSignerState,
+};
 use tempfile::TempDir;
 
 use crate::{
@@ -126,7 +128,7 @@ impl Fixture {
         let channel = store
             .get_watch_channel(&node_id, &channel_id)
             .expect("channel");
-        let snapshot = settlement_data_for_commitment(&channel, for_remote, 10);
+        let snapshot = &channel.local_settlement_data;
         let witness_bytes = settlement_data_to_witness(
             snapshot,
             for_remote,
@@ -139,15 +141,14 @@ impl Fixture {
             true,
         )
         .value();
-        let mut args = vec![0; 20];
+        let mut args =
+            ckb_hash::blake2b_256(channel_data_x_only_aggregated_pubkey(&channel, !for_remote))
+                [..20]
+                .to_vec();
         args.extend_from_slice(&since.to_le_bytes());
         args.extend_from_slice(&10u64.to_be_bytes());
         args.extend_from_slice(blake160(&witness_bytes).as_ref());
-        let mut lock = Script::new_builder()
-            .code_hash(Byte32::from([1; 32]))
-            .hash_type(ScriptHashType::Type)
-            .args(args.pack())
-            .build();
+        let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
         let mut tracked =
             tracked_settlement_tlcs(&lock, &channel, for_remote).expect("verified TLC identities");
         let witness = subsequent.then(|| {
@@ -205,6 +206,13 @@ impl Fixture {
     fn build(&self) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
         let signer =
             LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
+        // Keep the original commitment's snapshot even after a successor cell
+        // changes its witness hash or another direction's snapshot is updated.
+        let settlement_data = if self.for_remote {
+            &self.channel.remote_settlement_data
+        } else {
+            &self.channel.local_settlement_data
+        };
         build_settlement_tx(
             self.cell.clone(),
             EpochNumberWithFraction::new(10, 0, 1),
@@ -213,6 +221,7 @@ impl Fixture {
             &self.node_id,
             self.for_remote,
             self.channel.clone(),
+            settlement_data,
             self.witness.clone(),
             &self.tracked,
             &signer,
@@ -395,7 +404,7 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
             ] {
                 data.tlcs.clear();
             }
-            let snapshot = settlement_data_for_commitment(&fixture.channel, for_remote, 10);
+            let snapshot = &fixture.channel.local_settlement_data;
             let witness_bytes = settlement_data_to_witness(
                 snapshot,
                 for_remote,

@@ -139,6 +139,86 @@ fn test_node_namespace_isolates_shared_physical_store() {
     assert_eq!(store.get_preimage(&payment_hash), None);
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+#[test]
+fn test_local_watch_channel_resolves_hosted_tenant_namespace() {
+    let path = TempDir::new("local_watch_channel_namespace");
+    let store = open_store(path).expect("create shared store");
+    let tenant_u1 = store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let tenant_u2 = store.namespaced(NodeNamespace::hosted_tenant("u2"));
+    let unowned_tenant = store.namespaced(NodeNamespace::hosted_tenant("u3"));
+    let u1_state = ChannelActorState::samples(42)
+        .into_iter()
+        .next()
+        .expect("sample channel state");
+    let mut u2_state = ChannelActorState::samples(43)
+        .into_iter()
+        .next()
+        .expect("sample channel state");
+    let channel_id = u1_state.get_id();
+    u2_state.id = channel_id;
+    let u1_node_id = NodeId::from_bytes(u1_state.get_local_pubkey().serialize().to_vec());
+    let u2_node_id = NodeId::from_bytes(u2_state.get_local_pubkey().serialize().to_vec());
+    assert_ne!(u1_node_id, u2_node_id);
+    tenant_u1.insert_channel_actor_state(u1_state.clone());
+    tenant_u2.insert_channel_actor_state(u2_state);
+
+    let insert_watch = |node_id, channel_id, local_amount| {
+        let local_key = Privkey::from(&[1; 32]);
+        store.insert_watch_channel(
+            node_id,
+            channel_id,
+            None,
+            Some(local_key.clone()),
+            local_key.pubkey(),
+            Privkey::from(&[2; 32]).pubkey(),
+            Privkey::from(&[3; 32]).pubkey(),
+            Privkey::from(&[4; 32]).pubkey(),
+            SettlementData {
+                local_amount,
+                remote_amount: 100,
+                tlcs: vec![],
+            },
+        );
+    };
+    // Watchtower rows live in the host's physical keyspace. The channel id alone
+    // must not select the public node's or another tenant's settlement snapshot.
+    insert_watch(u1_node_id.clone(), channel_id, 10);
+    insert_watch(u2_node_id.clone(), channel_id, 20);
+    insert_watch(NodeId::local(), channel_id, 30);
+    for (reader, node_id) in [
+        (&tenant_u1, u1_node_id.clone()),
+        (&tenant_u2, u2_node_id),
+        (&store, NodeId::local()),
+    ] {
+        let expected = store
+            .get_watch_channel(&node_id, &channel_id)
+            .expect("root watch row");
+        assert_eq!(reader.get_local_watch_channel(&channel_id), Some(expected));
+    }
+    assert!(unowned_tenant
+        .get_local_watch_channel(&channel_id)
+        .is_none());
+
+    // Even a row under U1's watchtower identity does not establish ownership of
+    // a channel missing from U1's persisted channel state.
+    let unowned_channel_id = Hash256::from([91; 32]);
+    insert_watch(u1_node_id, unowned_channel_id, 40);
+    insert_watch(NodeId::local(), unowned_channel_id, 50);
+    assert!(tenant_u1
+        .get_local_watch_channel(&unowned_channel_id)
+        .is_none());
+
+    let mut missing_watch_state = u1_state;
+    missing_watch_state.id = Hash256::from([92; 32]);
+    let missing_watch_id = missing_watch_state.get_id();
+    tenant_u1.insert_channel_actor_state(missing_watch_state);
+    assert!(tenant_u1
+        .get_local_watch_channel(&missing_watch_id)
+        .is_none());
+    assert!(store.get_local_watch_channel(&missing_watch_id).is_none());
+}
+
 fn mock_node() -> (Privkey, NodeAnnouncement) {
     let signer = gen_rand_local_signer();
     let sk: Privkey = (*signer.secret_key()).into();
