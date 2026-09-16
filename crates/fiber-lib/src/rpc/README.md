@@ -1026,8 +1026,9 @@ Connect to a peer.
  The node resolves the address from locally synced graph data.
 * `save` - <em>`Option<bool>`</em>, Whether to save the peer address to the peer store.
 * `addr_type` - <em>Option<[TransportType](#type-transporttype)></em>, Filter addresses by transport type when connecting by pubkey.
- If not specified, the node uses target-specific defaults:
- native builds choose from `tcp` addresses only, while wasm builds choose from `ws`/`wss`.
+ If not specified, the node prefers the transport that is native to the current build
+ (`tcp` on native builds, `ws`/`wss` on wasm builds) and falls back to any other
+ dialable transport published by the peer.
 
 ##### Returns
 
@@ -1804,6 +1805,7 @@ The type of transport to filter by when resolving peer addresses.
 * `tcp` - TCP transport (e.g. /ip4/1.2.3.4/tcp/8080)
 * `ws` - WebSocket transport (e.g. /ip4/1.2.3.4/tcp/8080/ws)
 * `wss` - WebSocket Secure transport (e.g. /dns/example.com/tcp/443/wss)
+* `quic_v1` - QUIC v1 transport (e.g. /ip4/1.2.3.4/udp/8228/quic-v1)
 ---
 
 <a id="#type-udtarginfo"></a>
