@@ -830,6 +830,33 @@ async fn test_tenant_restart_sign_channel_announcement() {
         _ => unreachable!(),
     };
 
+    // The peer's announcement can only be queued while our external signature
+    // is pending. Restart drops that runtime queue, so recovery must replay the
+    // peer's cached signature rather than rely on a reply from a Ready channel.
+    wait_until_async_timeout(|| async {
+        public_node
+            .get_channel_actor_state(channel_id)
+            .public_channel_info
+            .as_ref()
+            .is_some_and(|info| info.local_channel_announcement_signature.is_some())
+    })
+    .await;
+    let peer_signature = public_node
+        .get_channel_actor_state(channel_id)
+        .public_channel_info
+        .as_ref()
+        .unwrap()
+        .local_channel_announcement_signature
+        .clone()
+        .expect("peer has a cached announcement signature to replay");
+    assert!(tenant
+        .get_channel_actor_state(channel_id)
+        .public_channel_info
+        .as_ref()
+        .unwrap()
+        .remote_channel_announcement_signature
+        .is_none());
+
     tenant.restart().await;
 
     let post_status = get_signing_status(&tenant, channel_id)
@@ -850,17 +877,42 @@ async fn test_tenant_restart_sign_channel_announcement() {
         }
         _ => panic!("tenant failed to restore SignChannelAnnouncement"),
     }
+    assert!(tenant
+        .get_channel_actor_state(channel_id)
+        .public_channel_info
+        .as_ref()
+        .unwrap()
+        .remote_channel_announcement_signature
+        .is_none());
 
     tenant.connect_to(&mut public_node).await;
 
     let applied = sign_and_submit(&tenant, &signer, channel_id, post_status).await;
     assert_eq!(applied, SubmitChannelSignatureResult::Applied);
 
-    wait_until_async_timeout(|| async {
-        let state = tenant.get_channel_actor_state(channel_id);
-        matches!(state.state, ChannelState::ChannelReady)
-    })
-    .await;
+    assert!(
+        wait_for_external_signer_recovery(&tenant, &public_node, &signer, channel_id, &[]).await,
+        "both peers must finish reestablishment and announcement signing"
+    );
+    for node in [&tenant, &public_node] {
+        let state = node.get_channel_actor_state(channel_id);
+        assert!(state
+            .public_channel_info
+            .as_ref()
+            .and_then(|info| info.channel_announcement.as_ref())
+            .is_some_and(|announcement| announcement.is_signed()));
+        assert!(node.get_triggered_unexpected_events().await.is_empty());
+    }
+    assert_eq!(
+        tenant
+            .get_channel_actor_state(channel_id)
+            .public_channel_info
+            .as_ref()
+            .unwrap()
+            .remote_channel_announcement_signature,
+        Some(peer_signature),
+        "reconnect must recover the peer's cached announcement signature"
+    );
 }
 
 // =========================================================================

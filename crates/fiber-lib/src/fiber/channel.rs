@@ -572,7 +572,12 @@ where
                     ));
                 }
                 match state.state {
-                    ChannelState::ChannelReady => {}
+                    ChannelState::ChannelReady => {
+                        // Both announcement signatures are already final. Reestablishment
+                        // replays our cached signature independently; replying here would
+                        // make two ready peers echo signatures and rebroadcast gossip forever.
+                        return Ok(());
+                    }
                     ChannelState::AwaitingChannelReady(flags)
                         if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
                     _ => {
@@ -584,7 +589,6 @@ where
                 }
 
                 // TODO: check announcement_signatures validity here.
-                let was_already_ready = matches!(state.state, ChannelState::ChannelReady);
                 let AnnouncementSignatures {
                     node_signature,
                     partial_signature,
@@ -595,32 +599,6 @@ where
                     partial_signature,
                 );
                 state.maybe_public_channel_is_ready(myself);
-                // If we are already in ChannelReady, the peer is likely re-sending its
-                // AnnouncementSignatures after a reconnect or restart. Replay our cached
-                // announcement signatures so the peer can also advance to ChannelReady.
-                if was_already_ready {
-                    if let Some((node_sig, partial_sig)) = state
-                        .public_channel_info
-                        .as_ref()
-                        .and_then(|info| info.local_channel_announcement_signature.clone())
-                    {
-                        state
-                            .network()
-                            .send_message(FiberActorMessage::new_command(
-                                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
-                                    state.get_remote_pubkey(),
-                                    FiberMessage::announcement_signatures(AnnouncementSignatures {
-                                        channel_id: state.get_id(),
-                                        channel_outpoint: state
-                                            .must_get_funding_transaction_outpoint(),
-                                        partial_signature: partial_sig,
-                                        node_signature: node_sig,
-                                    }),
-                                )),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    }
-                }
                 Ok(())
             }
             FiberChannelMessage::AcceptChannel(accept_channel) => {

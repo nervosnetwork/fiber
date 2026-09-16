@@ -26,8 +26,9 @@ use crate::fiber::network::{
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256, Init,
-    PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures, UpdateTlcInfo,
+    AddTlc, AnnouncementSignatures, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256,
+    Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
+    UpdateTlcInfo,
 };
 use crate::fiber::ChannelConnectivityState;
 use crate::fiber::{FiberActorMessage, FiberActorRef};
@@ -134,6 +135,43 @@ impl Actor for CapturingNetworkActor {
 }
 
 struct NoopChannelActor;
+
+/// Also observes gossip so an announcement replay cannot silently rebroadcast.
+struct CapturingPublicNetworkActor {
+    broadcast_count: Arc<Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl Actor for CapturingPublicNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = Arc<Mutex<Vec<FiberMessageWithTarget>>>;
+    type Arguments = Arc<Mutex<Vec<FiberMessageWithTarget>>>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        messages: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(messages)
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        messages: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if matches!(
+            &message,
+            NetworkActorMessage::PublicCommand(PublicNetworkCommand::BroadcastMessages(_))
+        ) {
+            *self.broadcast_count.lock().expect("broadcast capture lock") += 1;
+        }
+        CapturingNetworkActor
+            .handle(myself, message, messages)
+            .await
+    }
+}
 
 /// Captures signer-actor notifications addressed to a channel actor.
 struct SignerNotificationProbe;
@@ -10875,6 +10913,249 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
         "Channel should be removed from storage after funding abort, but still exists with state: {:?}",
         channel_state_after_restart.map(|s| s.state)
     );
+}
+
+#[tokio::test]
+async fn test_ready_public_channel_ignores_replayed_announcement_signatures() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let (node_signature, partial_signature) = state_a
+        .public_channel_info
+        .as_ref()
+        .expect("public channel")
+        .remote_channel_announcement_signature
+        .clone()
+        .expect("ready channel has the peer's announcement signatures");
+    let announcement = AnnouncementSignatures {
+        channel_id,
+        channel_outpoint: state_a.must_get_funding_transaction_outpoint(),
+        node_signature,
+        partial_signature,
+    };
+    node_a.stop().await;
+    node_b.stop().await;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let broadcast_count = Arc::new(Mutex::new(0));
+    let (network, network_handle) = Actor::spawn(
+        None,
+        CapturingPublicNetworkActor {
+            broadcast_count: broadcast_count.clone(),
+        },
+        captured.clone(),
+    )
+    .await
+    .expect("spawn public capture actor");
+    state_a.network = Some(FiberActorRef::from_network(&network));
+    state_a.private_key = Some(node_a.private_key.clone());
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network),
+        node_a.store.clone(),
+        None,
+    );
+    let (channel_ref, channel_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn no-op channel actor");
+    let original_state = bincode::serialize(&state_a).expect("serialize ready state");
+    assert!(matches!(state_a.state, ChannelState::ChannelReady));
+    assert!(!state_a.reestablishing);
+
+    for _ in 0..3 {
+        channel
+            .handle_peer_message(
+                &channel_ref,
+                &mut state_a,
+                FiberChannelMessage::AnnouncementSignatures(announcement.clone()),
+            )
+            .await
+            .expect("ignore duplicate announcement signatures");
+
+        // The mailbox barrier proves absence of output without a timing window.
+        let responses = take_captured_actor_messages(&network, &captured).await;
+        assert_eq!(
+            (responses.len(), *broadcast_count.lock().unwrap()),
+            (0, 0),
+            "a ready channel must neither echo signatures nor rebroadcast gossip"
+        );
+        assert_eq!(
+            bincode::serialize(&state_a).unwrap(),
+            original_state,
+            "replayed signatures must not change the established channel"
+        );
+    }
+    channel_handle.abort();
+    network_handle.abort();
+}
+
+#[tokio::test]
+async fn test_reestablish_replays_missing_public_channel_announcement_signatures() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    let ready_commitments = state_b.get_current_commitment_numbers();
+    let cached_a_signatures = state_a
+        .public_channel_info
+        .as_ref()
+        .unwrap()
+        .local_channel_announcement_signature
+        .clone()
+        .expect("A has persisted its announcement signatures");
+
+    // Both ChannelReady messages arrived, but A's announcement signatures were
+    // lost before B could finish opening. Restore precisely that persisted edge.
+    state_b.state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY);
+    state_b.commitment_numbers.local -= 1;
+    state_b.commitment_numbers.remote -= 1;
+    let public_info = state_b.public_channel_info.as_mut().unwrap();
+    public_info.remote_channel_announcement_signature = None;
+    public_info.channel_announcement = None;
+    public_info.channel_update = None;
+    node_b.store.insert_channel_actor_state(state_b);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    state_a.mark_reestablishing_offline();
+    state_b.mark_reestablishing_offline();
+
+    let captured_a = Arc::new(Mutex::new(Vec::new()));
+    let broadcast_count_a = Arc::new(Mutex::new(0));
+    let (network_a, network_a_handle) = Actor::spawn(
+        None,
+        CapturingPublicNetworkActor {
+            broadcast_count: broadcast_count_a.clone(),
+        },
+        captured_a.clone(),
+    )
+    .await
+    .expect("spawn A capture actor");
+    let captured_b = Arc::new(Mutex::new(Vec::new()));
+    let (network_b, network_b_handle) =
+        Actor::spawn(None, CapturingNetworkActor, captured_b.clone())
+            .await
+            .expect("spawn B capture actor");
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
+    state_a.private_key = Some(node_a.private_key.clone());
+    state_b.network = Some(FiberActorRef::from_network(&network_b));
+    state_b.private_key = Some(node_b.private_key.clone());
+    let channel_a = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network_a),
+        node_a.store.clone(),
+        None,
+    );
+    let channel_b = ChannelActor::new(
+        node_b.pubkey,
+        node_a.pubkey,
+        FiberActorRef::from_network(&network_b),
+        node_b.store.clone(),
+        None,
+    );
+    let (channel_a_ref, channel_a_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn A no-op channel actor");
+    let (channel_b_ref, channel_b_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn B no-op channel actor");
+
+    channel_b
+        .handle_event(&channel_b_ref, &mut state_b, ChannelEvent::PeerReconnected)
+        .await
+        .expect("B initiates reestablishment");
+    let handshake = take_captured_actor_messages(&network_b, &captured_b).await;
+    assert_eq!(handshake.len(), 1);
+    let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(message)) =
+        handshake.into_iter().next().unwrap().message
+    else {
+        panic!("B must start with ReestablishChannel")
+    };
+    channel_a
+        .handle_peer_message(
+            &channel_a_ref,
+            &mut state_a,
+            FiberChannelMessage::ReestablishChannel(message),
+        )
+        .await
+        .expect("A processes B's handshake");
+
+    let replay = take_captured_actor_messages(&network_a, &captured_a).await;
+    let mut signature_replay_count = 0;
+    for message in replay {
+        assert_eq!(message.target, node_b.pubkey);
+        let FiberMessage::ChannelNormalOperation(message) = message.message else {
+            panic!("reestablishment emits channel messages")
+        };
+        if let FiberChannelMessage::AnnouncementSignatures(ref announcement) = message {
+            signature_replay_count += 1;
+            assert_eq!(
+                (
+                    announcement.node_signature.clone(),
+                    announcement.partial_signature,
+                ),
+                cached_a_signatures,
+                "reestablishment must reuse the cached signatures"
+            );
+            assert!(matches!(
+                state_b.state,
+                ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY)
+            ));
+        }
+        channel_b
+            .handle_peer_message(&channel_b_ref, &mut state_b, message)
+            .await
+            .expect("B processes A's recovery messages");
+    }
+    assert_eq!(signature_replay_count, 1);
+    for state in [&state_a, &state_b] {
+        assert!(matches!(state.state, ChannelState::ChannelReady));
+        assert!(!state.reestablishing);
+        assert_eq!(state.connectivity_state, ChannelConnectivityState::Online);
+        assert_eq!(state.get_current_commitment_numbers(), ready_commitments);
+        assert!(!state.signing_context.is_awaiting_signature());
+    }
+    let public_info = state_b.public_channel_info.as_ref().unwrap();
+    assert_eq!(
+        public_info.remote_channel_announcement_signature,
+        Some(cached_a_signatures)
+    );
+    assert!(public_info
+        .channel_announcement
+        .as_ref()
+        .unwrap()
+        .is_signed());
+
+    // B also proactively replays its cached signatures. Once A is ready, that
+    // replay must terminate, rather than starting a signature/gossip ping-pong.
+    let broadcasts_before = *broadcast_count_a.lock().unwrap();
+    let mut reciprocal_signature_count = 0;
+    for message in take_captured_actor_messages(&network_b, &captured_b).await {
+        assert_eq!(message.target, node_a.pubkey);
+        let FiberMessage::ChannelNormalOperation(message) = message.message else {
+            panic!("reestablishment emits channel messages")
+        };
+        if matches!(message, FiberChannelMessage::AnnouncementSignatures(_)) {
+            reciprocal_signature_count += 1;
+        }
+        channel_a
+            .handle_peer_message(&channel_a_ref, &mut state_a, message)
+            .await
+            .expect("A processes B's recovery messages");
+    }
+    assert_eq!(reciprocal_signature_count, 1);
+    assert!(take_captured_actor_messages(&network_a, &captured_a)
+        .await
+        .is_empty());
+    assert_eq!(*broadcast_count_a.lock().unwrap(), broadcasts_before);
+    channel_a_handle.abort();
+    channel_b_handle.abort();
+    network_a_handle.abort();
+    network_b_handle.abort();
 }
 
 #[tokio::test]
