@@ -44,8 +44,8 @@ script:post-response {
   const before = BigInt(bru.getVar("NODE3_BALANCE_BEFORE"));
   const after = BigInt(res.body.result.capacity);
   const spent = before - after;
-  const minSpent = BigInt("9800000000");
-  const maxSpent = BigInt("10000000000");
+  const minSpent = BigInt("9900000000");
+  const maxSpent = BigInt("10100000000");
 
   if (after >= before) {
     throw new Error(`node3 balance should decrease after auto-accept, before=${before}, after=${after}`);

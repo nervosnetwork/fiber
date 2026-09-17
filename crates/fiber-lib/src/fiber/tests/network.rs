@@ -1978,7 +1978,7 @@ async fn test_inbound_peer_with_only_closed_channels_consumes_no_channel_peer_bu
 async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channel_peer() {
     init_tracing();
 
-    let funding_amount = 9_900_000_000u128;
+    let funding_amount = 10_000_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
 
     let mut target = NetworkNode::new_with_config(
@@ -2561,7 +2561,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
 async fn test_abort_funding_on_building_funding_tx() {
     init_tracing();
 
-    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_a = 10_000_000_000u128;
     let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
@@ -2681,7 +2681,7 @@ impl MockChainActorMiddleware for SignFundingTxFailureMockMiddleware {
 
 #[tokio::test]
 async fn test_abort_funding_on_committing_funding_tx_on_chain() {
-    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_a = 10_000_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     let middleware = Box::new(CkbTxFailureMockMiddleware);
     let mut node_a = NetworkNode::new_with_config(
@@ -2771,7 +2771,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
 
 #[tokio::test]
 async fn test_abort_funding_on_sign_funding_tx_failure() {
-    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_a = 10_000_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     // Put middleware on both nodes since either one might trigger signing
     let middleware = Box::new(SignFundingTxFailureMockMiddleware);
@@ -2922,7 +2922,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
 
 #[tokio::test]
 async fn test_to_be_accepted_channels_number_limit() {
-    let funding_amount = 9_900_000_000u128;
+    let funding_amount = 10_000_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -3195,7 +3195,7 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         single_open_channel_size
     );
 
-    let funding_amount = 9_900_000_000u128;
+    let funding_amount = 10_000_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
