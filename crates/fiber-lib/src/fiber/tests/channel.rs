@@ -1629,8 +1629,8 @@ async fn wait_for_local_signer_channel_idle(
 }
 
 fn assert_local_signer_has_no_material_history(node: &NetworkNode, channel_id: Hash256) {
-    // Inspect the persisted data directly: restoring ChannelActorState clears old
-    // local caches and would otherwise hide a regression in the live actor.
+    // Inspect the persisted data directly to verify that local caches are
+    // removed before writing the snapshot.
     let key = [
         &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
         channel_id.as_ref(),
@@ -1699,7 +1699,7 @@ async fn test_local_signer_payments_do_not_accumulate_public_material() {
 }
 
 #[tokio::test]
-async fn test_local_signer_restart_discards_cached_public_material() {
+async fn test_local_signer_write_discards_cached_public_material_before_restart() {
     init_tracing();
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true).await;
@@ -1723,7 +1723,7 @@ async fn test_local_signer_restart_discards_cached_public_material() {
             .local_material()
             .expect("local signer")
             .clone();
-        // Simulate the derivable history written by earlier local signing code.
+        // Populate derivable history and verify the write removes it before restart.
         let last_commitment = state
             .get_local_commitment_number()
             .max(state.get_remote_commitment_number())
@@ -1749,6 +1749,7 @@ async fn test_local_signer_restart_discards_cached_public_material() {
             }
         }
         node.store.insert_channel_actor_state(state);
+        assert_local_signer_has_no_material_history(node, channel_id);
     }
 
     node_a.start().await;
@@ -2060,6 +2061,52 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
         sdk.get_signing_status(channel_id).await.status,
         fiber_json_types::ChannelSigningStatus::NoSignatureRequired
     ));
+
+    // Exercise enough rounds to expire the opening material. Inspect raw
+    // snapshots to verify that actor cleanup runs before persistence.
+    for _ in 0..3 {
+        let payment = node_a
+            .send_payment_keysend(&node_b, 10_000, false)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                sdk.try_sign_pending(channel_id).await;
+                let state = node_a.get_channel_actor_state(channel_id);
+                if node_a.get_payment_status(payment.payment_hash).await == PaymentStatus::Success
+                    && state.tlc_state.all_tlcs().count() == 0
+                    && !state.is_waiting_tlc_ack()
+                    && !state.signing_context.is_awaiting_signature()
+                    && !state.has_pending_operations()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("external signer payment and cleanup should finish");
+        let key = [
+            &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+            channel_id.as_ref(),
+        ]
+        .concat();
+        let bytes = node_a.store.get(key).unwrap();
+        let persisted: ChannelActorData = bincode::deserialize(&bytes).unwrap();
+        let oldest_retained_round = persisted
+            .commitment_numbers
+            .local
+            .min(persisted.commitment_numbers.remote)
+            .saturating_sub(1);
+        assert!(persisted
+            .local_commitment_points
+            .keys()
+            .all(|number| *number >= oldest_retained_round));
+        assert!(persisted
+            .local_public_nonces
+            .keys()
+            .all(|slot| slot.commitment_number >= oldest_retained_round));
+    }
 
     node_a
         .send_shutdown(channel_id, false)
@@ -14756,6 +14803,49 @@ mod udt_funding_cell_capacity {
             "should start with 3 commitment points"
         );
 
+        {
+            let mut local_state = state.clone();
+            local_state.core.signer = None;
+            local_state.channel_signer = crate::fiber::channel_signer::ChannelSigner::external();
+            // External local points must survive while any TLC still references
+            // them, even when both counters have advanced far beyond that TLC.
+            local_state.commitment_numbers = CommitmentNumbers {
+                local: 10,
+                remote: 10,
+            };
+            local_state.local_commitment_points = [
+                (3, gen_rand_fiber_public_key()),
+                (5, gen_rand_fiber_public_key()),
+            ]
+            .into_iter()
+            .collect();
+            let shared = {
+                let mut tlc = local_state.tlc_state.received_tlcs.tlcs[0].clone();
+                tlc.tlc_id = TLCId::Received(3);
+                tlc.removed_confirmed_at = None;
+                tlc.applied_flags = AppliedFlags::empty();
+                tlc
+            };
+            local_state.tlc_state.received_tlcs.tlcs.push(shared);
+            local_state = bincode::deserialize(&bincode::serialize(&local_state).unwrap()).unwrap();
+            assert!(local_state.local_commitment_points.contains_key(&3));
+            assert!(local_state.local_commitment_points.contains_key(&5));
+            local_state.clean_up_failed_tlcs();
+            assert!(local_state.local_commitment_points.contains_key(&3));
+            assert!(local_state.local_commitment_points.contains_key(&5));
+            let shared = local_state
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .iter_mut()
+                .find(|tlc| tlc.tlc_id == TLCId::Received(3))
+                .unwrap();
+            shared.removed_confirmed_at = Some(1);
+            shared.applied_flags = AppliedFlags::REMOVE;
+            local_state.clean_up_failed_tlcs();
+            assert!(!local_state.local_commitment_points.contains_key(&3));
+            assert!(local_state.local_commitment_points.contains_key(&5));
+        }
         state.clean_up_failed_tlcs();
 
         // After cleanup:

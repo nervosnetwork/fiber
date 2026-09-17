@@ -2378,7 +2378,32 @@ fn test_store_sample_channel_actor_state() {
     // Insert all samples
     for sample in &samples {
         assert!(store.get_channel_actor_state(&sample.id).is_none());
-        store.insert_channel_actor_state(sample.clone());
+        let mut legacy = sample.clone();
+        legacy
+            .local_commitment_points
+            .insert(100, gen_rand_fiber_public_key());
+        legacy.local_public_nonces.insert(
+            fiber_types::NonceSlot {
+                purpose: fiber_types::NoncePurpose::Commitment,
+                commitment_number: 100,
+            },
+            musig2::SecNonce::build([42; 32]).build().public_nonce(),
+        );
+        store.insert_channel_actor_state(legacy);
+        // Decode the raw core to verify the write removed derivable material.
+        let key = [
+            &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+            sample.id.as_ref(),
+        ]
+        .concat();
+        let raw = store.get(key).unwrap();
+        let persisted: ChannelActorData = deserialize_from(raw.as_ref(), "ChannelActorData");
+        if sample.signer.is_some() {
+            assert!(persisted.local_commitment_points.is_empty());
+            assert!(persisted.local_public_nonces.is_empty());
+        } else {
+            assert!(persisted.local_commitment_points.contains_key(&100));
+        }
     }
 
     // Verify each sample can be queried back and key fields match

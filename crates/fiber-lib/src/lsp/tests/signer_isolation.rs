@@ -826,29 +826,6 @@ async fn channel_signature_submission_rejects_invalid_input_and_is_idempotent() 
         "error must state nonces must be distinct, got {err}"
     );
 
-    // 3f. Fail-closed nonce reuse: reusing an already assigned nonce from earlier slot
-    let mut reused_historical = valid_submission.clone();
-    let open_c_nonce = sdk
-        .signer
-        .channel_open_material(false)
-        .await
-        .unwrap()
-        .commitment_nonce;
-    reused_historical
-        .next_material
-        .as_mut()
-        .unwrap()
-        .next_commitment_nonce = Some(open_c_nonce.serialize().to_vec());
-    let err = sdk
-        .submit(reused_historical)
-        .await
-        .expect_err("historical nonce reuse must fail");
-    assert!(
-        err.to_string()
-            .contains("reuses a nonce already assigned to another slot"),
-        "error must state reuses nonce already assigned, got {err}"
-    );
-
     // 4. Valid submission succeeds
     let applied = sdk
         .submit(valid_submission.clone())

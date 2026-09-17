@@ -5016,6 +5016,7 @@ where
             ACTOR_HANDLE_WARN_THRESHOLD_MS,
         );
 
+        let previous_oldest_round = state.oldest_retained_signer_round();
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self
@@ -5067,6 +5068,12 @@ where
                 });
             }
         }
+
+        // Continuations may still use the old round while advancing counters.
+        // Prune only after the complete message has been processed.
+        state.prune_expired_signer_rounds(
+            previous_oldest_round..state.oldest_retained_signer_round(),
+        );
 
         // take the pending settlement tlc set
         let pending_notify_tlcs = std::mem::take(&mut state.pending_notify_settle_tlcs);
@@ -5502,18 +5509,10 @@ impl Serialize for ChannelActorState {
 
 impl<'de> Deserialize<'de> for ChannelActorState {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut core = ChannelActorData::deserialize(deserializer)?;
+        let core = ChannelActorData::deserialize(deserializer)?;
         let channel_signer =
             ChannelSigner::restore(core.signer.as_ref(), &core.local_channel_public_keys)
                 .map_err(serde::de::Error::custom)?;
-        if channel_signer.is_local() {
-            // Earlier local signing persisted every round's derivable material.
-            // Drop that cache when restoring so subsequent snapshots and reads
-            // do not grow with the channel's entire payment history. External
-            // signers still need their published material and reuse checks.
-            core.local_commitment_points = HashMap::new();
-            core.local_public_nonces = HashMap::new();
-        }
         let mut state = Self {
             channel_signer,
             core,
@@ -5948,7 +5947,7 @@ impl ChannelActorState {
             }
         }
 
-        // 5. Validate nonces against conflicts and cross-slot reuse
+        // 5. Validate nonces against conflicts in still-live slots
         for (purpose, submitted) in [
             (NoncePurpose::Commitment, &material.next_commitment_nonce),
             (NoncePurpose::Revocation, &material.next_revocation_nonce),
@@ -5967,20 +5966,6 @@ impl ChannelActorState {
                 {
                     return Err(ProcessingChannelError::InvalidParameter(format!(
                         "channel signer nonce {slot:?} conflicts with persisted material"
-                    )));
-                }
-
-                // Check fail-closed nonce-reuse against different slots
-                if self
-                    .core
-                    .local_public_nonces
-                    .iter()
-                    .any(|(existing_slot, existing_nonce)| {
-                        existing_slot != &slot && existing_nonce == nonce
-                    })
-                {
-                    return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "channel signer nonce {slot:?} reuses a nonce already assigned to another slot"
                     )));
                 }
             }
@@ -8063,8 +8048,65 @@ impl ChannelActorState {
         Ok((current.clone(), reason))
     }
 
+    /// Drop derivable local material before persisting a channel snapshot.
+    pub(crate) fn clear_local_signer_material(&mut self) {
+        if self.channel_signer.is_local() {
+            self.core.local_commitment_points = HashMap::new();
+            self.core.local_public_nonces = HashMap::new();
+        }
+    }
+
+    // Keep the preceding round for replay, both current counters, and all
+    // prepublished material. A pending signature pins its own round as well.
+    fn oldest_retained_signer_round(&self) -> u64 {
+        let mut number = self
+            .get_local_commitment_number()
+            .min(self.get_remote_commitment_number());
+        if let Some(pending) = &self.signing_context.pending_signature {
+            let slot = &pending.request.content().slot;
+            if slot.purpose != NoncePurpose::ChannelAnnouncement {
+                number = number.min(slot.commitment_number);
+            }
+        }
+        number.saturating_sub(1)
+    }
+
+    // Candidates are either rounds crossed by a completed message or the
+    // round referenced by a removed TLC. Never scan the material maps here.
+    fn prune_expired_signer_rounds(&mut self, rounds: impl IntoIterator<Item = u64>) {
+        if self.channel_signer.is_local() {
+            self.clear_local_signer_material();
+            return;
+        }
+        let oldest_retained_round = self.oldest_retained_signer_round();
+        for number in rounds {
+            if number >= oldest_retained_round {
+                continue;
+            }
+            if !self
+                .tlc_state
+                .all_tlcs()
+                .any(|tlc| tlc.created_at.get_remote() == number)
+            {
+                self.core.local_commitment_points.remove(&number);
+            }
+            for purpose in [NoncePurpose::Commitment, NoncePurpose::Revocation] {
+                self.core.local_public_nonces.remove(&NonceSlot {
+                    purpose,
+                    commitment_number: number,
+                });
+            }
+        }
+    }
+
     fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
+        let local_point_number = self
+            .tlc_state
+            .all_tlcs()
+            .find(|tlc| tlc.tlc_id == tlc_id)
+            .map(|tlc| tlc.created_at.get_remote());
         self.tlc_state.apply_remove_tlc(tlc_id);
+        self.prune_expired_signer_rounds(local_point_number);
 
         let points: HashSet<u64> = self
             .tlc_state
@@ -12343,60 +12385,19 @@ mod tests {
             .to_string()
             .contains("conflicts with persisted material"));
 
-        // 9. Fail-closed cross-slot nonce reuse check
-        let historical_nonce = dummy_nonce(40);
-        state.core.local_public_nonces.insert(
-            NonceSlot {
-                purpose: NoncePurpose::Commitment,
-                commitment_number: 0,
-            },
-            historical_nonce.clone(),
-        );
-
-        // Advance to commitment 3 (where both commitment and revocation slots are unpopulated)
         let req_commit_2 = ChannelSignatureRequest::SendCommitmentSigned {
             content: dummy_content(NoncePurpose::Commitment, 2),
             settlement_data: dummy_settlement(),
         };
 
-        // Reusing historical nonce in commitment nonce
-        let err = state
-            .apply_next_signer_material(
-                &req_commit_2,
-                Some(NextChannelSignerMaterial {
-                    next_commitment_point: Some(dummy_pubkey(30)),
-                    next_commitment_nonce: Some(historical_nonce.clone()),
-                    next_revocation_nonce: Some(dummy_nonce(50)),
-                }),
-            )
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("reuses a nonce already assigned to another slot"));
-
-        // Reusing historical nonce in revocation nonce
-        let err = state
-            .apply_next_signer_material(
-                &req_commit_2,
-                Some(NextChannelSignerMaterial {
-                    next_commitment_point: Some(dummy_pubkey(30)),
-                    next_commitment_nonce: Some(dummy_nonce(51)),
-                    next_revocation_nonce: Some(historical_nonce),
-                }),
-            )
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("reuses a nonce already assigned to another slot"));
-
-        // 10. Transactional atomicity: partial material is NOT committed when validation fails
+        // 9. Transactional atomicity: partial material is NOT committed when validation fails
         assert!(!state.core.local_commitment_points.contains_key(&3));
         assert!(!state.core.local_public_nonces.contains_key(&NonceSlot {
             purpose: NoncePurpose::Commitment,
             commitment_number: 3,
         }));
 
-        // 11. Valid application installs material
+        // 10. Valid application installs material
         let valid_mat = NextChannelSignerMaterial {
             next_commitment_point: Some(dummy_pubkey(30)),
             next_commitment_nonce: Some(dummy_nonce(51)),
@@ -12424,7 +12425,7 @@ mod tests {
             Some(&dummy_nonce(52))
         );
 
-        // 12. Idempotent re-application of the same material succeeds
+        // 11. Idempotent re-application of the same material succeeds
         assert!(state
             .apply_next_signer_material(&req_commit_2, Some(valid_mat))
             .is_ok());
@@ -12545,8 +12546,10 @@ mod tests {
             signature.unwrap()
         };
         let expected_signature = sign(&state);
+        let mut snapshot = state.clone();
+        snapshot.clear_local_signer_material();
         let mut restored: ChannelActorState =
-            bincode::deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+            bincode::deserialize(&bincode::serialize(&snapshot).unwrap()).unwrap();
         assert!(restored.local_commitment_points.is_empty());
         assert!(restored.local_public_nonces.is_empty());
         assert_eq!(restored.local_commitment_points.capacity(), 0);
@@ -12603,6 +12606,75 @@ mod tests {
             bincode::serialize(&restored.signing_context).unwrap(),
             bincode::serialize(&state.signing_context).unwrap()
         );
+    }
+
+    #[test]
+    fn test_external_signer_material_pruning_tracks_rounds_and_pending_signature() {
+        let mut state = state_with_legacy_local_signing_history();
+        let signer = state.channel_signer.local_material().unwrap().clone();
+        state.core.signer = None;
+        state.channel_signer = ChannelSigner::external();
+        let announcement = NonceSlot {
+            purpose: NoncePurpose::ChannelAnnouncement,
+            commitment_number: 0,
+        };
+        state.core.local_public_nonces.insert(
+            announcement,
+            signer
+                .derive_musig2_nonce(0, Musig2Context::Commitment)
+                .public_nonce(),
+        );
+        for number in 0..=12 {
+            state
+                .core
+                .local_commitment_points
+                .insert(number, signer.get_commitment_point(number));
+            for (purpose, context) in [
+                (NoncePurpose::Commitment, Musig2Context::Commitment),
+                (NoncePurpose::Revocation, Musig2Context::Revoke),
+            ] {
+                state.core.local_public_nonces.insert(
+                    NonceSlot {
+                        purpose,
+                        commitment_number: number,
+                    },
+                    signer.derive_musig2_nonce(number, context).public_nonce(),
+                );
+            }
+        }
+        state.commitment_numbers = CommitmentNumbers {
+            local: 10,
+            remote: 8,
+        };
+        let mut restored: ChannelActorState =
+            bincode::deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+        // Deserialization preserves the snapshot. Only explicit runtime
+        // pruning removes material; pending round 2 still pins round 1.
+        assert_eq!(
+            restored.local_commitment_points,
+            state.local_commitment_points
+        );
+        assert_eq!(restored.local_public_nonces, state.local_public_nonces);
+        restored.prune_expired_signer_rounds(0..restored.oldest_retained_signer_round());
+        assert!(!restored.local_commitment_points.contains_key(&0));
+        assert!(restored.local_commitment_points.contains_key(&1));
+        let previous_oldest_round = restored.oldest_retained_signer_round();
+        restored.signing_context = Default::default();
+        restored.prune_expired_signer_rounds(
+            previous_oldest_round..restored.oldest_retained_signer_round(),
+        );
+        assert_eq!(restored.local_commitment_points.len(), 6); // rounds 7..=12
+        assert_eq!(restored.local_public_nonces.len(), 13); // two per round + announcement
+        assert!(restored.local_public_nonces.contains_key(&announcement));
+
+        let previous_oldest_round = restored.oldest_retained_signer_round();
+        restored.increment_remote_commitment_number();
+        restored.prune_expired_signer_rounds(
+            previous_oldest_round..restored.oldest_retained_signer_round(),
+        );
+        assert!(!restored.local_commitment_points.contains_key(&7));
+        assert!(restored.local_commitment_points.contains_key(&8));
+        assert_eq!(restored.local_public_nonces.len(), 11);
     }
 
     #[test]

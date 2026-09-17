@@ -1058,7 +1058,8 @@ impl ChannelActorStateStore for Store {
             .map(|v| deserialize_from(v.as_ref(), "ChannelActorState"))
     }
 
-    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+    fn insert_channel_actor_state(&self, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         let mut batch = self.batch();
 
         let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
@@ -1074,9 +1075,10 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state_with_pending_commit_diff(
         &self,
-        state: ChannelActorState,
+        mut state: ChannelActorState,
         diff: &CommitDiff,
     ) {
+        state.clear_local_signer_material();
         let channel_id = state.get_id();
         let mut batch = self.batch();
 
@@ -1094,7 +1096,8 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+    fn move_channel_actor_state(&self, old_id: &Hash256, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         if old_id == &state.id {
             self.insert_channel_actor_state(state);
             return;
