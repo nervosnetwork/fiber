@@ -1,4 +1,4 @@
-use crate::channel::{ChannelOpenRecord, ChannelOpeningStatus};
+use crate::channel::{ChannelOpenRecord, ChannelOpeningStatus, CommitmentContractVersion};
 use crate::schema::CHANNEL_OPEN_RECORD_PREFIX;
 
 use super::{deterministic_hash256, deterministic_pubkey, StoreSample};
@@ -19,6 +19,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: None,
                 created_at: 1_704_067_200_000,
                 last_updated_at: 1_704_067_200_000,
+                commitment_contract_version: CommitmentContractVersion::Legacy,
             },
             // Funding transaction building
             ChannelOpenRecord {
@@ -30,6 +31,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: None,
                 created_at: 1_704_067_200_100,
                 last_updated_at: 1_704_067_200_200,
+                commitment_contract_version: CommitmentContractVersion::Legacy,
             },
             // Funding transaction broadcasted
             ChannelOpenRecord {
@@ -41,6 +43,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: None,
                 created_at: 1_704_067_200_250,
                 last_updated_at: 1_704_067_200_280,
+                commitment_contract_version: CommitmentContractVersion::Legacy,
             },
             // Failed channel with error
             ChannelOpenRecord {
@@ -52,6 +55,7 @@ impl StoreSample for ChannelOpenRecord {
                 failure_detail: Some("Funding timeout".to_string()),
                 created_at: 1_704_067_200_300,
                 last_updated_at: 1_704_067_200_400,
+                commitment_contract_version: CommitmentContractVersion::Legacy,
             },
         ]
     }

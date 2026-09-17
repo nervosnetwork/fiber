@@ -773,7 +773,7 @@ pub async fn run_integration_test() -> TestResult<()> {
         &ctx.node2.rpc_url,
         &ctx.node3.pubkey,
         "0x0",
-        "0x37785d3ecd00",
+        "0x37785748ec00",
     )
     .await?;
 
