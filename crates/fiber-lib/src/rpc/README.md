@@ -773,16 +773,11 @@ Generates a new invoice.
 * `hash_algorithm` - <em>Option<[HashAlgorithm](#type-hashalgorithm)></em>, The hash algorithm of the invoice.
 * `allow_mpp` - <em>`Option<bool>`</em>, Whether allow payment to use MPP
 * `allow_trampoline_routing` - <em>`Option<bool>`</em>, Whether allow payment to use trampoline routing
-* `lsp_buffer_duration_ms` - <em>`Option<u64>`</em>, Maximum time a hosted LSP may buffer this invoice's incoming payment
- while the tenant is offline. Only valid for an authenticated hosted
- tenant; `None` uses the LSP service default.
 
 ##### Returns
 
 * `invoice_address` - <em>`String`</em>, The encoded invoice address.
 * `invoice` - <em>[CkbInvoice](#type-ckbinvoice)</em>, The invoice.
-* `accepted_lsp_buffer_duration_ms` - <em>`Option<u64>`</em>, Buffer duration accepted by the hosted LSP after applying its service
- cap. `None` for invoices created outside a hosted tenant context.
 
 ---
 

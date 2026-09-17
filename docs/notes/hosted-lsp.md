@@ -83,15 +83,12 @@ record. The record binds:
 - Public T's public trampoline identity;
 - payment hash;
 - a digest of the complete signed invoice, including amount, asset and terms;
-- requested buffer duration and absolute invoice expiry.
+- service-selected buffer duration and absolute invoice expiry.
 
-`NewInvoiceParams.lsp_buffer_duration_ms` optionally requests the buffer
-duration. `None` uses the 24-hour default, zero disables buffering, and values
-above the seven-day protocol maximum are rejected. An operator may configure a
-shorter service-wide cap; `InvoiceResult.accepted_lsp_buffer_duration_ms`
-returns the duration actually accepted by the service. The field is rejected
-outside an authenticated hosted-tenant context rather than silently ignored.
-The actual deadline is still bounded by invoice and TLC expiry, so the accepted
+Hosted invoices use a service-selected buffer duration: the 24-hour default
+is capped by the operator's `max_buffer_duration_ms` setting, which cannot
+exceed seven days. Clients do not negotiate a per-invoice buffer duration.
+The actual deadline is still bounded by invoice and TLC expiry, so the configured
 duration does not promise that every payment can wait that long. The
 `LspInvoiceHint` record is intentionally not embedded in the invoice encoding
 or trampoline onion payload. A payer only needs the tenant-signed invoice and

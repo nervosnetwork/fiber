@@ -248,9 +248,8 @@ The server then resolves a namespaced store and verifies that the channel is in
 that namespace. Tenant tokens cannot select another tenant through a request
 parameter.
 
-`new_invoice` accepts the optional `lsp_buffer_duration_ms` delivery policy,
-automatically adds Public T's trampoline route hint, and registers the invoice
-before returning the accepted duration. `send_payment` starts the normal
+`new_invoice` automatically adds Public T's trampoline route hint and registers
+the invoice using the LSP service's buffer policy. `send_payment` starts the normal
 tenant-owned payment session.
 
 Both reads and mutations currently resolve `GetTenantRpcContext`, which ensures

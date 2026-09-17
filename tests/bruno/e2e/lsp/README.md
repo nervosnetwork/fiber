@@ -10,8 +10,8 @@ the tenant Biscuit selects the actor and Store namespace without a `tenant_id` r
 The workflow registers and activates a tenant, then Public T calls the standard `open_channel`
 RPC to create a private in-process U-T channel with outbound liquidity toward the tenant. It
 evicts and reactivates the tenant to verify that the same channel is reestablished. It also
-exercises both payment directions: the tenant calls `new_invoice` with
-`lsp_buffer_duration_ms`, which automatically registers the invoice and Public T trampoline hint;
+exercises both payment directions: the tenant calls `new_invoice`, which automatically
+registers the invoice and Public T trampoline hint using the service buffer policy;
 Node1 pays the offline hosted tenant while Public T buffers and later completes the delivery;
 then the tenant calls `send_payment` to pay Node1 through Public T. Tenant-token RPCs verify the
 resulting channel, invoice, and payment state in the tenant namespace.

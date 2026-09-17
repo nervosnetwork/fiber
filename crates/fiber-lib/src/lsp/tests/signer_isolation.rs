@@ -885,7 +885,6 @@ async fn hosted_external_signer_inbound_payment_requires_signing_during_commitme
                 hash_algorithm: None,
                 allow_mpp: None,
                 allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: None,
             }],
         )
         .await

@@ -48,9 +48,8 @@ params. The session performs no HTTP. Auto-approving poll loops stay in
 
 The wallet's RPC transport uses the tenant Biscuit returned by
 `HostedSession::finish_registration` with the standard Fiber data-plane
-methods. It calls `new_invoice` with an optional `lsp_buffer_duration_ms` and
-reads `accepted_lsp_buffer_duration_ms` from `InvoiceResult`; the Node adds
-Public T's trampoline hint and registers the hosted invoice. It calls the
+methods. It calls `new_invoice`; the Node adds Public T's trampoline hint and
+registers the hosted invoice using the LSP service's buffer policy. It calls the
 standard `send_payment` method for outbound payments.
 
 After a successful `new_invoice`, record `InvoiceResult.invoice.data.payment_hash`

@@ -1540,15 +1540,10 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
                 hash_algorithm: None,
                 allow_mpp: None,
                 allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
             }],
         )
         .await
         .expect("create hosted invoice through tenant-scoped new_invoice");
-    assert_eq!(
-        invoice.accepted_lsp_buffer_duration_ms,
-        Some(BUFFER_DURATION_MS / 2)
-    );
 
     let missing_channel = crate::fiber_types::Hash256::from([0x11; 32]);
     let signing_status_error = match tenant_client
@@ -1614,31 +1609,6 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     {
         panic!("public node must not see a tenant invoice");
     }
-
-    let public_buffer_error = public_client
-        .request::<fiber_json_types::InvoiceResult, _>(
-            "new_invoice",
-            rpc_params![fiber_json_types::NewInvoiceParams {
-                amount: 1_000,
-                description: Some("invalid public LSP buffer".to_string()),
-                currency: fiber_json_types::Currency::Fibd,
-                payment_preimage: Some(crate::fiber_types::Hash256::from([0x43; 32]).into(),),
-                payment_hash: None,
-                expiry: Some(60 * 60),
-                fallback_address: None,
-                final_expiry_delta: None,
-                udt_type_script: None,
-                hash_algorithm: None,
-                allow_mpp: None,
-                allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
-            }],
-        )
-        .await
-        .expect_err("public new_invoice must reject LSP-only buffer policy");
-    assert!(public_buffer_error
-        .to_string()
-        .contains("lsp_buffer_duration_ms is only valid for a hosted tenant"));
 
     rpc_handle
         .stop()
@@ -1949,7 +1919,6 @@ async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
                 hash_algorithm: None,
                 allow_mpp: Some(true),
                 allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
             }],
         )
         .await
@@ -1986,14 +1955,13 @@ async fn hosted_tenant_new_invoice_rejects_mpp_before_registration() {
                 hash_algorithm: None,
                 allow_mpp: Some(false),
                 allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
             }],
         )
         .await
         .expect("create hosted single-part invoice");
     assert_eq!(
-        invoice.accepted_lsp_buffer_duration_ms,
-        Some(BUFFER_DURATION_MS)
+        invoice.invoice.data.payment_hash,
+        accepted_payment_hash.into()
     );
     assert_eq!(
         tenant.node.get_invoice_status(&accepted_payment_hash),
@@ -2053,7 +2021,6 @@ async fn hosted_invoice_rejects_second_payer_without_settling_first() {
                 hash_algorithm: None,
                 allow_mpp: Some(false),
                 allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: Some(BUFFER_DURATION_MS),
             }],
         )
         .await
@@ -2308,15 +2275,10 @@ async fn hosted_tenant_pays_hosted_tenant_across_two_lsps() {
                 hash_algorithm: None,
                 allow_mpp: None,
                 allow_trampoline_routing: Some(true),
-                lsp_buffer_duration_ms: None,
             }],
         )
         .await
         .expect("create U2 hosted invoice with its tenant token");
-    assert_eq!(
-        invoice.accepted_lsp_buffer_duration_ms,
-        Some(crate::lsp::DEFAULT_LSP_BUFFER_DURATION_MS)
-    );
     let decoded = crate::invoice::CkbInvoice::from_str(&invoice.invoice_address)
         .expect("decode U2 hosted invoice");
     assert_eq!(
