@@ -227,10 +227,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             Err(error) if error.to_string().contains("watched channel not found") => return Ok(()),
             Err(error) => return Err(error),
         };
-        if matches!(
-            status,
-            WatchtowerSigningStatus::Internal | WatchtowerSigningStatus::NoSignatureRequired
-        ) {
+        if matches!(status, WatchtowerSigningStatus::NoSignatureRequired) {
             return Ok(());
         }
         match self
@@ -688,13 +685,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn internal_channel_is_ignored_and_pending_signer_is_retained() {
+    async fn idle_channel_is_ignored_and_pending_signer_is_retained() {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = FakeNode::default();
         {
-            node.state()
-                .statuses
-                .insert(channel_id().into(), ChannelSigningStatus::Internal);
+            node.state().statuses.insert(
+                channel_id().into(),
+                ChannelSigningStatus::NoSignatureRequired,
+            );
         }
         let mut agent = memory_agent(node, dir.path()).await;
         agent.initialize().await.expect("initialize");

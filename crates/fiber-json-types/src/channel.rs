@@ -918,14 +918,12 @@ pub struct GetWatchtowerSigningStatusResult {
     pub status: WatchtowerSigningStatus,
 }
 
-/// Read-only projection of a watchtower's external signer sub-state.
+/// Read-only projection of a watchtower's external signing requests.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum WatchtowerSigningStatus {
-    /// This watched channel holds a local settlement secret.
-    Internal,
-    /// External signer, but no signature is currently required.
+    /// No external signature is currently required for this watched channel.
     NoSignatureRequired,
     /// Settlement or TLC spend is paused until this signature is submitted.
     SignatureRequired {

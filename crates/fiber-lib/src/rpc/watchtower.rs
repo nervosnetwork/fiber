@@ -454,7 +454,7 @@ fn to_rpc_watchtower_signing_status(
     use fiber_types::{OnchainKeyPurpose, WatchtowerSignerState};
 
     match state {
-        WatchtowerSignerState::Internal => WatchtowerSigningStatus::Internal,
+        WatchtowerSignerState::Internal => WatchtowerSigningStatus::NoSignatureRequired,
         WatchtowerSignerState::External(external) => {
             if let Some((request_id, content)) = external.first_pending() {
                 WatchtowerSigningStatus::SignatureRequired {

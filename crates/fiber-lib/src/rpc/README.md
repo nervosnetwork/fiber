@@ -2316,13 +2316,12 @@ The UDT script which is used to identify the UDT configuration for a Fiber Node.
 <a id="#type-watchtowersigningstatus"></a>
 ### Type `WatchtowerSigningStatus`
 
-Read-only projection of a watchtower's external signer sub-state.
+Read-only projection of a watchtower's external signing requests.
 
 
 #### Enum with values of
 
-* `Internal` - This watched channel holds a local settlement secret.
-* `NoSignatureRequired` - External signer, but no signature is currently required.
+* `NoSignatureRequired` - No external signature is currently required for this watched channel.
 * `SignatureRequired` - Settlement or TLC spend is paused until this signature is submitted.
 ---
 
