@@ -1,0 +1,43 @@
+meta {
+  name: hosted tenant pays Node1 through Public T
+  type: http
+  seq: 28
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "invoice": "{{LSP_OUTGOING_INVOICE}}",
+        "trampoline_hops": ["{{NODE2_PUBKEY}}"],
+        "max_fee_amount": "0x2710"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].invoice = bru.getVar("LSP_OUTGOING_INVOICE");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.payment_hash: eq "{{LSP_OUTGOING_PAYMENT_HASH}}"
+}

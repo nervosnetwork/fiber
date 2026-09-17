@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/fiber-lsp-sdk",
     "crates/fiber-lib",
     "crates/fiber-bin",
     "crates/fiber-store",
@@ -9,6 +10,7 @@ members = [
     "crates/fiber-types",
     "crates/fiber-json-types",
     "crates/fiber-cli",
+    "tests/fiber-lsp-sdk-agent",
 ]
 exclude = ["rpc-doc-gen"]
 resolver = "2"

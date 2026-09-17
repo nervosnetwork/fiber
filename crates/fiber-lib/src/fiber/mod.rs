@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod channel_signer;
 pub mod config;
 pub mod gossip;
 pub mod graph;
@@ -29,8 +30,9 @@ pub use in_flight_ckb_tx_actor::{
 };
 pub use key::KeyPair;
 pub use network::{
-    start_network, NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
-    NetworkServiceEvent,
+    start_network, FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef,
+    NetworkActor, NetworkActorMessage, NetworkServiceEvent, PublicNetworkCommand,
+    PublicNetworkEvent,
 };
 pub use settle_tlc_set_command::SettleTlcSetCommand;
 

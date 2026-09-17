@@ -10,8 +10,11 @@ use biscuit_auth::{
     Authorizer, AuthorizerBuilder, AuthorizerLimits, Biscuit, PublicKey,
 };
 
+use crate::lsp::TenantId;
 use crate::now_timestamp_as_millis_u64;
 use fiber_types::NodeId;
+
+pub use crate::lsp::BiscuitTokenIssuer;
 
 const DEFAULT_BISCUIT_AUTH_MAX_TIME: Duration = Duration::from_millis(10);
 
@@ -110,6 +113,11 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         r#"allow if write("channels");"#,
     );
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
+    b.rule(
+        "get_channel_signing_status",
+        r#"allow if read("channels");"#,
+    );
+    b.rule("submit_channel_signature", r#"allow if write("channels");"#);
     // dev
     b.rule("commitment_signed", r#"allow if write("dev");"#);
     b.rule("add_tlc", r#"allow if write("dev");"#);
@@ -131,6 +139,17 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("cancel_invoice", r#"allow if write("invoices");"#);
     b.rule("settle_invoice", r#"allow if write("invoices");"#);
     b.rule("backup_now", r#"allow if write("node");"#);
+
+    // hosted LSP
+    b.rule("lsp_get_status", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_tenant_registry_nonce", r#"allow if write("lsp");"#);
+    b.rule("lsp_register_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
+    b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_invoice", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_payment", r#"allow if read("lsp");"#);
+    b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
 
     // payment
     b.rule("send_payment", r#"allow if write("payments");"#);
@@ -172,6 +191,18 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.with_rule(
         "remove_preimage",
         AuthRule::new(r#"allow if write("watchtower");"#).with_require_rpc_context(true),
+    );
+    b.with_rule(
+        "get_watchtower_signing_status",
+        AuthRule::new(
+            r#"allow if read("watchtower"); allow if write("watchtower"); allow if read("channels");"#,
+        )
+        .with_require_rpc_context(true),
+    );
+    b.with_rule(
+        "submit_watchtower_signature",
+        AuthRule::new(r#"allow if write("watchtower"); allow if write("channels");"#)
+            .with_require_rpc_context(true),
     );
 
     b.0
@@ -267,23 +298,192 @@ impl BiscuitAuth {
 
 /// Extract node id from token
 pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
+    extract_optional_node_id(token)?.ok_or_else(|| anyhow!("token is missing a node fact"))
+}
+
+fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
     const QUERY: &str = "data($id) <- node($id)";
     let mut authorizer = build_authorizer(token)?;
-    let (id,): (String,) = authorizer.query_exactly_one(QUERY)?;
-    let node_id = NodeId::from_str(id.as_str())?;
-    tracing::warn!("fetch {id:?} {node_id:?}");
-    Ok(node_id)
+    let nodes: Vec<(String,)> = authorizer.query(QUERY)?;
+    match nodes.as_slice() {
+        [] => Ok(None),
+        [(id,)] => Ok(Some(NodeId::from_str(id.as_str())?)),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one node fact"
+        )),
+    }
+}
+
+/// Resolve the watchtower namespace for an authenticated token.
+///
+/// Tenant tokens may only touch the `node(...)` bound at issue time, which is
+/// the hosted tenant watchtower id. They cannot address `NodeId::local()`.
+/// Operator tokens without a node fact use the host namespace.
+pub fn scoped_rpc_node_id(token: &Biscuit) -> Result<NodeId> {
+    match (extract_tenant_id(token)?, extract_optional_node_id(token)?) {
+        (Some(_), Some(node_id)) if node_id != NodeId::local() => Ok(node_id),
+        (Some(_), Some(_)) => Err(anyhow!(
+            "tenant token cannot access the host watchtower namespace"
+        )),
+        (Some(_), None) => Err(anyhow!("tenant token is missing a node fact")),
+        (None, Some(node_id)) => Ok(node_id),
+        (None, None) => Ok(NodeId::local()),
+    }
+}
+
+/// Extract the hosted tenant identity from the token authority block.
+///
+/// Biscuit holders may append attenuation blocks, so tenant facts from those
+/// blocks must not be trusted for request routing. `Authorizer::query` only
+/// exposes authority facts unless an additional trust scope is requested.
+pub fn extract_tenant_id(token: &Biscuit) -> Result<Option<TenantId>> {
+    const QUERY: &str = "data($id) <- tenant($id)";
+    let mut authorizer = build_authorizer(token)?;
+    let tenants: Vec<(String,)> = authorizer.query(QUERY)?;
+    match tenants.as_slice() {
+        [] => Ok(None),
+        [(tenant_id,)] => TenantId::new(tenant_id.clone())
+            .map(Some)
+            .map_err(anyhow::Error::msg),
+        _ => Err(anyhow!(
+            "token authority block must contain at most one tenant fact"
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use biscuit_auth::{macros::biscuit, KeyPair};
+    use biscuit_auth::{
+        macros::{biscuit, block},
+        KeyPair,
+    };
 
-    use crate::rpc::biscuit::extract_node_id;
+    use crate::{
+        lsp::TenantId,
+        rpc::biscuit::{extract_node_id, extract_tenant_id, scoped_rpc_node_id},
+    };
+    use fiber_types::NodeId;
 
-    use super::{build_authorizer, AuthRule, BiscuitAuth};
+    use super::{build_authorizer, AuthRule, BiscuitAuth, BiscuitTokenIssuer};
+
+    #[test]
+    fn tenant_token_issuer_binds_identity_and_data_plane_capabilities() {
+        let root = KeyPair::new();
+        let issuer = BiscuitTokenIssuer::from_private_key(
+            &root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .unwrap();
+        let node_id = NodeId::from_bytes(vec![1, 2, 3]);
+        let token = issuer
+            .issue_tenant_token(&TenantId::new("u1".to_string()).unwrap(), &node_id)
+            .unwrap();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let (biscuit, _) = auth
+            .check_permission("get_channel_signing_status", &token)
+            .unwrap();
+        assert_eq!(
+            extract_tenant_id(&biscuit).unwrap(),
+            Some(TenantId::new("u1".to_string()).unwrap())
+        );
+        assert_eq!(extract_node_id(&biscuit).unwrap(), node_id);
+        auth.check_permission("submit_channel_signature", &token)
+            .unwrap();
+        auth.check_permission("list_channels", &token).unwrap();
+        auth.check_permission("new_invoice", &token).unwrap();
+        auth.check_permission("send_payment", &token).unwrap();
+        auth.check_permission("get_invoice", &token).unwrap();
+        auth.check_permission("get_payment", &token).unwrap();
+        auth.check_permission("list_payments", &token).unwrap();
+        auth.check_permission("get_watchtower_signing_status", &token)
+            .unwrap();
+        auth.check_permission("submit_watchtower_signature", &token)
+            .unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("get_channel_signing_status", &biscuit)
+            .unwrap();
+        assert!(
+            crate::rpc::tenant::enforce_tenant_method_allowlist("open_channel", &biscuit).is_err()
+        );
+        // write("channels") still exists so biscuit allows node-operation
+        // methods; middleware is the tenant method gate.
+        auth.check_permission("open_channel", &token).unwrap();
+        auth.check_permission("create_preimage", &token).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("new_invoice", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("send_payment", &biscuit).unwrap();
+        assert!(auth
+            .check_permission("lsp_register_tenant", &token)
+            .is_err());
+        #[cfg(all(debug_assertions, feature = "debug-add-tlc"))]
+        auth.check_permission("check_channel_shutdown", &token)
+            .unwrap();
+        #[cfg(not(all(debug_assertions, feature = "debug-add-tlc")))]
+        assert!(auth
+            .check_permission("check_channel_shutdown", &token)
+            .is_err());
+
+        let other_root = KeyPair::new();
+        assert!(BiscuitTokenIssuer::from_private_key(
+            &other_root.private().to_prefixed_string(),
+            &root.public().to_string(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scoped_rpc_node_id_keeps_tenant_tokens_off_the_host_namespace() {
+        let root = KeyPair::new();
+        let tenant_id = TenantId::new("u1").unwrap();
+        let tenant_node = NodeId::from_bytes(vec![1, 2, 3]);
+        let tenant_token = biscuit!(
+            r#"
+                tenant({tenant});
+                node({node});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+            node = tenant_node.to_string(),
+        )
+        .build(&root)
+        .unwrap();
+        assert_eq!(scoped_rpc_node_id(&tenant_token).unwrap(), tenant_node);
+
+        let host_tenant_token = biscuit!(
+            r#"
+                tenant({tenant});
+                node({node});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+            node = NodeId::local().to_string(),
+        )
+        .build(&root)
+        .unwrap();
+        assert!(scoped_rpc_node_id(&host_tenant_token)
+            .unwrap_err()
+            .to_string()
+            .contains("host watchtower namespace"));
+
+        let tenant_without_node = biscuit!(
+            r#"
+                tenant({tenant});
+                write("watchtower");
+            "#,
+            tenant = tenant_id.as_str(),
+        )
+        .build(&root)
+        .unwrap();
+        assert!(scoped_rpc_node_id(&tenant_without_node)
+            .unwrap_err()
+            .to_string()
+            .contains("missing a node fact"));
+
+        let operator = biscuit!(r#"write("watchtower");"#).build(&root).unwrap();
+        assert_eq!(scoped_rpc_node_id(&operator).unwrap(), NodeId::local());
+    }
 
     #[test]
     fn test_biscuit_auth_uses_ten_millisecond_authorizer_limit() {
@@ -305,6 +505,41 @@ mod tests {
         let limits = authorizer.limits();
 
         assert_eq!(limits.max_time, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_extract_tenant_id_only_trusts_the_authority_block() {
+        let root = KeyPair::new();
+        let tenant_token = biscuit!(r#"tenant("u1");"#).build(&root).unwrap();
+        assert_eq!(
+            extract_tenant_id(&tenant_token).unwrap(),
+            Some(crate::lsp::TenantId::new("u1").unwrap())
+        );
+
+        let public_token = biscuit!(r#"read("channels");"#).build(&root).unwrap();
+        assert_eq!(extract_tenant_id(&public_token).unwrap(), None);
+
+        let attenuated = public_token
+            .append(block!(r#"tenant("u1");"#))
+            .expect("append untrusted tenant fact");
+        assert_eq!(extract_tenant_id(&attenuated).unwrap(), None);
+    }
+
+    #[test]
+    fn test_extract_tenant_id_rejects_invalid_authority_facts() {
+        let root = KeyPair::new();
+        let invalid = biscuit!(r#"tenant("../u1");"#).build(&root).unwrap();
+        assert!(extract_tenant_id(&invalid).is_err());
+
+        let ambiguous = biscuit!(
+            r#"
+                tenant("u1");
+                tenant("u2");
+            "#
+        )
+        .build(&root)
+        .unwrap();
+        assert!(extract_tenant_id(&ambiguous).is_err());
     }
 
     #[test]
@@ -388,6 +623,132 @@ mod tests {
         assert!(auth
             .check_permission("subscribe_store_changes", &internal_token)
             .is_ok());
+    }
+
+    #[test]
+    fn test_biscuit_auth_lsp_separates_read_and_write_methods() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("lsp");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("lsp");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        let read_methods = [
+            "lsp_get_status",
+            "lsp_list_tenants",
+            "lsp_get_invoice",
+            "lsp_get_payment",
+            "lsp_get_payment_delivery",
+        ];
+        let write_methods = [
+            "lsp_get_tenant_registry_nonce",
+            "lsp_register_tenant",
+            "lsp_ensure_tenant",
+            "lsp_evict_tenant",
+        ];
+
+        for method in read_methods {
+            assert!(auth.check_permission(method, &read_token).is_ok());
+            assert!(auth.check_permission(method, &write_token).is_err());
+        }
+        for method in write_methods {
+            assert!(auth.check_permission(method, &write_token).is_ok());
+            assert!(auth.check_permission(method, &read_token).is_err());
+        }
+    }
+
+    #[test]
+    fn test_biscuit_auth_channel_signing_separates_read_and_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        assert!(auth
+            .check_permission("get_channel_signing_status", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_channel_signing_status", &write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_channel_signature", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_channel_signature", &read_token)
+            .is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_watchtower_signing_separates_read_and_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+        let read_token = biscuit!(r#"read("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let write_token = biscuit!(r#"write("watchtower");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let channel_read_token = biscuit!(r#"read("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let channel_write_token = biscuit!(r#"write("channels");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &channel_read_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("get_watchtower_signing_status", &channel_write_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &read_token)
+            .is_err());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &channel_write_token)
+            .is_ok());
+        assert!(auth
+            .check_permission("submit_watchtower_signature", &channel_read_token)
+            .is_err());
+        let invoice_write_token = biscuit!(r#"write("invoices");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        assert!(auth
+            .check_permission("create_preimage", &invoice_write_token)
+            .is_err());
     }
 
     #[test]

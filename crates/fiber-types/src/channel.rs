@@ -1483,6 +1483,13 @@ impl PendingNotifySettleTlc {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorData {
     pub state: ChannelState,
+    /// Local per-commitment points published by an external channel signer.
+    #[serde(default)]
+    pub local_commitment_points: HashMap<u64, Pubkey>,
+    /// Local public nonces published by an external channel signer.
+    #[serde_as(as = "HashMap<_, PubNonceAsBytes>")]
+    #[serde(default)]
+    pub local_public_nonces: HashMap<crate::NonceSlot, PubNonce>,
     /// The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,
 
@@ -1536,8 +1543,8 @@ pub struct ChannelActorData {
     /// if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate.
     pub funding_fee_rate: u64,
 
-    /// Signer is used to sign the commitment transactions.
-    pub signer: InMemorySigner,
+    /// Local signing material. External signers persist only public channel material.
+    pub signer: Option<InMemorySigner>,
 
     /// Cached channel public keys for easier of access.
     pub local_channel_public_keys: ChannelBasePublicKeys,
@@ -1615,6 +1622,10 @@ pub struct ChannelActorData {
     /// Persisted state for an in-progress external funding flow.
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
+
+    /// Pending signature and last applied result; lifecycle remains in `state`.
+    #[serde(default)]
+    pub signing_context: crate::ChannelSigningContext,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
