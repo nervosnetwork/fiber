@@ -112,8 +112,9 @@ impl ExternalSignerHttpClient<'_> {
             .expect("get_channel_signing_status over HTTP")
     }
 
-    async fn try_sign_pending(&self, channel_id: Hash256) {
-        let status = self.get_signing_status(channel_id).await.status;
+    async fn sign_observed_status(&self, channel_id: Hash256, status: ChannelSigningStatus) {
+        // Sign only the snapshot the caller checked. Re-querying could consume a
+        // newly arrived request that the caller intended to leave paused.
         if !matches!(status, ChannelSigningStatus::SignatureRequired { .. }) {
             return;
         }
@@ -187,7 +188,8 @@ async fn wait_for_external_signer_recovery(
     };
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            sdk.try_sign_pending(channel_id).await;
+            let status = sdk.get_signing_status(channel_id).await.status;
+            sdk.sign_observed_status(channel_id, status).await;
             let state_a = node_a.get_channel_actor_state(channel_id);
             let state_b = node_b.get_channel_actor_state(channel_id);
             let mut payments_settled = true;
@@ -298,7 +300,9 @@ pub async fn setup_restartable_external_channel(
                 ) {
                     break;
                 }
-                sdk.try_sign_pending(channel_id).await;
+                // Use the same snapshot as the stop condition above: an idle
+                // channel can request its announcement signature between RPCs.
+                sdk.sign_observed_status(channel_id, status).await;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -318,7 +322,8 @@ pub async fn setup_restartable_external_channel(
                 if a_ready && b_ready {
                     break;
                 }
-                sdk.try_sign_pending(channel_id).await;
+                let status = sdk.get_signing_status(channel_id).await.status;
+                sdk.sign_observed_status(channel_id, status).await;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -376,6 +381,58 @@ pub async fn sign_and_submit(
 ) -> SubmitChannelSignatureResult {
     let submission = prepare_hosted_signature(signer, channel_id, status).await;
     submit_signature(node, submission).await.unwrap()
+}
+
+/// A stale idle snapshot must not consume a signing checkpoint that arrived later.
+#[tokio::test]
+async fn test_sign_observed_status_preserves_new_announcement_request() {
+    init_tracing();
+    let (restartable, signer) = RestartableExternalSigner::create().await;
+    // Simulate a poll that returned before the announcement request was created.
+    let observed_status = ChannelSigningStatus::NoSignatureRequired;
+    let ([tenant, public_node], channel_id) =
+        setup_restartable_external_channel(true, &signer).await;
+    let sdk = ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    };
+    let pending = sdk.get_signing_status(channel_id).await.status;
+    assert!(matches!(
+        pending,
+        ChannelSigningStatus::SignatureRequired {
+            transition: ChannelSigningTransition::SignChannelAnnouncement,
+            ..
+        }
+    ));
+    let signer_snapshot = restartable.store.lock().unwrap().snapshot().unwrap();
+
+    // The real node now has a pending announcement, but this iteration only
+    // observed an idle snapshot. A second query here would sign away the stop.
+    sdk.sign_observed_status(channel_id, observed_status).await;
+    assert_eq!(
+        restartable.store.lock().unwrap().snapshot().unwrap(),
+        signer_snapshot,
+        "an idle snapshot must not mutate the external signer"
+    );
+    assert_eq!(
+        serde_json::to_value(sdk.get_signing_status(channel_id).await.status).unwrap(),
+        serde_json::to_value(&pending).unwrap(),
+        "the exact announcement request must remain pending"
+    );
+    assert!(tenant
+        .get_channel_actor_state(channel_id)
+        .public_channel_info
+        .as_ref()
+        .unwrap()
+        .local_channel_announcement_signature
+        .is_none());
+
+    // An explicitly observed request can still be signed and finish opening.
+    sdk.sign_observed_status(channel_id, pending).await;
+    assert!(
+        wait_for_external_signer_recovery(&tenant, &public_node, &signer, channel_id, &[]).await,
+        "signing the observed announcement must recover both peers"
+    );
 }
 
 // =========================================================================
