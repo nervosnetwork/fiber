@@ -2339,6 +2339,7 @@ where
                     partial_signature,
                     peer_partial_signature,
                 )?;
+                state.clean_up_failed_tlcs();
                 // Notify outside observers (parity with the inline local path).
                 state
                     .network()
