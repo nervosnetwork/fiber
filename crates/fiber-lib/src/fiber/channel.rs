@@ -84,6 +84,7 @@ use fiber_types::{
     TlcErrorCode, TlcInfo, TlcStatus, INITIAL_COMMITMENT_NUMBER, NO_SHARED_SECRET,
 };
 pub use fiber_types::{
+    settlement_data_to_witness, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
     CommitDiff, CommitmentSignedTemplate, ReplayOrderHint, TlcReplayUpdate,
     CURRENT_COMMIT_DIFF_VERSION,
 };
@@ -1167,7 +1168,7 @@ where
             .verify_commitment_signed_and_send_ack(myself, commitment_signed)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(err) => {
                 error!(
                     "Failed to verify commitment_signed message: {:?}, shutdown channel {} forcefully",
@@ -5222,35 +5223,10 @@ impl From<TlcInfo> for TlcNotifyInfo {
     }
 }
 
-/// Build the witness bytes for a settlement transaction.
-pub fn settlement_data_to_witness(
-    data: &SettlementData,
-    for_remote: bool,
-    local_settlement_key: Pubkey,
-    remote_settlement_key: Pubkey,
-) -> Vec<u8> {
-    fiber_types::settlement_data_to_witness(
-        data,
-        for_remote,
-        local_settlement_key,
-        remote_settlement_key,
-    )
-}
-
 #[derive(Clone, Debug)]
 pub enum DeferredPeerTlcUpdate {
     Add(AddTlc),
     Remove(RemoveTlc),
-}
-
-/// Build the witness bytes for a single TLC in a settlement transaction.
-pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
-    fiber_types::settlement_tlc_to_witness(tlc, for_remote)
-}
-
-/// Get the local pubkey hash for a settlement TLC.
-pub fn settlement_tlc_local_pubkey_hash(tlc: &SettlementTlc) -> [u8; 20] {
-    fiber_types::settlement_tlc_local_pubkey_hash(tlc)
 }
 
 #[cfg(test)]
@@ -9003,7 +8979,6 @@ impl ChannelActorState {
                     if self.signing_context.is_awaiting_signature() {
                         return Ok(());
                     }
-                    self.assert_not_awaiting_signature()?;
                     let commitment_number = self.get_local_commitment_number();
                     return self.request_and_delegate_signature(
                         myself,
@@ -9421,14 +9396,14 @@ impl ChannelActorState {
         &mut self,
         myself: &ActorRef<ChannelActorMessage>,
         commitment_signed: CommitmentSigned,
-    ) -> Result<bool, ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         if self.is_duplicate_external_funding_commitment_signed(&commitment_signed) {
             debug!(
                 "Ignoring duplicate external funding CommitmentSigned for channel {:?} in state {:?}",
                 self.get_id(),
                 self.state
             );
-            return Ok(false);
+            return Ok(());
         }
 
         if self.is_duplicate_commitment_signed(&commitment_signed) {
@@ -9438,7 +9413,7 @@ impl ChannelActorState {
                 self.state
             );
             self.send_revoke_and_ack_message(myself, true).await?;
-            return Ok(false);
+            return Ok(());
         }
 
         self.assert_not_awaiting_signature()?;
@@ -9525,7 +9500,6 @@ impl ChannelActorState {
                 settlement_data,
             },
         )
-        .map(|_| false)
     }
 
     fn maybe_transfer_to_tx_signatures(
