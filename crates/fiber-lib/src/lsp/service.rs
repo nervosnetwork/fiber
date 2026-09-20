@@ -211,6 +211,18 @@ impl LspServiceState {
         failure: Option<String>,
         failure_code: Option<TlcErrorCode>,
     ) -> Result<LspPaymentOutcomeDecision, String> {
+        let delivery = self
+            .delivery_manager
+            .get(key)?
+            .ok_or_else(|| format!("hosted payment delivery {key:?} not found"))?;
+        if let LspPaymentDeliveryStatus::SettlingUpstream { payment_status, .. } = delivery.status {
+            // A settlement decision is durable, including a buffer timeout represented by a
+            // temporary failure code. Re-reading that session must not restart delivery or
+            // replace the decision just because its error description differs.
+            if payment_status == status {
+                return Ok(LspPaymentOutcomeDecision::SettleUpstream);
+            }
+        }
         let error = failure.clone().map(|reason| (reason, failure_code));
         if status == PaymentStatus::Failed
             && failure_code.is_some_and(|code| !is_permanent_hosted_payment_failure(code))

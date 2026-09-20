@@ -100,6 +100,8 @@ impl LspPaymentDeliveryStatus {
     /// Buffer timeout and permanent errors enter `SettlingUpstream(Failed)` while Public T fails
     /// the upstream TLC. Recovery may enter `SettlingUpstream` directly or return from it to
     /// `InFlight` when a concurrent downstream payment is discovered.
+    /// A proven downstream success can also supersede a pending failure settlement; a success
+    /// settlement must never be downgraded by a stale failure.
     ///
     /// Re-entering the same state is handled as an idempotent update by the delivery manager and
     /// therefore is not considered a transition here. Final states have no outgoing transitions.
@@ -121,6 +123,15 @@ impl LspPaymentDeliveryStatus {
             ) | (
                 Self::SettlingUpstream { .. },
                 Self::InFlight | Self::Succeeded | Self::Failed { .. }
+            ) | (
+                Self::SettlingUpstream {
+                    payment_status: PaymentStatus::Failed,
+                    ..
+                },
+                Self::SettlingUpstream {
+                    payment_status: PaymentStatus::Success,
+                    ..
+                }
             )
         )
     }

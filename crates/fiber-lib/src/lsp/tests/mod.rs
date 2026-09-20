@@ -2503,6 +2503,18 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
             LspPaymentOutcomeDecision::SettleUpstream,
             "{error_code:?} must not be retried"
         );
+        assert_eq!(
+            ractor::call!(service, |reply| LspServiceMessage::PaymentOutcomeReady {
+                payment_hash,
+                payment_status: PaymentStatus::Failed,
+                failure: Some(format!("reworded: {reason}")),
+                failure_code: Some(TlcErrorCode::TemporaryNodeFailure),
+                reply,
+            })
+            .unwrap()
+            .unwrap(),
+            LspPaymentOutcomeDecision::SettleUpstream,
+        );
         let settling = manager.get_by_payment_hash(&payment_hash).unwrap().unwrap();
         assert_eq!(
             settling.status,
@@ -2643,4 +2655,391 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         })
         .unwrap();
     wait_for_delivery_status(&reopened, payment_hash, LspPaymentDeliveryStatus::Succeeded).await;
+}
+
+struct ReconciliationNetworkActor;
+
+#[async_trait]
+impl Actor for ReconciliationNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = (PaymentStatus, TlcErrorCode, Arc<AtomicUsize>);
+    type Arguments = Self::State;
+
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let NetworkActorMessage::Fiber(FiberActorMessage::Command(command)) = message else {
+            return Ok(());
+        };
+        match command {
+            FiberActorCommand::GetPayment(payment_hash, reply) => {
+                let _ = reply.send(Ok(crate::fiber::network::SendPaymentResponse {
+                    payment_hash,
+                    payment_preimage: None,
+                    status: state.0,
+                    created_at: 0,
+                    last_updated_at: 0,
+                    failed_error: Some("persisted session failure".to_string()),
+                    failed_error_code: Some(state.1),
+                    custom_records: None,
+                    fee: 0,
+                    routers: vec![],
+                }));
+            }
+            FiberActorCommand::ReconcileBufferedTrampolineSettlement { reply, .. } => {
+                state.2.fetch_add(1, Ordering::Relaxed);
+                let _ = reply.send(Ok(()));
+            }
+            FiberActorCommand::DispatchBufferedTrampoline { .. } => {
+                panic!("settling delivery must not redispatch")
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+async fn check_settling_delivery_reconciliation(code: TlcErrorCode, status: PaymentStatus) {
+    let root = tempdir().unwrap();
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let manager = LspPaymentDeliveryManager::new(store.clone());
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("reconciliation").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        private_channel_id: Some(Hash256::from([21; 32])),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([11; 32]);
+    let registration = LspInvoiceRegistry::new(store.clone())
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, payment_hash),
+            None,
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let delivery = manager
+        .accept(
+            &registration,
+            &tenant,
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            now,
+        )
+        .unwrap();
+    manager
+        .transition_with_error(
+            &delivery.key(),
+            LspPaymentDeliveryStatus::SettlingUpstream {
+                payment_status: PaymentStatus::Failed,
+                failure: Some("original settlement failure".to_string()),
+            },
+            Some(("original settlement failure".to_string(), Some(code))),
+            now,
+        )
+        .unwrap();
+    let settlements = Arc::new(AtomicUsize::new(0));
+    let (network, _) = Actor::spawn(
+        None,
+        ReconciliationNetworkActor,
+        (status, code, settlements.clone()),
+    )
+    .await
+    .unwrap();
+    let (service, _) = Actor::spawn(
+        None,
+        LspService,
+        LspServiceArgs {
+            config,
+            public_node_id: lsp_key.pubkey(),
+            public_network_actor: network.clone(),
+            watchtower_store: store.clone(),
+            store,
+            runtime_factory: Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+            signing_key: lsp_key,
+            token_issuer: test_token_issuer(),
+        },
+    )
+    .await
+    .unwrap();
+    // Startup queues ResumeDelivery before this barrier. An invalid transition kills the actor.
+    ractor::call_t!(service, LspServiceMessage::GetStatus, 2_000)
+        .expect("service survives reconciliation");
+    let recovered = manager.get(&delivery.key()).unwrap().unwrap();
+    assert_eq!(recovered.attempt_count, 0);
+    match status {
+        PaymentStatus::Success => assert_eq!(recovered.status, LspPaymentDeliveryStatus::Succeeded),
+        PaymentStatus::Failed => assert!(matches!(
+            recovered.status,
+            LspPaymentDeliveryStatus::Failed { .. }
+        )),
+        _ => assert_eq!(recovered.status, LspPaymentDeliveryStatus::InFlight),
+    }
+    assert_eq!(
+        settlements.load(Ordering::Relaxed),
+        usize::from(status.is_final())
+    );
+    service.stop(None);
+    network.stop(None);
+}
+
+#[tokio::test]
+async fn settling_delivery_does_not_retry_temporary_session_failure() {
+    check_settling_delivery_reconciliation(
+        TlcErrorCode::TemporaryNodeFailure,
+        PaymentStatus::Failed,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn settling_delivery_tolerates_changed_failure_description() {
+    check_settling_delivery_reconciliation(TlcErrorCode::InvoiceCancelled, PaymentStatus::Failed)
+        .await;
+}
+
+struct QueryingOutcomeActor;
+
+#[async_trait]
+impl Actor for QueryingOutcomeActor {
+    type Msg = LspServiceMessage;
+    type State = (
+        ActorRef<NetworkActorMessage>,
+        Option<tokio::sync::oneshot::Sender<bool>>,
+    );
+    type Arguments = Self::State;
+
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            LspServiceMessage::PaymentOutcomeReady {
+                payment_hash,
+                reply,
+                ..
+            } => {
+                // Deterministically exercise the reverse call while NetworkActor awaits our decision.
+                let result = ractor::call_t!(
+                    state.0,
+                    |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
+                        payment_hash,
+                        reply
+                    )),
+                    1_000
+                );
+                if !matches!(result, Ok(Ok(_))) {
+                    let _ = state.1.take().unwrap().send(false);
+                }
+                let _ = reply.send(Ok(LspPaymentOutcomeDecision::SettleUpstream));
+            }
+            LspServiceMessage::PaymentOutcomeSettled { .. } => {
+                if let Some(done) = state.1.take() {
+                    let _ = done.send(true);
+                }
+            }
+            LspServiceMessage::ListTenants(reply) => {
+                let _ = reply.send(Ok(vec![]));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn payment_outcome_notification_allows_network_queries_before_settlement() {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::network::{FiberActorEvent, PublicNetworkCommand};
+    use crate::fiber::payment::{PaymentSession, PaymentSessionExt};
+
+    let node = crate::tests::NetworkNode::new().await;
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("outcome-query").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: Privkey::from(&[3; 32]).pubkey(),
+        private_channel_id: Some(Hash256::from([21; 32])),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([91; 32]);
+    let request =
+        hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64())
+            .into_send_payment_data()
+            .unwrap();
+    let mut session = PaymentSession::new_session(&node.store, request, 0);
+    session.status = PaymentStatus::Failed;
+    node.store.insert_payment_session(session);
+    let (done, completion) = tokio::sync::oneshot::channel();
+    let (service, _) = Actor::spawn(
+        None,
+        QueryingOutcomeActor,
+        (node.network_actor.clone(), Some(done)),
+    )
+    .await
+    .unwrap();
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            PublicNetworkCommand::SetLspService(service.clone()),
+        ))
+        .unwrap();
+    node.network_actor
+        .send_message(NetworkActorMessage::Fiber(FiberActorMessage::Event(
+            FiberActorEvent::PaymentActorStopped(payment_hash, None),
+        )))
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), completion)
+            .await
+            .unwrap()
+            .unwrap(),
+        "NetworkActor must serve queries while awaiting the LSP outcome decision"
+    );
+    service.stop(None);
+}
+
+#[tokio::test]
+async fn settling_delivery_recovers_concurrent_success() {
+    check_settling_delivery_reconciliation(
+        TlcErrorCode::TemporaryNodeFailure,
+        PaymentStatus::Success,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn settling_delivery_recovers_running_payment_without_redispatch() {
+    check_settling_delivery_reconciliation(
+        TlcErrorCode::TemporaryNodeFailure,
+        PaymentStatus::Inflight,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn delayed_payment_outcome_does_not_settle_replacement_execution() {
+    use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::network::PublicNetworkCommand;
+    use crate::fiber::payment::{PaymentSession, PaymentSessionExt};
+
+    let node = crate::tests::NetworkNode::new().await;
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("outcome-replacement").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: Privkey::from(&[3; 32]).pubkey(),
+        private_channel_id: Some(Hash256::from([21; 32])),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([92; 32]);
+    let request =
+        hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64())
+            .into_send_payment_data()
+            .unwrap();
+    let mut original = PaymentSession::new_session(&node.store, request, 0);
+    original.status = PaymentStatus::Failed;
+    let mut replacement = original.clone();
+    // Even identical timestamps/status must not confuse two incoming TLC executions.
+    replacement
+        .request
+        .trampoline_context
+        .as_mut()
+        .unwrap()
+        .previous_tlcs[0]
+        .prev_tlc_id += 1;
+    node.store.insert_payment_session(replacement.clone());
+    let (done, mut completion) = tokio::sync::oneshot::channel();
+    let (service, _) = Actor::spawn(
+        None,
+        QueryingOutcomeActor,
+        (node.network_actor.clone(), Some(done)),
+    )
+    .await
+    .unwrap();
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            PublicNetworkCommand::SetLspService(service.clone()),
+        ))
+        .unwrap();
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SettleLspPaymentOutcome {
+                session: Box::new(original),
+                last_error_packet: None,
+            },
+        ))
+        .unwrap();
+    ractor::call_t!(
+        node.network_actor,
+        |reply| NetworkActorMessage::new_command(FiberActorCommand::GetPayment(
+            payment_hash,
+            reply
+        )),
+        1_000
+    )
+    .unwrap()
+    .unwrap();
+    ractor::call_t!(service, LspServiceMessage::ListTenants, 1_000)
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            completion.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "stale outcome must not report the replacement execution as settled"
+    );
+    node.network_actor
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SettleLspPaymentOutcome {
+                session: Box::new(replacement),
+                last_error_packet: None,
+            },
+        ))
+        .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), completion)
+        .await
+        .unwrap()
+        .unwrap());
+    service.stop(None);
+}
+
+#[test]
+fn settling_delivery_only_upgrades_failure_to_proven_success() {
+    let failure = LspPaymentDeliveryStatus::SettlingUpstream {
+        payment_status: PaymentStatus::Failed,
+        failure: Some("buffer expired".to_string()),
+    };
+    let success = LspPaymentDeliveryStatus::SettlingUpstream {
+        payment_status: PaymentStatus::Success,
+        failure: None,
+    };
+    assert!(failure.check_next_valid(&success));
+    assert!(!success.check_next_valid(&failure));
+    assert!(!failure.check_next_valid(&LspPaymentDeliveryStatus::Deferred));
+    assert!(!success.check_next_valid(&LspPaymentDeliveryStatus::Deferred));
 }

@@ -1202,6 +1202,12 @@ pub enum FiberActorCommand {
         error_code: TlcErrorCode,
         reply: RpcReplyPort<Result<bool, String>>,
     },
+    /// Continue settlement after the LSP has durably accepted this session's outcome.
+    #[cfg(not(target_arch = "wasm32"))]
+    SettleLspPaymentOutcome {
+        session: Box<PaymentSession>,
+        last_error_packet: Option<TlcErrPacket>,
+    },
     // Build a payment router with the given hops
     BuildPaymentRouter(
         BuildRouterCommand,
@@ -2567,7 +2573,7 @@ where
             }
             FiberActorEvent::PaymentActorStopped(payment_hash, last_error_packet) => {
                 state
-                    .on_payment_actor_stopped(payment_hash, last_error_packet)
+                    .on_payment_actor_stopped(myself, payment_hash, last_error_packet)
                     .await;
             }
             FiberActorEvent::ChannelSettlementCompleted(channel_id) => {
@@ -3483,6 +3489,37 @@ where
                     .fail_buffered_trampoline(state, lsp_service, request, reason, error_code)
                     .await;
                 let _ = reply.send(result);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            FiberActorCommand::SettleLspPaymentOutcome {
+                session,
+                last_error_packet,
+            } => {
+                let payment_hash = session.request.payment_hash;
+                // The actor kept processing messages while the LSP decided. Do not apply a
+                // delayed decision (or its error packet) to a newer retry/execution of this hash.
+                if let Some(current) = state.store.get_payment_session(payment_hash) {
+                    if current.created_at == session.created_at
+                        && current.last_updated_at == session.last_updated_at
+                        && current.status == session.status
+                        && current.last_error == session.last_error
+                        && current.last_error_code == session.last_error_code
+                        && current
+                            .request
+                            .trampoline_context
+                            .as_ref()
+                            .map(|c| &c.previous_tlcs)
+                            == session
+                                .request
+                                .trampoline_context
+                                .as_ref()
+                                .map(|c| &c.previous_tlcs)
+                    {
+                        state
+                            .settle_payment_outcome(&current, last_error_packet.as_ref())
+                            .await;
+                    }
+                }
             }
             FiberActorCommand::GetInflightPaymentCount(reply) => {
                 let _ = reply.send(Ok(state.inflight_payments.len() as u32));
@@ -8177,6 +8214,7 @@ where
 
     async fn on_payment_actor_stopped(
         &mut self,
+        _myself: FiberActorRef,
         payment_hash: Hash256,
         last_error_packet: Option<TlcErrPacket>,
     ) {
@@ -8202,36 +8240,55 @@ where
 
         #[cfg(not(target_arch = "wasm32"))]
         if session.status.is_final() {
-            if let Some(lsp_service) = self.lsp_service.as_ref() {
-                let ready = ractor::call_t!(
-                    lsp_service,
-                    |reply| LspServiceMessage::PaymentOutcomeReady {
-                        payment_hash,
-                        payment_status: session.status,
-                        failure: session.last_error.clone(),
-                        failure_code: session.last_error_code,
-                        reply,
-                    },
-                    5_000
-                );
-                match ready {
-                    Ok(Ok(LspPaymentOutcomeDecision::SettleUpstream)) => {}
-                    Ok(Ok(LspPaymentOutcomeDecision::RetryDelivery)) => {
-                        return;
+            if let Some(lsp_service) = self.lsp_service.clone() {
+                // LspService itself calls NetworkActor during recovery and tenant activation.
+                // Await its decision outside this handler so those calls can be served.
+                crate::tasks::spawn(async move {
+                    let ready = ractor::call_t!(
+                        lsp_service,
+                        |reply| LspServiceMessage::PaymentOutcomeReady {
+                            payment_hash,
+                            payment_status: session.status,
+                            failure: session.last_error.clone(),
+                            failure_code: session.last_error_code,
+                            reply,
+                        },
+                        5_000
+                    );
+                    match ready {
+                        Ok(Ok(LspPaymentOutcomeDecision::SettleUpstream)) => {
+                            let _ = _myself.send_message(FiberActorMessage::new_command(
+                                FiberActorCommand::SettleLspPaymentOutcome {
+                                    session: Box::new(session),
+                                    last_error_packet,
+                                },
+                            ));
+                        }
+                        Ok(Ok(LspPaymentOutcomeDecision::RetryDelivery)) => {}
+                        ready => {
+                            warn!(
+                                %payment_hash,
+                                ?ready,
+                                "Failed to persist hosted payment outcome before upstream settlement"
+                            );
+                        }
                     }
-                    ready => {
-                        warn!(
-                            %payment_hash,
-                            ?ready,
-                            "Failed to persist hosted payment outcome before upstream settlement"
-                        );
-                        return;
-                    }
-                }
+                });
+                return;
             }
         }
+        self.settle_payment_outcome(&session, last_error_packet.as_ref())
+            .await;
+    }
+
+    async fn settle_payment_outcome(
+        &mut self,
+        session: &PaymentSession,
+        last_error_packet: Option<&TlcErrPacket>,
+    ) {
+        let payment_hash = session.request.payment_hash;
         let settlement = self
-            .settle_trampoline_payment(&session, last_error_packet.as_ref(), None)
+            .settle_trampoline_payment(session, last_error_packet, None)
             .await;
         if let Err(error) = &settlement {
             warn!(%payment_hash, %error, "Failed to settle upstream trampoline payment");
