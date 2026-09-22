@@ -119,13 +119,13 @@ pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
-    blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
-    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingTxSignaturesFlags,
+    ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags,
+    EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords,
+    PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey,
+    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -3604,6 +3604,11 @@ where
                         .is_some_and(|tlc| tlc.removed_reason.is_none())
                     {
                         channel_state.tlc_state.set_offered_tlc_removed(id, reason);
+                    }
+                    if let Some(tlc) = channel_state.tlc_state.get_mut(&downstream_tlc_id) {
+                        // Persist relay completion even when a peer fulfill already set the
+                        // removal reason before the channel closed.
+                        tlc.applied_flags.insert(AppliedFlags::REMOVE);
                         self.store.insert_channel_actor_state(channel_state);
                     }
                 }

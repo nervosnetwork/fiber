@@ -11,7 +11,7 @@ use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use fiber_types::{
-    ChannelData, ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus,
+    AppliedFlags, ChannelData, ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus,
     OutboundTlcStatus, Pubkey, RemoveTlcReason, SettlementData, TLCId, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
@@ -674,8 +674,18 @@ pub(crate) fn has_unresolved_onchain_tlcs(
 }
 
 pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
-    if tlc.removed_reason.is_some() || tlc.removed_confirmed_at.is_some() {
+    if tlc.removed_confirmed_at.is_some() {
         return false;
+    }
+
+    if let Some(reason) = &tlc.removed_reason {
+        // A peer fulfill received during force-close may never finish its remove handshake.
+        // Keep the forwarded TLC pending until its upstream delivery is durable, even though
+        // the preimage and removal reason were already recorded locally.
+        return tlc.is_offered()
+            && tlc.forwarding_tlc.is_some()
+            && matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
+            && !tlc.applied_flags.contains(AppliedFlags::REMOVE);
     }
 
     if tlc.is_offered() {

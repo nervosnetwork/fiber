@@ -3831,6 +3831,11 @@ where
                     {
                         state.tlc_state.set_offered_tlc_removed(id, reason);
                     }
+                    if let Some(tlc) = state.tlc_state.get_mut(&tlc_id) {
+                        // Receipt of a peer fulfill alone does not prove upstream delivery.
+                        // Only this durable relay acknowledgement completes its side effects.
+                        tlc.applied_flags.insert(AppliedFlags::REMOVE);
+                    }
                 }
                 if state.is_waiting_onchain_settlement() && state.is_onchain_settlement_confirmed()
                 {

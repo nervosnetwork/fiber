@@ -5091,6 +5091,17 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_closed_channel_upstream_fulfillment_from_onchain_preimage() {
+    assert_closed_channel_upstream_fulfillment(false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_closed_channel_upstream_fulfillment_after_uncommitted_peer_fulfill() {
+    assert_closed_channel_upstream_fulfillment(true).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_closed_channel_upstream_fulfillment(uncommitted_peer_fulfill: bool) {
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_network(
@@ -5166,6 +5177,32 @@ async fn test_closed_channel_upstream_fulfillment_from_onchain_preimage() {
         )
     })
     .await;
+
+    if uncommitted_peer_fulfill {
+        // Restore the state left by a peer fulfill received before the close confirmed,
+        // without relying on the mock chain's immediate confirmation timing.
+        let mut state = node_1.get_channel_actor_state(channels[1]);
+        state.tlc_state.set_offered_tlc_removed(
+            downstream_tlc.id(),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: hold_preimage,
+            }),
+        );
+        assert!(state
+            .tlc_state
+            .get(&downstream_tlc.tlc_id)
+            .unwrap()
+            .removed_confirmed_at
+            .is_none());
+        node_1
+            .update_channel_actor_state(
+                state,
+                Some(ReloadParams {
+                    notify_changes: false,
+                }),
+            )
+            .await;
+    }
 
     // Simulate watchtower on-chain preimage discovery: only the preimage is stored, NOT the
     // `WithoutPreimage` (no-preimage) marker. The two are mutually exclusive; writing the settled
