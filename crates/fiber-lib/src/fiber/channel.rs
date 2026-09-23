@@ -10823,6 +10823,45 @@ impl ChannelActorState {
         }
     }
 
+    /// Peer material for the exact persisted external signing request.
+    pub fn external_signing_peer_evidence(
+        &self,
+    ) -> Result<(PubNonce, Option<PartialSignature>), String> {
+        let request = &self
+            .signing_context
+            .pending_signature
+            .as_ref()
+            .ok_or("missing signing request")?
+            .request;
+        let (nonce, signature) = match request {
+            ChannelSignatureRequest::CompleteReceivedCommitment {
+                peer_partial_signature,
+                ..
+            } => (
+                self.last_committed_remote_nonce.clone(),
+                Some(*peer_partial_signature),
+            ),
+            ChannelSignatureRequest::SendCommitmentSigned { .. }
+            | ChannelSignatureRequest::SendClosingSigned { .. } => {
+                (self.last_committed_remote_nonce.clone(), None)
+            }
+            ChannelSignatureRequest::SendRevokeAndAck { .. } => {
+                (self.remote_revocation_nonce_for_send.clone(), None)
+            }
+            ChannelSignatureRequest::CompleteReceivedRevokeAndAck {
+                peer_partial_signature,
+                ..
+            } => (
+                self.remote_revocation_nonce_for_verify.clone(),
+                Some(*peer_partial_signature),
+            ),
+            ChannelSignatureRequest::SignChannelAnnouncement { .. } => {
+                (self.get_remote_channel_announcement_nonce(), None)
+            }
+        };
+        Ok((nonce.ok_or("missing peer public nonce")?, signature))
+    }
+
     fn get_funding_common_context(&self) -> Musig2CommonContext {
         let local_first = self.should_local_go_first_in_musig2();
         let key_agg_ctx = self.get_deterministic_musig2_agg_context();

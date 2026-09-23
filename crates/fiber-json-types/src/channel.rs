@@ -632,10 +632,26 @@ pub enum ChannelSigningStatus {
         transition: ChannelSigningTransition,
         /// Structured MuSig2 plaintext independently hashed by the external signer.
         content: Musig2SigningContent,
+        /// Participant nonce and peer partial signature for independent session verification.
+        session_evidence: SigningSessionEvidence,
         /// Balance and TLC snapshot captured with this commitment, when present.
         #[serde(default)]
         settlement: Option<SigningSettlement>,
     },
+}
+
+/// Participant evidence bound to the enclosing signing request.
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SigningSessionEvidence {
+    /// Counterparty public nonce (66 bytes), never an aggregate nonce.
+    #[serde_as(as = "SliceHex")]
+    #[schemars(schema_with = "schema_as_hex_bytes")]
+    pub peer_public_nonce: Vec<u8>,
+    /// Counterparty partial signature (32 bytes), required on received-message phases.
+    #[serde_as(as = "Option<SliceHex>")]
+    #[schemars(schema_with = "schema_as_hex_bytes_optional")]
+    pub peer_partial_signature: Option<Vec<u8>>,
 }
 
 /// Public settlement snapshot attached to a commitment signing request.
@@ -668,6 +684,14 @@ pub struct SigningSettlement {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SigningSettlementTlc {
+    /// Stable TLC id within its wallet-relative direction. Required for safe state tracking.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub tlc_id: u64,
+    /// Signer-owned key derivation index. External-signing clients reject missing indices.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub local_key_commitment_number: u64,
     /// Whether this TLC is inbound to the local party.
     pub inbound: bool,
     /// Payment hash locked by this TLC.

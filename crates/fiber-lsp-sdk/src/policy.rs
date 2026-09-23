@@ -16,10 +16,8 @@ pub enum SigningPolicy {
     /// Approve every prepared request. Compiled only for in-tree tests.
     #[cfg(any(test, feature = "test-apis"))]
     Always,
-    /// Auto-approve inbound settlements for invoices this client issued.
-    /// The snapshot must hash into the commitment lock args, and local
-    /// balance must not fall. Outbound payments and on-chain claims
-    /// require confirmation.
+    /// Auto-approve verified inbound updates after opening. Opening, outbound
+    /// changes, revocation and non-commitment operations require confirmation.
     Auto,
     /// Every signature requires an explicit user confirmation.
     Manual,
@@ -36,7 +34,9 @@ pub enum SigningDecision {
     Deny,
 }
 
-/// Client-owned invoice and payment memory used by [`SigningPolicy::Auto`].
+/// Legacy application bookkeeping used by [`SigningPolicy::decide`].
+/// This hash-only registry does not authorize commitments in the hosted session;
+/// use the channel signer's persisted payment authorizations instead.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PaymentRegistry {
     /// Payment hashes of invoices this client created and still considers live.
@@ -65,7 +65,7 @@ impl PaymentRegistry {
 }
 
 /// Owned settlement snapshot plus the keys needed to hash it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OwnedSettlementBinding {
     /// Balance and TLC set claimed for this commitment.
     pub data: SettlementData,
@@ -118,7 +118,34 @@ pub struct SigningPolicyInput<'a> {
 }
 
 impl SigningPolicy {
-    /// Evaluate one prepared request.
+    /// Decide from an immutable SDK preparation. Commitment automation requires the
+    /// mandatory verifier's result, not a node-supplied balance or a hash-only registry.
+    pub fn decide_prepared(self, prepared: &crate::PreparedSigning) -> SigningDecision {
+        if prepared.review().warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                SigningWarning::NoncePreviouslyUsedForDifferentMessage { .. }
+            )
+        }) {
+            return SigningDecision::Deny;
+        }
+        match self {
+            #[cfg(any(test, feature = "test-apis"))]
+            Self::Always => SigningDecision::Allow,
+            Self::Manual => SigningDecision::RequireConfirmation,
+            Self::Auto => match &prepared.validation {
+                crate::protocol::PreparedValidation::Commitment { review, .. }
+                    if review.version > 1 && !review.has_outbound_changes =>
+                {
+                    SigningDecision::Allow
+                }
+                _ => SigningDecision::RequireConfirmation,
+            },
+        }
+    }
+
+    /// Legacy additional policy check. Does not perform mandatory commitment validation.
+    /// Prefer [`Self::decide_prepared`]; a payment-hash registry is not a spending authorization.
     pub fn decide(self, input: SigningPolicyInput<'_>) -> SigningDecision {
         match self {
             #[cfg(any(test, feature = "test-apis"))]
@@ -140,7 +167,7 @@ fn decide_auto(input: SigningPolicyInput<'_>) -> SigningDecision {
     }
 
     match input.review.intent {
-        SigningIntent::Revocation => SigningDecision::Allow,
+        SigningIntent::Revocation => SigningDecision::RequireConfirmation,
         SigningIntent::CommitmentTransaction => decide_auto_commitment(input),
         SigningIntent::CooperativeCloseTransaction
         | SigningIntent::ChannelAnnouncement

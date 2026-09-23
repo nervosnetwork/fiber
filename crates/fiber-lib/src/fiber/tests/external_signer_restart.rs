@@ -1,7 +1,7 @@
 use ckb_types::{
     core::FeeRate,
     packed::{Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, Pack},
+    prelude::{AsTransactionBuilder, Entity},
 };
 use fiber_json_types::{
     ChannelSigningStatus, ChannelSigningTransition, GetChannelSigningStatusParams,
@@ -136,7 +136,145 @@ impl ExternalSignerHttpClient<'_> {
     }
 }
 
-async fn prepare_hosted_signature(
+/// Register opening terms from trusted test setup, never from a signing response.
+pub(crate) async fn approve_fixture_opening(
+    signer: &ChannelSigner<MemoryStore>,
+    funding: &Transaction,
+    state: &crate::fiber::channel::ChannelActorState,
+    local_view: bool,
+) {
+    let remote = if local_view {
+        state.remote_channel_public_keys.as_ref().unwrap()
+    } else {
+        &state.local_channel_public_keys
+    };
+    let (local_amount, remote_amount, local_reserved, remote_reserved) = if local_view {
+        (
+            state.to_local_amount,
+            state.to_remote_amount,
+            state.local_reserved_ckb_amount,
+            state.remote_reserved_ckb_amount,
+        )
+    } else {
+        (
+            state.to_remote_amount,
+            state.to_local_amount,
+            state.remote_reserved_ckb_amount,
+            state.local_reserved_ckb_amount,
+        )
+    };
+    let ckb = state.funding_udt_type_script.is_none();
+    signer
+        .approve_commitment_parameters(
+            funding,
+            fiber_lsp_sdk::CommitmentParameters {
+                remote_shutdown_script: if local_view {
+                    state.get_remote_shutdown_script()
+                } else {
+                    state.get_local_shutdown_script()
+                },
+                remote_funding_key: remote.funding_pubkey,
+                remote_settlement_key: remote.tlc_base_key,
+                commitment_lock: crate::ckb::contracts::get_script_by_contract(
+                    crate::ckb::contracts::Contract::CommitmentLock,
+                    &[],
+                ),
+                delay_epoch: ckb_sdk::Since::new(
+                    ckb_sdk::SinceType::EpochNumberWithFraction,
+                    state.commitment_delay_epoch,
+                    true,
+                )
+                .value()
+                .to_le_bytes(),
+                epoch_duration_ms: crate::fiber::config::MILLI_SECONDS_PER_EPOCH,
+                commitment_fee: crate::fiber::fee::checked_calculate_commitment_tx_fee(
+                    state.commitment_fee_rate,
+                    &state.funding_udt_type_script,
+                )
+                .unwrap(),
+                local_amount: local_amount + if ckb { u128::from(local_reserved) } else { 0 },
+                remote_amount: remote_amount + if ckb { u128::from(remote_reserved) } else { 0 },
+                local_reserved_ckb_amount: local_reserved,
+                remote_reserved_ckb_amount: remote_reserved,
+            },
+        )
+        .await
+        .unwrap();
+    if state.is_public() {
+        let mut keys = [
+            state.local_channel_public_keys.funding_pubkey,
+            state
+                .remote_channel_public_keys
+                .as_ref()
+                .unwrap()
+                .funding_pubkey,
+        ];
+        keys.sort();
+        let ctx = musig2::KeyAggContext::new(keys).unwrap();
+        let key: musig2::secp::Point = ctx.aggregated_pubkey();
+        let mut nodes = [state.local_pubkey, state.remote_pubkey];
+        nodes.sort();
+        signer
+            .approve_announcement(fiber_types::ChannelAnnouncement::new_unsigned(
+                &nodes[0],
+                &nodes[1],
+                ckb_types::packed::OutPoint::new(funding.calc_tx_hash(), 0),
+                crate::fiber::network::get_chain_hash(),
+                &secp256k1::XOnlyPublicKey::from_slice(&key.serialize_xonly()).unwrap(),
+                local_amount + remote_amount,
+                state.funding_udt_type_script.clone(),
+            ))
+            .await
+            .unwrap();
+    }
+}
+
+// Secrets belong to the test driver; restarting the SDK restores only its verified ledger.
+static FIXTURE_PREIMAGES: std::sync::LazyLock<Mutex<std::collections::HashMap<Hash256, Hash256>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Authorize a payment created by the test driver, including its known preimage.
+pub(crate) async fn approve_fixture_payment(
+    signer: &ChannelSigner<MemoryStore>,
+    hash: Hash256,
+    preimage: Hash256,
+    amount: u128,
+    inbound: bool,
+) {
+    let now = crate::now_timestamp_as_millis_u64();
+    let terms = fiber_lsp_sdk::PaymentAuthorization {
+        payment_hash: hash,
+        hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+        inbound,
+        amount,
+        expires_at_ms: now + 120_000,
+        min_tlc_expiry_delta_ms: 1,
+        max_tlc_expiry_ms: u64::MAX,
+    };
+    if inbound {
+        signer.authorize_invoice(terms, preimage).await.unwrap();
+    } else {
+        signer.authorize_payment(terms).await.unwrap();
+    }
+    FIXTURE_PREIMAGES.lock().unwrap().insert(hash, preimage);
+}
+
+pub(crate) async fn approve_fixture_keysend(
+    signer: &ChannelSigner<MemoryStore>,
+    sender: &NetworkNode,
+    hash: Hash256,
+    amount: u128,
+    inbound: bool,
+) {
+    let preimage = sender
+        .get_payment_session(hash)
+        .unwrap()
+        .request
+        .preimage
+        .unwrap();
+    approve_fixture_payment(signer, hash, preimage, amount, inbound).await;
+}
+pub(crate) async fn prepare_hosted_signature(
     signer: &ChannelSigner<MemoryStore>,
     channel_id: Hash256,
     status: ChannelSigningStatus,
@@ -144,34 +282,110 @@ async fn prepare_hosted_signature(
     let ChannelSigningStatus::SignatureRequired {
         request_id,
         content,
-        ..
+        transition,
+        settlement,
+        session_evidence,
     } = status
     else {
-        panic!("hosted channel must have a pending signing request");
+        panic!("expected signing request")
     };
-    let content =
-        fiber_lsp_sdk::json::musig2_from_rpc(content).expect("hosted signing content must decode");
-    let slot = content.slot;
-    let prepared = signer
-        .prepare(ChannelSigningContent::Musig2(content))
-        .await
-        .expect("prepare hosted external signature");
-    let ChannelSignature::Musig2(signature) = signer
-        .sign(prepared)
-        .await
-        .expect("sign hosted external request")
-    else {
-        panic!("hosted channel request must use MuSig2");
+    let m = fiber_lsp_sdk::json::musig2_from_rpc(content).unwrap();
+    let slot = m.slot;
+    let content = ChannelSigningContent::Musig2(m);
+    let session = fiber_lsp_sdk::json::session_evidence_from_rpc(session_evidence).unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let signature = match transition {
+        ChannelSigningTransition::SendCommitmentSigned
+        | ChannelSigningTransition::CompleteReceivedCommitment => {
+            let (data, local_settlement_key, remote_settlement_key, for_remote) =
+                fiber_lsp_sdk::json::settlement_from_rpc(&settlement.unwrap()).unwrap();
+            let records = signer.recovery_records().await.unwrap();
+            if let Some(previous) = records
+                .iter()
+                .rev()
+                .find(|r| r.reference.for_remote == for_remote)
+            {
+                for old in &previous.settlement.data.tlcs {
+                    if !data.tlcs.iter().any(|t| t.payment_hash == old.payment_hash) {
+                        let preimage = FIXTURE_PREIMAGES
+                            .lock()
+                            .unwrap()
+                            .get(&old.payment_hash)
+                            .copied()
+                            .expect("test driver owns fulfillment preimage");
+                        signer
+                            .authorize_fulfillment(old.payment_hash, preimage)
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            let context = fiber_lsp_sdk::CommitmentContext {
+                transition: if transition == ChannelSigningTransition::SendCommitmentSigned {
+                    fiber_types::ChannelSigningTransition::SendCommitmentSigned
+                } else {
+                    fiber_types::ChannelSigningTransition::CompleteReceivedCommitment
+                },
+                session,
+                settlement: fiber_lsp_sdk::OwnedSettlementBinding {
+                    data,
+                    local_settlement_key,
+                    remote_settlement_key,
+                    for_remote: Some(for_remote),
+                },
+            };
+            let prepared = signer
+                .prepare_commitment(content, context, now)
+                .await
+                .unwrap();
+            signer.sign_commitment(prepared, now).await.unwrap()
+        }
+        ChannelSigningTransition::SendRevokeAndAck
+        | ChannelSigningTransition::CompleteReceivedRevokeAndAck => {
+            let receiving = transition == ChannelSigningTransition::CompleteReceivedRevokeAndAck;
+            let records = signer.recovery_records().await.unwrap();
+            let find = |version| {
+                records
+                    .iter()
+                    .find(|r| r.reference.for_remote == receiving && r.reference.version == version)
+                    .unwrap()
+                    .reference
+                    .clone()
+            };
+            let context = fiber_lsp_sdk::RevocationContext {
+                transition: if receiving {
+                    fiber_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck
+                } else {
+                    fiber_types::ChannelSigningTransition::SendRevokeAndAck
+                },
+                session,
+                revoked: find(slot.commitment_number - 1),
+                replacement: find(slot.commitment_number),
+            };
+            let prepared = signer
+                .prepare_revocation(content, context, now)
+                .await
+                .unwrap();
+            signer.sign_revocation(prepared, now).await.unwrap()
+        }
+        ChannelSigningTransition::SendClosingSigned => {
+            let prepared = signer.prepare_close(content, session).await.unwrap();
+            signer.sign(prepared).await.unwrap()
+        }
+        ChannelSigningTransition::SignChannelAnnouncement => {
+            let prepared = signer.prepare_announcement(content, session).await.unwrap();
+            signer.sign(prepared).await.unwrap()
+        }
     };
-    let next_material = signer
-        .next_material(slot)
-        .await
-        .expect("load next hosted signer material");
+    let ChannelSignature::Musig2(signature) = signature else {
+        panic!("expected MuSig2")
+    };
+    let next = signer.next_material(slot).await.unwrap();
     SubmitChannelSignatureParams {
         channel_id: channel_id.into(),
         request_id,
         partial_signature: signature.partial_signature.serialize(),
-        next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
+        next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next)),
     }
 }
 
@@ -224,62 +438,7 @@ pub async fn setup_restartable_external_channel(
     is_public: bool,
     signer: &ChannelSigner<MemoryStore>,
 ) -> ([NetworkNode; 2], Hash256) {
-    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
-        let mut builder = NetworkNodeConfigBuilder::new()
-            .node_name(Some(format!("signer-restart-node-{index}")))
-            .base_dir_prefix(&format!("signer-restart-node-{index}-"));
-        if index == 0 {
-            builder = builder.rpc_config(Some(gen_rpc_config()));
-        } else {
-            builder = builder.fiber_config_updater(|config| {
-                config.auto_accept_channel_ckb_funding_amount =
-                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
-            });
-        }
-        builder.build()
-    })
-    .await;
-    let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().unwrap();
-    let material = signer.channel_open_material(is_public).await.unwrap();
-
-    let open: OpenChannelWithExternalFundingResult = node_a
-        .send_rpc_request(
-            "open_channel_with_external_funding",
-            OpenChannelWithExternalFundingParams {
-                pubkey: node_b.pubkey.into(),
-                funding_amount: 100_000_000_000,
-                public: Some(is_public),
-                funding_udt_type_script: None,
-                shutdown_script: Script::default().into(),
-                funding_lock_script: Script::default().into(),
-                funding_lock_script_cell_deps: None,
-                commitment_delay_epoch: None,
-                commitment_fee_rate: None,
-                funding_fee_rate: None,
-                tlc_expiry_delta: None,
-                tlc_min_value: None,
-                tlc_fee_proportional_millionths: None,
-                max_tlc_value_in_flight: None,
-                max_tlc_number_in_flight: None,
-                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
-            },
-        )
-        .await
-        .unwrap();
-
-    let channel_id: Hash256 = open.channel_id.into();
-    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    bind_external_signer(signer, &unsigned_tx, Script::default()).await;
-    let _: SubmitSignedFundingTxResult = node_a
-        .send_rpc_request(
-            "submit_signed_funding_tx",
-            SubmitSignedFundingTxParams {
-                channel_id: channel_id.into(),
-                signed_funding_tx: mock_sign_external_funding_tx(&unsigned_tx).into(),
-            },
-        )
-        .await
-        .unwrap();
+    let ([node_a, node_b], channel_id, _) = setup_pending_external_channel(is_public, signer).await;
 
     let sdk = ExternalSignerHttpClient {
         node: &node_a,
@@ -335,6 +494,7 @@ pub async fn setup_restartable_external_channel(
             .send_payment_keysend(&node_b, 1_000_000, false)
             .await
             .expect("seed acceptor outbound liquidity");
+        approve_fixture_keysend(signer, &node_a, seed_payment.payment_hash, 1_000_000, false).await;
         let settled = wait_for_external_signer_recovery(
             &node_a,
             &node_b,
@@ -347,6 +507,325 @@ pub async fn setup_restartable_external_channel(
     }
 
     ([node_a, node_b], channel_id)
+}
+
+async fn setup_pending_external_channel(
+    is_public: bool,
+    signer: &ChannelSigner<MemoryStore>,
+) -> ([NetworkNode; 2], Hash256, Transaction) {
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("signer-restart-node-{index}")))
+            .base_dir_prefix(&format!("signer-restart-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().unwrap();
+    let material = signer.channel_open_material(is_public).await.unwrap();
+
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: 100_000_000_000,
+                public: Some(is_public),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .unwrap();
+
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    bind_external_signer(signer, &unsigned_tx, Script::default()).await;
+    approve_fixture_opening(
+        signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: mock_sign_external_funding_tx(&unsigned_tx).into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    ([node_a, node_b], channel_id, unsigned_tx)
+}
+
+/// Exercise the mandatory SDK validator against real ChannelActor/RPC opening requests.
+#[tokio::test]
+async fn test_sdk_validates_real_opening_commitments() {
+    init_tracing();
+    let (_restartable, signer) = RestartableExternalSigner::create().await;
+    let ([node_a, node_b], channel_id, _funding) =
+        setup_pending_external_channel(false, &signer).await;
+    let mut verified = 0;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            ) && node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|s| matches!(s.state, ChannelState::ChannelReady))
+            {
+                break;
+            }
+            if let ChannelSigningStatus::SignatureRequired {
+                request_id,
+                transition,
+                content,
+                settlement,
+                session_evidence,
+            } = get_signing_status(&node_a, channel_id)
+                .await
+                .unwrap()
+                .status
+            {
+                let transition = match transition {
+                    ChannelSigningTransition::SendCommitmentSigned => {
+                        fiber_types::ChannelSigningTransition::SendCommitmentSigned
+                    }
+                    ChannelSigningTransition::CompleteReceivedCommitment => {
+                        fiber_types::ChannelSigningTransition::CompleteReceivedCommitment
+                    }
+                    other => panic!("unexpected opening transition {other:?}"),
+                };
+                let (data, local_settlement_key, remote_settlement_key, for_remote) =
+                    fiber_lsp_sdk::json::settlement_from_rpc(&settlement.unwrap()).unwrap();
+                let context = fiber_lsp_sdk::CommitmentContext {
+                    transition,
+                    session: fiber_lsp_sdk::json::session_evidence_from_rpc(session_evidence)
+                        .unwrap(),
+                    settlement: fiber_lsp_sdk::OwnedSettlementBinding {
+                        data,
+                        local_settlement_key,
+                        remote_settlement_key,
+                        for_remote: Some(for_remote),
+                    },
+                };
+                let content = fiber_lsp_sdk::json::musig2_from_rpc(content).unwrap();
+                let slot = content.slot;
+                let prepared = signer
+                    .prepare_commitment(ChannelSigningContent::Musig2(content), context, 0)
+                    .await
+                    .unwrap();
+                let ChannelSignature::Musig2(signature) =
+                    signer.sign_commitment(prepared, 0).await.unwrap()
+                else {
+                    panic!()
+                };
+                let next = signer.next_material(slot).await.unwrap();
+                submit_signature(
+                    &node_a,
+                    SubmitChannelSignatureParams {
+                        channel_id: channel_id.into(),
+                        request_id,
+                        partial_signature: signature.partial_signature.serialize(),
+                        next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next)),
+                    },
+                )
+                .await
+                .unwrap();
+                verified += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("verified opening reaches ChannelReady");
+    assert_eq!(verified, 2);
+    // Exercise all real commitment/revocation phases with mandatory SDK validation.
+    for inbound in [false, true] {
+        let (sender, receiver) = if inbound {
+            (&node_b, &node_a)
+        } else {
+            (&node_a, &node_b)
+        };
+        let payment = sender
+            .send_payment_keysend(receiver, 10_000, false)
+            .await
+            .unwrap();
+        let preimage = sender
+            .get_payment_session(payment.payment_hash)
+            .unwrap()
+            .request
+            .preimage
+            .unwrap();
+        let now = crate::now_timestamp_as_millis_u64();
+        let authorization = fiber_lsp_sdk::PaymentAuthorization {
+            payment_hash: payment.payment_hash,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            inbound,
+            amount: 10_000,
+            expires_at_ms: now + 60_000,
+            min_tlc_expiry_delta_ms: 1,
+            max_tlc_expiry_ms: u64::MAX,
+        };
+        if inbound {
+            signer
+                .authorize_invoice(authorization, preimage)
+                .await
+                .unwrap();
+        } else {
+            signer.authorize_payment(authorization).await.unwrap();
+        }
+        let mut resolved = false;
+        let mut revocations = 0;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let status = get_signing_status(&node_a, channel_id)
+                    .await
+                    .unwrap()
+                    .status;
+                if let ChannelSigningStatus::SignatureRequired {
+                    request_id,
+                    transition,
+                    content,
+                    settlement,
+                    session_evidence,
+                } = status
+                {
+                    let session =
+                        fiber_lsp_sdk::json::session_evidence_from_rpc(session_evidence).unwrap();
+                    let m = fiber_lsp_sdk::json::musig2_from_rpc(content).unwrap();
+                    let slot = m.slot;
+                    let content = ChannelSigningContent::Musig2(m);
+                    let now = crate::now_timestamp_as_millis_u64();
+                    let signature = if let Some(settlement) = settlement {
+                        let (data, local_settlement_key, remote_settlement_key, for_remote) =
+                            fiber_lsp_sdk::json::settlement_from_rpc(&settlement).unwrap();
+                        if !resolved
+                            && data.tlcs.is_empty()
+                            && signer.recovery_records().await.unwrap().iter().any(|r| {
+                                r.settlement
+                                    .data
+                                    .tlcs
+                                    .iter()
+                                    .any(|t| t.payment_hash == payment.payment_hash)
+                            })
+                        {
+                            signer
+                                .authorize_fulfillment(payment.payment_hash, preimage)
+                                .await
+                                .unwrap();
+                            resolved = true;
+                        }
+                        let context = fiber_lsp_sdk::CommitmentContext {
+                            transition: if for_remote {
+                                fiber_types::ChannelSigningTransition::SendCommitmentSigned
+                            } else {
+                                fiber_types::ChannelSigningTransition::CompleteReceivedCommitment
+                            },
+                            session,
+                            settlement: fiber_lsp_sdk::OwnedSettlementBinding {
+                                data,
+                                local_settlement_key,
+                                remote_settlement_key,
+                                for_remote: Some(for_remote),
+                            },
+                        };
+                        let prepared = signer
+                            .prepare_commitment(content, context, now)
+                            .await
+                            .unwrap();
+                        signer.sign_commitment(prepared, now).await.unwrap()
+                    } else {
+                        let receiving =
+                            transition == ChannelSigningTransition::CompleteReceivedRevokeAndAck;
+                        assert!(
+                            receiving || transition == ChannelSigningTransition::SendRevokeAndAck
+                        );
+                        let records = signer.recovery_records().await.unwrap();
+                        let find = |v| {
+                            records
+                                .iter()
+                                .find(|r| {
+                                    r.reference.for_remote == receiving && r.reference.version == v
+                                })
+                                .unwrap()
+                                .reference
+                                .clone()
+                        };
+                        let context = fiber_lsp_sdk::RevocationContext {
+                            transition: if receiving {
+                                fiber_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck
+                            } else {
+                                fiber_types::ChannelSigningTransition::SendRevokeAndAck
+                            },
+                            session,
+                            revoked: find(slot.commitment_number - 1),
+                            replacement: find(slot.commitment_number),
+                        };
+                        let prepared = signer
+                            .prepare_revocation(content, context, now)
+                            .await
+                            .unwrap();
+                        revocations += 1;
+                        signer.sign_revocation(prepared, now).await.unwrap()
+                    };
+                    let ChannelSignature::Musig2(signature) = signature else {
+                        panic!()
+                    };
+                    let next = signer.next_material(slot).await.unwrap();
+                    submit_signature(
+                        &node_a,
+                        SubmitChannelSignatureParams {
+                            channel_id: channel_id.into(),
+                            request_id,
+                            partial_signature: signature.partial_signature.serialize(),
+                            next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next)),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                let a = node_a.get_channel_actor_state(channel_id);
+                let b = node_b.get_channel_actor_state(channel_id);
+                if sender.get_payment_status(payment.payment_hash).await == PaymentStatus::Success
+                    && a.tlc_state.all_tlcs().count() == 0
+                    && b.tlc_state.all_tlcs().count() == 0
+                    && !a.tlc_state.waiting_ack
+                    && !b.tlc_state.waiting_ack
+                    && !a.signing_context.is_awaiting_signature()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("checked payment and revocation lifecycle completes");
+        assert!(revocations >= 2);
+    }
 }
 
 /// Query channel external signing status.
@@ -452,6 +931,7 @@ async fn test_tenant_restart_send_commitment_signed() {
         .send_payment_keysend(&public_node, 10_000, false)
         .await
         .expect("start keysend");
+    approve_fixture_keysend(&signer, &tenant, payment.payment_hash, 10_000, false).await;
 
     // 2. State checkpoint: wait until entering SendCommitmentSigned.
     wait_until_async_timeout(|| async {
@@ -528,6 +1008,7 @@ async fn test_tenant_restart_complete_received_commitment() {
         .send_payment_keysend(&tenant, 10_000, false)
         .await
         .expect("start inbound keysend");
+    approve_fixture_keysend(&signer, &public_node, payment.payment_hash, 10_000, true).await;
 
     // 2. State checkpoint: wait until entering CompleteReceivedCommitment.
     wait_until_async_timeout(|| async {
@@ -603,6 +1084,7 @@ async fn test_tenant_restart_send_revoke_and_ack() {
         .send_payment_keysend(&tenant, 10_000, false)
         .await
         .expect("start inbound keysend");
+    approve_fixture_keysend(&signer, &public_node, payment.payment_hash, 10_000, true).await;
 
     // Advance through CompleteReceivedCommitment and pause at SendRevokeAndAck.
     wait_until_async_timeout(|| async {
@@ -693,6 +1175,7 @@ async fn test_tenant_restart_complete_received_revoke_and_ack() {
         .send_payment_keysend(&public_node, 10_000, false)
         .await
         .expect("start keysend");
+    approve_fixture_keysend(&signer, &tenant, payment.payment_hash, 10_000, false).await;
 
     wait_until_async_timeout(|| async {
         matches!(
@@ -789,7 +1272,7 @@ async fn test_tenant_restart_send_closing_signed() {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        close_script: None,
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
@@ -798,6 +1281,29 @@ async fn test_tenant_restart_send_closing_signed() {
             },
         ))
     };
+    let opening = tenant.get_channel_actor_state(channel_id);
+    let local_script = opening.get_local_shutdown_script();
+    let remote_script = opening.get_remote_shutdown_script();
+    let local_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        0,
+        &None,
+        (remote_script.clone(), local_script.clone()),
+    )
+    .unwrap();
+    let remote_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        DEFAULT_COMMITMENT_FEE_RATE,
+        &None,
+        (local_script, remote_script),
+    )
+    .unwrap();
+    signer
+        .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+            fee: local_fee + remote_fee,
+            local_fee_share: local_fee,
+            remote_fee_share: remote_fee,
+        })
+        .await
+        .unwrap();
     call!(public_node.network_actor, message).unwrap().unwrap();
 
     // State checkpoint: wait until entering SendClosingSigned.
@@ -988,6 +1494,7 @@ async fn test_signer_restart_send_commitment_signed() {
         .send_payment_keysend(&public_node, 10_000, false)
         .await
         .expect("start keysend");
+    approve_fixture_keysend(&signer, &tenant, payment.payment_hash, 10_000, false).await;
 
     wait_until_async_timeout(|| async {
         matches!(
@@ -1038,6 +1545,7 @@ async fn test_signer_restart_complete_received_commitment() {
         .send_payment_keysend(&tenant, 10_000, false)
         .await
         .expect("start inbound keysend");
+    approve_fixture_keysend(&signer, &public_node, payment.payment_hash, 10_000, true).await;
 
     wait_until_async_timeout(|| async {
         matches!(
@@ -1085,6 +1593,7 @@ async fn test_signer_restart_send_revoke_and_ack() {
         .send_payment_keysend(&tenant, 10_000, false)
         .await
         .expect("start inbound keysend");
+    approve_fixture_keysend(&signer, &public_node, payment.payment_hash, 10_000, true).await;
 
     wait_until_async_timeout(|| async {
         matches!(
@@ -1150,6 +1659,7 @@ async fn test_signer_restart_complete_received_revoke_and_ack() {
         .send_payment_keysend(&public_node, 10_000, false)
         .await
         .expect("start keysend");
+    approve_fixture_keysend(&signer, &tenant, payment.payment_hash, 10_000, false).await;
 
     wait_until_async_timeout(|| async {
         matches!(
@@ -1220,7 +1730,7 @@ async fn test_signer_restart_send_closing_signed() {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        close_script: None,
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
@@ -1229,6 +1739,29 @@ async fn test_signer_restart_send_closing_signed() {
             },
         ))
     };
+    let opening = tenant.get_channel_actor_state(channel_id);
+    let local_script = opening.get_local_shutdown_script();
+    let remote_script = opening.get_remote_shutdown_script();
+    let local_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        0,
+        &None,
+        (remote_script.clone(), local_script.clone()),
+    )
+    .unwrap();
+    let remote_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        DEFAULT_COMMITMENT_FEE_RATE,
+        &None,
+        (local_script, remote_script),
+    )
+    .unwrap();
+    signer
+        .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+            fee: local_fee + remote_fee,
+            local_fee_share: local_fee,
+            remote_fee_share: remote_fee,
+        })
+        .await
+        .unwrap();
     call!(public_node.network_actor, message).unwrap().unwrap();
 
     wait_until_async_timeout(|| async {
@@ -1365,7 +1898,7 @@ async fn check_signature_deadline(
     let (_restartable, signer) = RestartableExternalSigner::create().await;
     let ([mut tenant, mut public_node], channel_id) =
         setup_restartable_external_channel(false, &signer).await;
-    public_node
+    let deadline_payment = public_node
         .send_payment(SendPaymentCommand {
             target_pubkey: Some(tenant.pubkey),
             amount: Some(10_000),
@@ -1376,6 +1909,14 @@ async fn check_signature_deadline(
         })
         .await
         .expect("start inbound payment");
+    approve_fixture_keysend(
+        &signer,
+        &public_node,
+        deadline_payment.payment_hash,
+        10_000,
+        true,
+    )
+    .await;
     wait_until_async_timeout(|| async {
         let status = get_signing_status(&tenant, channel_id)
             .await
@@ -1589,4 +2130,32 @@ async fn test_signature_deadline_while_awaiting_received_revoke() {
         ChannelSigningTransition::CompleteReceivedRevokeAndAck,
     )
     .await;
+}
+
+pub(crate) async fn approve_fixture_close(
+    signer: &ChannelSigner<MemoryStore>,
+    state: &crate::fiber::channel::ChannelActorState,
+) {
+    let local = state.get_local_shutdown_script();
+    let remote = state.get_remote_shutdown_script();
+    let local_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        0,
+        &state.funding_udt_type_script,
+        (remote.clone(), local.clone()),
+    )
+    .unwrap();
+    let remote_fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        DEFAULT_COMMITMENT_FEE_RATE,
+        &state.funding_udt_type_script,
+        (local, remote),
+    )
+    .unwrap();
+    signer
+        .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+            fee: local_fee + remote_fee,
+            local_fee_share: local_fee,
+            remote_fee_share: remote_fee,
+        })
+        .await
+        .unwrap();
 }

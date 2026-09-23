@@ -79,9 +79,7 @@ use fiber_types::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use fiber_lsp_sdk::{
-    ChannelSignature, ChannelSigner, ChannelSigningContent, MemoryStore, RootSigner,
-};
+use fiber_lsp_sdk::{ChannelSigner, MemoryStore, RootSigner};
 use fiber_store::backend::StorageBackend;
 use fiber_types::{ChannelActorData, Musig2Context, NoncePurpose, NonceSlot};
 use fiber_types::{CloseFlags, FeatureVector};
@@ -1889,6 +1887,13 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
     bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &channel_signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
     let _: SubmitSignedFundingTxResult = node_a
         .send_rpc_request(
@@ -2011,6 +2016,14 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
         .send_payment_keysend(&node_b, 10_000, false)
         .await
         .expect("start payment that requires an external commitment signature");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &channel_signer,
+        &node_a,
+        payment.payment_hash,
+        10_000,
+        false,
+    )
+    .await;
     wait_until_async_timeout(|| async {
         matches!(
             sdk.get_signing_status(channel_id).await.status,
@@ -2069,6 +2082,14 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
             .send_payment_keysend(&node_b, 10_000, false)
             .await
             .unwrap();
+        crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+            &channel_signer,
+            &node_a,
+            payment.payment_hash,
+            10_000,
+            false,
+        )
+        .await;
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 sdk.try_sign_pending(channel_id).await;
@@ -2108,6 +2129,24 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
             .all(|slot| slot.commitment_number >= oldest_retained_round));
     }
 
+    let state = node_a.get_channel_actor_state(channel_id);
+    let fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        1_000_000_000,
+        &None,
+        (
+            state.get_remote_shutdown_script(),
+            state.get_local_shutdown_script(),
+        ),
+    )
+    .unwrap();
+    channel_signer
+        .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+            fee,
+            local_fee_share: fee,
+            remote_fee_share: 0,
+        })
+        .await
+        .unwrap();
     node_a
         .send_shutdown(channel_id, false)
         .await
@@ -2199,6 +2238,13 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
     bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &channel_signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
     let _: SubmitSignedFundingTxResult = node_a
         .send_rpc_request(
@@ -2311,41 +2357,12 @@ impl ExternalSignerHttpClient<'_> {
         channel_id: Hash256,
         status: fiber_json_types::ChannelSigningStatus,
     ) -> SubmitChannelSignatureParams {
-        let fiber_json_types::ChannelSigningStatus::SignatureRequired {
-            request_id,
-            content,
-            ..
-        } = status
-        else {
-            panic!("channel must have a pending signing request");
-        };
-        let content = fiber_lsp_sdk::json::musig2_from_rpc(content)
-            .expect("RPC signing content must round-trip into fiber-signer plaintext");
-        let slot = content.slot;
-        let prepared = self
-            .signer
-            .prepare(ChannelSigningContent::Musig2(content))
-            .await
-            .expect("independent signer prepares the RPC plaintext");
-        let signature = self
-            .signer
-            .sign(prepared)
-            .await
-            .expect("independent signer signs the RPC plaintext");
-        let ChannelSignature::Musig2(signature) = signature else {
-            panic!("channel MuSig2 request must produce a MuSig2 signature");
-        };
-        let next_material = self
-            .signer
-            .next_material(slot)
-            .await
-            .expect("next public signer material");
-        SubmitChannelSignatureParams {
-            channel_id: channel_id.into(),
-            request_id,
-            partial_signature: signature.partial_signature.serialize(),
-            next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
-        }
+        crate::fiber::tests::external_signer_restart::prepare_hosted_signature(
+            self.signer,
+            channel_id,
+            status,
+        )
+        .await
     }
 
     async fn submit(
@@ -2415,6 +2432,13 @@ async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSig
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
     bind_external_signer(&signer, &unsigned_tx, Script::default()).await;
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
     let _: SubmitSignedFundingTxResult = node_a
         .send_rpc_request(
             "submit_signed_funding_tx",
@@ -2451,6 +2475,14 @@ async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSig
         .send_payment_keysend(&node_b, 1_000_000, false)
         .await
         .expect("seed acceptor outbound liquidity");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &node_a,
+        seed_payment.payment_hash,
+        1_000_000,
+        false,
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             sdk.try_sign_pending(channel_id).await;
@@ -2538,6 +2570,14 @@ async fn test_external_signer_pending_update_tlc_info_after_peer_restart() {
         .send_payment_keysend(&public_node, 10_001, false)
         .await
         .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
     wait_until_async_timeout(|| async {
         matches!(
             ExternalSignerHttpClient {
@@ -2600,6 +2640,14 @@ async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
         .send_payment_keysend(&tenant, 10_003, false)
         .await
         .expect("start payment for pending commitment tail");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &public_node,
+        commitment_tail_payment.payment_hash,
+        10_003,
+        true,
+    )
+    .await;
     wait_until_async_timeout(|| async {
         matches!(
             ExternalSignerHttpClient {
@@ -2653,6 +2701,14 @@ async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
         .send_payment_keysend(&public_node, 10_004, false)
         .await
         .expect("start payment for pending revoke tail");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        revoke_tail_tenant_payment.payment_hash,
+        10_004,
+        false,
+    )
+    .await;
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
         state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
@@ -2723,6 +2779,14 @@ async fn test_external_signer_pending_send_revoke_peer_restart_race() {
         .send_payment_keysend(&public_node, 10_003, false)
         .await
         .expect("start payment from tenant");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        payment.payment_hash,
+        10_003,
+        false,
+    )
+    .await;
 
     // 1. Sign tenant's SendCommitmentSigned
     wait_until_async_timeout(|| async {
@@ -2853,6 +2917,14 @@ async fn test_external_signer_pending_add_tlc_peer_restart() {
         .send_payment_keysend(&public_node, 10_001, false)
         .await
         .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
         state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
@@ -2864,6 +2936,14 @@ async fn test_external_signer_pending_add_tlc_peer_restart() {
         .send_payment_keysend(&tenant, 20_000, false)
         .await
         .expect("start payment from public_node");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &public_node,
+        public_payment.payment_hash,
+        20_000,
+        true,
+    )
+    .await;
 
     // Wait until tenant buffers public_node's peer messages (AddTlc, CommitmentSigned)
     wait_until_async_timeout(|| async {
@@ -2908,6 +2988,14 @@ async fn test_external_signer_tenant_restart_while_awaiting_signature() {
         .send_payment_keysend(&public_node, 10_001, false)
         .await
         .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
 
     // Sign tenant's SendCommitmentSigned
     wait_until_async_timeout(|| async {
@@ -2973,6 +3061,14 @@ async fn test_external_signer_tenant_restart_while_awaiting_commitment_signature
         .send_payment_keysend(&public_node, 10_001, false)
         .await
         .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
 
     wait_until_async_timeout(|| async {
         let state = tenant.get_channel_actor_state(channel_id);
@@ -3146,13 +3242,18 @@ async fn test_external_signer_cooperative_shutdown() {
 
     let ([tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
 
+    crate::fiber::tests::external_signer_restart::approve_fixture_close(
+        &signer,
+        &tenant.get_channel_actor_state(channel_id),
+    )
+    .await;
     let message = |rpc_reply| {
         NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        close_script: None,
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },
@@ -3207,6 +3308,14 @@ async fn test_external_signer_shutdown_after_tlc_resolved() {
         .send_payment_keysend(&tenant, 10_000, false)
         .await
         .expect("start payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &public_node,
+        payment.payment_hash,
+        10_000,
+        true,
+    )
+    .await;
 
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
@@ -3221,13 +3330,18 @@ async fn test_external_signer_shutdown_after_tlc_resolved() {
     .await
     .expect("payment should complete");
 
+    crate::fiber::tests::external_signer_restart::approve_fixture_close(
+        &signer,
+        &tenant.get_channel_actor_state(channel_id),
+    )
+    .await;
     let message = |rpc_reply| {
         NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
                     ShutdownCommand {
-                        close_script: Some(Script::new_builder().args([0u8; 19].pack()).build()),
+                        close_script: None,
                         fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
                         force: false,
                     },

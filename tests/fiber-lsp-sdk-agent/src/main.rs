@@ -49,6 +49,7 @@ struct Args {
 
 #[derive(Debug, Deserialize)]
 struct BindApprovedFundingRequest {
+    commitment_parameters: fiber_lsp_sdk::CommitmentParameters,
     channel_id: fiber_json_types::Hash256,
     unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
     shutdown_script: ckb_jsonrpc_types::Script,
@@ -166,13 +167,17 @@ where
     S: fiber_lsp_sdk::SignerStore,
 {
     let channel_id: Hash256 = request.channel_id.into();
+    let funding: ckb_types::packed::Transaction = request.unsigned_funding_tx.into();
     agent
         .bind_approved_funding(
             channel_id,
-            request.unsigned_funding_tx.into(),
+            funding.clone(),
             request.shutdown_script.into(),
             request.funding_output_index,
         )
+        .await?;
+    agent
+        .approve_opening(channel_id, &funding, request.commitment_parameters)
         .await
 }
 

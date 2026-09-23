@@ -35,8 +35,8 @@ dependencies here.
 After `open_channel_with_external_funding` returns a frozen unsigned funding
 transaction, call `ChannelSigner::bind_from_approved_funding` with that
 transaction, the cells the wallet agreed to spend, and the shutdown script from
-the open request. Later `ChannelSigner::prepare` checks every signing request
-against that approved funding identity. The node does not supply a bindable
+the open request. The intent-specific `prepare_*` methods validate signing requests
+against that approved funding identity and locally authorized state. The node does not supply a bindable
 channel identity.
 
 RPC clients should convert `get_channel_signing_status` and
@@ -52,34 +52,75 @@ methods. It calls `new_invoice`; the Node adds Public T's trampoline hint and
 registers the hosted invoice using the LSP service's buffer policy. It calls the
 standard `send_payment` method for outbound payments.
 
-After a successful `new_invoice`, record `InvoiceResult.invoice.data.payment_hash`
-with `HostedSession::registry_mut().record_issued_invoice`. After starting an
-outbound payment, record `GetPaymentCommandResult.payment_hash` with
-`record_outbound_payment`. `SigningPolicy::Auto` uses this client-owned registry
-to reject commitment snapshots containing unknown inbound or outbound TLCs.
-The application must persist this wallet payment registry alongside its
-`HostedSessionState`; the signer store intentionally contains signing-safety
-material rather than wallet invoice and payment history.
+## Client-side verification flow
 
-[`HostedSession::new`] defaults to [`SigningPolicy::Auto`]. Call
-[`SigningPolicy::decide`] yourself only if you are not using `HostedSession`.
-`Always` exists only under `test-apis`. Production clients use `Auto`
-(inbound invoices this client issued, the snapshot hashes into the
-commitment lock args, and local balance does not fall) or `Manual`. Auto
-will not trust a node-supplied `local_amount` unless that snapshot is
-committed by the unsigned transaction. Settlement, TLC, cooperative close,
-and announcement requests always require confirmation under `Auto`.
+```text
+Wallet-approved funding, opening balances, keys, scripts and fees
+                              |
+                 Bind funding + approve opening terms
+                              |
+                 Register payment / invoice authorizations
+                              |
+Untrusted LSP request --------> Decode + bind to local channel
+                              |
+                  Select mandatory prepare_* verifier
+                              |
+       +----------------------+-----------------------+
+       |                      |                       |
+  Commitment              Revocation            Close / Announcement
+       |                      |                       |
+  Funding input,         Known old state +       Locally approved terms
+  contract, asset,       exact successor         + exact output amounts,
+  fees, balances         in correct lane         fees / announcement
+       |                      |                       |
+  TLC authorization,     Penalty output,         No live TLCs and equal
+  ids, derived keys,     version ordering,      lane balances for close
+  expiry, resolution     recovery window              |
+       |                      |                       |
+  Both commitment        Complete successor           |
+  lanes and exact        proof before revoking        |
+  balance transition     our previous state           |
+       |                      |                       |
+       +----------------------+-----------------------+
+                              |
+             Verify nonce purpose, counter, participants,
+             aggregate nonce and required peer partial
+                              |
+                     Validated PreparedSigning
+                              |
+                 Auto policy / explicit confirmation
+                 (Auto: verified commitment updates
+                  without outbound changes, after opening)
+                              |
+                 Recheck revision and applicable time limits
+                              |
+                 Sign + verify complete peer proof, if present
+                              |
+                 CAS: persist validated state, recovery proof
+                 and signing history before returning signature
+                              |
+                        Submit to LSP
 
-Signing is deliberately split into review and approval. The node supplies typed
-plaintext, never a caller-computed digest. `ChannelSigner::prepare` computes the
-Fiber digest and returns a `SigningReview` plus the exact typed content. Calling
-`ChannelSigner::sign(prepared)` represents user or policy approval of those
-exact bytes.
+Any validation failure ------> Reject; no returned signature or store mutation
+```
 
-The ordinary signer store contains the root public key and per-channel
-allocation entropy. It also stores only signing-safety context: observed local
-and remote commitment numbers, published nonce slots, and hashes of signed
-content/messages. It never stores the root secret, funding key, TLC key,
-commitment seed, MuSig2 base nonce, balances, or TLC state. Tenant routing is
-deliberately outside the SDK. Reopening a signer requires both the same root key
-and its serialized store.
+```text
+On-chain settlement / TLC spend
+  LSP transaction + local spending approval + stored commitment
+                              |
+  Independent ChainVerifier: live inputs, lineage, maturity, time
+                              |
+  Verify witness, signing key, preimage / timeout, residual state,
+  destination, asset conservation and exact fee
+                              |
+  Explicit confirmation -> recheck chain + revision -> persist + return signature
+
+Preimage release
+  Authorized invoice + incoming TLC in complete local recovery record
+                              |
+  Verify live funding, unrevoked state, preimage and remaining recovery window
+                              |
+  Persist release / fulfillment intent -> application may release preimage
+                              |
+  Later commitment: verify TLC removal and exact balance increase
+```

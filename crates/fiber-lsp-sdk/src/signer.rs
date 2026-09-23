@@ -16,6 +16,8 @@ use crate::{
     RootKeyBackup, SignerError, SignerStore, SigningIntent, SigningReview, SigningWarning,
 };
 
+use crate::protocol::{PreparedValidation, SigningData};
+
 const STORE_FORMAT_VERSION: u16 = 1;
 const DERIVATION_VERSION: u16 = 1;
 const METADATA_KEY: &[u8] = b"fiber-lsp-sdk/signer/metadata";
@@ -52,6 +54,7 @@ struct StoredSignedRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredSigningState {
     format_version: u16,
+    commitment: Option<crate::commitment::CommitmentState>,
     revision: u64,
     local_highest_signed: Option<u64>,
     remote_highest_signed: Option<u64>,
@@ -59,10 +62,29 @@ struct StoredSigningState {
     signed_requests: Vec<StoredSignedRequest>,
 }
 
+impl StoredSigningState {
+    fn validate_revision_and_nonce(&self, prepared: &SigningData) -> Result<(), SignerError> {
+        if self.revision != prepared.state_revision {
+            return Err(SignerError::SigningStateChanged);
+        }
+        if prepared
+            .content
+            .nonce_slot()
+            .is_some_and(|slot| !self.published_nonces.contains(&slot))
+        {
+            return Err(crate::commitment::invalid(
+                "nonce slot was never published by this signer",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Default for StoredSigningState {
     fn default() -> Self {
         Self {
-            format_version: STORE_FORMAT_VERSION,
+            commitment: None,
+            format_version: 3,
             revision: 0,
             local_highest_signed: None,
             remote_highest_signed: None,
@@ -446,15 +468,23 @@ impl<S: SignerStore> ChannelSigner<S> {
         }
     }
 
-    /// Independently hash typed plaintext after checking the bound funding identity.
-    ///
-    /// Requires [`Self::bind_from_approved_funding`]. This is an identity check,
-    /// not a balance policy: it does not reconstruct TLC state or output amounts.
-    /// Call [`crate::SigningPolicy::decide`] on the returned review before [`sign`].
+    /// Reject context-free signing requests. Use the intent-specific preparation method
+    /// (`prepare_commitment`, `prepare_revocation`, `prepare_close`,
+    /// `prepare_announcement` or `prepare_onchain`) with its verification evidence.
     pub async fn prepare(
         &self,
         content: ChannelSigningContent,
     ) -> Result<PreparedSigning, SignerError> {
+        let _ = content;
+        Err(crate::commitment::invalid(
+            "signing requires the intent-specific verifier and complete context",
+        ))
+    }
+
+    async fn prepare_inner(
+        &self,
+        content: ChannelSigningContent,
+    ) -> Result<SigningData, SignerError> {
         let binding = self
             .load_binding()
             .await?
@@ -477,7 +507,7 @@ impl<S: SignerStore> ChannelSigner<S> {
             canonical_content,
             warnings,
         };
-        Ok(PreparedSigning {
+        Ok(SigningData {
             channel_key_id: self.channel_key_id,
             state_revision: state.revision,
             content,
@@ -485,8 +515,626 @@ impl<S: SignerStore> ChannelSigner<S> {
         })
     }
 
-    /// Sign an exact request after its [`SigningReview`] has been approved.
+    /// Approve immutable opening terms using the exact funding transaction already bound.
+    /// The caller must obtain contract, keys, fee and balances from its own opening approval,
+    /// not copy them from an untrusted signing request. Existing channels need trusted recovery.
+    pub async fn approve_commitment_parameters(
+        &self,
+        funding: &ckb_types::packed::Transaction,
+        parameters: crate::CommitmentParameters,
+    ) -> Result<(), SignerError> {
+        use ckb_types::prelude::*;
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        if funding.calc_tx_hash() != binding.funding_outpoint.tx_hash() {
+            return Err(crate::commitment::invalid(
+                "opening transaction differs from bound funding",
+            ));
+        }
+        let index: u32 = binding.funding_outpoint.index().unpack();
+        let output = funding
+            .raw()
+            .outputs()
+            .get(index as usize)
+            .ok_or_else(|| crate::commitment::invalid("missing funding output"))?;
+        let data = funding
+            .raw()
+            .outputs_data()
+            .get(index as usize)
+            .ok_or_else(|| crate::commitment::invalid("missing funding output data"))?
+            .raw_data()
+            .to_vec();
+        let ctx = musig2::KeyAggContext::new([
+            self.key_material.funding_key.pubkey(),
+            parameters.remote_funding_key,
+        ])
+        .map_err(|e| crate::commitment::invalid(&e.to_string()))?;
+        // Funding aggregation may use either ordering depending on which peer opened.
+        let reversed = musig2::KeyAggContext::new([
+            parameters.remote_funding_key,
+            self.key_material.funding_key.pubkey(),
+        ])
+        .map_err(|e| crate::commitment::invalid(&e.to_string()))?;
+        if !musig2_matches_approved_lock(&ctx, &binding.funding_lock_script)
+            && !musig2_matches_approved_lock(&reversed, &binding.funding_lock_script)
+        {
+            return Err(crate::commitment::invalid(
+                "approved remote funding key does not match funding lock",
+            ));
+        }
+        let commitment = crate::commitment::CommitmentState::new(parameters, output, data)?;
+        loop {
+            let (encoded, mut state) = self.load_signing_state().await?;
+            if let Some(existing) = &state.commitment {
+                return if existing.parameters == commitment.parameters {
+                    Ok(())
+                } else {
+                    Err(crate::commitment::invalid(
+                        "approved opening terms cannot be replaced",
+                    ))
+                };
+            }
+            if state
+                .signed_requests
+                .iter()
+                .any(|r| r.intent == SigningIntent::CommitmentTransaction)
+            {
+                return Err(crate::commitment::invalid(
+                    "legacy signed channel requires trusted state recovery",
+                ));
+            }
+            state.commitment = Some(commitment.clone());
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| crate::commitment::invalid("state revision overflow"))?;
+            if self.store_signing_state(encoded.as_deref(), &state).await? {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Persist a wallet-approved outgoing payment in this channel's asset.
+    /// For invoices compare the returned invoice against the original local creation terms.
+    pub async fn authorize_payment(
+        &self,
+        authorization: crate::PaymentAuthorization,
+    ) -> Result<(), SignerError> {
+        if authorization.inbound {
+            return Err(crate::commitment::invalid(
+                "inbound authorization requires authorize_invoice and a matching preimage",
+            ));
+        }
+        self.update_commitment(|state| state.authorize(authorization.clone()))
+            .await
+    }
+
+    /// Register a locally created invoice only after proving possession of its preimage.
+    /// The preimage is checked but is neither persisted by the SDK nor sent to the LSP.
+    /// This is not authorization to fulfill or release it; call `authorize_fulfillment` later.
+    pub async fn authorize_invoice(
+        &self,
+        authorization: crate::PaymentAuthorization,
+        preimage: fiber_types::Hash256,
+    ) -> Result<(), SignerError> {
+        if !authorization.inbound
+            || authorization.hash_algorithm.hash(preimage.as_ref())
+                != *authorization.payment_hash.as_ref()
+        {
+            return Err(crate::commitment::invalid(
+                "invoice direction or preimage does not match authorization",
+            ));
+        }
+        self.update_commitment(|state| state.authorize(authorization.clone()))
+            .await
+    }
+
+    /// Record a verified preimage before allowing a TLC to settle into its recipient's balance.
+    /// This records intent only: it does not prove a commitment is enforceable or release the
+    /// preimage to the LSP. The application must separately enforce safe preimage release.
+    pub async fn authorize_fulfillment(
+        &self,
+        payment_hash: fiber_types::Hash256,
+        preimage: fiber_types::Hash256,
+    ) -> Result<(), SignerError> {
+        self.update_commitment(|state| state.resolve(payment_hash, Some(preimage)))
+            .await
+    }
+
+    /// Approve refunding an unresolved TLC. Cannot override an approved fulfillment.
+    pub async fn authorize_cancellation(
+        &self,
+        payment_hash: fiber_types::Hash256,
+    ) -> Result<(), SignerError> {
+        self.update_commitment(|state| state.resolve(payment_hash, None))
+            .await
+    }
+
+    async fn update_commitment(
+        &self,
+        update: impl Fn(&mut crate::commitment::CommitmentState) -> Result<(), SignerError>,
+    ) -> Result<(), SignerError> {
+        loop {
+            let (encoded, mut state) = self.load_signing_state().await?;
+            update(
+                state
+                    .commitment
+                    .as_mut()
+                    .ok_or_else(|| crate::commitment::invalid("missing approved opening terms"))?,
+            )?;
+            state.revision = state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| crate::commitment::invalid("state revision overflow"))?;
+            if self.store_signing_state(encoded.as_deref(), &state).await? {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Validate every commitment against locally approved terms, keys, payment authorizations
+    /// and both persisted commitment lanes. `now_ms` must come from the wallet's trusted clock.
+    /// The returned immutable preparation binds validation and signing to one store revision.
+    pub async fn prepare_commitment(
+        &self,
+        content: ChannelSigningContent,
+        context: crate::CommitmentContext,
+        now_ms: u64,
+    ) -> Result<PreparedSigning, SignerError> {
+        let prepared = self.prepare_inner(content).await?;
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared)?;
+        let mut commitment = state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing approved opening terms"))?;
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        crate::lifecycle::validate_session(
+            &prepared.content,
+            &context.session,
+            context.transition,
+            &commitment.parameters,
+            &self.key_material,
+        )?;
+        let review = commitment.validate(
+            &prepared.content,
+            &context,
+            &binding,
+            &self.key_material,
+            now_ms,
+        )?;
+        commitment
+            .lifecycle
+            .record_commitment(&prepared.content, &context, &review)?;
+        Ok(PreparedSigning {
+            data: prepared,
+            validation: PreparedValidation::Commitment {
+                state: commitment,
+                review,
+                context,
+                validated_at_ms: now_ms,
+            },
+        })
+    }
+
+    /// Validate a revocation against the old state and a safely persisted successor.
+    pub async fn prepare_revocation(
+        &self,
+        content: ChannelSigningContent,
+        context: crate::RevocationContext,
+        now_ms: u64,
+    ) -> Result<PreparedSigning, SignerError> {
+        let prepared = self.prepare_inner(content).await?;
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared)?;
+        let mut commitment = state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        commitment.validate_revocation(
+            &prepared.content,
+            &context,
+            &binding,
+            &self.key_material,
+            now_ms,
+        )?;
+        Ok(PreparedSigning {
+            data: prepared,
+            validation: PreparedValidation::Revocation {
+                state: commitment,
+                context,
+                validated_at_ms: now_ms,
+            },
+        })
+    }
+
+    /// Revalidate revocation time and state immediately before signing.
+    pub async fn sign_revocation(
+        &self,
+        prepared: PreparedSigning,
+        now_ms: u64,
+    ) -> Result<ChannelSignature, SignerError> {
+        if prepared.data.channel_key_id != self.channel_key_id {
+            return Err(SignerError::PreparedForAnotherChannel);
+        }
+        let PreparedValidation::Revocation {
+            context,
+            validated_at_ms,
+            ..
+        } = prepared.validation
+        else {
+            return Err(crate::commitment::invalid("expected verified revocation"));
+        };
+        if now_ms < validated_at_ms {
+            return Err(crate::commitment::invalid("wallet clock moved backwards"));
+        }
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared.data)?;
+        let fresh = self
+            .prepare_revocation(prepared.data.content, context, now_ms)
+            .await?;
+        if fresh.data.state_revision != state.revision {
+            return Err(SignerError::SigningStateChanged);
+        }
+        self.sign_verified(fresh).await
+    }
+
+    /// Retrieve durable signed commitment evidence for independent recovery.
+    pub async fn recovery_records(&self) -> Result<Vec<crate::RecoveryRecord>, SignerError> {
+        let (_, state) = self.load_signing_state().await?;
+        Ok(state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?
+            .lifecycle
+            .commitments)
+    }
+
+    /// Retrieve verified revocation records and complete punishment signatures for recovery.
+    pub async fn revocation_records(&self) -> Result<Vec<crate::RevocationRecord>, SignerError> {
+        let (_, state) = self.load_signing_state().await?;
+        Ok(state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?
+            .lifecycle
+            .revocations)
+    }
+
+    /// Check and durably record permission to release a preimage at the current wallet time.
+    /// The application must release immediately; the trusted chain source verifies live funding.
+    /// This API neither transmits nor persists the preimage.
+    pub async fn authorize_preimage_release<C: crate::ChainVerifier>(
+        &self,
+        hash: fiber_types::Hash256,
+        preimage: fiber_types::Hash256,
+        now_ms: u64,
+        chain: &C,
+    ) -> Result<crate::CommitmentReference, SignerError> {
+        let (encoded, mut state) = self.load_signing_state().await?;
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        let live = chain.live_cell(&binding.funding_outpoint).await?;
+        let commitment = state
+            .commitment
+            .as_mut()
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        if live.output != commitment.funding_output || live.data != commitment.funding_data {
+            return Err(crate::commitment::invalid(
+                "funding is not live with approved asset and capacity",
+            ));
+        }
+        let reference = commitment.release_preimage(hash, preimage, now_ms)?;
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| crate::commitment::invalid("revision overflow"))?;
+        if !self.store_signing_state(encoded.as_deref(), &state).await? {
+            return Err(SignerError::SigningStateChanged);
+        }
+        Ok(reference)
+    }
+
+    /// Approve an exact cooperative-close fee allocation locally.
+    pub async fn authorize_close(
+        &self,
+        terms: crate::CloseAuthorization,
+    ) -> Result<(), SignerError> {
+        if terms.local_fee_share.checked_add(terms.remote_fee_share) != Some(terms.fee) {
+            return Err(crate::commitment::invalid("invalid close fee allocation"));
+        }
+        self.update_commitment(|state| {
+            state.lifecycle.close = Some(terms.clone());
+            Ok(())
+        })
+        .await
+    }
+
+    /// Validate cooperative-close outputs and nonce session against both tracked balances.
+    pub async fn prepare_close(
+        &self,
+        content: ChannelSigningContent,
+        session: crate::SigningSessionEvidence,
+    ) -> Result<PreparedSigning, SignerError> {
+        let prepared = self.prepare_inner(content).await?;
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared)?;
+        let commitment = state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        crate::lifecycle::validate_session(
+            &prepared.content,
+            &session,
+            fiber_types::ChannelSigningTransition::SendClosingSigned,
+            &commitment.parameters,
+            &self.key_material,
+        )?;
+        commitment.validate_close(&prepared.content, &binding)?;
+        Ok(PreparedSigning {
+            data: prepared,
+            validation: PreparedValidation::Close { state: commitment },
+        })
+    }
+
+    /// Approve exact public announcement fields from wallet-owned network/channel configuration.
+    /// This is local authorization, never a copy of an unreviewed LSP signing request.
+    pub async fn approve_announcement(
+        &self,
+        announcement: fiber_types::ChannelAnnouncement,
+    ) -> Result<(), SignerError> {
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        let (_, state) = self.load_signing_state().await?;
+        let commitment = state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        let mut keys = [
+            self.key_material.funding_key.pubkey(),
+            commitment.parameters.remote_funding_key,
+        ];
+        keys.sort();
+        let ctx = musig2::KeyAggContext::new(keys)
+            .map_err(|e| crate::commitment::invalid(&e.to_string()))?;
+        let point: musig2::secp::Point = ctx.aggregated_pubkey();
+        // Announcements advertise liquid capacity, excluding the CKB reserves.
+        let total = commitment
+            .parameters
+            .local_amount
+            .checked_add(commitment.parameters.remote_amount)
+            .ok_or_else(|| crate::commitment::invalid("capacity overflow"))?;
+        let capacity = if commitment.funding_output.type_().to_opt().is_none() {
+            total
+                .checked_sub(u128::from(commitment.parameters.local_reserved_ckb_amount))
+                .and_then(|n| {
+                    n.checked_sub(u128::from(commitment.parameters.remote_reserved_ckb_amount))
+                })
+                .ok_or_else(|| crate::commitment::invalid("reserves exceed capacity"))?
+        } else {
+            total
+        };
+        if announcement.channel_outpoint != binding.funding_outpoint
+            || announcement.ckb_key.serialize() != point.serialize_xonly()
+            || announcement.udt_type_script != commitment.funding_output.type_().to_opt()
+            || announcement.capacity != capacity
+        {
+            return Err(crate::commitment::invalid(
+                "announcement does not match approved funding",
+            ));
+        }
+        let content = Musig2SignableContent::ChannelAnnouncement(announcement);
+        let bytes = content.canonical_bytes();
+        self.update_commitment(|state| {
+            if state
+                .lifecycle
+                .announcement
+                .as_ref()
+                .is_some_and(|old| *old != bytes)
+            {
+                return Err(crate::commitment::invalid(
+                    "announcement terms already approved",
+                ));
+            }
+            state.lifecycle.announcement = Some(bytes.clone());
+            Ok(())
+        })
+        .await
+    }
+
+    /// Verify announcement fields and nonce against local approval.
+    pub async fn prepare_announcement(
+        &self,
+        content: ChannelSigningContent,
+        session: crate::SigningSessionEvidence,
+    ) -> Result<PreparedSigning, SignerError> {
+        let prepared = self.prepare_inner(content).await?;
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared)?;
+        let commitment = state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        crate::lifecycle::validate_session(
+            &prepared.content,
+            &session,
+            fiber_types::ChannelSigningTransition::SignChannelAnnouncement,
+            &commitment.parameters,
+            &self.key_material,
+        )?;
+        if commitment.lifecycle.announcement.as_ref() != Some(&prepared.content.canonical_bytes()) {
+            return Err(crate::commitment::invalid(
+                "announcement differs from approved network/channel fields",
+            ));
+        }
+        Ok(PreparedSigning {
+            data: prepared,
+            validation: PreparedValidation::Announcement { state: commitment },
+        })
+    }
+
+    /// Prepare an on-chain claim against local history and an independent trusted chain source.
+    pub async fn prepare_onchain<C: crate::ChainVerifier>(
+        &self,
+        content: crate::OnchainSigningContent,
+        authorization: crate::OnchainSpendAuthorization,
+        chain: &C,
+    ) -> Result<PreparedSigning, SignerError> {
+        let prepared = self
+            .prepare_inner(ChannelSigningContent::Onchain(content.clone()))
+            .await?;
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared)?;
+        let commitment = state
+            .commitment
+            .as_ref()
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        let record = commitment.lifecycle.find(&authorization.source)?;
+        crate::onchain::validate(&content, &authorization, record, chain).await?;
+        Ok(PreparedSigning {
+            data: prepared,
+            validation: PreparedValidation::Onchain { authorization },
+        })
+    }
+
+    /// Recheck live inputs and chain maturity immediately before signing an on-chain claim.
+    pub async fn sign_onchain<C: crate::ChainVerifier>(
+        &self,
+        prepared: PreparedSigning,
+        chain: &C,
+    ) -> Result<ChannelSignature, SignerError> {
+        if prepared.data.channel_key_id != self.channel_key_id {
+            return Err(SignerError::PreparedForAnotherChannel);
+        }
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared.data)?;
+        let ChannelSigningContent::Onchain(content) = &prepared.data.content else {
+            return Err(crate::commitment::invalid("expected on-chain claim"));
+        };
+        let PreparedValidation::Onchain { authorization } = &prepared.validation else {
+            return Err(crate::commitment::invalid(
+                "expected verified on-chain claim",
+            ));
+        };
+        let commitment = state
+            .commitment
+            .as_ref()
+            .ok_or_else(|| crate::commitment::invalid("missing opening terms"))?;
+        crate::onchain::validate(
+            content,
+            authorization,
+            commitment.lifecycle.find(&authorization.source)?,
+            chain,
+        )
+        .await?;
+        self.sign_verified(prepared).await
+    }
+
+    #[cfg(test)]
+    async fn prepare_crypto_test(
+        &self,
+        content: ChannelSigningContent,
+    ) -> Result<SigningData, SignerError> {
+        self.prepare_inner(content).await
+    }
+
+    #[cfg(test)]
+    async fn sign_crypto_test(&self, data: SigningData) -> Result<ChannelSignature, SignerError> {
+        self.sign_inner(data, None).await
+    }
+
+    /// Sign a verified close or announcement after review. Other operations require
+    /// their intent-specific signing method to recheck time or chain data.
     pub async fn sign(&self, prepared: PreparedSigning) -> Result<ChannelSignature, SignerError> {
+        if !matches!(
+            prepared.validation,
+            PreparedValidation::Close { .. } | PreparedValidation::Announcement { .. }
+        ) {
+            return Err(crate::commitment::invalid(
+                "use the intent-specific signing method with verified context",
+            ));
+        }
+        self.sign_verified(prepared).await
+    }
+
+    /// Recheck commitment context and expiry at approval time, then atomically persist the
+    /// validated state with the signature history. Use the wallet's clock, not LSP time.
+    pub async fn sign_commitment(
+        &self,
+        prepared: PreparedSigning,
+        now_ms: u64,
+    ) -> Result<ChannelSignature, SignerError> {
+        let PreparedValidation::Commitment {
+            context,
+            validated_at_ms,
+            ..
+        } = &prepared.validation
+        else {
+            return Err(crate::commitment::invalid("expected verified commitment"));
+        };
+        if now_ms < *validated_at_ms {
+            return Err(crate::commitment::invalid(
+                "wallet clock moved backwards since review",
+            ));
+        }
+        let (_, state) = self.load_signing_state().await?;
+        state.validate_revision_and_nonce(&prepared.data)?;
+        let mut commitment = state
+            .commitment
+            .ok_or_else(|| crate::commitment::invalid("missing approved opening terms"))?;
+        let binding = self
+            .load_binding()
+            .await?
+            .ok_or(SignerError::ChannelNotBound)?;
+        let review = commitment.validate(
+            &prepared.data.content,
+            context,
+            &binding,
+            &self.key_material,
+            now_ms,
+        )?;
+        crate::lifecycle::validate_session(
+            &prepared.data.content,
+            &context.session,
+            context.transition,
+            &commitment.parameters,
+            &self.key_material,
+        )?;
+        commitment
+            .lifecycle
+            .record_commitment(&prepared.data.content, context, &review)?;
+        self.sign_inner(prepared.data, Some(commitment)).await
+    }
+
+    async fn sign_verified(
+        &self,
+        prepared: PreparedSigning,
+    ) -> Result<ChannelSignature, SignerError> {
+        let state = match prepared.validation {
+            PreparedValidation::Commitment { state, .. }
+            | PreparedValidation::Revocation { state, .. }
+            | PreparedValidation::Close { state }
+            | PreparedValidation::Announcement { state } => Some(state),
+            PreparedValidation::Onchain { .. } => None,
+        };
+        self.sign_inner(prepared.data, state).await
+    }
+
+    async fn sign_inner(
+        &self,
+        prepared: SigningData,
+        commitment_state: Option<crate::commitment::CommitmentState>,
+    ) -> Result<ChannelSignature, SignerError> {
         if prepared.channel_key_id != self.channel_key_id {
             return Err(SignerError::PreparedForAnotherChannel);
         }
@@ -522,6 +1170,14 @@ impl<S: SignerStore> ChannelSigner<S> {
             return Ok(signature);
         }
 
+        if let Some(mut commitment) = commitment_state {
+            if let ChannelSignature::Musig2(ref partial) = signature {
+                commitment
+                    .lifecycle
+                    .complete(&prepared.content, partial.partial_signature)?;
+            }
+            state.commitment = Some(commitment);
+        }
         state.signed_requests.push(StoredSignedRequest {
             intent: prepared.content.intent(),
             commitment_counter: prepared.content.commitment_counter(),
@@ -588,11 +1244,16 @@ impl<S: SignerStore> ChannelSigner<S> {
             .map_err(store_error)?;
         let state = match encoded.as_deref() {
             Some(bytes) => {
-                let state: StoredSigningState = decode(bytes)?;
-                if state.format_version != STORE_FORMAT_VERSION {
-                    return Err(SignerError::UnsupportedStoreVersion(state.format_version));
+                let version = bytes
+                    .get(..2)
+                    .map(|v| u16::from_le_bytes([v[0], v[1]]))
+                    .ok_or_else(|| {
+                        SignerError::CorruptStore("missing signing store version".to_string())
+                    })?;
+                match version {
+                    3 => decode(bytes)?,
+                    other => return Err(SignerError::UnsupportedStoreVersion(other)),
                 }
-                state
             }
             None => StoredSigningState::default(),
         };
@@ -911,7 +1572,7 @@ fn validate_nonce_slot(slot: NonceSlot) -> Result<(), SignerError> {
     Ok(())
 }
 
-fn derive_nonce(signer: &InMemorySigner, slot: NonceSlot) -> SecNonce {
+pub(crate) fn derive_nonce(signer: &InMemorySigner, slot: NonceSlot) -> SecNonce {
     match slot.purpose {
         NoncePurpose::Commitment => {
             signer.derive_musig2_nonce(slot.commitment_number, Musig2Context::Commitment)
@@ -1106,15 +1767,23 @@ mod tests {
         let remote_signer = InMemorySigner::generate_from_seed(b"restore test remote signer");
         bind_remote(&channel, &remote_signer).await;
         let (content, nonce_before, _, _) = musig_content(&channel, &remote_signer, 42, 1).await;
-        let prepared = channel.prepare(content.clone()).await.expect("prepare");
+        let prepared = channel
+            .prepare_crypto_test(content.clone())
+            .await
+            .expect("prepare");
         let review_before = prepared.review().clone();
-        let partial_before = channel.sign(prepared).await.expect("sign");
+        let partial_before = channel.sign_crypto_test(prepared).await.expect("sign");
         let onchain = ChannelSigningContent::Onchain(OnchainSigningContent {
             key_purpose: OnchainKeyPurpose::Settlement,
             transaction: transaction(2).data(),
         });
         let settlement_before = channel
-            .sign(channel.prepare(onchain.clone()).await.expect("prepare"))
+            .sign_crypto_test(
+                channel
+                    .prepare_crypto_test(onchain.clone())
+                    .await
+                    .expect("prepare"),
+            )
             .await
             .expect("sign settlement");
 
@@ -1140,15 +1809,27 @@ mod tests {
                 .public_nonce,
             nonce_before
         );
-        let prepared = restored.prepare(content).await.expect("prepare restored");
+        let prepared = restored
+            .prepare_crypto_test(content)
+            .await
+            .expect("prepare restored");
         assert_eq!(prepared.review(), &review_before);
         assert_eq!(
-            restored.sign(prepared).await.expect("sign restored"),
+            restored
+                .sign_crypto_test(prepared)
+                .await
+                .expect("sign restored"),
             partial_before
         );
-        let prepared = restored.prepare(onchain).await.expect("prepare settlement");
+        let prepared = restored
+            .prepare_crypto_test(onchain)
+            .await
+            .expect("prepare settlement");
         assert_eq!(
-            restored.sign(prepared).await.expect("sign settlement"),
+            restored
+                .sign_crypto_test(prepared)
+                .await
+                .expect("sign settlement"),
             settlement_before
         );
     }
@@ -1272,10 +1953,10 @@ mod tests {
         let (content, local_nonce, key_agg_ctx, agg_nonce) =
             musig_content(&channel, &remote_signer, 7, 11).await;
         let expected_message = content.signing_message();
-        let prepared = channel.prepare(content).await.expect("prepare");
+        let prepared = channel.prepare_crypto_test(content).await.expect("prepare");
         assert_eq!(prepared.review().signing_message, expected_message);
         assert_eq!(prepared.content().signing_message(), expected_message);
-        let response = match channel.sign(prepared).await.expect("sign") {
+        let response = match channel.sign_crypto_test(prepared).await.expect("sign") {
             ChannelSignature::Musig2(response) => response,
             ChannelSignature::Onchain(_) => panic!("expected MuSig2 signature"),
         };
@@ -1294,9 +1975,16 @@ mod tests {
             transaction: transaction(12).data(),
         });
         let expected_message = crate::compute_tx_message(&transaction(12));
-        let prepared = channel.prepare(onchain).await.expect("prepare onchain");
+        let prepared = channel
+            .prepare_crypto_test(onchain)
+            .await
+            .expect("prepare onchain");
         assert_eq!(prepared.review().signing_message, expected_message);
-        let response = match channel.sign(prepared).await.expect("sign onchain") {
+        let response = match channel
+            .sign_crypto_test(prepared)
+            .await
+            .expect("sign onchain")
+        {
             ChannelSignature::Onchain(response) => response,
             ChannelSignature::Musig2(_) => panic!("expected on-chain signature"),
         };
@@ -1322,13 +2010,13 @@ mod tests {
         let remote = InMemorySigner::generate_from_seed(b"tamper remote signer");
         bind_remote(&channel, &remote).await;
         let (content, _, _, _) = musig_content(&channel, &remote, 9, 1).await;
-        let mut prepared = channel.prepare(content).await.expect("prepare");
+        let mut prepared = channel.prepare_crypto_test(content).await.expect("prepare");
         let ChannelSigningContent::Musig2(content) = &mut prepared.content else {
             panic!("expected MuSig2 content");
         };
         content.content = Musig2SignableContent::CommitmentTransaction(transaction(2).data());
         assert!(matches!(
-            channel.sign(prepared).await,
+            channel.sign_crypto_test(prepared).await,
             Err(SignerError::InvalidContent(_))
         ));
     }
@@ -1342,23 +2030,32 @@ mod tests {
         let remote = InMemorySigner::generate_from_seed(b"warning remote signer");
         bind_remote(&channel, &remote).await;
         let (first, _, _, _) = musig_content(&channel, &remote, 5, 1).await;
-        let prepared = channel.prepare(first).await.expect("prepare first");
-        channel.sign(prepared).await.expect("sign first");
+        let prepared = channel
+            .prepare_crypto_test(first)
+            .await
+            .expect("prepare first");
+        channel
+            .sign_crypto_test(prepared)
+            .await
+            .expect("sign first");
 
         let (different, _, _, _) = musig_content(&channel, &remote, 5, 2).await;
-        let prepared = channel.prepare(different).await.expect("prepare reuse");
+        let prepared = channel
+            .prepare_crypto_test(different)
+            .await
+            .expect("prepare reuse");
         assert!(prepared.review().warnings.iter().any(|warning| matches!(
             warning,
             SigningWarning::NoncePreviouslyUsedForDifferentMessage { .. }
         )));
         channel
-            .sign(prepared)
+            .sign_crypto_test(prepared)
             .await
             .expect("compatibility mode permits explicitly reviewed reuse");
 
         let (rollback, _, _, _) = musig_content(&channel, &remote, 4, 3).await;
         assert!(channel
-            .prepare(rollback)
+            .prepare_crypto_test(rollback)
             .await
             .expect("prepare rollback")
             .review()
@@ -1367,7 +2064,7 @@ mod tests {
             .any(|warning| matches!(warning, SigningWarning::CommitmentNumberRollback { .. })));
         let (jump, _, _, _) = musig_content(&channel, &remote, 8, 4).await;
         assert!(channel
-            .prepare(jump)
+            .prepare_crypto_test(jump)
             .await
             .expect("prepare jump")
             .review()
@@ -1395,13 +2092,18 @@ mod tests {
         bind_remote(&first, &remote).await;
         let (first_content, _, _, _) = musig_content(&first, &remote, 3, 1).await;
         let (second_content, _, _, _) = musig_content(&second, &remote, 3, 2).await;
-        let first_prepared = first.prepare(first_content).await.expect("prepare first");
+        let first_prepared = first
+            .prepare_crypto_test(first_content)
+            .await
+            .expect("prepare first");
         let second_prepared = second
-            .prepare(second_content)
+            .prepare_crypto_test(second_content)
             .await
             .expect("prepare second");
-        let (first_result, second_result) =
-            tokio::join!(first.sign(first_prepared), second.sign(second_prepared));
+        let (first_result, second_result) = tokio::join!(
+            first.sign_crypto_test(first_prepared),
+            second.sign_crypto_test(second_prepared)
+        );
         assert_eq!(
             usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()),
             1
@@ -1470,13 +2172,13 @@ mod tests {
         channel: &ChannelSigner<MemoryStore>,
         remote: &InMemorySigner,
         transaction: ckb_types::packed::Transaction,
-    ) -> Result<PreparedSigning, SignerError> {
+    ) -> Result<SigningData, SignerError> {
         let (mut content, _, _, _) = musig_content(channel, remote, 1, 1).await;
         let ChannelSigningContent::Musig2(inner) = &mut content else {
             panic!("expected MuSig2 content");
         };
         inner.content = Musig2SignableContent::CommitmentTransaction(transaction);
-        channel.prepare(content).await
+        channel.prepare_crypto_test(content).await
     }
 
     #[tokio::test]
@@ -1488,7 +2190,10 @@ mod tests {
         let remote = InMemorySigner::generate_from_seed(b"unbound remote");
         let (content, _, _, _) = musig_content(&channel, &remote, 1, 1).await;
         assert_eq!(
-            channel.prepare(content).await.expect_err("unbound"),
+            channel
+                .prepare_crypto_test(content)
+                .await
+                .expect_err("unbound"),
             SignerError::ChannelNotBound
         );
     }
@@ -1534,7 +2239,7 @@ mod tests {
             .expect("bind channel");
         let (content, _, _, _) = musig_content(&channel, &attacker, 1, 1).await;
         assert!(matches!(
-            channel.prepare(content).await,
+            channel.prepare_crypto_test(content).await,
             Err(SignerError::InvalidContent(_))
         ));
     }
@@ -1572,7 +2277,7 @@ mod tests {
             transaction: transaction(1).data(),
         });
         channel
-            .prepare(onchain)
+            .prepare_crypto_test(onchain)
             .await
             .expect("settlement txs are not checked against the shutdown script");
     }
@@ -1595,7 +2300,10 @@ mod tests {
         )
         .await
         .expect("verified prepare");
-        channel.sign(prepared).await.expect("sign verified request");
+        channel
+            .sign_crypto_test(prepared)
+            .await
+            .expect("sign verified request");
     }
 
     fn approved_funding_tx(
@@ -1675,4 +2383,61 @@ mod tests {
             Err(SignerError::InvalidContent(_))
         ));
     }
+    #[tokio::test]
+    async fn unsupported_signing_state_versions_are_rejected_without_mutation() {
+        let store = MemoryStore::default();
+        let root = RootSigner::create(root_key(), store.clone()).await.unwrap();
+        let channel = root.create_channel().await.unwrap();
+        for version in [0u16, 1, 2, 4] {
+            store
+                .put(
+                    &signing_state_store_key(channel.channel_key_id()),
+                    &version.to_le_bytes(),
+                )
+                .await
+                .unwrap();
+            let before = store.snapshot().unwrap();
+            let result = channel
+                .get_musig2_nonce(NonceSlot {
+                    purpose: NoncePurpose::Commitment,
+                    commitment_number: 1,
+                })
+                .await;
+            assert!(matches!(result, Err(SignerError::UnsupportedStoreVersion(v)) if v == version));
+            assert_eq!(store.snapshot().unwrap(), before);
+        }
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn revocation_rejects_persisted_successor_without_recovery_signature() {
+    let f = crate::commitment_tests::Fixture::new(false).await;
+    f.sign(false, 0, f.opening()).await;
+    f.sign(false, 1, f.opening()).await;
+    let (content, context) = f.revocation(false, 1).await;
+    // Simulate an incomplete persisted successor, independently of peer-evidence validation.
+    let (encoded, mut state) = f.signer.load_signing_state().await.unwrap();
+    state
+        .commitment
+        .as_mut()
+        .unwrap()
+        .lifecycle
+        .commitments
+        .last_mut()
+        .unwrap()
+        .complete_signature = None;
+    assert!(f
+        .signer
+        .store_signing_state(encoded.as_deref(), &state)
+        .await
+        .unwrap());
+    let before = f.store.snapshot().unwrap();
+    let error = f
+        .signer
+        .prepare_revocation(content, context, 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not recoverable"), "{error}");
+    assert_eq!(f.store.snapshot().unwrap(), before);
 }

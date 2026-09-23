@@ -18,7 +18,7 @@ use crate::{
     json::{musig2_from_rpc, next_material_to_rpc, onchain_from_rpc, settlement_from_rpc},
     ChannelKeyId, ChannelOpenSignerMaterial, ChannelSignature, ChannelSigningContent,
     OwnedSettlementBinding, PaymentRegistry, PreparedSigning, RootSigner, SignerError, SignerStore,
-    SigningDecision, SigningPolicy, SigningPolicyInput,
+    SigningDecision, SigningPolicy,
 };
 
 /// Persistable hosted-session map. The caller owns file or IndexedDB I/O.
@@ -263,16 +263,34 @@ impl<S: SignerStore> HostedSession<S> {
         Ok(())
     }
 
+    /// Open this session's signer to approve opening terms and persist payment authorizations.
+    pub async fn channel_signer(
+        &self,
+        channel_id: Hash256,
+    ) -> Result<crate::ChannelSigner<S>, SessionError> {
+        let key = self
+            .state
+            .bindings
+            .get(&channel_id)
+            .ok_or(SessionError::ChannelNotInDirectory)?;
+        Ok(self.root.open_channel(*key).await?)
+    }
+
     /// Handle one `get_channel_signing_status` result. Does not submit.
+    /// `now_ms` must come from the wallet's own clock, never the LSP response.
     pub async fn handle_channel_status(
         &mut self,
         channel_id: Hash256,
         status: ChannelSigningStatus,
+        now_ms: u64,
     ) -> Result<ProcessOutcome, SessionError> {
-        let Some(pending) = self.pending_from_channel_status(channel_id, status).await? else {
+        let Some(pending) = self
+            .pending_from_channel_status(channel_id, status, now_ms)
+            .await?
+        else {
             return Ok(ProcessOutcome::Idle);
         };
-        self.decide(pending).await
+        self.decide(pending, now_ms).await
     }
 
     /// Handle one `get_watchtower_signing_status` result. Does not submit.
@@ -287,12 +305,17 @@ impl<S: SignerStore> HostedSession<S> {
         else {
             return Ok(ProcessOutcome::Idle);
         };
-        self.decide(pending).await
+        self.decide(pending, 0).await
     }
 
-    /// Sign a request the user has already confirmed. Skips policy.
-    pub async fn confirm(&mut self, pending: PendingRequest) -> Result<SubmitParams, SessionError> {
-        self.sign_pending(pending).await
+    /// Sign a request the user has already confirmed. Skips the interaction policy,
+    /// but rechecks mandatory commitment validation with fresh wallet time.
+    pub async fn confirm(
+        &mut self,
+        pending: PendingRequest,
+        now_ms: u64,
+    ) -> Result<SubmitParams, SessionError> {
+        self.sign_pending(pending, now_ms).await
     }
 
     /// Build `create_watch_channel` params with pubkeys only.
@@ -328,12 +351,14 @@ impl<S: SignerStore> HostedSession<S> {
         &self,
         channel_id: Hash256,
         status: ChannelSigningStatus,
+        now_ms: u64,
     ) -> Result<Option<PendingRequest>, SessionError> {
         let ChannelSigningStatus::SignatureRequired {
             request_id,
             content,
             settlement,
-            ..
+            transition,
+            session_evidence,
         } = status
         else {
             return Ok(None);
@@ -346,6 +371,8 @@ impl<S: SignerStore> HostedSession<S> {
             .ok_or(SessionError::ChannelNotInDirectory)?;
         let signer = self.root.open_channel(key_id).await?;
         let content = musig2_from_rpc(content).map_err(SessionError::Invalid)?;
+        let session = crate::json::session_evidence_from_rpc(session_evidence)
+            .map_err(SessionError::Invalid)?;
         let settlement = settlement
             .as_ref()
             .map(settlement_from_rpc)
@@ -361,15 +388,146 @@ impl<S: SignerStore> HostedSession<S> {
                     }
                 },
             );
-        let prepared = signer
-            .prepare(ChannelSigningContent::Musig2(content))
-            .await?;
+        let content = ChannelSigningContent::Musig2(content);
+        let prepared = if content.intent() == crate::SigningIntent::CommitmentTransaction {
+            let transition = match transition {
+                fiber_json_types::ChannelSigningTransition::SendCommitmentSigned => {
+                    fiber_types::ChannelSigningTransition::SendCommitmentSigned
+                }
+                fiber_json_types::ChannelSigningTransition::CompleteReceivedCommitment => {
+                    fiber_types::ChannelSigningTransition::CompleteReceivedCommitment
+                }
+                _ => {
+                    return Err(SessionError::Invalid(
+                        "incorrect commitment transition".to_string(),
+                    ))
+                }
+            };
+            signer
+                .prepare_commitment(
+                    content,
+                    crate::CommitmentContext {
+                        transition,
+                        session,
+                        settlement: settlement.clone().ok_or_else(|| {
+                            SessionError::Invalid("missing commitment settlement".to_string())
+                        })?,
+                    },
+                    now_ms,
+                )
+                .await?
+        } else if content.intent() == crate::SigningIntent::Revocation {
+            let transition = match transition {
+                fiber_json_types::ChannelSigningTransition::SendRevokeAndAck => {
+                    fiber_types::ChannelSigningTransition::SendRevokeAndAck
+                }
+                fiber_json_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck => {
+                    fiber_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck
+                }
+                _ => {
+                    return Err(SessionError::Invalid(
+                        "incorrect revocation transition".into(),
+                    ))
+                }
+            };
+            let receiving =
+                transition == fiber_types::ChannelSigningTransition::CompleteReceivedRevokeAndAck;
+            let version = content
+                .nonce_slot()
+                .ok_or_else(|| SessionError::Invalid("missing nonce".into()))?
+                .commitment_number;
+            let old_version = version
+                .checked_sub(1)
+                .ok_or_else(|| SessionError::Invalid("revocation version underflow".into()))?;
+            let records = signer.recovery_records().await?;
+            let find = |v| {
+                records
+                    .iter()
+                    .find(|r| r.reference.for_remote == receiving && r.reference.version == v)
+                    .map(|r| r.reference.clone())
+                    .ok_or_else(|| {
+                        SessionError::Invalid("missing commitment history for revocation".into())
+                    })
+            };
+            let context = crate::RevocationContext {
+                transition,
+                session,
+                revoked: find(old_version)?,
+                replacement: find(version)?,
+            };
+            signer.prepare_revocation(content, context, now_ms).await?
+        } else if content.intent() == crate::SigningIntent::CooperativeCloseTransaction {
+            if transition != fiber_json_types::ChannelSigningTransition::SendClosingSigned {
+                return Err(SessionError::Invalid("incorrect close transition".into()));
+            }
+            signer.prepare_close(content, session).await?
+        } else if content.intent() == crate::SigningIntent::ChannelAnnouncement {
+            if transition != fiber_json_types::ChannelSigningTransition::SignChannelAnnouncement {
+                return Err(SessionError::Invalid(
+                    "incorrect announcement transition".into(),
+                ));
+            }
+            signer.prepare_announcement(content, session).await?
+        } else {
+            signer.prepare(content).await?
+        };
         Ok(Some(PendingRequest {
             channel_id,
             request_id: request_id.into(),
             prepared,
             settlement,
             kind: RequestKind::Channel,
+        }))
+    }
+
+    /// Prepare a watchtower request with wallet-approved spending terms and trusted chain data.
+    /// On-chain signatures always require confirmation, regardless of policy.
+    pub async fn handle_watchtower_status_verified<C: crate::ChainVerifier>(
+        &self,
+        channel_id: Hash256,
+        status: WatchtowerSigningStatus,
+        authorization: crate::OnchainSpendAuthorization,
+        chain: &C,
+    ) -> Result<ProcessOutcome, SessionError> {
+        let WatchtowerSigningStatus::SignatureRequired {
+            request_id,
+            content,
+        } = status
+        else {
+            return Ok(ProcessOutcome::Idle);
+        };
+        let signer = self.channel_signer(channel_id).await?;
+        let prepared = signer
+            .prepare_onchain(onchain_from_rpc(content), authorization, chain)
+            .await?;
+        Ok(ProcessOutcome::NeedConfirmation(PendingRequest {
+            channel_id,
+            request_id: request_id.into(),
+            prepared,
+            settlement: None,
+            kind: RequestKind::Watchtower,
+        }))
+    }
+
+    /// Confirm an on-chain request, rechecking live chain inputs and maturity before signing.
+    pub async fn confirm_onchain<C: crate::ChainVerifier>(
+        &self,
+        pending: PendingRequest,
+        chain: &C,
+    ) -> Result<SubmitParams, SessionError> {
+        if !matches!(pending.kind, RequestKind::Watchtower) {
+            return Err(SessionError::Invalid("expected watchtower request".into()));
+        }
+        let signer = self.channel_signer(pending.channel_id).await?;
+        let ChannelSignature::Onchain(signature) =
+            signer.sign_onchain(pending.prepared, chain).await?
+        else {
+            return Err(SessionError::Invalid("expected on-chain signature".into()));
+        };
+        Ok(SubmitParams::Watchtower(SubmitWatchtowerSignatureParams {
+            channel_id: pending.channel_id.into(),
+            request_id: pending.request_id.into(),
+            signature: signature.signature.to_vec(),
         }))
     }
 
@@ -404,26 +562,26 @@ impl<S: SignerStore> HostedSession<S> {
         }))
     }
 
-    async fn decide(&self, pending: PendingRequest) -> Result<ProcessOutcome, SessionError> {
-        let settlement = pending
-            .settlement
-            .as_ref()
-            .map(OwnedSettlementBinding::as_binding);
-        match self.policy.decide(SigningPolicyInput {
-            review: pending.prepared.review(),
-            content: pending.prepared.content(),
-            settlement,
-            registry: &self.registry,
-        }) {
+    async fn decide(
+        &self,
+        pending: PendingRequest,
+        now_ms: u64,
+    ) -> Result<ProcessOutcome, SessionError> {
+        let decision = self.policy.decide_prepared(&pending.prepared);
+        match decision {
             SigningDecision::Allow => Ok(ProcessOutcome::ReadyToSubmit(
-                self.sign_pending(pending).await?,
+                self.sign_pending(pending, now_ms).await?,
             )),
             SigningDecision::RequireConfirmation => Ok(ProcessOutcome::NeedConfirmation(pending)),
             SigningDecision::Deny => Ok(ProcessOutcome::Denied),
         }
     }
 
-    async fn sign_pending(&self, pending: PendingRequest) -> Result<SubmitParams, SessionError> {
+    async fn sign_pending(
+        &self,
+        pending: PendingRequest,
+        now_ms: u64,
+    ) -> Result<SubmitParams, SessionError> {
         let key_id = self
             .state
             .bindings
@@ -432,7 +590,23 @@ impl<S: SignerStore> HostedSession<S> {
             .ok_or(SessionError::ChannelNotInDirectory)?;
         let signer = self.root.open_channel(key_id).await?;
         let slot = pending.prepared.content().nonce_slot();
-        let signature = signer.sign(pending.prepared).await?;
+        let signature = match &pending.prepared.validation {
+            crate::protocol::PreparedValidation::Commitment { .. } => {
+                signer.sign_commitment(pending.prepared, now_ms).await?
+            }
+            crate::protocol::PreparedValidation::Revocation { .. } => {
+                signer.sign_revocation(pending.prepared, now_ms).await?
+            }
+            crate::protocol::PreparedValidation::Close { .. }
+            | crate::protocol::PreparedValidation::Announcement { .. } => {
+                signer.sign(pending.prepared).await?
+            }
+            crate::protocol::PreparedValidation::Onchain { .. } => {
+                return Err(SessionError::Invalid(
+                    "on-chain confirmation requires a ChainVerifier".into(),
+                ));
+            }
+        };
         match (pending.kind, signature) {
             (RequestKind::Channel, ChannelSignature::Musig2(signature)) => {
                 let next_material = match slot {
@@ -467,14 +641,11 @@ mod tests {
         ChannelSigningTransition, GetLspTenantRegistryNonceResult, LspTenantRuntimeStatus,
         LspTenantStatus, RegisterLspTenantResult,
     };
-    use fiber_types::{settlement_witness_hash, Privkey, SettlementData, SettlementTlc, TLCId};
-    use musig2::{AggNonce, KeyAggContext, SecNonce};
+    use fiber_types::Privkey;
+    use musig2::KeyAggContext;
 
     use super::*;
-    use crate::{
-        json::musig2_to_rpc, CommitmentCounter, MemoryStore, Musig2SignableContent, NoncePurpose,
-        NonceSlot, RootKey,
-    };
+    use crate::{json::musig2_to_rpc, MemoryStore, RootKey};
 
     fn root_key() -> RootKey {
         RootKey::import([42; 32]).expect("root key")
@@ -594,160 +765,85 @@ mod tests {
         ChannelSigningStatus,
         Hash256,
     ) {
-        let mut session = session().await;
-        session.allocate_pending_channel().await.expect("allocate");
-        let pending = session.pending_channel_key_id().expect("pending");
-        let signer = session.root.open_channel(pending).await.expect("open");
-        let remote_secret = secp256k1::SecretKey::from_byte_array(&[3u8; 32]).unwrap();
-        let remote_pubkey =
-            secp256k1::PublicKey::from_secret_key(secp256k1::SECP256K1, &remote_secret);
-        let remote = fiber_types::Pubkey::from(remote_pubkey);
-        let funding = ckb_types::packed::OutPoint::new_builder()
-            .tx_hash([7u8; 32].pack())
-            .index(0u32)
-            .build();
-        let ctx = KeyAggContext::new([
-            signer.public_material().base_public_keys.funding_pubkey,
-            remote,
-        ])
-        .expect("agg");
-        let point: musig2::secp::Point = ctx.aggregated_pubkey();
-        let digest = fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[]);
-        let lock = ckb_types::packed::Script::new_builder()
-            .args(digest[..20].to_vec().pack())
-            .build();
-        let shutdown = ckb_types::packed::Script::new_builder()
-            .args([1u8, 2, 3].pack())
-            .build();
-        let funding_tx = ckb_types::core::TransactionBuilder::default()
-            .input(
-                ckb_types::packed::CellInput::new_builder()
-                    .previous_output(funding.clone())
-                    .build(),
-            )
-            .output(
-                ckb_types::packed::CellOutput::new_builder()
-                    .lock(lock)
-                    .capacity(1000u64)
-                    .build(),
-            )
-            .output_data(ckb_types::packed::Bytes::default())
-            .build()
-            .data();
+        let f = crate::commitment_tests::Fixture::new(false).await;
+        f.sign(true, 0, f.opening()).await;
+        let (content, context) = f.request(true, 1, f.incoming(true)).await;
+        let ChannelSigningContent::Musig2(content) = content else {
+            panic!()
+        };
+        let snapshot = context.settlement;
+        let settlement = fiber_json_types::SigningSettlement {
+            local_amount: snapshot.data.local_amount,
+            remote_amount: snapshot.data.remote_amount,
+            local_settlement_pubkey: snapshot.local_settlement_key.into(),
+            remote_settlement_pubkey: snapshot.remote_settlement_key.into(),
+            for_remote: true,
+            tlcs: snapshot
+                .data
+                .tlcs
+                .iter()
+                .map(|tlc| fiber_json_types::SigningSettlementTlc {
+                    tlc_id: u64::from(tlc.tlc_id),
+                    local_key_commitment_number: tlc.local_key_commitment_number.unwrap(),
+                    inbound: true,
+                    payment_hash: tlc.payment_hash.into(),
+                    payment_amount: tlc.payment_amount,
+                    hash_algorithm: tlc.hash_algorithm.into(),
+                    expiry: tlc.expiry,
+                    local_key_pubkey: tlc.local_pubkey().into(),
+                    remote_key: tlc.remote_key.into(),
+                })
+                .collect(),
+        };
         let channel_id = Hash256::from([0x22; 32]);
+        let hash = f.terms(true).payment_hash;
+        let mut session = HostedSession::new(f.root);
         session
-            .bind_approved_funding(channel_id, &funding_tx, shutdown, 0)
-            .await
-            .expect("bind");
-
-        let payment_hash = Hash256::from([9; 32]);
-        let local_key = Privkey::from(&[1; 32]).pubkey();
-        let remote_settle = Privkey::from(&[2; 32]).pubkey();
-        let settlement = SettlementData {
-            local_amount: 15,
-            remote_amount: 1,
-            tlcs: vec![SettlementTlc {
-                tlc_id: TLCId::Received(0),
-                hash_algorithm: Default::default(),
-                payment_amount: 5,
-                payment_hash,
-                expiry: 1_000,
-                local_key: None,
-                local_key_pubkey: Some(Privkey::from(&[3; 32]).pubkey()),
-                local_key_commitment_number: None,
-                remote_key: Privkey::from(&[7; 32]).pubkey(),
-            }],
-        };
-        let hash = settlement_witness_hash(&settlement, true, local_key, remote_settle);
-        let mut args = vec![0u8; 36];
-        args.extend_from_slice(&hash);
-        args.push(0x00);
-        let commitment = ckb_types::core::TransactionBuilder::default()
-            .input(
-                ckb_types::packed::CellInput::new_builder()
-                    .previous_output(ckb_types::packed::OutPoint::new(
-                        funding_tx.calc_tx_hash(),
-                        0,
-                    ))
-                    .build(),
-            )
-            .output(
-                ckb_types::packed::CellOutput::new_builder()
-                    .lock(
-                        ckb_types::packed::Script::new_builder()
-                            .args(args.pack())
-                            .build(),
-                    )
-                    .capacity(1000u64)
-                    .build(),
-            )
-            .output_data(ckb_types::packed::Bytes::default())
-            .build()
-            .data();
-        let slot = NonceSlot {
-            purpose: NoncePurpose::Commitment,
-            commitment_number: 1,
-        };
-        let local_nonce = signer
-            .get_musig2_nonce(slot)
-            .await
-            .expect("nonce")
-            .public_nonce;
-        let remote_nonce = SecNonce::build([7u8; 32]).build().public_nonce();
-        let content = crate::Musig2SigningContent {
-            slot,
-            commitment_counter: Some(CommitmentCounter::Local),
-            key_agg_ctx: ctx,
-            agg_nonce: AggNonce::sum([local_nonce, remote_nonce]),
-            content: Musig2SignableContent::CommitmentTransaction(commitment),
-        };
-        let (data, local_s, remote_s, for_remote) =
-            (settlement.clone(), local_key, remote_settle, true);
-        let json_settlement = {
-            let owned = OwnedSettlementBinding {
-                data,
-                local_settlement_key: local_s,
-                remote_settlement_key: remote_s,
-                for_remote: Some(for_remote),
-            };
-            fiber_json_types::SigningSettlement {
-                local_amount: owned.data.local_amount,
-                remote_amount: owned.data.remote_amount,
-                local_settlement_pubkey: owned.local_settlement_key.into(),
-                remote_settlement_pubkey: owned.remote_settlement_key.into(),
-                for_remote,
-                tlcs: owned
-                    .data
-                    .tlcs
-                    .iter()
-                    .map(|tlc| fiber_json_types::SigningSettlementTlc {
-                        inbound: matches!(tlc.tlc_id, TLCId::Received(_)),
-                        payment_hash: tlc.payment_hash.into(),
-                        payment_amount: tlc.payment_amount,
-                        hash_algorithm: tlc.hash_algorithm.into(),
-                        expiry: tlc.expiry,
-                        local_key_pubkey: tlc.local_pubkey().into(),
-                        remote_key: tlc.remote_key.into(),
-                    })
-                    .collect(),
-            }
-        };
+            .state
+            .bindings
+            .insert(channel_id, f.signer.channel_key_id());
         let status = ChannelSigningStatus::SignatureRequired {
+            session_evidence: crate::json::session_evidence_to_rpc(&context.session),
             request_id: Hash256::from([0x33; 32]).into(),
             transition: ChannelSigningTransition::SendCommitmentSigned,
             content: musig2_to_rpc(&content),
-            settlement: Some(json_settlement),
+            settlement: Some(settlement),
         };
-        (session, channel_id, status, payment_hash)
+        (session, channel_id, status, hash)
+    }
+
+    async fn authorize_receive(
+        session: &HostedSession<MemoryStore>,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+    ) {
+        session
+            .channel_signer(channel_id)
+            .await
+            .unwrap()
+            .authorize_invoice(
+                crate::PaymentAuthorization {
+                    payment_hash,
+                    hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+                    inbound: true,
+                    amount: 50,
+                    expires_at_ms: 10_000,
+                    min_tlc_expiry_delta_ms: 1000,
+                    max_tlc_expiry_ms: 100_000,
+                },
+                [9; 32].into(),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn auto_allows_an_issued_inbound_commitment() {
         let (mut session, channel_id, status, payment_hash) = bound_session_with_inbound().await;
-        session.registry_mut().record_issued_invoice(payment_hash);
+        authorize_receive(&session, channel_id, payment_hash).await;
         session.registry_mut().note_signed_balance(10);
         let outcome = session
-            .handle_channel_status(channel_id, status)
+            .handle_channel_status(channel_id, status, 0)
             .await
             .expect("handle");
         assert!(matches!(outcome, ProcessOutcome::ReadyToSubmit(_)));
@@ -757,20 +853,33 @@ mod tests {
     async fn auto_denies_an_unissued_inbound_commitment() {
         let (mut session, channel_id, status, _) = bound_session_with_inbound().await;
         session.registry_mut().note_signed_balance(10);
-        let outcome = session
-            .handle_channel_status(channel_id, status)
+        let error = session
+            .handle_channel_status(channel_id, status, 0)
             .await
-            .expect("handle");
-        assert!(matches!(outcome, ProcessOutcome::Denied));
+            .unwrap_err();
+        assert!(error.to_string().contains("no local payment authorization"));
+    }
+
+    #[tokio::test]
+    async fn hash_only_registry_cannot_authorize_an_unverified_receipt() {
+        let (mut session, channel_id, status, hash) = bound_session_with_inbound().await;
+        session.registry_mut().record_issued_invoice(hash);
+        session.registry_mut().note_signed_balance(0);
+        assert!(session
+            .handle_channel_status(channel_id, status, 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("no local payment authorization"));
     }
 
     #[tokio::test]
     async fn manual_asks_before_signing() {
         let (session, channel_id, status, payment_hash) = bound_session_with_inbound().await;
         let mut session = session.with_policy(SigningPolicy::Manual);
-        session.registry_mut().record_issued_invoice(payment_hash);
+        authorize_receive(&session, channel_id, payment_hash).await;
         let outcome = session
-            .handle_channel_status(channel_id, status)
+            .handle_channel_status(channel_id, status, 0)
             .await
             .expect("handle");
         assert!(matches!(outcome, ProcessOutcome::NeedConfirmation(_)));
@@ -796,32 +905,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_asks_before_a_watchtower_settlement() {
+    async fn auto_rejects_watchtower_without_verified_chain_context() {
         let (mut session, channel_id, _, _) = bound_session_with_inbound().await;
-        let outcome = session
+        assert!(session
             .handle_watchtower_status(channel_id, watchtower_required_status())
             .await
-            .expect("handle");
-        assert!(matches!(outcome, ProcessOutcome::NeedConfirmation(_)));
+            .is_err());
     }
 
     #[tokio::test]
-    async fn confirm_watchtower_request_builds_submit_params() {
-        let (mut session, channel_id, _, _) = bound_session_with_inbound().await;
-        let ProcessOutcome::NeedConfirmation(pending) = session
+    async fn manual_cannot_bypass_missing_chain_context() {
+        let (session, channel_id, _, _) = bound_session_with_inbound().await;
+        let mut session = session.with_policy(SigningPolicy::Manual);
+        assert!(session
             .handle_watchtower_status(channel_id, watchtower_required_status())
             .await
-            .expect("handle")
-        else {
-            panic!("expected confirmation");
-        };
-        let SubmitParams::Watchtower(params) = session.confirm(pending).await.expect("confirm")
-        else {
-            panic!("expected watchtower submit");
-        };
-        assert_eq!(params.channel_id, channel_id.into());
-        assert_eq!(params.request_id, Hash256::from([0x44; 32]).into());
-        assert_eq!(params.signature.len(), 65);
+            .is_err());
     }
 
     #[tokio::test]

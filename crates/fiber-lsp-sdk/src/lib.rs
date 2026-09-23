@@ -5,6 +5,14 @@
 
 #![forbid(unsafe_code)]
 
+mod commitment;
+mod lifecycle;
+mod onchain;
+pub use lifecycle::{
+    CloseAuthorization, CommitmentReference, RecoveryRecord, RevocationContext, RevocationRecord,
+    SigningSessionEvidence,
+};
+pub use onchain::{ChainVerifier, OnchainSpendAuthorization, VerifiedCell};
 #[cfg(feature = "json")]
 pub mod json;
 mod policy;
@@ -37,3 +45,10 @@ pub use session::{
 };
 pub use signer::{ChannelSigner, CreatedRootSigner, RootSigner};
 pub use store::{MemoryStore, MemoryStoreError, SignerStore};
+
+pub use commitment::{
+    CommitmentContext, CommitmentParameters, CommitmentReview, PaymentAuthorization,
+};
+
+#[cfg(test)]
+mod commitment_tests;

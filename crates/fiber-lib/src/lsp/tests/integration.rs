@@ -74,10 +74,7 @@ use crate::{
     },
     NetworkServiceEvent,
 };
-use fiber_lsp_sdk::{
-    ChannelKeyId, ChannelSignature, ChannelSigner, ChannelSigningContent, MemoryStore, RootKey,
-    RootSigner,
-};
+use fiber_lsp_sdk::{ChannelKeyId, ChannelSigner, MemoryStore, RootKey, RootSigner};
 
 const TENANT_ID: &str = "u1";
 const BUFFER_DURATION_MS: u64 = 120_000;
@@ -568,6 +565,13 @@ async fn open_hosted_external_channel(
         .bind_from_approved_funding(&unsigned_tx, 0, Script::default(), &expected_inputs)
         .await
         .expect("bind hosted external signer to approved funding");
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        signer,
+        &unsigned_tx,
+        &public_node.get_channel_actor_state(channel_id),
+        false,
+    )
+    .await;
     let signed_tx = unsigned_tx
         .as_advanced_builder()
         .set_witnesses(vec![Bytes::default()])
@@ -605,38 +609,10 @@ async fn prepare_hosted_signature(
     channel_id: crate::fiber_types::Hash256,
     status: fiber_json_types::ChannelSigningStatus,
 ) -> SubmitChannelSignatureParams {
-    let fiber_json_types::ChannelSigningStatus::SignatureRequired {
-        request_id,
-        content,
-        ..
-    } = status
-    else {
-        panic!("hosted channel must have a pending signing request");
-    };
-    let content =
-        fiber_lsp_sdk::json::musig2_from_rpc(content).expect("hosted signing content must decode");
-    let slot = content.slot;
-    let prepared = signer
-        .prepare(ChannelSigningContent::Musig2(content))
-        .await
-        .expect("prepare hosted external signature");
-    let ChannelSignature::Musig2(signature) = signer
-        .sign(prepared)
-        .await
-        .expect("sign hosted external request")
-    else {
-        panic!("hosted channel request must use MuSig2");
-    };
-    let next_material = signer
-        .next_material(slot)
-        .await
-        .expect("load next hosted signer material");
-    SubmitChannelSignatureParams {
-        channel_id: channel_id.into(),
-        request_id,
-        partial_signature: signature.partial_signature.serialize(),
-        next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
-    }
+    crate::fiber::tests::external_signer_restart::prepare_hosted_signature(
+        signer, channel_id, status,
+    )
+    .await
 }
 
 async fn submit_hosted_signature(

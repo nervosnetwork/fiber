@@ -7,7 +7,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use fiber_json_types::{
     ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial, SubmitChannelSignatureResult,
-    SubmitWatchtowerSignatureResult, WatchtowerSigningStatus,
+    WatchtowerSigningStatus,
 };
 use fiber_lsp_sdk::{
     json::open_material_to_rpc, ChannelKeyId, HostedSession, HostedSessionState, ProcessOutcome,
@@ -18,6 +18,15 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::rpc::FiberRpc;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis()
+        .try_into()
+        .expect("timestamp fits u64")
+}
 
 const ROOT_KEY_FILE: &str = "root.key";
 const AGENT_STATE_FILE: &str = "agent.json";
@@ -46,7 +55,7 @@ pub struct AgentConfig {
 
 /// Auto-approving test client backed by [`fiber_lsp_sdk::HostedSession`].
 ///
-/// Uses [`SigningPolicy::Always`] so E2E can drive the node. Production
+/// Uses [`SigningPolicy::Manual`] and explicitly confirms verified requests. Production
 /// clients construct `HostedSession::new` (default `Auto`) and feed RPC
 /// results in themselves.
 pub struct Agent<R, S> {
@@ -76,7 +85,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .transpose()?;
         let state_file = config.store_dir.join(AGENT_STATE_FILE);
         let session = HostedSession::new(root)
-            .with_policy(SigningPolicy::Always)
+            .with_policy(SigningPolicy::Manual)
             .with_state(HostedSessionState {
                 tenant_token: persisted.tenant_token,
                 bindings,
@@ -173,6 +182,23 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(())
     }
 
+    /// Record opening terms provided by the local test driver, independently of LSP status.
+    pub async fn approve_opening(
+        &self,
+        channel_id: Hash256,
+        funding: &ckb_types::packed::Transaction,
+        parameters: fiber_lsp_sdk::CommitmentParameters,
+    ) -> Result<()> {
+        let key = self
+            .binding(channel_id)
+            .ok_or_else(|| anyhow!("unbound channel"))?;
+        self.open_channel(key)
+            .await?
+            .approve_commitment_parameters(funding, parameters)
+            .await
+            .map_err(|e| anyhow!("approve opening: {e}"))
+    }
+
     /// Service outstanding signing requests for already-bound channels.
     pub async fn poll_once(&mut self) -> Result<()> {
         let token = self
@@ -196,7 +222,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .status;
         match self
             .session
-            .handle_channel_status(channel_id, status)
+            .handle_channel_status(channel_id, status, now_ms())
             .await
             .map_err(|error| anyhow!("handle channel status: {error}"))?
         {
@@ -210,10 +236,19 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             ProcessOutcome::ReadyToSubmit(SubmitParams::Watchtower(_)) => Err(anyhow!(
                 "channel status produced a watchtower submit payload"
             )),
-            ProcessOutcome::NeedConfirmation(_) => {
-                Err(anyhow!("Always policy required confirmation"))
+            ProcessOutcome::NeedConfirmation(pending) => {
+                let SubmitParams::Channel(params) = self
+                    .session
+                    .confirm(pending, now_ms())
+                    .await
+                    .map_err(|e| anyhow!("confirm: {e}"))?
+                else {
+                    return Err(anyhow!("expected channel signature"));
+                };
+                self.rpc.submit_channel_signature(token, params).await?;
+                Ok(())
             }
-            ProcessOutcome::Denied => Err(anyhow!("Always policy denied a signing request")),
+            ProcessOutcome::Denied => Err(anyhow!("signing policy denied a signing request")),
         }
     }
 
@@ -230,26 +265,45 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         if matches!(status, WatchtowerSigningStatus::NoSignatureRequired) {
             return Ok(());
         }
-        match self
+        Err(anyhow!("watchtower request requires local authorization and an independent ChainVerifier; use poll_watchtower_verified"))
+    }
+
+    /// Sign a watchtower request only with locally approved terms and independent live chain evidence.
+    pub async fn poll_watchtower_verified<C: fiber_lsp_sdk::ChainVerifier>(
+        &self,
+        channel_id: Hash256,
+        authorization: fiber_lsp_sdk::OnchainSpendAuthorization,
+        chain: &C,
+    ) -> Result<()> {
+        let token = self
             .session
-            .handle_watchtower_status(channel_id, status)
+            .tenant_token()
+            .ok_or_else(|| anyhow!("agent is not registered"))?;
+        let status = self
+            .rpc
+            .get_watchtower_signing_status(token, channel_id.into())
+            .await?
+            .status;
+        let outcome = self
+            .session
+            .handle_watchtower_status_verified(channel_id, status, authorization, chain)
             .await
-            .map_err(|error| anyhow!("handle watchtower status: {error}"))?
-        {
+            .map_err(|e| anyhow!("prepare watchtower: {e}"))?;
+        match outcome {
             ProcessOutcome::Idle => Ok(()),
-            ProcessOutcome::ReadyToSubmit(SubmitParams::Watchtower(params)) => {
-                match self.rpc.submit_watchtower_signature(token, params).await? {
-                    SubmitWatchtowerSignatureResult::Applied
-                    | SubmitWatchtowerSignatureResult::AlreadyApplied => Ok(()),
-                }
+            ProcessOutcome::NeedConfirmation(pending) => {
+                let SubmitParams::Watchtower(params) = self
+                    .session
+                    .confirm_onchain(pending, chain)
+                    .await
+                    .map_err(|e| anyhow!("confirm watchtower: {e}"))?
+                else {
+                    return Err(anyhow!("expected watchtower signature"));
+                };
+                self.rpc.submit_watchtower_signature(token, params).await?;
+                Ok(())
             }
-            ProcessOutcome::ReadyToSubmit(SubmitParams::Channel(_)) => Err(anyhow!(
-                "watchtower status produced a channel submit payload"
-            )),
-            ProcessOutcome::NeedConfirmation(_) => {
-                Err(anyhow!("Always policy required confirmation"))
-            }
-            ProcessOutcome::Denied => Err(anyhow!("Always policy denied a signing request")),
+            _ => Err(anyhow!("watchtower must require explicit confirmation")),
         }
     }
 
@@ -382,18 +436,17 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use ckb_types::prelude::*;
+    use fiber_json_types::SubmitWatchtowerSignatureResult;
     use fiber_json_types::{
-        ChannelSigningStatus, ChannelSigningTransition, GetChannelSigningStatusResult,
-        GetLspTenantRegistryNonceResult, Hash256 as JsonHash256, LspTenantRuntimeStatus,
-        LspTenantStatus, RegisterLspTenantParams, RegisterLspTenantResult,
-        SubmitChannelSignatureParams,
+        ChannelSigningStatus, GetChannelSigningStatusResult, GetLspTenantRegistryNonceResult,
+        Hash256 as JsonHash256, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams,
+        RegisterLspTenantResult, SubmitChannelSignatureParams,
     };
     use fiber_lsp_sdk::{MemoryStore, RootKey, RootSigner, SignerStore};
     use fiber_types::{Privkey, TenantId, TenantRegistryPayload, TenantRegistrySignature};
 
     use super::*;
-    use crate::convert::{musig2_to_rpc, tests as convert_tests};
+    use crate::convert::tests as convert_tests;
 
     #[derive(Clone)]
     struct FakeNode {
@@ -539,7 +592,9 @@ mod tests {
     ) -> ckb_types::packed::Script {
         use ckb_types::prelude::*;
         use musig2::KeyAggContext;
-        let ctx = KeyAggContext::new([local, remote]).expect("aggregate keys");
+        let mut keys = [local, remote];
+        keys.sort();
+        let ctx = KeyAggContext::new(keys).expect("aggregate keys");
         let point: musig2::secp::Point = ctx.aggregated_pubkey();
         let digest = fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[]);
         ckb_types::packed::Script::new_builder()
@@ -568,7 +623,10 @@ mod tests {
             .data()
     }
 
-    async fn bind_pending<S: SignerStore>(agent: &mut Agent<FakeNode, S>, channel_id: Hash256) {
+    async fn bind_pending<S: SignerStore>(
+        agent: &mut Agent<FakeNode, S>,
+        channel_id: Hash256,
+    ) -> ckb_types::packed::Transaction {
         let key_id = agent.pending_channel_key_id().expect("pending key");
         let signer = agent.open_channel(key_id).await.expect("open signer");
         let tx = approved_funding_tx(funding_lock_for(
@@ -576,9 +634,19 @@ mod tests {
             convert_tests::remote_binding_pubkey(),
         ));
         agent
-            .bind_approved_funding(channel_id, tx, convert_tests::bound_shutdown_script(), 0)
+            .bind_approved_funding(
+                channel_id,
+                tx.clone(),
+                convert_tests::bound_shutdown_script(),
+                0,
+            )
             .await
             .expect("bind approved funding");
+        agent
+            .approve_opening(channel_id, &tx, convert_tests::parameters())
+            .await
+            .unwrap();
+        tx
     }
 
     async fn memory_agent(node: FakeNode, dir: &Path) -> Agent<FakeNode, MemoryStore> {
@@ -709,37 +777,33 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let node = FakeNode::default();
         node.insert_external_channel(channel_id());
-        let mut agent = memory_agent(node.clone(), dir.path()).await;
-        agent.initialize().await.expect("initialize");
-        let key_id = agent.pending_channel_key_id().expect("pending key");
-        let signer = agent.open_channel(key_id).await.expect("open signer");
-        let funding_tx = approved_funding_tx(funding_lock_for(
-            signer.public_material().base_public_keys.funding_pubkey,
-            convert_tests::remote_binding_pubkey(),
-        ));
-        let funding_outpoint = ckb_types::packed::OutPoint::new(funding_tx.calc_tx_hash(), 0);
-        agent
-            .bind_approved_funding(
-                channel_id(),
-                funding_tx,
-                convert_tests::bound_shutdown_script(),
-                0,
-            )
-            .await
-            .expect("bind approved funding");
-        let mut content = convert_tests::musig_content_for(&signer).await;
-        content.content = fiber_lsp_sdk::Musig2SignableContent::CommitmentTransaction(
-            convert_tests::commitment_spending(funding_outpoint),
-        );
-        node.state().statuses.insert(
-            channel_id().into(),
-            ChannelSigningStatus::SignatureRequired {
-                request_id: JsonHash256([0x22; 32]),
-                transition: ChannelSigningTransition::SendCommitmentSigned,
-                content: musig2_to_rpc(&content),
-                settlement: None,
+        let mut agent = Agent::open(
+            node.clone(),
+            AgentConfig {
+                store_dir: dir.path().to_path_buf(),
+                status_file: None,
             },
-        );
+        )
+        .await
+        .unwrap();
+        agent.initialize().await.expect("initialize");
+        let tx = bind_pending(&mut agent, channel_id()).await;
+        let signer = agent
+            .open_channel(agent.binding(channel_id()).unwrap())
+            .await
+            .unwrap();
+        let status = convert_tests::commitment_status(&signer, &tx, true).await;
+        let mut malicious = status.clone();
+        let ChannelSigningStatus::SignatureRequired { settlement, .. } = &mut malicious else {
+            panic!()
+        };
+        settlement.as_mut().unwrap().local_amount += 1;
+        node.state().statuses.insert(channel_id().into(), malicious);
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        assert!(agent.poll_once().await.is_err());
+        assert!(node.state().submissions.is_empty());
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        node.state().statuses.insert(channel_id().into(), status);
 
         agent.poll_once().await.expect("poll and sign");
 
@@ -763,36 +827,49 @@ mod tests {
             .await
             .expect("first open");
         first.initialize().await.expect("first initialize");
-        bind_pending(&mut first, channel_id()).await;
-        drop(first);
-
-        let tx = ckb_types::core::TransactionBuilder::default()
-            .output(
-                ckb_types::packed::CellOutput::new_builder()
-                    .capacity(1000u64)
-                    .build(),
-            )
-            .output_data(ckb_types::packed::Bytes::default())
-            .build()
-            .data();
-        let request_id = JsonHash256([0x33; 32]);
-        node.state().watchtower_statuses.insert(
+        let funding = bind_pending(&mut first, channel_id()).await;
+        let key = first.binding(channel_id()).unwrap();
+        let signer = first.open_channel(key).await.unwrap();
+        let status = convert_tests::commitment_status(&signer, &funding, false).await;
+        node.state().statuses.insert(channel_id().into(), status);
+        first.poll_once().await.unwrap();
+        let records = signer.recovery_records().await.unwrap();
+        let (status, authorization, mut chain) = convert_tests::settlement(&records[0]);
+        node.state().statuses.insert(
             channel_id().into(),
-            WatchtowerSigningStatus::SignatureRequired {
-                request_id,
-                content: fiber_json_types::OnchainSigningContent {
-                    key_purpose: fiber_json_types::OnchainKeyPurpose::Settlement,
-                    transaction: tx.into(),
-                },
-            },
+            ChannelSigningStatus::NoSignatureRequired,
         );
+        node.state()
+            .watchtower_statuses
+            .insert(channel_id().into(), status);
+        drop(signer);
+        drop(first);
+        let request_id = JsonHash256([0x33; 32]);
 
         let mut reopened = Agent::open(node.clone(), config()).await.expect("reopen");
         reopened.initialize().await.expect("reinitialize");
-        reopened
-            .poll_once()
+        let restored = reopened.open_channel(key).await.unwrap();
+        assert_eq!(
+            serde_json::to_vec(&restored.recovery_records().await.unwrap()).unwrap(),
+            serde_json::to_vec(&records).unwrap()
+        );
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        assert!(
+            reopened.poll_once().await.is_err(),
+            "missing chain context must reject"
+        );
+        chain.live = false;
+        assert!(reopened
+            .poll_watchtower_verified(channel_id(), authorization.clone(), &chain)
             .await
-            .expect("poll and sign watchtower");
+            .is_err());
+        assert!(node.state().watchtower_submissions.is_empty());
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        chain.live = true;
+        reopened
+            .poll_watchtower_verified(channel_id(), authorization, &chain)
+            .await
+            .expect("checked watchtower after restart");
 
         let state = node.state();
         assert_eq!(state.watchtower_submissions.len(), 1);

@@ -17,9 +17,9 @@ pub use fiber_types::{
 /// Later [`crate::ChannelSigner::prepare`] calls check that MuSig2
 /// aggregation matches this funding lock, that commitment/close txs spend this
 /// outpoint, that close txs pay the local shutdown script, and that
-/// announcements name the same outpoint. They do not reconstruct balances.
-/// [`crate::SigningPolicy::Auto`] binds a settlement snapshot to the
-/// commitment lock args before trusting `local_amount` or the TLC set.
+/// announcements name the same outpoint. Commitments additionally require
+/// [`crate::ChannelSigner::approve_commitment_parameters`] and mandatory
+/// [`crate::ChannelSigner::prepare_commitment`] verification in every policy.
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelBinding {
@@ -113,24 +113,100 @@ pub struct SigningReview {
     pub warnings: Vec<SigningWarning>,
 }
 
-/// Prepared request whose exact plaintext can be reviewed before signing.
+/// Plaintext and review material before intent-specific semantic validation.
+/// This internal type cannot be passed to any public signing method.
+#[derive(Clone, Debug)]
+pub(crate) struct SigningData {
+    pub channel_key_id: ChannelKeyId,
+    pub state_revision: u64,
+    pub content: ChannelSigningContent,
+    pub review: SigningReview,
+}
+
+#[cfg(test)]
+impl SigningData {
+    pub fn review(&self) -> &SigningReview {
+        &self.review
+    }
+    pub fn content(&self) -> &ChannelSigningContent {
+        &self.content
+    }
+}
+
+/// Each variant carries every required result of its intent-specific verifier.
+#[derive(Clone, Debug)]
+pub(crate) enum PreparedValidation {
+    Commitment {
+        state: crate::commitment::CommitmentState,
+        context: crate::CommitmentContext,
+        review: crate::CommitmentReview,
+        validated_at_ms: u64,
+    },
+    Revocation {
+        state: crate::commitment::CommitmentState,
+        context: crate::RevocationContext,
+        validated_at_ms: u64,
+    },
+    Close {
+        state: crate::commitment::CommitmentState,
+    },
+    Announcement {
+        state: crate::commitment::CommitmentState,
+    },
+    Onchain {
+        authorization: crate::OnchainSpendAuthorization,
+    },
+}
+
+/// Fully validated request whose exact plaintext can be reviewed before signing.
+/// Fields are private; only an intent-specific verifier can construct this value.
 #[derive(Clone, Debug)]
 pub struct PreparedSigning {
-    pub(crate) channel_key_id: ChannelKeyId,
-    pub(crate) state_revision: u64,
-    pub(crate) content: ChannelSigningContent,
-    pub(crate) review: SigningReview,
+    pub(crate) data: SigningData,
+    pub(crate) validation: PreparedValidation,
 }
 
 impl PreparedSigning {
+    /// Verified old/replacement state identities for a revocation review.
+    pub fn revocation_context(&self) -> Option<&crate::RevocationContext> {
+        match &self.validation {
+            PreparedValidation::Revocation { context, .. } => Some(context),
+            _ => None,
+        }
+    }
+
+    /// Wallet-approved destination, fee and inputs for an on-chain review.
+    pub fn onchain_authorization(&self) -> Option<&crate::OnchainSpendAuthorization> {
+        match &self.validation {
+            PreparedValidation::Onchain { authorization } => Some(authorization),
+            _ => None,
+        }
+    }
+
+    /// Exact verified context, including protocol transition and witness orientation.
+    pub fn commitment_context(&self) -> Option<&crate::CommitmentContext> {
+        match &self.validation {
+            PreparedValidation::Commitment { context, .. } => Some(context),
+            _ => None,
+        }
+    }
+
+    /// Verified commitment balances and transition, absent for other operations.
+    pub fn commitment_review(&self) -> Option<&crate::CommitmentReview> {
+        match &self.validation {
+            PreparedValidation::Commitment { review, .. } => Some(review),
+            _ => None,
+        }
+    }
+
     /// User-facing review generated from the exact signing plaintext.
     pub fn review(&self) -> &SigningReview {
-        &self.review
+        &self.data.review
     }
 
     /// Typed plaintext that will be signed if this preparation is approved.
     pub fn content(&self) -> &ChannelSigningContent {
-        &self.content
+        &self.data.content
     }
 }
 

@@ -114,10 +114,11 @@ pub fn settlement_from_rpc(
                 .iter()
                 .map(|tlc| {
                     Ok(SettlementTlc {
-                        tlc_id: if tlc.inbound {
-                            TLCId::Received(0)
+                        // RPC direction is wallet-relative; witness direction depends on the lane.
+                        tlc_id: if tlc.inbound == settlement.for_remote {
+                            TLCId::Received(tlc.tlc_id)
                         } else {
-                            TLCId::Offered(0)
+                            TLCId::Offered(tlc.tlc_id)
                         },
                         hash_algorithm: tlc.hash_algorithm.into(),
                         payment_amount: tlc.payment_amount,
@@ -125,7 +126,7 @@ pub fn settlement_from_rpc(
                         expiry: tlc.expiry,
                         local_key: None,
                         local_key_pubkey: Some(tlc.local_key_pubkey.try_into()?),
-                        local_key_commitment_number: None,
+                        local_key_commitment_number: Some(tlc.local_key_commitment_number),
                         remote_key: tlc.remote_key.try_into()?,
                     })
                 })
@@ -261,6 +262,30 @@ fn musig2_signable_to_rpc(content: &Musig2SignableContent) -> JsonMusig2Signable
     }
 }
 
+/// Decode participant evidence, rejecting malformed nonce or partial signature bytes.
+pub fn session_evidence_from_rpc(
+    value: fiber_json_types::SigningSessionEvidence,
+) -> Result<crate::SigningSessionEvidence, String> {
+    Ok(crate::SigningSessionEvidence {
+        peer_public_nonce: musig2::PubNonce::from_bytes(&value.peer_public_nonce)
+            .map_err(|e| e.to_string())?,
+        peer_partial_signature: value
+            .peer_partial_signature
+            .map(|s| musig2::PartialSignature::from_slice(&s).map_err(|e| e.to_string()))
+            .transpose()?,
+    })
+}
+
+/// Encode public participant evidence for the JSON boundary.
+pub fn session_evidence_to_rpc(
+    value: &crate::SigningSessionEvidence,
+) -> fiber_json_types::SigningSessionEvidence {
+    fiber_json_types::SigningSessionEvidence {
+        peer_public_nonce: value.peer_public_nonce.serialize().to_vec(),
+        peer_partial_signature: value.peer_partial_signature.map(|s| s.serialize().to_vec()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use fiber_types::Pubkey;
@@ -362,6 +387,8 @@ mod tests {
             remote_settlement_pubkey: remote.into(),
             for_remote: true,
             tlcs: vec![fiber_json_types::SigningSettlementTlc {
+                tlc_id: 42,
+                local_key_commitment_number: 3,
                 inbound: true,
                 payment_hash: payment_hash.into(),
                 payment_amount: 5,
@@ -378,6 +405,6 @@ mod tests {
         assert_eq!(remote_key, remote);
         assert!(for_remote);
         assert_eq!(data.tlcs[0].payment_hash, payment_hash);
-        assert!(matches!(data.tlcs[0].tlc_id, TLCId::Received(0)));
+        assert!(matches!(data.tlcs[0].tlc_id, TLCId::Received(42)));
     }
 }

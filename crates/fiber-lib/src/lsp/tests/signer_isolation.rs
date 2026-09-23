@@ -5,9 +5,7 @@ use ckb_types::{
     packed::{Script, Transaction},
     prelude::*,
 };
-use fiber_lsp_sdk::{
-    ChannelSignature, ChannelSigner, ChannelSigningContent, MemoryStore, RootSigner,
-};
+use fiber_lsp_sdk::{ChannelSigner, MemoryStore, RootSigner};
 use hyper::{
     header::{HeaderValue, AUTHORIZATION},
     HeaderMap,
@@ -316,41 +314,12 @@ impl ExternalSignerClient {
         channel_id: Hash256,
         status: fiber_json_types::ChannelSigningStatus,
     ) -> SubmitChannelSignatureParams {
-        let fiber_json_types::ChannelSigningStatus::SignatureRequired {
-            request_id,
-            content,
-            ..
-        } = status
-        else {
-            panic!("channel must have a pending signing request");
-        };
-        let content = fiber_lsp_sdk::json::musig2_from_rpc(content)
-            .expect("RPC signing content must round-trip into fiber-signer plaintext");
-        let slot = content.slot;
-        let prepared = self
-            .signer
-            .prepare(ChannelSigningContent::Musig2(content))
-            .await
-            .expect("independent signer prepares the RPC plaintext");
-        let signature = self
-            .signer
-            .sign(prepared)
-            .await
-            .expect("independent signer signs the RPC plaintext");
-        let ChannelSignature::Musig2(signature) = signature else {
-            panic!("channel MuSig2 request must produce a MuSig2 signature");
-        };
-        let next_material = self
-            .signer
-            .next_material(slot)
-            .await
-            .expect("next public signer material");
-        SubmitChannelSignatureParams {
-            channel_id: channel_id.into(),
-            request_id,
-            partial_signature: signature.partial_signature.serialize(),
-            next_material: Some(fiber_lsp_sdk::json::next_material_to_rpc(&next_material)),
-        }
+        crate::fiber::tests::external_signer_restart::prepare_hosted_signature(
+            &self.signer,
+            channel_id,
+            status,
+        )
+        .await
     }
 
     async fn submit(
@@ -429,6 +398,13 @@ async fn open_hosted_external_channel(
         .bind_from_approved_funding(&unsigned_tx, 0, Script::default(), &expected_inputs)
         .await
         .expect("bind approved funding");
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &channel_signer,
+        &unsigned_tx,
+        &fixture.public_t.get_channel_actor_state(channel_id),
+        false,
+    )
+    .await;
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
     let _: SubmitSignedFundingTxResult = tenant_client
         .request(
@@ -890,6 +866,14 @@ async fn hosted_external_signer_inbound_payment_requires_signing_during_commitme
         .await
         .expect("create hosted invoice");
     let payment_hash: Hash256 = invoice.invoice.data.payment_hash.into();
+    crate::fiber::tests::external_signer_restart::approve_fixture_payment(
+        &sdk.signer,
+        payment_hash,
+        payment_preimage,
+        1_000,
+        true,
+    )
+    .await;
 
     let payment_response = payer
         .send_payment(SendPaymentCommand {

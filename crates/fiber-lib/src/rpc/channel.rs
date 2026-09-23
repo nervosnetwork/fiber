@@ -882,16 +882,28 @@ fn to_rpc_channel_signing_status(
             ChannelSigningStatus::SignatureRequired {
                 request_id: request_id.0.into(),
                 transition: to_rpc_signing_transition(transition),
+                session_evidence: {
+                    let (nonce, signature) = state.external_signing_peer_evidence()?;
+                    fiber_json_types::SigningSessionEvidence {
+                        peer_public_nonce: nonce.serialize().to_vec(),
+                        peer_partial_signature: signature.map(|s| s.serialize().to_vec()),
+                    }
+                },
                 content: to_rpc_musig2_signing_content(content)?,
-                settlement: settlement_data.and_then(|settlement| {
-                    let remote = state.remote_channel_public_keys.as_ref()?;
-                    Some(to_rpc_signing_settlement(
-                        settlement,
-                        state.local_channel_public_keys.tlc_base_key,
-                        remote.tlc_base_key,
-                        for_remote,
-                    ))
-                }),
+                settlement: settlement_data
+                    .map(|settlement| {
+                        let remote = state
+                            .remote_channel_public_keys
+                            .as_ref()
+                            .ok_or("missing remote channel public keys")?;
+                        to_rpc_signing_settlement(
+                            settlement,
+                            state.local_channel_public_keys.tlc_base_key,
+                            remote.tlc_base_key,
+                            for_remote,
+                        )
+                    })
+                    .transpose()?,
             }
         }
     })
@@ -902,8 +914,8 @@ fn to_rpc_signing_settlement(
     local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
     for_remote: bool,
-) -> fiber_json_types::SigningSettlement {
-    fiber_json_types::SigningSettlement {
+) -> Result<fiber_json_types::SigningSettlement, String> {
+    Ok(fiber_json_types::SigningSettlement {
         local_amount: settlement.local_amount,
         remote_amount: settlement.remote_amount,
         local_settlement_pubkey: local_settlement_key.into(),
@@ -912,17 +924,23 @@ fn to_rpc_signing_settlement(
         tlcs: settlement
             .tlcs
             .into_iter()
-            .map(|tlc| fiber_json_types::SigningSettlementTlc {
-                inbound: matches!(tlc.tlc_id, TLCId::Received(_)),
-                payment_hash: tlc.payment_hash.into(),
-                payment_amount: tlc.payment_amount,
-                hash_algorithm: tlc.hash_algorithm.into(),
-                expiry: tlc.expiry,
-                local_key_pubkey: tlc.local_pubkey().into(),
-                remote_key: tlc.remote_key.into(),
+            .map(|tlc| {
+                Ok(fiber_json_types::SigningSettlementTlc {
+                    tlc_id: u64::from(tlc.tlc_id),
+                    local_key_commitment_number: tlc
+                        .local_key_commitment_number
+                        .ok_or("missing TLC key derivation index")?,
+                    inbound: matches!(tlc.tlc_id, TLCId::Received(_)) == for_remote,
+                    payment_hash: tlc.payment_hash.into(),
+                    payment_amount: tlc.payment_amount,
+                    hash_algorithm: tlc.hash_algorithm.into(),
+                    expiry: tlc.expiry,
+                    local_key_pubkey: tlc.local_pubkey().into(),
+                    remote_key: tlc.remote_key.into(),
+                })
             })
-            .collect(),
-    }
+            .collect::<Result<Vec<_>, String>>()?,
+    })
 }
 
 fn to_rpc_signing_transition(
@@ -1082,5 +1100,55 @@ pub(crate) fn to_rpc_channel_open_signer_material(
             .channel_announcement_nonce
             .as_ref()
             .map(|nonce| nonce.serialize().to_vec()),
+    }
+}
+
+#[cfg(test)]
+mod signing_snapshot_tests {
+    use fiber_types::{Privkey, SettlementData, SettlementTlc, TLCId};
+
+    use super::to_rpc_signing_settlement;
+
+    #[test]
+    fn signing_snapshot_preserves_ids_keys_and_wallet_relative_direction() {
+        let local = Privkey::from(&[1; 32]).pubkey();
+        let remote = Privkey::from(&[2; 32]).pubkey();
+        for for_remote in [false, true] {
+            for inbound in [false, true] {
+                let data = SettlementData {
+                    local_amount: 100,
+                    remote_amount: 200,
+                    tlcs: vec![SettlementTlc {
+                        tlc_id: if inbound == for_remote {
+                            TLCId::Received(42)
+                        } else {
+                            TLCId::Offered(42)
+                        },
+                        hash_algorithm: Default::default(),
+                        payment_amount: 10,
+                        payment_hash: [3; 32].into(),
+                        expiry: 10_000,
+                        local_key: None,
+                        local_key_pubkey: Some(local),
+                        local_key_commitment_number: Some(7),
+                        remote_key: remote,
+                    }],
+                };
+                let json =
+                    to_rpc_signing_settlement(data.clone(), local, remote, for_remote).unwrap();
+                assert_eq!(json.tlcs[0].inbound, inbound);
+                assert_eq!(json.tlcs[0].tlc_id, 42);
+                assert_eq!(json.tlcs[0].local_key_commitment_number, 7);
+                let (restored, _, _, _) = fiber_lsp_sdk::json::settlement_from_rpc(&json).unwrap();
+                assert_eq!(restored, data);
+                let mut missing_index = data;
+                missing_index.tlcs[0].local_key_commitment_number = None;
+                assert_eq!(
+                    to_rpc_signing_settlement(missing_index, local, remote, for_remote)
+                        .unwrap_err(),
+                    "missing TLC key derivation index"
+                );
+            }
+        }
     }
 }
