@@ -18,6 +18,7 @@
 //! | 194          | Hash256              | PaymentCustomRecords        |
 //! | 224          | Hash256              | ChannelData                 |
 //! | 201          | Hash256              | ChannelOpenRecord           |
+//! | 202          | (singleton)          | TenantChannelOpening        |
 //! | 232          | Payment_hash         | CchOrder                    |
 //! | 233          | Payment_hash         | CchReceiveBtcOrderCreation  |
 //! | 234          | Payment_hash         | CchSendBtcOrderCreation    |
@@ -45,11 +46,14 @@ pub const HOLD_TLC_PREFIX: u8 = 197;
 // A shared prefix for watchtower and channel store
 pub const WATCHTOWER_TLC_SETTLED_PREFIX: u8 = 200;
 pub const CHANNEL_OPEN_RECORD_PREFIX: u8 = 201;
+/// Single pending or frozen opening in a tenant's namespaced store.
+pub const TENANT_CHANNEL_OPENING_PREFIX: u8 = 202;
 #[cfg(feature = "watchtower")]
 mod watchtower {
     pub const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
     pub const WATCHTOWER_PREIMAGE_PREFIX: u8 = 225;
     pub const WATCHTOWER_NODE_PAYMENTHASH_PREFIX: u8 = 226;
+    pub const WATCHTOWER_SIGNER_PREFIX: u8 = 227;
 }
 #[cfg(feature = "watchtower")]
 pub use watchtower::*;

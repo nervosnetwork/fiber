@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::CchConfig;
 use crate::{ckb::CkbConfig, rpc::config::RpcConfig, FiberConfig};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{CchConfig, LspConfig};
 use clap::Parser;
 use clap_serde_derive::ClapSerde;
 use serde::Deserialize;
@@ -18,6 +18,9 @@ pub struct Config {
     // cch config, None represents that we should not run cch service
     #[cfg(not(target_arch = "wasm32"))]
     pub cch: Option<CchConfig>,
+    // lsp config, None represents that we should not run the hosted LSP service
+    #[cfg(not(target_arch = "wasm32"))]
+    pub lsp: Option<LspConfig>,
     // rpc server config, None represents that we should not run rpc service
     pub rpc: Option<RpcConfig>,
     // ckb actor config, None represents that we should not run ckb actor
@@ -43,6 +46,9 @@ pub enum Service {
     #[cfg(not(target_arch = "wasm32"))]
     #[serde(alias = "cch", alias = "CCH")]
     CCH,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(alias = "lsp", alias = "LSP")]
+    LSP,
     #[serde(alias = "rpc", alias = "RPC")]
     RPC,
     #[serde(alias = "ckb", alias = "CKB")]
@@ -55,6 +61,8 @@ struct SerializedConfig {
     fiber: Option<<FiberConfig as ClapSerde>::Opt>,
     #[cfg(not(target_arch = "wasm32"))]
     cch: Option<<CchConfig as ClapSerde>::Opt>,
+    #[cfg(not(target_arch = "wasm32"))]
+    lsp: Option<<LspConfig as ClapSerde>::Opt>,
     rpc: Option<<RpcConfig as ClapSerde>::Opt>,
     ckb: Option<<CkbConfig as ClapSerde>::Opt>,
 }
@@ -63,6 +71,7 @@ pub mod native {
     const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
     const DEFAULT_FIBER_DIR_NAME: &str = "fiber";
     const DEFAULT_CCH_DIR_NAME: &str = "cch";
+    const DEFAULT_LSP_DIR_NAME: &str = "lsp";
     use crate::config::SerializedConfig;
     use crate::config::Service;
     use std::{fs::File, io::BufReader, path::PathBuf, process::exit, str::FromStr};
@@ -75,7 +84,7 @@ pub mod native {
     use home::home_dir;
     use tracing::error;
 
-    use crate::{ckb::CkbConfig, rpc::config::RpcConfig, CchConfig, FiberConfig};
+    use crate::{ckb::CkbConfig, rpc::config::RpcConfig, CchConfig, FiberConfig, LspConfig};
 
     use super::Config;
     fn get_default_base_dir() -> PathBuf {
@@ -129,6 +138,10 @@ pub mod native {
         #[command(flatten)]
         pub cch: <CchConfig as ClapSerde>::Opt,
 
+        /// config for the hosted LSP service
+        #[command(flatten)]
+        pub lsp: <LspConfig as ClapSerde>::Opt,
+
         /// config for rpc
         #[command(flatten)]
         pub rpc: <RpcConfig as ClapSerde>::Opt,
@@ -144,6 +157,7 @@ pub mod native {
             match s {
                 "fiber" | "FIBER" => Ok(Self::FIBER),
                 "cch" | "CCH" => Ok(Self::CCH),
+                "lsp" | "LSP" => Ok(Self::LSP),
                 "rpc" | "RPC" => Ok(Self::RPC),
                 "ckb" | "CKB" => Ok(Self::CkbChain),
                 _ => Err(format!("invalid service {}", s)),
@@ -217,12 +231,14 @@ pub mod native {
             args.fiber.base_dir = Some(Some(base_dir.join(DEFAULT_FIBER_DIR_NAME)));
             args.ckb.base_dir = Some(Some(base_dir.join(crate::ckb::DEFAULT_CKB_BASE_DIR_NAME)));
             args.cch.base_dir = Some(Some(base_dir.join(DEFAULT_CCH_DIR_NAME)));
+            args.lsp.base_dir = Some(Some(base_dir.join(DEFAULT_LSP_DIR_NAME)));
 
-            let (fiber, cch, rpc, ckb) = {
+            let (fiber, cch, lsp, rpc, ckb) = {
                 let SerializedConfig {
                     services: _,
                     fiber,
                     cch,
+                    lsp,
                     rpc,
                     ckb,
                 } = config_from_file;
@@ -230,13 +246,15 @@ pub mod native {
                     // Successfully read config file, merging these options with the default ones.
                     fiber.map(|c| FiberConfig::from(c).merge(&mut args.fiber)),
                     cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
+                    lsp.map(|c| LspConfig::from(c).merge(&mut args.lsp)),
                     rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
                     ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                 )
             };
-            let (fiber, cch, rpc, ckb) = (
+            let (fiber, cch, lsp, rpc, ckb) = (
                 fiber.unwrap_or(FiberConfig::from(&mut args.fiber)),
                 cch.unwrap_or(CchConfig::from(&mut args.cch)),
+                lsp.unwrap_or(LspConfig::from(&mut args.lsp)),
                 rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
             );
@@ -247,6 +265,7 @@ pub mod native {
                 (None, Some(fiber))
             };
             let cch = services.contains(&Service::CCH).then_some(cch);
+            let lsp = services.contains(&Service::LSP).then_some(lsp);
             let rpc = services.contains(&Service::RPC).then_some(rpc);
             let ckb = services.contains(&Service::CkbChain).then_some(ckb);
 
@@ -254,6 +273,7 @@ pub mod native {
                 fiber,
                 disabled_fiber,
                 cch,
+                lsp,
                 rpc,
                 ckb,
                 base_dir,
@@ -322,6 +342,8 @@ mod wasm {
             Self {
                 fiber,
                 disabled_fiber,
+                #[cfg(not(target_arch = "wasm32"))]
+                lsp: None,
                 rpc,
                 ckb,
                 base_dir: PathBuf::from_str(&database_prefix).unwrap(),

@@ -1,0 +1,39 @@
+meta {
+  name: request cooperative close after signer restart
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"shutdown_channel","params":[{"channel_id":"placeholder","close_script":{},"force":false}]}
+}
+
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+  const body = req.getBody();
+  body.params[0].channel_id = bru.getVar("REMOTE_CHANNEL_ID");
+  body.params[0].close_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+}

@@ -213,6 +213,11 @@ fn is_port_available(port: u16) -> bool {
     }
 }
 
+const RESERVED_E2E_PORTS: &[u16] = &[
+    8114,  // CKB RPC
+    21917, // fiber-lsp-sdk-agent control (not remapped)
+];
+
 fn generate_ports(num_ports: usize) -> Vec<u16> {
     let mut ports = HashSet::new();
     let mut rng = rand::rng();
@@ -220,6 +225,9 @@ fn generate_ports(num_ports: usize) -> Vec<u16> {
     while ports.len() < num_ports {
         // avoid https://en.wikipedia.org/wiki/Ephemeral_port
         let port: u16 = rng.random_range(1024..32768);
+        if RESERVED_E2E_PORTS.contains(&port) {
+            continue;
+        }
         if is_port_available(port) {
             ports.insert(port);
         }

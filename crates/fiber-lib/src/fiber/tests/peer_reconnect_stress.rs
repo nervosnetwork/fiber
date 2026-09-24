@@ -150,7 +150,7 @@ async fn exercise_peer_reconnects(
     while Instant::now() < reconnect_deadline {
         node_b_network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::DisconnectPeer(
+                PublicNetworkCommand::DisconnectPeer(
                     node_c_pubkey,
                     PeerDisconnectReason::Requested,
                     None,
@@ -169,7 +169,7 @@ async fn exercise_peer_reconnects(
 
         node_b_network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(
+                PublicNetworkCommand::ConnectPeer(
                     node_c_addr.clone(),
                     false,
                     PeerConnectSource::Manual,

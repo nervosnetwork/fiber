@@ -401,8 +401,12 @@ pub(crate) fn create_test_channel_state_with_tlc(
     let signer = InMemorySigner::generate_from_seed(&seed);
 
     ChannelActorState {
+        channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
         core: ChannelActorData {
             state: ChannelState::ChannelReady,
+            signing_context: Default::default(),
+            local_commitment_points: HashMap::new(),
+            local_public_nonces: HashMap::new(),
             public_channel_info: None,
             local_tlc_info: ChannelTlcInfo::default(),
             remote_tlc_info: None,
@@ -421,7 +425,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
             commitment_fee_rate: 0,
             commitment_delay_epoch: 0,
             funding_fee_rate: 0,
-            signer,
+            signer: Some(signer),
             local_channel_public_keys: ChannelBasePublicKeys {
                 funding_pubkey: gen_rand_fiber_public_key(),
                 tlc_base_key: gen_rand_fiber_public_key(),
@@ -464,6 +468,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_messages: Default::default(),
     }
 }
 

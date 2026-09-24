@@ -151,7 +151,7 @@ pub fn verify_and_select_settlement_data<'a>(
         let settlement_witness = settlement_data_to_witness(
             settlement_data,
             parsed.for_remote,
-            channel_data.local_settlement_key.clone(),
+            channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
         );
         if blake160(&settlement_witness).as_ref() == parsed.witness_hash {

@@ -34,7 +34,9 @@ use crate::fiber::channel::{
     settlement_data_to_witness, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelEvent, ChannelInitializationOperation, ChannelInitializationParameter,
 };
-use crate::fiber::network::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
+use crate::fiber::network::{
+    FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef, NetworkActorMessage,
+};
 use crate::fiber::onchain_tlc_reconcile::{
     can_reconcile_onchain_fulfillment, collect_onchain_fulfilled_tlcs,
     collect_onchain_received_timeout_settled_tlcs, collect_onchain_timeout_settled_tlcs,
@@ -51,6 +53,8 @@ use crate::fiber::{
     network::check_channel_shutdown_settlement, onchain_tlc_reconcile::OnChainTlcSettlement,
 };
 use crate::store::open_store;
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+use crate::store::NodeNamespace;
 use crate::tests::test_utils::{NetworkNode, NetworkNodeConfigBuilder};
 // Browser tests disable Watchtower; gate its integration fixtures with the same feature.
 #[cfg(feature = "watchtower")]
@@ -78,7 +82,7 @@ async fn wait_for_settlement_completion(node: &NetworkNode, channel_id: Hash256)
 fn trigger_shutdown_check(node: &NetworkNode) {
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::CheckChannelsShutdown,
+            FiberActorCommand::CheckChannelsShutdown,
         ))
         .unwrap();
 }
@@ -112,6 +116,14 @@ fn payment_hash_for(preimage: Hash256, hash_algorithm: HashAlgorithm) -> Hash256
 fn empty_channel_state(channel_id: Hash256) -> crate::fiber::channel::ChannelActorState {
     let mut state =
         create_test_channel_state_with_tlc(channel_id, 0, 1000, gen_rand_sha256_hash(), None);
+    // The lightweight settlement-command fixture uses arbitrary public keys.
+    // These tests persist and restore the channel, which requires them to match
+    // the local signer material validated during deserialization.
+    state.local_channel_public_keys = state
+        .signer
+        .as_ref()
+        .expect("local signer fixture")
+        .get_base_public_keys();
     state.tlc_state.offered_tlcs.tlcs.clear();
     state.tlc_state.received_tlcs.tlcs.clear();
     state
@@ -337,6 +349,90 @@ fn resolve_ignores_locally_known_preimage_without_settlement_record() {
         ),
         OnChainTlcResolution::Unknown
     );
+}
+
+#[test]
+#[cfg(all(not(target_arch = "wasm32"), feature = "watchtower"))]
+fn collect_hosted_tenant_tlcs_from_root_watchtower_settlements() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root_store = open_store(temp_dir.path()).expect("open shared store");
+    let tenant_store = root_store.namespaced(NodeNamespace::hosted_tenant("u1"));
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let fulfilled_hash = payment_hash_for(preimage, hash_algorithm);
+    let timeout_hash = gen_rand_sha256_hash();
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE
+            | CloseFlags::WAITING_ONCHAIN_SETTLEMENT
+            | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
+    );
+    for (id, payment_hash) in [(0, fulfilled_hash), (1, timeout_hash)] {
+        state.tlc_state.offered_tlcs.tlcs.push(tlc_info(
+            TLCId::Offered(id),
+            TlcStatus::Outbound(OutboundTlcStatus::Committed),
+            payment_hash,
+            hash_algorithm,
+        ));
+        state.tlc_state.received_tlcs.tlcs.push(tlc_info(
+            TLCId::Received(id),
+            TlcStatus::Inbound(InboundTlcStatus::Committed),
+            payment_hash,
+            hash_algorithm,
+        ));
+    }
+    tenant_store.insert_channel_actor_state(state);
+    let state = tenant_store
+        .get_channel_actor_state(&channel_id)
+        .expect("restore tenant channel state");
+
+    // Expiry alone must not finalize a TLC before the watchtower records its
+    // chain outcome, even after the rest of the channel has settled.
+    assert!(collect_onchain_fulfilled_tlcs(&state, &tenant_store).is_empty());
+    assert!(collect_onchain_timeout_settled_tlcs(&state, &tenant_store, 100).is_empty());
+    assert!(collect_onchain_received_timeout_settled_tlcs(&state, &tenant_store).is_empty());
+
+    // The host watchtower writes outside the tenant namespace and uses the
+    // tenant identity, not NodeId::local(). Reconciliation must bridge both
+    // differences without requiring a duplicate proof in the tenant store.
+    let tenant_node_id = NodeId::from_bytes(state.get_local_pubkey().serialize().to_vec());
+    for tlc in state.tlc_state.all_tlcs() {
+        root_store.insert_onchain_tlc_settlement(
+            &tenant_node_id,
+            &channel_id,
+            tlc.tlc_id,
+            OnChainTlcSettlement {
+                payment_hash: tlc.payment_hash,
+                hash_algorithm,
+                preimage: (tlc.payment_hash == fulfilled_hash).then_some(preimage),
+                tx_hash: gen_rand_sha256_hash(),
+                tlc_index: 0,
+            },
+        );
+    }
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &tenant_store);
+    assert_eq!(fulfilled.len(), 2);
+    for tlc_id in [TLCId::Offered(0), TLCId::Received(0)] {
+        let tlc = fulfilled
+            .iter()
+            .find(|tlc| tlc.tlc_id == tlc_id)
+            .expect("tenant fulfillment must be recovered from root watchtower proof");
+        assert_eq!(tlc.preimage, preimage);
+        assert_eq!(tlc.payment_hash, fulfilled_hash);
+    }
+    let offered_timeouts = collect_onchain_timeout_settled_tlcs(&state, &tenant_store, 100);
+    assert_eq!(offered_timeouts.len(), 1);
+    assert_eq!(offered_timeouts[0].tlc_id, TLCId::Offered(1));
+    assert_eq!(offered_timeouts[0].payment_hash, timeout_hash);
+    assert_eq!(
+        offered_timeouts[0].role,
+        OnChainTimeoutTlcRole::OriginPayer { attempt_id: None }
+    );
+    let received_timeouts = collect_onchain_received_timeout_settled_tlcs(&state, &tenant_store);
+    assert_eq!(received_timeouts.len(), 1);
+    assert_eq!(received_timeouts[0].tlc_id, 1);
 }
 
 #[test]
@@ -888,7 +984,9 @@ fn settlement_tlc_for(tlc: &TlcInfo) -> SettlementTlc {
         payment_amount: tlc.amount,
         payment_hash: tlc.payment_hash,
         expiry: tlc.expiry,
-        local_key: Privkey::from([1u8; 32]),
+        local_key: Some(Privkey::from([1u8; 32])),
+        local_key_pubkey: None,
+        local_key_commitment_number: None,
         remote_key: Privkey::from([2u8; 32]).pubkey(),
     }
 }
@@ -921,7 +1019,9 @@ fn has_unresolved_and_fulfill_for_received_announce_wait_ack_on_local_close() {
             payment_amount: 1000,
             payment_hash,
             expiry: 10,
-            local_key: Privkey::from([1u8; 32]),
+            local_key: Some(Privkey::from([1u8; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from([2u8; 32]).pubkey(),
         }],
     };
@@ -1061,7 +1161,8 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
     let channel_data_no_revocation = ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: Privkey::from([1u8; 32]),
+        local_settlement_key: Some(Privkey::from([1u8; 32])),
+        local_settlement_key_pubkey: None,
         remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
         local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
         remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
@@ -1090,7 +1191,8 @@ fn settlement_data_for_commitment_edge_cases_no_revocation_and_zero_commitment()
     let channel_data_with_revocation = ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: Privkey::from([1u8; 32]),
+        local_settlement_key: Some(Privkey::from([1u8; 32])),
+        local_settlement_key_pubkey: None,
         remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
         local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
         remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
@@ -1484,7 +1586,8 @@ fn test_verify_and_select_settlement_data_preceding_and_pending() {
     let channel_data = ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: local_settlement_key.clone(),
+        local_settlement_key: Some(local_settlement_key.clone()),
+        local_settlement_key_pubkey: None,
         remote_settlement_key,
         local_funding_pubkey: local_privkey.pubkey(),
         remote_funding_pubkey: remote_privkey.pubkey(),
@@ -1573,7 +1676,9 @@ fn test_tracked_settlement_tlcs_extraction() {
         payment_amount: 3000,
         payment_hash,
         expiry: 200,
-        local_key: Privkey::from([5u8; 32]),
+        local_key: Some(Privkey::from([5u8; 32])),
+        local_key_pubkey: None,
+        local_key_commitment_number: None,
         remote_key: Privkey::from([6u8; 32]).pubkey(),
     };
 
@@ -1586,7 +1691,8 @@ fn test_tracked_settlement_tlcs_extraction() {
     let channel_data = ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: local_settlement_key.clone(),
+        local_settlement_key: Some(local_settlement_key.clone()),
+        local_settlement_key_pubkey: None,
         remote_settlement_key,
         local_funding_pubkey: local_privkey.pubkey(),
         remote_funding_pubkey: remote_privkey.pubkey(),
@@ -1608,7 +1714,7 @@ fn test_tracked_settlement_tlcs_extraction() {
     let pending_witness = settlement_data_to_witness(
         &pending_settlement,
         true,
-        local_settlement_key,
+        local_settlement_key.pubkey(),
         remote_settlement_key,
     );
     let pending_witness_hash = blake160(&pending_witness).0;
@@ -1634,6 +1740,21 @@ fn test_tracked_settlement_tlcs_extraction() {
 
     // Direction mismatch: expected local, but lock is remote
     assert!(tracked_settlement_tlcs(&lock, &channel_data, false).is_none());
+
+    // External signers retain only public keys in the watchtower snapshot. The
+    // verified witness and tracked TLC identities must not depend on secrets.
+    let mut external_channel_data = channel_data;
+    external_channel_data.local_settlement_key = None;
+    external_channel_data.local_settlement_key_pubkey = Some(local_settlement_key.pubkey());
+    for tlc in &mut external_channel_data.pending_remote_settlement_data.tlcs {
+        tlc.local_key_pubkey = Some(tlc.local_pubkey());
+        tlc.local_key = None;
+        tlc.local_key_commitment_number = Some(2);
+    }
+    assert_eq!(
+        tracked_settlement_tlcs(&lock, &external_channel_data, true),
+        Some(tracked)
+    );
 }
 
 #[derive(Clone, Default)]
@@ -1754,7 +1875,7 @@ fn create_test_commitment_lock_with_keys(
     let witness = settlement_data_to_witness(
         settlement_data,
         for_remote,
-        local_settlement_privkey.clone(),
+        local_settlement_privkey.pubkey(),
         remote_settlement_pubkey,
     );
     let witness_hash = blake160(&witness).0;
@@ -1847,7 +1968,8 @@ async fn assert_confirmed_snapshot_recovery(wrong_direction: bool, revoked: bool
         NodeId::local(),
         channel_id,
         None,
-        local_settlement_privkey.clone(),
+        Some(local_settlement_privkey.clone()),
+        local_settlement_privkey.pubkey(),
         remote_settlement_pubkey,
         local_privkey.pubkey(),
         remote_privkey.pubkey(),
@@ -1953,7 +2075,8 @@ async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confir
         NodeId::local(),
         channel_id,
         None,
-        local_settlement_privkey.clone(),
+        Some(local_settlement_privkey.clone()),
+        local_settlement_privkey.pubkey(),
         remote_settlement_pubkey,
         local_privkey.pubkey(),
         remote_privkey.pubkey(),
@@ -2020,7 +2143,9 @@ async fn test_scenario_b_transient_rpc_failure_retries_and_recovers_under_confir
     let event = rx.recv().await.expect("receive message");
     assert!(matches!(
         event,
-        NetworkActorMessage::Event(NetworkActorEvent::ChannelSettlementRecovered(..))
+        NetworkActorMessage::Fiber(FiberActorMessage::Event(
+            FiberActorEvent::ChannelSettlementRecovered(..)
+        ))
     ));
 }
 
@@ -2071,7 +2196,8 @@ async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_
         NodeId::local(),
         channel_id,
         None,
-        local_settlement_privkey.clone(),
+        Some(local_settlement_privkey.clone()),
+        local_settlement_privkey.pubkey(),
         remote_settlement_pubkey,
         local_privkey.pubkey(),
         remote_privkey.pubkey(),
@@ -2143,7 +2269,7 @@ async fn test_scenario_c_cell_dep_pending_tx_recovers_snapshot_and_blocks_until_
     );
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::CheckChannels,
+            FiberActorCommand::CheckChannels,
         ))
         .unwrap();
     wait_for_settlement_completion(&node, channel_id).await;
@@ -2193,7 +2319,8 @@ fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
         foreign_node,
         channel_id,
         None,
-        local_priv.clone(),
+        Some(local_priv.clone()),
+        local_priv.pubkey(),
         remote_pub,
         local_funding,
         remote_funding,
@@ -2211,7 +2338,8 @@ fn test_scenario_d_multi_tenant_watchtower_store_isolation() {
         local_node,
         channel_id,
         None,
-        local_priv,
+        Some(local_priv.clone()),
+        local_priv.pubkey(),
         remote_pub,
         local_funding,
         remote_funding,
@@ -2283,7 +2411,7 @@ async fn test_scenario_e_real_db_persistence_and_reopen() {
         let mut node = NetworkNode::new_with_config(config).await;
         node.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::CheckChannels,
+                FiberActorCommand::CheckChannels,
             ))
             .unwrap();
         wait_for_settlement_completion(&node, channel_id).await;
@@ -2355,7 +2483,7 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
         let channel_actor = ChannelActor::new(
             local_privkey.pubkey(),
             remote_pubkey,
-            node.network_actor.clone(),
+            FiberActorRef::from_network(&node.network_actor),
             store.clone(),
             None,
         );
@@ -2396,14 +2524,14 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
 
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
                 channel_id, actor_ref, reply
             ))
         )
         .unwrap();
         node.network_actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::ChannelSettlementRecovered(channel_id, record),
+            .send_message(NetworkActorMessage::new_event(
+                FiberActorEvent::ChannelSettlementRecovered(channel_id, record),
             ))
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
@@ -2487,8 +2615,8 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
             },
         };
         node.network_actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+            .send_message(NetworkActorMessage::new_event(
+                FiberActorEvent::ChannelSettlementCompleted(channel_id),
             ))
             .unwrap();
         node.node_info().await;
@@ -2500,8 +2628,8 @@ async fn test_scenario_f_live_actor_and_no_actor_recovery_and_finalization() {
         store.store_shutdown_settlement_record(&channel_id, &record);
 
         node.network_actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::ChannelSettlementRecovered(channel_id, record),
+            .send_message(NetworkActorMessage::new_event(
+                FiberActorEvent::ChannelSettlementRecovered(channel_id, record),
             ))
             .unwrap();
         wait_for_settlement_completion(&node, channel_id).await;
@@ -2564,7 +2692,8 @@ async fn test_scenario_g_malformed_script_wrong_funding_and_direction_mismatch_s
         NodeId::local(),
         channel_id,
         None,
-        local_settlement_privkey.clone(),
+        Some(local_settlement_privkey.clone()),
+        local_settlement_privkey.pubkey(),
         remote_settlement_pubkey,
         local_privkey.pubkey(),
         remote_privkey.pubkey(),
@@ -2816,7 +2945,8 @@ fn test_fresh_channel_pre_tlc_commitment_uses_verified_snapshot() {
     let channel_data = ChannelData {
         channel_id,
         funding_udt_type_script: None,
-        local_settlement_key: local_settlement_key.clone(),
+        local_settlement_key: Some(local_settlement_key.clone()),
+        local_settlement_key_pubkey: None,
         remote_settlement_key,
         local_funding_pubkey: local_privkey.pubkey(),
         remote_funding_pubkey: remote_privkey.pubkey(),
@@ -2978,7 +3108,7 @@ async fn assert_excluded_payer_reconciliation(
             ChannelActor::new(
                 key.pubkey(),
                 target,
-                node.network_actor.clone(),
+                FiberActorRef::from_network(&node.network_actor),
                 node.store.clone(),
                 None,
             ),
@@ -2993,7 +3123,7 @@ async fn assert_excluded_payer_reconciliation(
         live_ref = Some(actor.clone());
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
                 channel_id, actor, reply
             ))
         )
@@ -3006,7 +3136,7 @@ async fn assert_excluded_payer_reconciliation(
     };
     node.network_actor
         .send_message(NetworkActorMessage::new_event(
-            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+            FiberActorEvent::ChannelSettlementCompleted(channel_id),
         ))
         .unwrap();
     if block_payment {
@@ -3030,7 +3160,7 @@ async fn assert_excluded_payer_reconciliation(
         for _ in 0..3 {
             node.network_actor
                 .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+                    FiberActorEvent::ChannelSettlementCompleted(channel_id),
                 ))
                 .unwrap();
         }
@@ -3181,11 +3311,9 @@ async fn assert_excluded_tlc_relays_failure_before_finalization(
     );
     node.network_actor
         .send_message(if settlement_completed {
-            NetworkActorMessage::new_event(NetworkActorEvent::ChannelSettlementCompleted(
-                channel_id,
-            ))
+            NetworkActorMessage::new_event(FiberActorEvent::ChannelSettlementCompleted(channel_id))
         } else {
-            NetworkActorMessage::new_command(NetworkActorCommand::CheckChannels)
+            NetworkActorMessage::new_command(FiberActorCommand::CheckChannels)
         })
         .unwrap();
     node.node_info().await;
@@ -3209,7 +3337,7 @@ async fn assert_excluded_tlc_relays_failure_before_finalization(
     for _ in 0..3 {
         node.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::CheckChannels,
+                FiberActorCommand::CheckChannels,
             ))
             .unwrap();
         node.node_info().await;
@@ -3444,7 +3572,8 @@ fn test_local_force_close_excluded_tlc_ignores_remote_revocation_number() {
         ChannelData {
             channel_id,
             funding_udt_type_script: None,
-            local_settlement_key: Privkey::from([1u8; 32]),
+            local_settlement_key: Some(Privkey::from([1u8; 32])),
+            local_settlement_key_pubkey: None,
             remote_settlement_key: Privkey::from([2u8; 32]).pubkey(),
             local_funding_pubkey: Privkey::from([3u8; 32]).pubkey(),
             remote_funding_pubkey: Privkey::from([4u8; 32]).pubkey(),
@@ -3563,7 +3692,8 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         NodeId::local(),
         channel_id,
         None,
-        settlement_key.clone(),
+        Some(settlement_key.clone()),
+        settlement_key.pubkey(),
         remote_settlement_key,
         local_key.pubkey(),
         remote_key.pubkey(),
@@ -3628,7 +3758,9 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         .await;
         assert!(matches!(
             receiver.recv().await.unwrap(),
-            NetworkActorMessage::Event(NetworkActorEvent::ChannelSettlementRecovered(id, _))
+            NetworkActorMessage::Fiber(FiberActorMessage::Event(
+                FiberActorEvent::ChannelSettlementRecovered(id, _)
+            ))
                 if id == channel_id
         ));
         collector.stop(None);
@@ -3656,7 +3788,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
             ChannelActor::new(
                 local_key.pubkey(),
                 target,
-                node.network_actor.clone(),
+                FiberActorRef::from_network(&node.network_actor),
                 node.store.clone(),
                 None,
             ),
@@ -3671,7 +3803,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         live_ref = Some(actor.clone());
         ractor::call!(
             node.network_actor,
-            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+            |reply| NetworkActorMessage::new_command(FiberActorCommand::InstallTestChannelActor(
                 channel_id, actor, reply
             ))
         )
@@ -3683,7 +3815,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
     trigger_shutdown_check(&node);
     node.network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::CheckChannels,
+            FiberActorCommand::CheckChannels,
         ))
         .unwrap();
     if let Some(actor) = &live_ref {
@@ -3752,7 +3884,7 @@ async fn assert_excluded_payer_with_unclaimed_balance(
         trigger_shutdown_check(&node);
         node.network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::CheckChannels,
+                FiberActorCommand::CheckChannels,
             ))
             .unwrap();
         if let Some(actor) = &live_ref {

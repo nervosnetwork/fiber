@@ -1960,6 +1960,7 @@ dependencies = [
  "console_error_panic_hook",
  "fiber-types 0.8.1",
  "fiber-types 0.9.0-rc4",
+ "fiber-types 0.9.1",
  "fiber-wasm-db-common",
  "serde",
  "thiserror 1.0.69",

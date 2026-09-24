@@ -5,7 +5,7 @@ use crate::ckb::{CkbChainMessage, FundingContext, FundingTx, GetShutdownTxRespon
 use crate::fiber::channel::{
     funding_timeout_check_delay, merge_external_funding_witnesses, AddTlcResponse, ChannelActor,
     ChannelActorMessage, ChannelActorState, ChannelActorStateStore, ChannelOpenRecordStore,
-    ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
+    ProcessingChannelResult, ReloadParams, ReplayOrderHint, TestPendingMessages, UpdateCommand,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
     XUDT_COMPATIBLE_WITNESS,
@@ -15,20 +15,31 @@ use crate::fiber::config::{
     MAX_PAYMENT_TLC_EXPIRY_LIMIT, MILLI_SECONDS_PER_EPOCH, MIN_TLC_EXPIRY_DELTA,
 };
 
+use crate::fiber::channel_signer::SignerNotification;
 use crate::fiber::fee::check_open_channel_parameters;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::network::{
     DebugEvent, FiberMessageWithTarget, OpenChannelWithExternalFundingCommand, PeerConnectSource,
     PeerDisconnectReason, TestFiberMessageKind, CHECK_CHANNELS_INTERVAL,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fiber::onchain_tlc_reconcile::OnChainTlcSettlement;
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::types::{
-    AddTlc, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256, Init,
-    PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
+    AddTlc, AnnouncementSignatures, CommitmentSigned, FiberChannelMessage, FiberMessage, Hash256,
+    Init, PeeledPaymentOnionPacket, Pubkey, ReestablishChannel, TlcErr, TxSignatures,
+    UpdateTlcInfo,
 };
 use crate::fiber::ChannelConnectivityState;
+use crate::fiber::{FiberActorMessage, FiberActorRef};
 use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::rpc::channel::{
+    to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
+    GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
+    OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
+    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+};
 use crate::store::sample::StoreSample;
 use crate::test_utils::{init_tracing, NetworkNode, NetworkNodeConfigBuilder};
 use crate::tests::test_utils::*;
@@ -42,8 +53,8 @@ use crate::{
             StopReason,
         },
         config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
-        network::{AcceptChannelCommand, NetworkActorEvent, OpenChannelCommand},
-        NetworkActorCommand, NetworkActorMessage,
+        network::{AcceptChannelCommand, FiberActorEvent, OpenChannelCommand},
+        FiberActorCommand, NetworkActorMessage, PublicNetworkCommand, PublicNetworkEvent,
     },
     gen_rand_fiber_private_key, gen_rand_fiber_public_key, gen_rand_sha256_hash,
     now_timestamp_as_millis_u64, NetworkServiceEvent,
@@ -56,16 +67,21 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
     H256,
 };
+use fiber_types::ChannelSignatureRequest;
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
-    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, HashAlgorithm, InMemorySigner,
-    InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus, PaymentHopData, PaymentStatus,
-    Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
-    ShuttingDownFlags, SigningCommitmentFlags, TLCId, TlcErrPacket, TlcErrorCode, TlcInfo,
-    TlcStatus, NO_SHARED_SECRET,
+    ChannelOpeningStatus, ChannelState, ChannelUpdateChannelFlags, CollaboratingFundingTxFlags,
+    HashAlgorithm, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus,
+    PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevokeAndAck, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
+    TlcErrPacket, TlcErrorCode, TlcInfo, TlcStatus, NO_SHARED_SECRET,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use fiber_lsp_sdk::{ChannelSigner, MemoryStore, RootSigner};
+use fiber_store::backend::StorageBackend;
+use fiber_types::{ChannelActorData, Musig2Context, NoncePurpose, NonceSlot};
 use fiber_types::{CloseFlags, FeatureVector};
 use molecule::bytes::BytesMut;
 use musig2::secp::{Point, Scalar};
@@ -100,11 +116,13 @@ impl Actor for CapturingNetworkActor {
         messages: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(message)) => {
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                FiberActorCommand::SendFiberMessage(message),
+            )) => {
                 messages.lock().expect("capture lock").push(message);
             }
-            NetworkActorMessage::Command(NetworkActorCommand::GetTestHeldFiberMessageCount(
-                reply,
+            NetworkActorMessage::Fiber(FiberActorMessage::Command(
+                FiberActorCommand::GetTestHeldFiberMessageCount(reply),
             )) => {
                 let _ = reply.send(messages.lock().expect("capture lock").len());
             }
@@ -115,6 +133,73 @@ impl Actor for CapturingNetworkActor {
 }
 
 struct NoopChannelActor;
+
+/// Also observes gossip so an announcement replay cannot silently rebroadcast.
+struct CapturingPublicNetworkActor {
+    broadcast_count: Arc<Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl Actor for CapturingPublicNetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = Arc<Mutex<Vec<FiberMessageWithTarget>>>;
+    type Arguments = Arc<Mutex<Vec<FiberMessageWithTarget>>>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        messages: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(messages)
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        messages: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if matches!(
+            &message,
+            NetworkActorMessage::PublicCommand(PublicNetworkCommand::BroadcastMessages(_))
+        ) {
+            *self.broadcast_count.lock().expect("broadcast capture lock") += 1;
+        }
+        CapturingNetworkActor
+            .handle(myself, message, messages)
+            .await
+    }
+}
+
+/// Captures signer-actor notifications addressed to a channel actor.
+struct SignerNotificationProbe;
+
+#[async_trait::async_trait]
+impl Actor for SignerNotificationProbe {
+    type Msg = ChannelActorMessage;
+    type State = Arc<Mutex<Vec<SignerNotification>>>;
+    type Arguments = Arc<Mutex<Vec<SignerNotification>>>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        captured: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(captured)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let ChannelActorMessage::SignerNotification(notification) = message {
+            state.lock().expect("probe lock").push(notification);
+        }
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl Actor for NoopChannelActor {
@@ -137,9 +222,7 @@ async fn take_captured_actor_messages(
 ) -> Vec<FiberMessageWithTarget> {
     let message_count = tokio::time::timeout(event_wait_timeout(), async {
         call!(network, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::GetTestHeldFiberMessageCount(
-                reply,
-            ))
+            NetworkActorMessage::new_command(FiberActorCommand::GetTestHeldFiberMessageCount(reply))
         })
     })
     .await
@@ -220,8 +303,8 @@ fn create_mock_pending_add_tlc_command(
 
 fn notify_check_active_channel(node: &NetworkNode, channel_id: Hash256) {
     node.network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::CheckActiveChannel),
             }),
@@ -231,8 +314,8 @@ fn notify_check_active_channel(node: &NetworkNode, channel_id: Hash256) {
 
 fn notify_maintain_channel_tlcs(node: &NetworkNode, channel_id: Hash256) {
     node.network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
             }),
@@ -242,8 +325,8 @@ fn notify_maintain_channel_tlcs(node: &NetworkNode, channel_id: Hash256) {
 
 fn stop_channel_actor(node: &NetworkNode, channel_id: Hash256) {
     node.network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::NotifyEvent(ChannelEvent::Stop(StopReason::Closed)),
             }),
@@ -260,7 +343,7 @@ async fn disconnect_peers_and_wait_for_channel_offline(
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -297,7 +380,7 @@ async fn take_held_fiber_messages_bounded(
 ) -> Vec<FiberMessageWithTarget> {
     tokio::time::timeout(event_wait_timeout(), async {
         call!(node.network_actor, |reply| {
-            NetworkActorMessage::new_command(NetworkActorCommand::TakeTestHeldFiberMessages(reply))
+            NetworkActorMessage::new_command(FiberActorCommand::TakeTestHeldFiberMessages(reply))
         })
     })
     .await
@@ -520,8 +603,8 @@ async fn test_revoke_and_ack_rejects_malicious_next_per_commitment_point() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::revoke_and_ack(RevokeAndAck {
                     channel_id,
@@ -567,7 +650,7 @@ async fn test_open_channel_to_peer() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -608,7 +691,7 @@ async fn test_open_and_accept_channel() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -644,7 +727,7 @@ async fn test_open_and_accept_channel() {
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
@@ -696,6 +779,7 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 funding_cell_lock_script,
                 funding_udt_type_script,
                 funding_source_lock_script,
+                allow_peer_funding_source_lock,
                 reply,
             } = message
             else {
@@ -708,6 +792,7 @@ impl MockChainActorMiddleware for UnderfundInitialFundingTx {
                 funding_source_lock_script_cell_deps: Vec::new(),
                 funding_cell_lock_script,
                 funding_udt_type_script,
+                allow_peer_funding_source_lock,
             };
             let mut funding_tx: FundingTx = local_tx.into();
             let result = funding_tx
@@ -807,7 +892,7 @@ async fn open_channel_with_underfunded_initial_tx(
     };
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: params.public,
@@ -839,7 +924,7 @@ async fn open_channel_with_underfunded_initial_tx(
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: params.node_b_funding_amount,
@@ -1104,7 +1189,7 @@ async fn do_test_owned_channel_removed_from_graph_on_disconnected(public: bool) 
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node2.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -1169,7 +1254,7 @@ async fn do_test_owned_channel_saved_to_graph_on_reconnected(public: bool) {
     node1
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node2.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -1522,6 +1607,171 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert!(node_a.get_payment_preimage(&payment_hash).is_none());
 }
 
+async fn wait_for_local_signer_channel_idle(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    channel_id: Hash256,
+) {
+    wait_until(|| {
+        [node_a, node_b].into_iter().all(|node| {
+            let state = node.get_channel_actor_state(channel_id);
+            state.is_ready()
+                && !state.reestablishing
+                && state.tlc_state.all_tlcs().count() == 0
+                && !state.is_waiting_tlc_ack()
+                && !state.signing_context.is_awaiting_signature()
+                && !state.has_pending_operations()
+        })
+    })
+    .await;
+}
+
+fn assert_local_signer_has_no_material_history(node: &NetworkNode, channel_id: Hash256) {
+    // Inspect the persisted data directly to verify that local caches are
+    // removed before writing the snapshot.
+    let key = [
+        &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+        channel_id.as_ref(),
+    ]
+    .concat();
+    let bytes = node.store.get(key).expect("persisted channel state");
+    let persisted: ChannelActorData =
+        bincode::deserialize(&bytes).expect("deserialize channel data without restoring it");
+    assert!(persisted.local_commitment_points.is_empty());
+    assert!(persisted.local_public_nonces.is_empty());
+
+    let state = node.get_channel_actor_state(channel_id);
+    let signer = state.channel_signer.local_material().expect("local signer");
+    assert_eq!(
+        state.get_next_commitment_nonce(),
+        signer
+            .derive_musig2_nonce(
+                state.get_next_commitment_number(true),
+                Musig2Context::Commitment
+            )
+            .public_nonce()
+    );
+    assert_eq!(
+        state.get_next_revocation_nonce(),
+        signer
+            .derive_musig2_nonce(
+                state.get_next_commitment_number(false),
+                Musig2Context::Revoke
+            )
+            .public_nonce()
+    );
+}
+
+#[tokio::test]
+async fn test_local_signer_payments_do_not_accumulate_public_material() {
+    init_tracing();
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true).await;
+    let initial_commitment = node_a
+        .get_channel_actor_state(channel_id)
+        .get_local_commitment_number();
+
+    for round in 0..6 {
+        let (payer, payee) = if round % 2 == 0 {
+            (&node_a, &node_b)
+        } else {
+            (&node_b, &node_a)
+        };
+        let payment = payer
+            .send_payment_keysend(payee, 10_000, false)
+            .await
+            .expect("local signer payment");
+        payer.wait_until_success(payment.payment_hash).await;
+        wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+        for node in [&node_a, &node_b] {
+            assert_local_signer_has_no_material_history(node, channel_id);
+        }
+    }
+
+    assert!(
+        node_a
+            .get_channel_actor_state(channel_id)
+            .get_local_commitment_number()
+            > initial_commitment
+    );
+}
+
+#[tokio::test]
+async fn test_local_signer_write_discards_cached_public_material_before_restart() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100_000_000_000, 100_000_000_000, true).await;
+    let payment = node_a
+        .send_payment_keysend(&node_b, 10_000, false)
+        .await
+        .expect("payment before restart");
+    node_a.wait_until_success(payment.payment_hash).await;
+    wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+    let balances = [
+        node_a.get_local_balance_from_channel(channel_id),
+        node_b.get_local_balance_from_channel(channel_id),
+    ];
+    node_a.stop().await;
+    node_b.stop().await;
+
+    for node in [&node_a, &node_b] {
+        let mut state = node.get_channel_actor_state(channel_id);
+        let signer = state
+            .channel_signer
+            .local_material()
+            .expect("local signer")
+            .clone();
+        // Populate derivable history and verify the write removes it before restart.
+        let last_commitment = state
+            .get_local_commitment_number()
+            .max(state.get_remote_commitment_number())
+            + 1;
+        for commitment_number in 0..=last_commitment {
+            state.local_commitment_points.insert(
+                commitment_number,
+                signer.get_commitment_point(commitment_number),
+            );
+            for (purpose, context) in [
+                (NoncePurpose::Commitment, Musig2Context::Commitment),
+                (NoncePurpose::Revocation, Musig2Context::Revoke),
+            ] {
+                state.local_public_nonces.insert(
+                    NonceSlot {
+                        purpose,
+                        commitment_number,
+                    },
+                    signer
+                        .derive_musig2_nonce(commitment_number, context)
+                        .public_nonce(),
+                );
+            }
+        }
+        node.store.insert_channel_actor_state(state);
+        assert_local_signer_has_no_material_history(node, channel_id);
+    }
+
+    node_a.start().await;
+    node_b.start().await;
+    node_a.connect_to(&mut node_b).await;
+    wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+    for (node, balance) in [(&node_a, balances[0]), (&node_b, balances[1])] {
+        assert_local_signer_has_no_material_history(node, channel_id);
+        assert_eq!(node.get_local_balance_from_channel(channel_id), balance);
+    }
+
+    for (payer, payee) in [(&node_a, &node_b), (&node_b, &node_a)] {
+        let payment = payer
+            .send_payment_keysend(payee, 1_000, false)
+            .await
+            .expect("payment after restart without cached material");
+        payer.wait_until_success(payment.payment_hash).await;
+        wait_for_local_signer_channel_idle(&node_a, &node_b, channel_id).await;
+    }
+    for node in [&node_a, &node_b] {
+        assert_local_signer_has_no_material_history(node, channel_id);
+    }
+}
+
 #[tokio::test]
 async fn test_network_send_payment_send_each_other() {
     init_tracing();
@@ -1573,6 +1823,1536 @@ async fn test_network_send_payment_send_each_other() {
     // so the balance should be node_a_old_balance - 1, node_b_old_balance + 1
     assert_eq!(node_a_new_balance, node_a_old_balance - 1);
     assert_eq!(node_b_new_balance, node_b_old_balance + 1);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
+    init_tracing();
+
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("sdk-signer-node-{index}")))
+            .base_dir_prefix(&format!("sdk-signer-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [mut node_a, node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let created = RootSigner::in_memory()
+        .await
+        .expect("create in-memory root signer");
+    let channel_signer = created
+        .root_signer
+        .create_channel()
+        .await
+        .expect("create local channel signer");
+    let material = channel_signer
+        .channel_open_material(false)
+        .await
+        .expect("channel open material");
+
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: 100_000_000_000,
+                public: Some(false),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .expect("open_channel_with_external_funding over HTTP");
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &channel_signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: signed_tx.into(),
+            },
+        )
+        .await
+        .expect("submit_signed_funding_tx over HTTP");
+
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: &channel_signer,
+    };
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    let first_status = sdk.get_signing_status(channel_id).await.status;
+    let valid_submission = sdk.prepare_submission(channel_id, first_status).await;
+
+    let before_missing_material = node_a.get_channel_actor_state(channel_id);
+    let mut missing_material = valid_submission.clone();
+    missing_material.next_material = None;
+    assert!(sdk
+        .submit(missing_material)
+        .await
+        .expect_err("external signer must still publish next material")
+        .contains("must provide next_material"));
+    let after_missing_material = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        before_missing_material.local_commitment_points,
+        after_missing_material.local_commitment_points
+    );
+    assert_eq!(
+        before_missing_material.local_public_nonces,
+        after_missing_material.local_public_nonces
+    );
+    assert_eq!(
+        bincode::serialize(&before_missing_material.signing_context).unwrap(),
+        bincode::serialize(&after_missing_material.signing_context).unwrap(),
+        "rejected external material must not consume the pending signature"
+    );
+
+    let mut wrong_request = valid_submission.clone();
+    wrong_request.request_id = Hash256::from([0x11; 32]).into();
+    assert!(sdk
+        .submit(wrong_request)
+        .await
+        .expect_err("wrong request id must be rejected")
+        .contains("request id does not match"));
+
+    let mut invalid_signature = valid_submission.clone();
+    invalid_signature.partial_signature = [1; 32];
+    assert!(sdk
+        .submit(invalid_signature)
+        .await
+        .expect_err("invalid partial signature must be rejected")
+        .contains("signature is invalid"));
+
+    let mut conflicting_material = valid_submission.clone();
+    conflicting_material
+        .next_material
+        .as_mut()
+        .expect("SDK submission includes next material")
+        .next_commitment_point = Some(node_b.pubkey.into());
+    assert!(sdk
+        .submit(conflicting_material)
+        .await
+        .expect_err("conflicting next signer material must be rejected")
+        .contains("conflicts with persisted material"));
+
+    let applied = sdk
+        .submit(valid_submission.clone())
+        .await
+        .expect("valid signature must resume the channel");
+    assert_eq!(applied, SubmitChannelSignatureResult::Applied);
+    let replayed = sdk
+        .submit(valid_submission)
+        .await
+        .expect("identical signature submission must be idempotent");
+    assert_eq!(replayed, SubmitChannelSignatureResult::AlreadyApplied);
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a_ready = matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            );
+            let b_ready = node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady));
+            if a_ready && b_ready {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SDK-owned signer should take the channel to ChannelReady");
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        state.channel_signing_status(),
+        fiber_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+    assert!(
+        state.signer.is_none(),
+        "an external signer channel must not retain local channel private keys"
+    );
+
+    let payment = node_a
+        .send_payment_keysend(&node_b, 10_000, false)
+        .await
+        .expect("start payment that requires an external commitment signature");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &channel_signer,
+        &node_a,
+        payment.payment_hash,
+        10_000,
+        false,
+    )
+    .await;
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    assert_ne!(
+        node_a.get_payment_status(payment.payment_hash).await,
+        PaymentStatus::Success,
+        "payment must remain paused before the signature is submitted"
+    );
+
+    let pending_before_restart = sdk.get_signing_status(channel_id).await.status;
+    let fiber_json_types::ChannelSigningStatus::SignatureRequired {
+        request_id: expected_request_id,
+        ..
+    } = pending_before_restart
+    else {
+        panic!("payment must persist a pending signing request");
+    };
+    node_a.restart().await;
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: &channel_signer,
+    };
+    let pending_after_restart = sdk.get_signing_status(channel_id).await.status;
+    assert!(matches!(
+        pending_after_restart,
+        fiber_json_types::ChannelSigningStatus::SignatureRequired {
+            request_id,
+            ..
+        } if request_id == expected_request_id
+    ));
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if node_a.get_payment_status(payment.payment_hash).await == PaymentStatus::Success {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("payment should finish while the HTTP client services signer requests");
+    assert!(matches!(
+        sdk.get_signing_status(channel_id).await.status,
+        fiber_json_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+
+    // Exercise enough rounds to expire the opening material. Inspect raw
+    // snapshots to verify that actor cleanup runs before persistence.
+    for _ in 0..3 {
+        let payment = node_a
+            .send_payment_keysend(&node_b, 10_000, false)
+            .await
+            .unwrap();
+        crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+            &channel_signer,
+            &node_a,
+            payment.payment_hash,
+            10_000,
+            false,
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                sdk.try_sign_pending(channel_id).await;
+                let state = node_a.get_channel_actor_state(channel_id);
+                if node_a.get_payment_status(payment.payment_hash).await == PaymentStatus::Success
+                    && state.tlc_state.all_tlcs().count() == 0
+                    && !state.is_waiting_tlc_ack()
+                    && !state.signing_context.is_awaiting_signature()
+                    && !state.has_pending_operations()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("external signer payment and cleanup should finish");
+        let key = [
+            &[fiber_types::schema::CHANNEL_ACTOR_STATE_PREFIX],
+            channel_id.as_ref(),
+        ]
+        .concat();
+        let bytes = node_a.store.get(key).unwrap();
+        let persisted: ChannelActorData = bincode::deserialize(&bytes).unwrap();
+        let oldest_retained_round = persisted
+            .commitment_numbers
+            .local
+            .min(persisted.commitment_numbers.remote)
+            .saturating_sub(1);
+        assert!(persisted
+            .local_commitment_points
+            .keys()
+            .all(|number| *number >= oldest_retained_round));
+        assert!(persisted
+            .local_public_nonces
+            .keys()
+            .all(|slot| slot.commitment_number >= oldest_retained_round));
+    }
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    let fee = crate::fiber::fee::checked_calculate_shutdown_tx_fee(
+        1_000_000_000,
+        &None,
+        (
+            state.get_remote_shutdown_script(),
+            state.get_local_shutdown_script(),
+        ),
+    )
+    .unwrap();
+    channel_signer
+        .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+            fee,
+            local_fee_share: fee,
+            remote_fee_share: 0,
+        })
+        .await
+        .unwrap();
+    node_a
+        .send_shutdown(channel_id, false)
+        .await
+        .expect("start cooperative close that requires an external closing signature");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::Closed(CloseFlags::COOPERATIVE)
+            ) && node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| {
+                    matches!(state.state, ChannelState::Closed(CloseFlags::COOPERATIVE))
+                })
+            {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cooperative close should finish while the HTTP client services signer requests");
+    assert!(matches!(
+        sdk.get_signing_status(channel_id).await.status,
+        fiber_json_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_public_channel_announcement_pauses_until_signature_is_submitted() {
+    init_tracing();
+
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("sdk-public-signer-node-{index}")))
+            .base_dir_prefix(&format!("sdk-public-signer-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+
+    let created = RootSigner::in_memory()
+        .await
+        .expect("create in-memory root signer");
+    let channel_signer = created
+        .root_signer
+        .create_channel()
+        .await
+        .expect("create local channel signer");
+    let material = channel_signer
+        .channel_open_material(true)
+        .await
+        .expect("public channel open material");
+
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: 100_000_000_000,
+                public: Some(true),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .expect("open public channel with external funding over HTTP");
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &channel_signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
+    let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: signed_tx.into(),
+            },
+        )
+        .await
+        .expect("submit_signed_funding_tx over HTTP");
+
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: &channel_signer,
+    };
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a_ready = matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            );
+            let b_ready = node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady));
+            if a_ready && b_ready {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SDK-owned signer should announce a public channel and reach ChannelReady");
+
+    let state = node_a.get_channel_actor_state(channel_id);
+    assert!(state.is_public());
+    assert!(state
+        .public_channel_info
+        .as_ref()
+        .and_then(|info| info.channel_announcement.as_ref())
+        .is_some_and(|announcement| announcement.is_signed()));
+    assert!(matches!(
+        state.channel_signing_status(),
+        fiber_types::ChannelSigningStatus::NoSignatureRequired
+    ));
+}
+
+/// Phone-SDK stand-in: HTTP RPC to Fiber plus an independent local `fiber-signer`.
+///
+/// It never sends ChannelActor commands for query or submit, and the node does not
+/// start a signer actor for this channel.
+#[cfg(not(target_arch = "wasm32"))]
+struct ExternalSignerHttpClient<'a> {
+    node: &'a NetworkNode,
+    signer: &'a ChannelSigner<MemoryStore>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ExternalSignerHttpClient<'_> {
+    async fn get_signing_status(&self, channel_id: Hash256) -> GetChannelSigningStatusResult {
+        self.node
+            .send_rpc_request(
+                "get_channel_signing_status",
+                GetChannelSigningStatusParams {
+                    channel_id: channel_id.into(),
+                },
+            )
+            .await
+            .expect("get_channel_signing_status over HTTP")
+    }
+
+    async fn try_sign_pending(&self, channel_id: Hash256) {
+        let status = self.get_signing_status(channel_id).await.status;
+        if !matches!(
+            status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        ) {
+            return;
+        }
+        let submission = self.prepare_submission(channel_id, status).await;
+        let result = self
+            .submit(submission)
+            .await
+            .expect("submit_channel_signature over HTTP");
+        assert_eq!(result, SubmitChannelSignatureResult::Applied);
+    }
+
+    async fn prepare_submission(
+        &self,
+        channel_id: Hash256,
+        status: fiber_json_types::ChannelSigningStatus,
+    ) -> SubmitChannelSignatureParams {
+        crate::fiber::tests::external_signer_restart::prepare_hosted_signature(
+            self.signer,
+            channel_id,
+            status,
+        )
+        .await
+    }
+
+    async fn submit(
+        &self,
+        params: SubmitChannelSignatureParams,
+    ) -> Result<SubmitChannelSignatureResult, String> {
+        self.node
+            .send_rpc_request("submit_channel_signature", params)
+            .await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSigner<MemoryStore>) {
+    let nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |index| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("sdk-restart-node-{index}")))
+            .base_dir_prefix(&format!("sdk-restart-node-{index}-"));
+        if index == 0 {
+            builder = builder.rpc_config(Some(gen_rpc_config()));
+        } else {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount =
+                    Some(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT);
+            });
+        }
+        builder.build()
+    })
+    .await;
+    let [node_a, node_b]: [NetworkNode; 2] = nodes.try_into().expect("two nodes");
+    let created = RootSigner::in_memory()
+        .await
+        .expect("create in-memory root signer");
+    let signer = created
+        .root_signer
+        .create_channel()
+        .await
+        .expect("create external channel signer");
+    let material = signer
+        .channel_open_material(false)
+        .await
+        .expect("external channel open material");
+    let open: OpenChannelWithExternalFundingResult = node_a
+        .send_rpc_request(
+            "open_channel_with_external_funding",
+            OpenChannelWithExternalFundingParams {
+                pubkey: node_b.pubkey.into(),
+                funding_amount: HUGE_CKB_AMOUNT,
+                public: Some(false),
+                funding_udt_type_script: None,
+                shutdown_script: Script::default().into(),
+                funding_lock_script: Script::default().into(),
+                funding_lock_script_cell_deps: None,
+                commitment_delay_epoch: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+            },
+        )
+        .await
+        .expect("open external-signer channel");
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
+    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
+        &signer,
+        &unsigned_tx,
+        &node_a.get_channel_actor_state(channel_id),
+        true,
+    )
+    .await;
+    let _: SubmitSignedFundingTxResult = node_a
+        .send_rpc_request(
+            "submit_signed_funding_tx",
+            SubmitSignedFundingTxParams {
+                channel_id: channel_id.into(),
+                signed_funding_tx: mock_sign_external_funding_tx(&unsigned_tx).into(),
+            },
+        )
+        .await
+        .expect("submit external funding transaction");
+    let sdk = ExternalSignerHttpClient {
+        node: &node_a,
+        signer: &signer,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a_ready = matches!(
+                node_a.get_channel_actor_state(channel_id).state,
+                ChannelState::ChannelReady
+            );
+            let b_ready = node_b
+                .get_channel_actor_state_unchecked(channel_id)
+                .is_some_and(|state| matches!(state.state, ChannelState::ChannelReady));
+            if a_ready && b_ready {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("external-signer channel becomes ready");
+    let seed_payment = node_a
+        .send_payment_keysend(&node_b, 1_000_000, false)
+        .await
+        .expect("seed acceptor outbound liquidity");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &node_a,
+        seed_payment.payment_hash,
+        1_000_000,
+        false,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            sdk.try_sign_pending(channel_id).await;
+            let state_a = node_a.get_channel_actor_state(channel_id);
+            let state_b = node_b.get_channel_actor_state(channel_id);
+            if node_a.get_payment_status(seed_payment.payment_hash).await == PaymentStatus::Success
+                && state_a.tlc_state.all_tlcs().count() == 0
+                && state_b.tlc_state.all_tlcs().count() == 0
+                && !state_a.tlc_state.waiting_ack
+                && !state_b.tlc_state.waiting_ack
+                && !state_a.signing_context.is_awaiting_signature()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("seed payment settles");
+    ([node_a, node_b], channel_id, signer)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_external_signer_recovery(
+    node_a: &NetworkNode,
+    node_b: &NetworkNode,
+    signer: &ChannelSigner<MemoryStore>,
+    channel_id: Hash256,
+    payments: &[(&NetworkNode, Hash256)],
+) -> bool {
+    let sdk = ExternalSignerHttpClient {
+        node: node_a,
+        signer,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            sdk.try_sign_pending(channel_id).await;
+            let state_a = node_a.get_channel_actor_state(channel_id);
+            let state_b = node_b.get_channel_actor_state(channel_id);
+            let mut payments_settled = true;
+            for (node, payment_hash) in payments {
+                if node.get_payment_status(*payment_hash).await != PaymentStatus::Success {
+                    payments_settled = false;
+                    break;
+                }
+            }
+            if payments_settled
+                && matches!(state_a.state, ChannelState::ChannelReady)
+                && matches!(state_b.state, ChannelState::ChannelReady)
+                && !state_a.reestablishing
+                && !state_b.reestablishing
+                && state_a.tlc_state.all_tlcs().count() == 0
+                && state_b.tlc_state.all_tlcs().count() == 0
+                && !state_a.tlc_state.waiting_ack
+                && !state_b.tlc_state.waiting_ack
+                && !state_a.signing_context.is_awaiting_signature()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn live_pending_messages(node: &NetworkNode, channel_id: Hash256) -> TestPendingMessages {
+    let actor = node
+        .get_channel_actor(channel_id)
+        .await
+        .expect("channel actor is running");
+    call!(actor, ChannelActorMessage::TestGetPendingMessages).expect("channel actor is alive")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_pending_update_tlc_info_after_peer_restart() {
+    init_tracing();
+
+    // A peer message received while the tenant waits for its own commitment
+    // signature remains queued across its public peer's reestablishment.
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
+    wait_until_async_timeout(|| async {
+        matches!(
+            ExternalSignerHttpClient {
+                node: &tenant,
+                signer: &signer,
+            }
+            .get_signing_status(channel_id)
+            .await
+            .status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    let public_state = public_node.get_channel_actor_state(channel_id);
+    let public_tlc_info = public_state.local_tlc_info.clone();
+    tenant
+        .get_channel_actor(channel_id)
+        .await
+        .expect("tenant channel actor")
+        .send_message(ChannelActorMessage::PeerMessage(
+            FiberChannelMessage::UpdateTlcInfo(UpdateTlcInfo {
+                channel_id,
+                timestamp: public_tlc_info.timestamp.saturating_add(1),
+                channel_flags: ChannelUpdateChannelFlags::empty(),
+                tlc_expiry_delta: public_tlc_info.tlc_expiry_delta,
+                tlc_minimum_value: public_tlc_info.tlc_minimum_value,
+                tlc_fee_proportional_millionths: public_tlc_info.tlc_fee_proportional_millionths,
+            }),
+        ))
+        .expect("queue peer update behind external signature");
+    wait_until_async_timeout(|| async {
+        live_pending_messages(&tenant, channel_id)
+            .await
+            .pending_peer_message_count
+            > 0
+    })
+    .await;
+    public_node.restart().await;
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(recovered, "external-signer channel and TLC state recover");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_pending_commitment_tail_after_peer_restart() {
+    init_tracing();
+
+    // Completing an incoming commitment first starts the revoke signature.
+    // The commitment completion remains in-flight until that signature returns.
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+    let commitment_tail_payment = public_node
+        .send_payment_keysend(&tenant, 10_003, false)
+        .await
+        .expect("start payment for pending commitment tail");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &public_node,
+        commitment_tail_payment.payment_hash,
+        10_003,
+        true,
+    )
+    .await;
+    wait_until_async_timeout(|| async {
+        matches!(
+            ExternalSignerHttpClient {
+                node: &tenant,
+                signer: &signer,
+            }
+            .get_signing_status(channel_id)
+            .await
+            .status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| matches!(req, ChannelSignatureRequest::SendRevokeAndAck { .. }))
+    })
+    .await;
+    public_node.restart().await;
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&public_node, commitment_tail_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(recovered, "external-signer channel and TLC state recover");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_pending_revoke_tail_after_peer_restart() {
+    init_tracing();
+
+    // While completion of a received revoke waits for an external signature,
+    // queue the peer's next commitment. Draining it creates another signature
+    // request before the received-revoke processing completes.
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+    let revoke_tail_tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_004, false)
+        .await
+        .expect("start payment for pending revoke tail");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        revoke_tail_tenant_payment.payment_hash,
+        10_004,
+        false,
+    )
+    .await;
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && state.tlc_state.waiting_ack
+    })
+    .await;
+    wait_until_async_timeout(|| async {
+        live_pending_messages(&tenant, channel_id)
+            .await
+            .has_pending_peer_commitment
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| {
+                matches!(
+                    req,
+                    ChannelSignatureRequest::CompleteReceivedCommitment { .. }
+                )
+            })
+    })
+    .await;
+    public_node.restart().await;
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, revoke_tail_tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(recovered, "external-signer channel and TLC state recover");
+    let pending_messages = live_pending_messages(&tenant, channel_id).await;
+    assert_eq!(pending_messages.pending_peer_message_count, 0);
+    assert!(!tenant
+        .get_channel_actor_state(channel_id)
+        .signing_context
+        .is_awaiting_signature());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_pending_send_revoke_peer_restart_race() {
+    init_tracing();
+
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+    let payment = tenant
+        .send_payment_keysend(&public_node, 10_003, false)
+        .await
+        .expect("start payment from tenant");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        payment.payment_hash,
+        10_003,
+        false,
+    )
+    .await;
+
+    // 1. Sign tenant's SendCommitmentSigned
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // 2. Wait for tenant to receive public_node's RevokeAndAck and sign CompleteReceivedRevokeAndAck
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| {
+                matches!(
+                    req,
+                    ChannelSignatureRequest::CompleteReceivedRevokeAndAck { .. }
+                )
+            })
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // 3. Complete received commitment from public_node
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| {
+                matches!(
+                    req,
+                    ChannelSignatureRequest::CompleteReceivedCommitment { .. }
+                )
+            })
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // 4. Now tenant is awaiting SendRevokeAndAck!
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state
+            .signing_context
+            .awaiting_signature()
+            .is_some_and(|(_, req)| matches!(req, ChannelSignatureRequest::SendRevokeAndAck { .. }))
+    })
+    .await;
+
+    // Delete CommitDiff on public_node to simulate peer rebooting where waiting_ack will be cleared upon reestablish
+    public_node.store.delete_pending_commit_diff(&channel_id);
+    public_node.restart().await;
+
+    // Allow reestablish handshake to complete between public_node and tenant while tenant is STILL awaiting signature
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Tenant must still be reestablishing and buffer the handshake until SendRevokeAndAck is signed
+    let tenant_state = tenant.get_channel_actor_state(channel_id);
+    assert!(
+        tenant_state.reestablishing,
+        "tenant must remain in reestablishing state while awaiting signature"
+    );
+    assert!(
+        tenant_state.signing_context.is_awaiting_signature(),
+        "tenant must still be awaiting SendRevokeAndAck signature"
+    );
+
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, payment.payment_hash)],
+    )
+    .await;
+    assert!(
+        recovered,
+        "external-signer channel and payment recover without bad signature or force close"
+    );
+
+    let final_tenant_state = tenant.get_channel_actor_state(channel_id);
+    assert!(
+        !final_tenant_state.reestablishing,
+        "tenant should no longer be reestablishing after recovery"
+    );
+    assert_eq!(
+        final_tenant_state.state,
+        ChannelState::ChannelReady,
+        "channel should return to ChannelReady"
+    );
+    assert!(
+        !final_tenant_state.signing_context.is_awaiting_signature(),
+        "signing context must not be awaiting signature"
+    );
+    let pending_messages = live_pending_messages(&tenant, channel_id).await;
+    assert_eq!(
+        pending_messages.pending_peer_message_count, 0,
+        "all pending messages must be drained"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_pending_add_tlc_peer_restart() {
+    init_tracing();
+
+    let ([tenant, mut public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    // 1. Tenant initiates a payment, pausing in SendCommitmentSigned awaiting external signature
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+
+    // 2. While tenant is awaiting signature, public_node initiates a payment to tenant
+    let public_payment = public_node
+        .send_payment_keysend(&tenant, 20_000, false)
+        .await
+        .expect("start payment from public_node");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &public_node,
+        public_payment.payment_hash,
+        20_000,
+        true,
+    )
+    .await;
+
+    // Wait until tenant buffers public_node's peer messages (AddTlc, CommitmentSigned)
+    wait_until_async_timeout(|| async {
+        live_pending_messages(&tenant, channel_id)
+            .await
+            .pending_peer_message_count
+            > 0
+    })
+    .await;
+
+    // 3. Now public_node restarts!
+    public_node.restart().await;
+
+    // 4. Try to recover with external signer
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[
+            (&tenant, tenant_payment.payment_hash),
+            (&public_node, public_payment.payment_hash),
+        ],
+    )
+    .await;
+
+    assert!(
+        recovered,
+        "channel and both payments must recover without TLC ID mismatch or force close"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_tenant_restart_while_awaiting_signature() {
+    init_tracing();
+
+    let ([mut tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    // 1. Tenant initiates a payment
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
+
+    // Sign tenant's SendCommitmentSigned
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+    ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    }
+    .try_sign_pending(channel_id)
+    .await;
+
+    // Wait for tenant to reach SendRevokeAndAck
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        if let Some((_, req)) = state.signing_context.awaiting_signature() {
+            if matches!(req, ChannelSignatureRequest::SendRevokeAndAck { .. }) {
+                return true;
+            }
+            ExternalSignerHttpClient {
+                node: &tenant,
+                signer: &signer,
+            }
+            .try_sign_pending(channel_id)
+            .await;
+        }
+        false
+    })
+    .await;
+
+    println!("Tenant reached SendRevokeAndAck awaiting signature!");
+
+    // 2. Tenant restarts while awaiting SendRevokeAndAck! (Simulates cold tenant / eviction)
+    tenant.restart().await;
+
+    // 3. Now submit the signature to the restarted tenant
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(
+        recovered,
+        "channel and payment must recover after tenant restart while awaiting SendRevokeAndAck"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_tenant_restart_while_awaiting_commitment_signature() {
+    init_tracing();
+
+    let ([mut tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    // 1. Tenant initiates a payment, reaching awaiting signature for SendCommitmentSigned
+    let tenant_payment = tenant
+        .send_payment_keysend(&public_node, 10_001, false)
+        .await
+        .expect("start tenant payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &tenant,
+        tenant_payment.payment_hash,
+        10_001,
+        false,
+    )
+    .await;
+
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        state.signing_context.is_awaiting_signature() && !state.tlc_state.waiting_ack
+    })
+    .await;
+
+    println!("Tenant is awaiting SendCommitmentSigned signature!");
+
+    // 2. Tenant restarts while awaiting SendCommitmentSigned (cold tenant wake-up)
+    tenant.restart().await;
+
+    // 3. Now submit the signature to the restarted tenant
+    let recovered = wait_for_external_signer_recovery(
+        &tenant,
+        &public_node,
+        &signer,
+        channel_id,
+        &[(&tenant, tenant_payment.payment_hash)],
+    )
+    .await;
+
+    assert!(
+        recovered,
+        "channel and payment must recover after tenant restart while awaiting SendCommitmentSigned"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestablish() {
+    init_tracing();
+
+    let (mut node_a, mut node_b, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    node_a
+        .send_payment_keysend(&node_b, 2000, false)
+        .await
+        .expect("start keysend payment");
+    node_b.wait_for_held_fiber_messages(1).await;
+
+    let live_state_a = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            let state = node_a.get_channel_actor_state(channel_id);
+            if state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_none()
+                && state.remote_revocation_nonce_for_next.is_some()
+                && state.remote_revocation_nonce_for_send != state.remote_revocation_nonce_for_next
+            {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("A must reach the revoke-owing nonce boundary");
+
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a.remote_revocation_nonce_for_send,
+        live_state_a.remote_revocation_nonce_for_send
+    );
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network_a, _network_handle) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .expect("spawn capture network actor");
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
+    state_a.private_key = Some(node_a.private_key.clone());
+
+    let signer_notifications = Arc::new(Mutex::new(Vec::new()));
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network_a),
+        node_a.store.clone(),
+        None,
+    );
+    let (channel_actor_ref, _channel_actor_handle) =
+        Actor::spawn(None, SignerNotificationProbe, signer_notifications.clone())
+            .await
+            .expect("spawn notification probe");
+
+    state_a
+        .send_revoke_and_ack_message(&channel_actor_ref, false)
+        .await
+        .expect("revoke delegated to channel signer");
+    assert!(state_a.signing_context.is_awaiting_signature());
+
+    state_a.mark_reestablishing_offline();
+    assert_eq!(
+        state_a.connectivity_state,
+        ChannelConnectivityState::Offline
+    );
+    assert!(state_a.reestablishing);
+    assert!(!state_a.pending_messages.pending_reestablish_send);
+
+    let local_commitment_number = state_a.get_local_commitment_number();
+    let remote_commitment_number = state_a.get_remote_commitment_number();
+    channel
+        .handle_peer_message(
+            &channel_actor_ref,
+            &mut state_a,
+            FiberChannelMessage::ReestablishChannel(ReestablishChannel {
+                channel_id,
+                local_commitment_number,
+                remote_commitment_number,
+            }),
+        )
+        .await
+        .expect("peer reestablish queued while awaiting signature");
+
+    assert_eq!(
+        state_a.connectivity_state,
+        ChannelConnectivityState::Syncing
+    );
+    assert!(state_a.pending_messages.pending_reestablish_send);
+    assert_eq!(state_a.pending_messages.peer_messages.len(), 1);
+
+    let initial_messages = take_captured_actor_messages(&network_a, &captured).await;
+    assert!(initial_messages.is_empty());
+
+    let notification = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            if let Some(notification) = signer_notifications.lock().expect("probe lock").pop() {
+                return notification;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("signature notification within timeout");
+
+    channel
+        .handle_signer_notification(&channel_actor_ref, &mut state_a, notification)
+        .await
+        .expect("signer notification completes successfully");
+
+    let messages = take_captured_actor_messages(&network_a, &captured).await;
+    let reestablish_count = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                &m.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(_))
+            )
+        })
+        .count();
+    assert_eq!(
+        reestablish_count, 1,
+        "must emit exactly one ReestablishChannel message, but found {}",
+        reestablish_count
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_cooperative_shutdown() {
+    init_tracing();
+
+    let ([tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+
+    crate::fiber::tests::external_signer_restart::approve_fixture_close(
+        &signer,
+        &tenant.get_channel_actor_state(channel_id),
+    )
+    .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: None,
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(public_node.network_actor, message)
+        .expect("public_node alive")
+        .expect("successfully shutdown channel");
+
+    let sdk = ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    };
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+
+    sdk.try_sign_pending(channel_id).await;
+
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        matches!(
+            state.state,
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+                | ChannelState::Closed(_)
+        )
+    })
+    .await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_external_signer_shutdown_after_tlc_resolved() {
+    init_tracing();
+
+    let ([tenant, public_node], channel_id, signer) = new_external_signer_channel().await;
+    let sdk = ExternalSignerHttpClient {
+        node: &tenant,
+        signer: &signer,
+    };
+
+    let payment = public_node
+        .send_payment_keysend(&tenant, 10_000, false)
+        .await
+        .expect("start payment");
+    crate::fiber::tests::external_signer_restart::approve_fixture_keysend(
+        &signer,
+        &public_node,
+        payment.payment_hash,
+        10_000,
+        true,
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if public_node.get_payment_status(payment.payment_hash).await == PaymentStatus::Success
+            {
+                break;
+            }
+            sdk.try_sign_pending(channel_id).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("payment should complete");
+
+    crate::fiber::tests::external_signer_restart::approve_fixture_close(
+        &signer,
+        &tenant.get_channel_actor_state(channel_id),
+    )
+    .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: None,
+                        fee_rate: Some(FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE)),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(public_node.network_actor, message)
+        .expect("public_node alive")
+        .expect("successfully shutdown channel");
+
+    wait_until_async_timeout(|| async {
+        matches!(
+            sdk.get_signing_status(channel_id).await.status,
+            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
+        )
+    })
+    .await;
+
+    sdk.try_sign_pending(channel_id).await;
+
+    wait_until_async_timeout(|| async {
+        let state = tenant.get_channel_actor_state(channel_id);
+        matches!(
+            state.state,
+            ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+                | ChannelState::Closed(_)
+        )
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1718,7 +3498,7 @@ async fn test_network_send_previous_tlc_error() {
     // step1: try to send a invalid onion_packet with add_tlc
     // ==================================================================================
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -1813,7 +3593,7 @@ async fn test_network_send_previous_tlc_error_with_limit_amount_error() {
     // step1: try to send a invalid onion_packet with add_tlc
     // ==================================================================================
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2481,7 +4261,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let node_b_funidng_amount = 11800000000;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -2516,7 +4296,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: node_b_funidng_amount,
@@ -2571,7 +4351,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2614,7 +4394,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -2690,7 +4470,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2716,7 +4496,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -2742,7 +4522,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     let digest = correct_algorithm.hash(preimage);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -2768,7 +4548,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -2840,7 +4620,7 @@ async fn do_test_channel_remote_commitment_error() {
             let payment_hash = hash_algorithm.hash(preimage);
             let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
             let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id: new_channel_id,
                         command: ChannelCommand::AddTlc(
@@ -2866,7 +4646,7 @@ async fn do_test_channel_remote_commitment_error() {
         while all_sent.len() > tlc_number_in_flight_limit - 2 {
             let (preimage, tlc_id) = all_sent.remove(0);
             let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id: new_channel_id,
                         command: ChannelCommand::RemoveTlc(
@@ -2919,7 +4699,7 @@ async fn do_test_channel_add_tlc_amount_invalid() {
         let hash_algorithm = HashAlgorithm::Sha256;
         let digest = hash_algorithm.hash(preimage);
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(
@@ -2996,7 +4776,7 @@ async fn test_network_add_tlc_amount_overflow_error() {
         let hash_algorithm = HashAlgorithm::Sha256;
         let digest = hash_algorithm.hash(preimage);
         call!(node.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::AddTlc(
@@ -3044,7 +4824,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result_a = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3070,7 +4850,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let digest = algorithm.hash(failed_preimage_b);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3108,7 +4888,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     let digest = algorithm.hash(preimage_b);
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result_b = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3133,7 +4913,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     loop {
         // remove tlc from node_b
         let res = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::RemoveTlc(
@@ -3189,7 +4969,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     // remove the later tlc from node_b
     let tlc_id_b = add_tlc_result_b.unwrap().tlc_id;
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -3258,7 +5038,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3283,7 +5063,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3308,7 +5088,7 @@ async fn test_remove_tlc_with_expiry_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3334,7 +5114,7 @@ async fn test_remove_tlc_with_expiry_error() {
     };
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3410,7 +5190,7 @@ async fn test_remove_expired_tlc_in_background() {
     };
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -3450,7 +5230,7 @@ async fn test_check_active_channel_event_does_not_remove_expired_received_tlc() 
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3511,7 +5291,7 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3551,8 +5331,8 @@ async fn test_check_channels_does_not_fallback_when_channel_actor_missing() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::CheckChannels,
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::CheckChannels,
         ))
         .expect("node_b alive");
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -3592,7 +5372,7 @@ async fn test_restart_restores_ready_channel_actor_offline() {
     );
 
     let update_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -3651,7 +5431,7 @@ async fn test_restart_restores_shutting_down_channel_actor_for_reestablish() {
     );
 
     let update_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -3787,7 +5567,7 @@ async fn test_closed_channel_restores_after_restart_mid_settlement() {
     );
 
     let restored_control_result = call!(node_1.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channels[1],
                 command: ChannelCommand::Update(
@@ -3826,7 +5606,7 @@ async fn test_restarted_offline_channel_registers_expired_received_tlc_remove() 
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3898,7 +5678,7 @@ async fn test_restarted_offline_channel_force_closes_expired_offered_tlc() {
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -3972,7 +5752,7 @@ async fn test_offered_tlc_survives_force_close_transition() {
     let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -4070,7 +5850,7 @@ async fn do_test_add_tlc_duplicated() {
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4113,7 +5893,7 @@ async fn do_test_add_tlc_waiting_ack() {
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4147,7 +5927,7 @@ async fn do_test_add_tlc_waiting_ack() {
             is_trampoline_hop: false,
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4202,7 +5982,7 @@ async fn test_open_channel_constraints_limit_incoming_tlcs() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4228,7 +6008,7 @@ async fn test_open_channel_constraints_limit_incoming_tlcs() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4284,7 +6064,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4310,7 +6090,7 @@ async fn do_test_add_tlc_with_number_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4365,7 +6145,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4391,7 +6171,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4447,7 +6227,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4472,7 +6252,7 @@ async fn do_test_add_tlc_value_limit() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4528,7 +6308,7 @@ async fn do_test_add_tlc_value_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4553,7 +6333,7 @@ async fn do_test_add_tlc_value_limit_reverse() {
             expiry,
         );
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
                     command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4595,8 +6375,8 @@ async fn test_peer_add_tlc_checks_local_incoming_constraints() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::add_tlc(AddTlc {
                     channel_id: new_channel_id,
@@ -4635,7 +6415,7 @@ async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation()
     let payment_hash = gen_rand_sha256_hash();
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -4666,8 +6446,8 @@ async fn test_peer_plaintext_remove_tlc_fail_is_rejected_before_state_mutation()
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::remove_tlc(RemoveTlc {
                     channel_id,
@@ -4724,7 +6504,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4750,7 +6530,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4776,7 +6556,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
@@ -4805,7 +6585,7 @@ async fn test_channel_update_tlc_expiry() {
 
     // update channel with new tlc_expiry_delta which is too small
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4829,7 +6609,7 @@ async fn test_channel_update_tlc_expiry() {
 
     // update channel with new tlc_expiry_delta which is too large
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4857,7 +6637,7 @@ async fn test_channel_update_tlc_expiry() {
     // update channel with new tlc_expiry_delta which is still too small
     // for less than 2/3 of the commitment delay
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4883,7 +6663,7 @@ async fn test_channel_update_tlc_expiry() {
     // update tlc_expiry_delta with 2/3 of the commitment delay
     // this should be successful
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Update(
@@ -4949,7 +6729,7 @@ async fn test_forward_payment_channel_disabled() {
 
     // update channel to disable it from node_b
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::Update(
@@ -5013,7 +6793,7 @@ async fn test_forward_payment_tlc_minimum_value() {
     // update B's ChannelUpdate in channel_b_c with tlc_minimum_value set to our tlc_amount
     // this is used to override the default tlc_minimum_value value.
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::Update(
@@ -5044,7 +6824,7 @@ async fn test_forward_payment_tlc_minimum_value() {
 
     // update B's ChannelUpdate in channel_b_c with new tlc_minimum_value
     let update_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::Update(
@@ -5078,7 +6858,7 @@ async fn test_forward_payment_tlc_minimum_value() {
         is_trampoline_hop: false,
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_a_b,
                 command: ChannelCommand::AddTlc(add_tlc_command.clone(), rpc_reply),
@@ -5091,7 +6871,7 @@ async fn test_forward_payment_tlc_minimum_value() {
 
     // AddTlc from B to C is not OK because the forwarding value is too small
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: channel_b_c,
                 command: ChannelCommand::AddTlc(add_tlc_command.clone(), rpc_reply),
@@ -5200,7 +6980,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -5226,7 +7006,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -5248,7 +7028,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 
     let fee_rate = FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE);
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -5323,7 +7103,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
 
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -5357,7 +7137,7 @@ async fn test_revoke_old_commitment_transaction() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -5392,7 +7172,7 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: 11800000000,
@@ -5414,6 +7194,7 @@ async fn test_revoke_old_commitment_transaction() {
     let x_only_aggregated_pubkey = node_b
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::RemoteTxComplete(
+                _,
                 _,
                 _,
                 _,
@@ -5479,8 +7260,8 @@ async fn test_revoke_old_commitment_transaction() {
 
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::CommitmentSigned(None),
             }),
@@ -5559,7 +7340,7 @@ async fn test_create_channel() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -5594,7 +7375,7 @@ async fn test_create_channel() {
         })
         .await;
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: 11800000000,
@@ -5689,7 +7470,7 @@ async fn test_reestablish_channel() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -5725,7 +7506,7 @@ async fn test_reestablish_channel() {
         .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: 11800000000,
@@ -5791,7 +7572,7 @@ async fn test_reestablish_channel() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -5880,7 +7661,7 @@ async fn test_force_close_channel_when_remote_is_offline() {
         .await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -5920,7 +7701,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
     let old_node_b_balance = node_b_state.to_local_amount;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -5944,7 +7725,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
 
     // node_a send Shutdown
     let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -5964,7 +7745,7 @@ async fn test_normal_shutdown_with_remove_tlc() {
 
     // node_b send remove tlc
     call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -6180,7 +7961,7 @@ async fn test_reconnect_resolves_awaiting_channel_ready_when_peer_is_already_rea
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -6381,7 +8162,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
     let disconnect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             node_b.pubkey,
             PeerDisconnectReason::Requested,
             Some(rpc_reply),
@@ -6416,7 +8197,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::MaintainConnections,
+            PublicNetworkCommand::MaintainConnections,
         ))
         .expect("node_a alive");
 
@@ -6435,7 +8216,7 @@ async fn test_manual_disconnect_blocks_auto_reconnect_until_manual_connect() {
     node_b.stop().await;
 
     let connect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ConnectPeerWithPubkey(
+        NetworkActorMessage::new_command(PublicNetworkCommand::ConnectPeerWithPubkey(
             node_b.pubkey,
             None,
             PeerConnectSource::Manual,
@@ -6465,7 +8246,7 @@ async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
         NetworkNode::new_2_nodes_with_established_channel(100000000000, 100000000000, true).await;
 
     let first_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             node_b.pubkey,
             PeerDisconnectReason::Requested,
             Some(rpc_reply),
@@ -6485,7 +8266,7 @@ async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
         .await;
 
     let second_disconnect_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::DisconnectPeer(
+        NetworkActorMessage::new_command(PublicNetworkCommand::DisconnectPeer(
             node_b.pubkey,
             PeerDisconnectReason::Requested,
             Some(rpc_reply),
@@ -6502,7 +8283,7 @@ async fn test_repeated_manual_disconnect_keeps_auto_reconnect_disabled() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::MaintainConnections,
+            PublicNetworkCommand::MaintainConnections,
         ))
         .expect("node_a alive");
 
@@ -6608,7 +8389,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     let expiry = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6636,7 +8417,7 @@ async fn test_node_reestablish_resend_remove_tlc() {
     node_a.stop().await;
 
     let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -6696,7 +8477,7 @@ async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
     let expected_preimage: Hash256 = preimage.into();
     let payment_hash: Hash256 = HashAlgorithm::CkbHash.hash(preimage).into();
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6729,7 +8510,7 @@ async fn test_remove_tlc_fulfill_persists_preimage_while_reestablishing() {
         payment_preimage: preimage.into(),
     });
     let result = call!(node_b.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::RemoveTlc(
@@ -6782,7 +8563,7 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
     let expiry_0 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
 
     let add_tlc_0 = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6806,7 +8587,7 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
 
     let expiry_1 = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
     let add_tlc_1 = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::AddTlc(
@@ -6874,7 +8655,7 @@ async fn test_force_close_preimage_multiple_keeps_short_expiry_tlc_pending_befor
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -6980,7 +8761,7 @@ async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
 
     // test open channel with large size shutdown script
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -7030,7 +8811,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
 
     // test auto accept channel with large size shutdown script
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -7285,8 +9066,8 @@ async fn test_remote_force_shutdown_awaiting_channel_ready_closes_both_sides() {
         .expect("initiator should record shutdown transaction hash");
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ClosingTransactionConfirmed(
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ClosingTransactionConfirmed(
                 node_b.pubkey,
                 channel_id,
                 expected_shutdown_tx_hash.pack(),
@@ -7331,8 +9112,8 @@ async fn test_remote_force_shutdown_awaiting_channel_ready_after_restart() {
     node_a.restart().await;
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::RemoteForceShutdownChannel(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::RemoteForceShutdownChannel(
                 channel_id,
                 Some(GetShutdownTxResponse {
                     transaction: Some(remote_commitment_tx),
@@ -7368,7 +9149,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
             .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7390,7 +9171,7 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
         .contains("Local balance is not enough to pay the fee"));
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7452,7 +9233,7 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
             .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7564,7 +9345,7 @@ async fn test_shutdown_channel_network_graph_with_sync_up() {
     assert_eq!(network_channels.len(), 1);
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -7608,7 +9389,7 @@ async fn test_shutdown_channel_and_shutdown_transaction_hash() {
             .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Shutdown(
@@ -8452,7 +10233,7 @@ async fn test_abandon_failed_channel_without_accept() {
     let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8500,7 +10281,7 @@ async fn test_open_channel_with_invalid_commitment_delay() {
         let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
                 OpenChannelCommand {
                     pubkey: node_b.pubkey,
                     public: false,
@@ -8552,7 +10333,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8582,7 +10363,7 @@ async fn test_open_channel_tlc_expiry_is_smaller_than_commitment_delay() {
         .contains("TLC expiry delta 13332 is smaller than 2/3 commitment_delay_epoch delay 13333"));
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8612,7 +10393,7 @@ async fn test_abandon_channel_with_peer_accept() {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -8648,7 +10429,7 @@ async fn test_abandon_channel_with_peer_accept() {
     node_a.send_ckb_chain_message(crate::ckb::CkbChainMessage::Stop);
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
@@ -8732,8 +10513,8 @@ async fn test_channel_with_malicious_peer_send_channel_msg() {
 
         node_2
             .network_actor
-            .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
                     target: target_node.pubkey,
                     message: FiberMessage::add_tlc(AddTlc {
                         channel_id: wrong_channel_id,
@@ -8772,8 +10553,8 @@ async fn test_inbound_add_tlc_rejects_expiry_too_soon() {
 
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget {
                 target: node_b.pubkey,
                 message: FiberMessage::add_tlc(AddTlc {
                     channel_id,
@@ -8811,7 +10592,7 @@ async fn test_funding_timeout() {
     .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: nodes[1].pubkey,
                 public: false,
@@ -8859,7 +10640,7 @@ async fn test_auto_accept_fails_debug_event() {
     .await;
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: nodes[1].pubkey,
                 public: false,
@@ -8973,7 +10754,7 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     ));
 
     let control_result_before_final_settlement = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -9009,8 +10790,8 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
 
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Event(
-            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        .send_message(NetworkActorMessage::new_event(
+            FiberActorEvent::ChannelSettlementCompleted(channel_id),
         ))
         .expect("network actor alive");
 
@@ -9025,7 +10806,7 @@ async fn test_closing_channel_stays_alive_until_onchain_settlement_complete() {
     .await;
 
     let control_result_after_final_settlement = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -9070,7 +10851,7 @@ async fn test_cooperative_close_stops_channel_actor_immediately() {
 
     wait_until_async_timeout(|| async {
         let control_result = call!(node_a.network_actor, |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id,
                     command: ChannelCommand::Update(
@@ -9098,7 +10879,7 @@ async fn test_cooperative_close_stops_channel_actor_immediately() {
     .await;
 
     let control_result = call!(node_a.network_actor, |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::Update(
@@ -9137,7 +10918,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
 
     // Step 1: Open a channel from node_a to node_b
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: true,
@@ -9184,7 +10965,7 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
     // This will trigger ChannelAccepted event on node_a, which attempts to fund the channel
     // Since CKB is stopped, the funding will fail with a temporary error
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id,
                 funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
@@ -9272,6 +11053,249 @@ async fn test_channel_aborts_funding_after_restart_when_stuck_in_negotiating_fun
         "Channel should be removed from storage after funding abort, but still exists with state: {:?}",
         channel_state_after_restart.map(|s| s.state)
     );
+}
+
+#[tokio::test]
+async fn test_ready_public_channel_ignores_replayed_announcement_signatures() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let (node_signature, partial_signature) = state_a
+        .public_channel_info
+        .as_ref()
+        .expect("public channel")
+        .remote_channel_announcement_signature
+        .clone()
+        .expect("ready channel has the peer's announcement signatures");
+    let announcement = AnnouncementSignatures {
+        channel_id,
+        channel_outpoint: state_a.must_get_funding_transaction_outpoint(),
+        node_signature,
+        partial_signature,
+    };
+    node_a.stop().await;
+    node_b.stop().await;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let broadcast_count = Arc::new(Mutex::new(0));
+    let (network, network_handle) = Actor::spawn(
+        None,
+        CapturingPublicNetworkActor {
+            broadcast_count: broadcast_count.clone(),
+        },
+        captured.clone(),
+    )
+    .await
+    .expect("spawn public capture actor");
+    state_a.network = Some(FiberActorRef::from_network(&network));
+    state_a.private_key = Some(node_a.private_key.clone());
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network),
+        node_a.store.clone(),
+        None,
+    );
+    let (channel_ref, channel_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn no-op channel actor");
+    let original_state = bincode::serialize(&state_a).expect("serialize ready state");
+    assert!(matches!(state_a.state, ChannelState::ChannelReady));
+    assert!(!state_a.reestablishing);
+
+    for _ in 0..3 {
+        channel
+            .handle_peer_message(
+                &channel_ref,
+                &mut state_a,
+                FiberChannelMessage::AnnouncementSignatures(announcement.clone()),
+            )
+            .await
+            .expect("ignore duplicate announcement signatures");
+
+        // The mailbox barrier proves absence of output without a timing window.
+        let responses = take_captured_actor_messages(&network, &captured).await;
+        assert_eq!(
+            (responses.len(), *broadcast_count.lock().unwrap()),
+            (0, 0),
+            "a ready channel must neither echo signatures nor rebroadcast gossip"
+        );
+        assert_eq!(
+            bincode::serialize(&state_a).unwrap(),
+            original_state,
+            "replayed signatures must not change the established channel"
+        );
+    }
+    channel_handle.abort();
+    network_handle.abort();
+}
+
+#[tokio::test]
+async fn test_reestablish_replays_missing_public_channel_announcement_signatures() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    let ready_commitments = state_b.get_current_commitment_numbers();
+    let cached_a_signatures = state_a
+        .public_channel_info
+        .as_ref()
+        .unwrap()
+        .local_channel_announcement_signature
+        .clone()
+        .expect("A has persisted its announcement signatures");
+
+    // Both ChannelReady messages arrived, but A's announcement signatures were
+    // lost before B could finish opening. Restore precisely that persisted edge.
+    state_b.state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY);
+    state_b.commitment_numbers.local -= 1;
+    state_b.commitment_numbers.remote -= 1;
+    let public_info = state_b.public_channel_info.as_mut().unwrap();
+    public_info.remote_channel_announcement_signature = None;
+    public_info.channel_announcement = None;
+    public_info.channel_update = None;
+    node_b.store.insert_channel_actor_state(state_b);
+    let mut state_b = node_b.get_channel_actor_state(channel_id);
+    state_a.mark_reestablishing_offline();
+    state_b.mark_reestablishing_offline();
+
+    let captured_a = Arc::new(Mutex::new(Vec::new()));
+    let broadcast_count_a = Arc::new(Mutex::new(0));
+    let (network_a, network_a_handle) = Actor::spawn(
+        None,
+        CapturingPublicNetworkActor {
+            broadcast_count: broadcast_count_a.clone(),
+        },
+        captured_a.clone(),
+    )
+    .await
+    .expect("spawn A capture actor");
+    let captured_b = Arc::new(Mutex::new(Vec::new()));
+    let (network_b, network_b_handle) =
+        Actor::spawn(None, CapturingNetworkActor, captured_b.clone())
+            .await
+            .expect("spawn B capture actor");
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
+    state_a.private_key = Some(node_a.private_key.clone());
+    state_b.network = Some(FiberActorRef::from_network(&network_b));
+    state_b.private_key = Some(node_b.private_key.clone());
+    let channel_a = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network_a),
+        node_a.store.clone(),
+        None,
+    );
+    let channel_b = ChannelActor::new(
+        node_b.pubkey,
+        node_a.pubkey,
+        FiberActorRef::from_network(&network_b),
+        node_b.store.clone(),
+        None,
+    );
+    let (channel_a_ref, channel_a_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn A no-op channel actor");
+    let (channel_b_ref, channel_b_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn B no-op channel actor");
+
+    channel_b
+        .handle_event(&channel_b_ref, &mut state_b, ChannelEvent::PeerReconnected)
+        .await
+        .expect("B initiates reestablishment");
+    let handshake = take_captured_actor_messages(&network_b, &captured_b).await;
+    assert_eq!(handshake.len(), 1);
+    let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(message)) =
+        handshake.into_iter().next().unwrap().message
+    else {
+        panic!("B must start with ReestablishChannel")
+    };
+    channel_a
+        .handle_peer_message(
+            &channel_a_ref,
+            &mut state_a,
+            FiberChannelMessage::ReestablishChannel(message),
+        )
+        .await
+        .expect("A processes B's handshake");
+
+    let replay = take_captured_actor_messages(&network_a, &captured_a).await;
+    let mut signature_replay_count = 0;
+    for message in replay {
+        assert_eq!(message.target, node_b.pubkey);
+        let FiberMessage::ChannelNormalOperation(message) = message.message else {
+            panic!("reestablishment emits channel messages")
+        };
+        if let FiberChannelMessage::AnnouncementSignatures(ref announcement) = message {
+            signature_replay_count += 1;
+            assert_eq!(
+                (
+                    announcement.node_signature.clone(),
+                    announcement.partial_signature,
+                ),
+                cached_a_signatures,
+                "reestablishment must reuse the cached signatures"
+            );
+            assert!(matches!(
+                state_b.state,
+                ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY)
+            ));
+        }
+        channel_b
+            .handle_peer_message(&channel_b_ref, &mut state_b, message)
+            .await
+            .expect("B processes A's recovery messages");
+    }
+    assert_eq!(signature_replay_count, 1);
+    for state in [&state_a, &state_b] {
+        assert!(matches!(state.state, ChannelState::ChannelReady));
+        assert!(!state.reestablishing);
+        assert_eq!(state.connectivity_state, ChannelConnectivityState::Online);
+        assert_eq!(state.get_current_commitment_numbers(), ready_commitments);
+        assert!(!state.signing_context.is_awaiting_signature());
+    }
+    let public_info = state_b.public_channel_info.as_ref().unwrap();
+    assert_eq!(
+        public_info.remote_channel_announcement_signature,
+        Some(cached_a_signatures)
+    );
+    assert!(public_info
+        .channel_announcement
+        .as_ref()
+        .unwrap()
+        .is_signed());
+
+    // B also proactively replays its cached signatures. Once A is ready, that
+    // replay must terminate, rather than starting a signature/gossip ping-pong.
+    let broadcasts_before = *broadcast_count_a.lock().unwrap();
+    let mut reciprocal_signature_count = 0;
+    for message in take_captured_actor_messages(&network_b, &captured_b).await {
+        assert_eq!(message.target, node_a.pubkey);
+        let FiberMessage::ChannelNormalOperation(message) = message.message else {
+            panic!("reestablishment emits channel messages")
+        };
+        if matches!(message, FiberChannelMessage::AnnouncementSignatures(_)) {
+            reciprocal_signature_count += 1;
+        }
+        channel_a
+            .handle_peer_message(&channel_a_ref, &mut state_a, message)
+            .await
+            .expect("A processes B's recovery messages");
+    }
+    assert_eq!(reciprocal_signature_count, 1);
+    assert!(take_captured_actor_messages(&network_a, &captured_a)
+        .await
+        .is_empty());
+    assert_eq!(*broadcast_count_a.lock().unwrap(), broadcasts_before);
+    channel_a_handle.abort();
+    channel_b_handle.abort();
+    network_a_handle.abort();
+    network_b_handle.abort();
 }
 
 #[tokio::test]
@@ -9363,12 +11387,12 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
         Actor::spawn(None, CapturingNetworkActor, captured_b.clone())
             .await
             .expect("spawn B capture network actor");
-    state_b.network = Some(network_b.clone());
+    state_b.network = Some(FiberActorRef::from_network(&network_b));
     state_b.private_key = Some(node_b.private_key.clone());
     let channel_b = ChannelActor::new(
         node_b.pubkey,
         node_a.pubkey,
-        network_b.clone(),
+        FiberActorRef::from_network(&network_b),
         node_b.store.clone(),
         None,
     );
@@ -9381,18 +11405,30 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
         Actor::spawn(None, CapturingNetworkActor, captured_a.clone())
             .await
             .expect("spawn A capture network actor");
-    state_a.network = Some(network_a.clone());
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
     state_a.private_key = Some(node_a.private_key.clone());
+    node_a.store.insert_channel_actor_state(state_a.clone());
+
     let channel_a = ChannelActor::new(
         node_a.pubkey,
         node_b.pubkey,
-        network_a.clone(),
+        FiberActorRef::from_network(&network_a),
         node_a.store.clone(),
         None,
     );
-    let (channel_a_ref, channel_a_handle) = Actor::spawn(None, NoopChannelActor, ())
-        .await
-        .expect("spawn A no-op channel actor");
+    let (channel_a_ref, channel_a_handle) = Actor::spawn(
+        None,
+        channel_a,
+        crate::fiber::channel::ChannelInitializationParameter {
+            operation: crate::fiber::channel::ChannelInitializationOperation::RestoreOfflineChannel(
+                channel_id,
+            ),
+            ephemeral_config: Default::default(),
+            private_key: node_a.private_key.clone(),
+        },
+    )
+    .await
+    .expect("spawn A channel actor");
 
     channel_b
         .handle_peer_message(
@@ -9400,8 +11436,8 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
             &mut state_b,
             FiberChannelMessage::ReestablishChannel(ReestablishChannel {
                 channel_id,
-                local_commitment_number: state_a.get_local_commitment_number(),
-                remote_commitment_number: state_a.get_remote_commitment_number(),
+                local_commitment_number: original_a_commitments.local,
+                remote_commitment_number: original_a_commitments.remote,
             }),
         )
         .await
@@ -9409,6 +11445,16 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
 
     let messages_from_b = take_captured_actor_messages(&network_b, &captured_b).await;
     let message_count_from_b = messages_from_b.len();
+    // This is a public channel, so recovery also replays its stored announcement
+    // signature between the reciprocal handshake and the owed commitment.
+    let announcement_index = messages_from_b.iter().position(|message| {
+        matches!(
+            &message.message,
+            FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                announcement
+            )) if announcement.channel_id == channel_id
+        )
+    });
     let reestablish_messages = messages_from_b
         .iter()
         .enumerate()
@@ -9455,18 +11501,35 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
     drop(reestablish_messages);
     drop(commitment_messages);
 
+    // Discard any initial messages emitted by A on startup
+    let _ = take_captured_actor_messages(&network_a, &captured_a).await;
+
     for message in messages_from_b {
         assert_eq!(message.target, node_a.pubkey);
         let FiberMessage::ChannelNormalOperation(message) = message.message else {
             panic!("B emitted a non-channel message during reestablish")
         };
-        channel_a
-            .handle_peer_message(&channel_a_ref, &mut state_a, message)
-            .await
+        channel_a_ref
+            .send_message(ChannelActorMessage::PeerMessage(message))
             .expect("A must process B's captured reestablish output");
     }
 
+    // An announcement alone does not mean the asynchronously signed ack is ready.
+    wait_until_async_timeout(|| async {
+        captured_a.lock().unwrap().iter().any(|message| {
+            matches!(
+                &message.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke))
+                    if revoke.channel_id == channel_id
+            )
+        })
+    })
+    .await;
     let messages_from_a = take_captured_actor_messages(&network_a, &captured_a).await;
+    let state_a = node_a
+        .store
+        .get_channel_actor_state(&channel_id)
+        .expect("get state A");
     assert_eq!(
         reestablish_message_count,
         1,
@@ -9479,9 +11542,14 @@ async fn test_peer_reestablish_overtakes_reconnected_and_replays_owed_commitment
         state_a.remote_revocation_nonce_for_next == original_a_next_nonce,
     );
     assert_eq!(
-        (message_count_from_b, reestablish_index, commitment_index),
-        (2, Some(0), 1),
-        "B must emit only reciprocal ReestablishChannel then persisted CommitmentSigned"
+        (
+            message_count_from_b,
+            reestablish_index,
+            announcement_index,
+            commitment_index,
+        ),
+        (3, Some(0), Some(1), 2),
+        "B must emit reciprocal ReestablishChannel, stored AnnouncementSignatures, then persisted CommitmentSigned"
     );
     assert_eq!(
         state_b.connectivity_state,
@@ -9746,7 +11814,7 @@ async fn test_reestablish_replays_reverse_commitment_for_different_next_nonce() 
     node_b
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::SendFiberMessage(replayed_message),
+            FiberActorCommand::SendFiberMessage(replayed_message),
         ))
         .expect("node_b alive");
 
@@ -10271,8 +12339,8 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
 
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
                 channel_id,
                 command: ChannelCommand::SetDeferPeerTlcUpdates(true),
             }),
@@ -10282,8 +12350,8 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
     for tlc_id in 0..max_deferred_updates {
         node_b
             .network_actor
-            .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+            .send_message(NetworkActorMessage::new_command(
+                FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                     node_a.pubkey,
                     FiberMessage::add_tlc(create_deferred_replay_test_add_tlc(channel_id, tlc_id)),
                 )),
@@ -10293,8 +12361,8 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::add_tlc(create_deferred_replay_test_add_tlc(
                     channel_id,
@@ -10316,6 +12384,144 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
         .await;
 }
 
+/// With a local ChannelSigner, revoke-owing signing is delegated via
+/// SignerNotification (send-to-self) and only sends the peer message once the
+/// signature notification is applied.
+#[tokio::test]
+async fn test_channel_signer_signs_revocation_via_messages() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+
+    // Hold B's CommitmentSigned so A ends up in the revoke-owing nonce
+    // boundary (same setup as the reestablish replay test).
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    node_a
+        .send_payment_keysend(&node_b, 2000, false)
+        .await
+        .expect("start keysend payment");
+    node_b.wait_for_held_fiber_messages(1).await;
+
+    let live_state_a = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            let state = node_a.get_channel_actor_state(channel_id);
+            if state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_none()
+                && state.remote_revocation_nonce_for_next.is_some()
+                && state.remote_revocation_nonce_for_send != state.remote_revocation_nonce_for_next
+            {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("A must reach the revoke-owing nonce boundary");
+
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state_a = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_a.remote_revocation_nonce_for_send,
+        live_state_a.remote_revocation_nonce_for_send
+    );
+    let remote_commitment_number_before = state_a.get_remote_commitment_number();
+
+    // Stopping the nodes detaches the real actors but also persists an offline,
+    // reestablishing channel. This harness tests normal connected signing, not
+    // recovery: restore that connectivity before applying the notification.
+    assert!(state_a.reestablishing);
+    state_a.reestablishing = false;
+    state_a.reestablish_started_at = None;
+    state_a.connectivity_state = ChannelConnectivityState::Online;
+
+    // Manual harness: capturing network + hand-driven channel.
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network_a, _network_handle) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .expect("spawn capture network actor");
+    state_a.network = Some(FiberActorRef::from_network(&network_a));
+    state_a.private_key = Some(node_a.private_key.clone());
+
+    let signer_notifications = Arc::new(Mutex::new(Vec::new()));
+
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network_a),
+        node_a.store.clone(),
+        None,
+    );
+    // The probe doubles as the channel actor ref: it is passed as `myself` to
+    // the signing call and notifications routed there land in its buffer.
+    let (channel_actor_ref, _channel_actor_handle) =
+        Actor::spawn(None, SignerNotificationProbe, signer_notifications.clone())
+            .await
+            .expect("spawn notification probe");
+
+    // Sending the revoke now goes through ChannelSigner: nothing may be
+    // put on the wire yet.
+    state_a
+        .send_revoke_and_ack_message(&channel_actor_ref, false)
+        .await
+        .expect("revoke delegated to channel signer");
+    assert!(
+        take_captured_actor_messages(&network_a, &captured)
+            .await
+            .is_empty(),
+        "no peer message may be sent before the signature notification"
+    );
+
+    // The signature comes back asynchronously; feeding the notification into
+    // the channel resumes the transition and sends the RevokeAndAck.
+    let notification = tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            if let Some(notification) = signer_notifications.lock().expect("probe lock").pop() {
+                return notification;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("signature notification within timeout");
+    let SignerNotification::ChannelSignatureReady {
+        channel_id: notified_channel_id,
+        ..
+    } = &notification;
+    assert_eq!(*notified_channel_id, channel_id);
+
+    channel
+        .handle_signer_notification(&channel_actor_ref, &mut state_a, notification)
+        .await
+        .expect("continuation succeeds");
+
+    let messages = take_captured_actor_messages(&network_a, &captured).await;
+    assert!(
+        messages.iter().any(|m| matches!(
+            &m.message,
+            FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke))
+                if revoke.channel_id == channel_id
+        )),
+        "RevokeAndAck must be sent after the signature notification, got {:?}",
+        messages
+            .iter()
+            .map(|m| format!("{:?}", m.message))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        state_a.get_remote_commitment_number(),
+        remote_commitment_number_before + 1
+    );
+    assert!(state_a.last_revoke_ack_msg.is_some());
+}
+
 #[tokio::test]
 async fn test_reestablish_does_not_complete_while_waiting_for_peer_revoke_and_ack() {
     init_tracing();
@@ -10335,8 +12541,8 @@ async fn test_reestablish_does_not_complete_while_waiting_for_peer_revoke_and_ac
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -10725,7 +12931,7 @@ async fn open_external_funding_channel(
     funding_amount: u128,
 ) -> (Hash256, Transaction) {
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
                 pubkey: node_b.pubkey,
                 funding_amount,
@@ -10742,6 +12948,7 @@ async fn open_external_funding_channel(
                 tlc_fee_proportional_millionths: None,
                 max_tlc_value_in_flight: None,
                 max_tlc_number_in_flight: None,
+                external_channel_signer: None,
             },
             rpc_reply,
         ))
@@ -10997,7 +13204,7 @@ async fn test_submit_signed_funding_tx() {
 
     // Submit the signed funding tx
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11047,7 +13254,7 @@ async fn test_submit_signed_funding_tx_unblocks_acceptor_commitment_handshake() 
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11121,7 +13328,7 @@ async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_igno
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11151,8 +13358,8 @@ async fn test_external_funding_duplicate_tx_complete_after_signed_submit_is_igno
     });
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 duplicate_tx_complete,
             )),
@@ -11182,7 +13389,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
 
     // Open a NORMAL channel (not external funding)
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannel(
             OpenChannelCommand {
                 pubkey: node_b.pubkey,
                 public: false,
@@ -11217,7 +13424,7 @@ async fn test_submit_signed_funding_tx_wrong_state() {
     // This should fail because the channel is not in AWAITING_EXTERNAL_FUNDING state.
     let dummy_tx = Transaction::default();
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: dummy_tx.clone(),
             reply: rpc_reply,
@@ -11256,7 +13463,7 @@ async fn test_submit_signed_funding_tx_duplicate() {
 
     // First submission should succeed
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11267,7 +13474,7 @@ async fn test_submit_signed_funding_tx_duplicate() {
 
     // Second submission should fail with RepeatedProcessing or InvalidState
     let submit_message2 = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11312,7 +13519,7 @@ async fn test_submit_signed_funding_tx_output_mismatch() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: tampered_tx.clone(),
             reply: rpc_reply,
@@ -11349,7 +13556,7 @@ async fn test_submit_signed_funding_tx_input_count_mismatch() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: tampered_tx.clone(),
             reply: rpc_reply,
@@ -11389,7 +13596,7 @@ async fn test_submit_signed_funding_tx_cell_deps_mismatch() {
     let tampered_tx: Transaction = unsigned_tx.as_builder().raw(tampered_raw_tx).build();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: tampered_tx.clone(),
             reply: rpc_reply,
@@ -11416,7 +13623,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
 
     // Use a TLC expiry delta that is too small
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
                 pubkey: node_b.pubkey,
                 funding_amount: 100_000_000_000,
@@ -11433,6 +13640,7 @@ async fn test_external_funding_invalid_tlc_expiry_delta() {
                 tlc_fee_proportional_millionths: None,
                 max_tlc_value_in_flight: None,
                 max_tlc_number_in_flight: None,
+                external_channel_signer: None,
             },
             rpc_reply,
         ))
@@ -11461,7 +13669,7 @@ async fn test_external_funding_invalid_commitment_delay() {
     let too_small_epoch = EpochNumberWithFraction::new(0, 0, 1);
 
     let message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+        NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
             OpenChannelWithExternalFundingCommand {
                 pubkey: node_b.pubkey,
                 funding_amount: 100_000_000_000,
@@ -11478,6 +13686,7 @@ async fn test_external_funding_invalid_commitment_delay() {
                 tlc_fee_proportional_millionths: None,
                 max_tlc_value_in_flight: None,
                 max_tlc_number_in_flight: None,
+                external_channel_signer: None,
             },
             rpc_reply,
         ))
@@ -11509,7 +13718,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
 
     let open_fut = async move {
         let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            NetworkActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
                 OpenChannelWithExternalFundingCommand {
                     pubkey: node_b.pubkey,
                     funding_amount: 100_000_000_000,
@@ -11526,6 +13735,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
                     tlc_fee_proportional_millionths: None,
                     max_tlc_value_in_flight: None,
                     max_tlc_number_in_flight: None,
+                    external_channel_signer: None,
                 },
                 rpc_reply,
             ))
@@ -11544,7 +13754,7 @@ async fn test_external_funding_pending_reply_returns_error_when_channel_stops() 
         .await;
 
     let abandon_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::AbandonChannel(
+        NetworkActorMessage::new_command(FiberActorCommand::AbandonChannel(
             temp_channel_id,
             rpc_reply,
         ))
@@ -11599,7 +13809,7 @@ async fn test_external_funding_signed_submission_not_aborted_by_stale_timeout() 
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11636,8 +13846,8 @@ async fn test_channel_stale_passive_wait_no_proactive_send() {
 
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -11668,7 +13878,7 @@ async fn test_channel_stale_audit_success_resumes_ready() {
     node_a
         .network_actor
         .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(
+            PublicNetworkCommand::DisconnectPeer(
                 node_b.pubkey,
                 PeerDisconnectReason::Requested,
                 None,
@@ -11677,8 +13887,8 @@ async fn test_channel_stale_audit_success_resumes_ready() {
         .expect("disconnect sent");
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_b.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -11726,8 +13936,8 @@ async fn test_channel_stale_audit_failure_blocks_channel() {
 
     node_b
         .network_actor
-        .send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
                 node_a.pubkey,
                 FiberMessage::reestablish_channel(ReestablishChannel {
                     channel_id,
@@ -11766,7 +13976,7 @@ async fn test_submit_signed_funding_tx_after_restart_for_external_funding() {
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11809,7 +14019,7 @@ async fn test_submit_signed_funding_tx_after_acceptor_restart_for_external_fundi
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -11956,7 +14166,7 @@ async fn test_external_funding_initiator_restart_after_signed_submit_resumes_han
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -12027,7 +14237,7 @@ async fn test_external_funding_initiator_send_tx_signatures_first_preserves_exte
         mock_sign_external_funding_tx_with_witness(&unsigned_tx, external_witness.clone());
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -12127,14 +14337,16 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
 
     node_a
         .network_actor
-        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
-            node_b.pubkey,
-            FiberMessage::tx_signatures(TxSignatures {
-                channel_id,
-                witnesses: vec![vec![0u8; 65]],
-            }),
-            None,
-        )))
+        .send_message(NetworkActorMessage::new_event(
+            PublicNetworkEvent::FiberMessage(
+                node_b.pubkey,
+                FiberMessage::tx_signatures(TxSignatures {
+                    channel_id,
+                    witnesses: vec![vec![0u8; 65]],
+                }),
+                None,
+            ),
+        ))
         .expect("network actor alive");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -12177,7 +14389,7 @@ async fn test_external_funding_acceptor_restart_after_signed_submit_resumes_hand
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -12254,7 +14466,7 @@ async fn test_reproduce_acceptor_restart_race_in_external_funding() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -12344,7 +14556,7 @@ async fn test_external_funding_state_cleared_after_terminal_path() {
         .data();
 
     let submit_message = |rpc_reply| {
-        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+        NetworkActorMessage::new_command(FiberActorCommand::SubmitSignedFundingTx {
             channel_id,
             signed_tx: signed_tx.clone(),
             reply: rpc_reply,
@@ -12515,8 +14727,12 @@ mod udt_funding_cell_capacity {
         let remote_funding = gen_rand_fiber_public_key();
 
         ChannelActorState {
+            channel_signer: crate::fiber::channel_signer::ChannelSigner::local(signer.clone()),
             core: ChannelActorData {
                 state: ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty()),
+                signing_context: Default::default(),
+                local_commitment_points: HashMap::new(),
+                local_public_nonces: HashMap::new(),
                 public_channel_info: None,
                 local_tlc_info: ChannelTlcInfo::default(),
                 remote_tlc_info: None,
@@ -12535,7 +14751,7 @@ mod udt_funding_cell_capacity {
                 commitment_fee_rate: 0,
                 commitment_delay_epoch: 0,
                 funding_fee_rate: 0,
-                signer,
+                signer: Some(signer),
                 local_channel_public_keys: ChannelBasePublicKeys {
                     funding_pubkey: local_funding,
                     tlc_base_key: gen_rand_fiber_public_key(),
@@ -12581,6 +14797,7 @@ mod udt_funding_cell_capacity {
             private_key: None,
             funding_abort_detail: None,
             needs_backup: false,
+            pending_messages: Default::default(),
         }
     }
 
@@ -12679,6 +14896,49 @@ mod udt_funding_cell_capacity {
             "should start with 3 commitment points"
         );
 
+        {
+            let mut local_state = state.clone();
+            local_state.core.signer = None;
+            local_state.channel_signer = crate::fiber::channel_signer::ChannelSigner::external();
+            // External local points must survive while any TLC still references
+            // them, even when both counters have advanced far beyond that TLC.
+            local_state.commitment_numbers = CommitmentNumbers {
+                local: 10,
+                remote: 10,
+            };
+            local_state.local_commitment_points = [
+                (3, gen_rand_fiber_public_key()),
+                (5, gen_rand_fiber_public_key()),
+            ]
+            .into_iter()
+            .collect();
+            let shared = {
+                let mut tlc = local_state.tlc_state.received_tlcs.tlcs[0].clone();
+                tlc.tlc_id = TLCId::Received(3);
+                tlc.removed_confirmed_at = None;
+                tlc.applied_flags = AppliedFlags::empty();
+                tlc
+            };
+            local_state.tlc_state.received_tlcs.tlcs.push(shared);
+            local_state = bincode::deserialize(&bincode::serialize(&local_state).unwrap()).unwrap();
+            assert!(local_state.local_commitment_points.contains_key(&3));
+            assert!(local_state.local_commitment_points.contains_key(&5));
+            local_state.clean_up_failed_tlcs();
+            assert!(local_state.local_commitment_points.contains_key(&3));
+            assert!(local_state.local_commitment_points.contains_key(&5));
+            let shared = local_state
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .iter_mut()
+                .find(|tlc| tlc.tlc_id == TLCId::Received(3))
+                .unwrap();
+            shared.removed_confirmed_at = Some(1);
+            shared.applied_flags = AppliedFlags::REMOVE;
+            local_state.clean_up_failed_tlcs();
+            assert!(!local_state.local_commitment_points.contains_key(&3));
+            assert!(local_state.local_commitment_points.contains_key(&5));
+        }
         state.clean_up_failed_tlcs();
 
         // After cleanup:

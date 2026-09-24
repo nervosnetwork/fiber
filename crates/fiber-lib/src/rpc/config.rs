@@ -1,9 +1,11 @@
+use std::path::PathBuf;
+
 use clap_serde_derive::ClapSerde;
 
 #[cfg(not(feature = "watchtower"))]
-const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,peer";
+const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,lsp,peer";
 #[cfg(feature = "watchtower")]
-const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,peer,watchtower";
+const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,lsp,peer,watchtower";
 
 #[derive(ClapSerde, Debug, Clone)]
 pub struct RpcConfig {
@@ -15,6 +17,16 @@ pub struct RpcConfig {
     #[default(None)]
     #[arg(name = "RPC_BISCUIT_PUBLIC_KEY", long = "rpc-biscuit-public-key", env)]
     pub biscuit_public_key: Option<String>,
+
+    /// File containing the Biscuit private key used to issue hosted tenant tokens.
+    /// Required when the LSP service is enabled; rejected when LSP is not running.
+    #[default(None)]
+    #[arg(
+        name = "RPC_BISCUIT_PRIVATE_KEY_PATH",
+        long = "rpc-biscuit-private-key-path",
+        env
+    )]
+    pub biscuit_private_key_path: Option<PathBuf>,
 
     #[default(DEFAULT_ENABLED_MODULES.split(',').map(ToString::to_string).collect())]
     #[arg(name = "RPC_ENABLED_MODULES", long = "rpc-enabled-modules", env, value_parser, num_args = 0.., value_delimiter = ',')]
