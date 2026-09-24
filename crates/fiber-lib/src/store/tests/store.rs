@@ -2698,3 +2698,80 @@ mod store_actor_tests {
         );
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
+    let path = TempDir::new("tenant_channel_opening");
+    let created = fiber_lsp_sdk::RootSigner::in_memory().await.unwrap();
+    let signer = created.root_signer.create_channel().await.unwrap();
+    let material = signer.channel_open_material(false).await.unwrap();
+    let request: fiber_json_types::OpenChannelWithExternalFundingParams = serde_json::from_value(serde_json::json!({
+            "pubkey": material.base_public_keys.funding_pubkey, "public": false,
+        "funding_amount":"0xba43b7400", "shutdown_script":ckb_jsonrpc_types::Script::from(Script::default()),
+        "funding_lock_script":ckb_jsonrpc_types::Script::from(Script::default()),
+        "external_channel_signer":fiber_lsp_sdk::json::open_material_to_rpc(&material),
+    })).unwrap();
+    let mut command = crate::rpc::channel::external_funding_command(&request).unwrap();
+    command.funding_amount = u128::MAX;
+    command.tlc_min_value = Some(u128::MAX);
+    command.tlc_fee_proportional_millionths = Some(u128::MAX);
+    command.max_tlc_value_in_flight = Some(u128::MAX);
+    command.commitment_delay_epoch = Some(ckb_types::core::EpochNumberWithFraction::new(1, 0, 1));
+    let temporary_id = Hash256::from([1; 32]);
+    let final_id = Hash256::from([2; 32]);
+    {
+        let store = open_store(&path).unwrap();
+        let tenant = store.namespaced(NodeNamespace::hosted_tenant("opening-owner"));
+        tenant.put_tenant_channel_opening(Some(TenantChannelOpening {
+            command: command.clone(),
+            channel_id: temporary_id,
+            result: None,
+            terminated: false,
+        }));
+        assert!(store.get_tenant_channel_opening().is_none());
+        assert!(store
+            .namespaced(NodeNamespace::hosted_tenant("other-tenant"))
+            .get_tenant_channel_opening()
+            .is_none());
+    }
+    let result = fiber_json_types::OpenTenantChannelResult {
+        channel_id: final_id.into(),
+        unsigned_funding_tx: Transaction::default().into(),
+        opening_context: fiber_json_types::TenantChannelOpeningContext {
+            remote_funding_key: material.base_public_keys.funding_pubkey.into(),
+            remote_settlement_key: material.base_public_keys.tlc_base_key.into(),
+            remote_shutdown_script: Script::default().into(),
+            commitment_delay_epoch: 1.into(),
+            commitment_fee_rate: 1000,
+            local_amount: 50_000_000_000,
+            remote_amount: 50_000_000_000,
+            local_reserved_ckb_amount: 9_900_000_000,
+            remote_reserved_ckb_amount: 9_900_000_000,
+        },
+    };
+    {
+        let store = open_store(&path)
+            .unwrap()
+            .namespaced(NodeNamespace::hosted_tenant("opening-owner"));
+        let mut pending = store.get_tenant_channel_opening().unwrap();
+        assert_eq!(pending.channel_id, temporary_id);
+        assert!(pending.result.is_none());
+        assert_eq!(
+            serde_json::to_value(&pending.command).unwrap(),
+            serde_json::to_value(&command).unwrap()
+        );
+        pending.channel_id = final_id;
+        pending.result = Some(result.clone());
+        store.put_tenant_channel_opening(Some(pending));
+    }
+    let store = open_store(&path)
+        .unwrap()
+        .namespaced(NodeNamespace::hosted_tenant("opening-owner"));
+    let restored = store.get_tenant_channel_opening().unwrap();
+    assert_eq!(restored.channel_id, final_id);
+    assert_eq!(
+        serde_json::to_value(restored.result.unwrap()).unwrap(),
+        serde_json::to_value(result).unwrap()
+    );
+}

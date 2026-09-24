@@ -5781,6 +5781,41 @@ enum TlcUpdateAction {
 
 // Constructors for the channel actor state.
 impl ChannelActorState {
+    pub(crate) fn tenant_opening_result(
+        &self,
+        funding_tx: Transaction,
+    ) -> fiber_json_types::OpenTenantChannelResult {
+        let channel = self;
+        let channel_id = self.get_id();
+        let remote = channel.get_remote_channel_public_keys();
+        let ckb = channel.funding_udt_type_script.is_none();
+        return fiber_json_types::OpenTenantChannelResult {
+            channel_id: channel_id.into(),
+            unsigned_funding_tx: funding_tx.into(),
+            opening_context: fiber_json_types::TenantChannelOpeningContext {
+                remote_funding_key: remote.funding_pubkey.into(),
+                remote_settlement_key: remote.tlc_base_key.into(),
+                remote_shutdown_script: channel.get_remote_shutdown_script().into(),
+                commitment_delay_epoch: channel.commitment_delay_epoch.into(),
+                commitment_fee_rate: channel.commitment_fee_rate,
+                local_amount: channel.to_local_amount
+                    + if ckb {
+                        u128::from(channel.local_reserved_ckb_amount)
+                    } else {
+                        0
+                    },
+                remote_amount: channel.to_remote_amount
+                    + if ckb {
+                        u128::from(channel.remote_reserved_ckb_amount)
+                    } else {
+                        0
+                    },
+                local_reserved_ckb_amount: channel.local_reserved_ckb_amount,
+                remote_reserved_ckb_amount: channel.remote_reserved_ckb_amount,
+            },
+        };
+    }
+
     /// Strictly verifies that the channel does not already have an in-flight signature request.
     #[inline]
     pub fn assert_not_awaiting_signature(&self) -> ProcessingChannelResult {
@@ -11692,8 +11727,22 @@ pub trait ChannelActorStateStore {
     }
 }
 
+/// Durable single-channel opening slot in a tenant's namespaced store.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TenantChannelOpening {
+    pub command: super::network::OpenChannelWithExternalFundingCommand,
+    pub channel_id: Hash256,
+    pub result: Option<fiber_json_types::OpenTenantChannelResult>,
+    pub terminated: bool,
+}
+
 /// Store trait for persisting and querying outbound channel-opening records.
 pub trait ChannelOpenRecordStore {
+    /// Read the authenticated tenant's durable opening slot.
+    fn get_tenant_channel_opening(&self) -> Option<TenantChannelOpening>;
+    /// Persist a slot before starting negotiation; clear only after confirmed termination.
+    fn put_tenant_channel_opening(&self, opening: Option<TenantChannelOpening>);
+
     /// Return all stored channel-opening records.
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord>;
     /// Return the record for the given channel ID, if any.

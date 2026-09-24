@@ -7,6 +7,10 @@
 
 mod commitment;
 mod lifecycle;
+#[cfg(feature = "json")]
+mod opening;
+#[cfg(feature = "json")]
+pub use opening::{FundingVerifier, OpeningNetwork, OpeningPersistence, TenantOpeningRpc};
 mod onchain;
 pub use lifecycle::{
     CloseAuthorization, CommitmentReference, RecoveryRecord, RevocationContext, RevocationRecord,

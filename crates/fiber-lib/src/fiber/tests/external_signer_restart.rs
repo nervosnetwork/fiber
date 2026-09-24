@@ -77,23 +77,6 @@ fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
         .data()
 }
 
-async fn bind_external_signer(
-    signer: &ChannelSigner<MemoryStore>,
-    unsigned_tx: &Transaction,
-    shutdown_script: Script,
-) {
-    let expected_inputs: Vec<_> = unsigned_tx
-        .raw()
-        .inputs()
-        .into_iter()
-        .map(|input| input.previous_output())
-        .collect();
-    signer
-        .bind_from_approved_funding(unsigned_tx, 0, shutdown_script, &expected_inputs)
-        .await
-        .expect("bind approved funding");
-}
-
 struct ExternalSignerHttpClient<'a> {
     node: &'a NetworkNode,
     signer: &'a ChannelSigner<MemoryStore>,
@@ -136,7 +119,87 @@ impl ExternalSignerHttpClient<'_> {
     }
 }
 
-/// Register opening terms from trusted test setup, never from a signing response.
+/// Test transport calls the production RPC; the synthetic chain's wallet is a fixture.
+pub(crate) struct TestOpeningRpc {
+    client: jsonrpsee::http_client::HttpClient,
+    saved: std::sync::Arc<std::sync::Mutex<Option<fiber_lsp_sdk::HostedSessionState>>>,
+}
+
+#[async_trait::async_trait]
+impl fiber_lsp_sdk::TenantOpeningRpc for TestOpeningRpc {
+    async fn open_tenant_channel(
+        &self,
+        _token: &str,
+        request: fiber_json_types::OpenChannelWithExternalFundingParams,
+    ) -> Result<fiber_json_types::OpenTenantChannelResult, fiber_lsp_sdk::SessionError> {
+        use jsonrpsee::core::client::ClientT;
+        self.client
+            .request("open_tenant_channel", jsonrpsee::rpc_params![request])
+            .await
+            .map_err(|e| fiber_lsp_sdk::SessionError::Invalid(e.to_string()))
+    }
+}
+
+/// The mock chain owns all funding cells. Real wallets must independently resolve
+/// inputs and enforce their debit/fee limits, as the external SDK agent does.
+#[async_trait::async_trait]
+impl fiber_lsp_sdk::FundingVerifier for TestOpeningRpc {
+    async fn verify_funding(
+        &self,
+        _request: &fiber_json_types::OpenChannelWithExternalFundingParams,
+        result: &fiber_json_types::OpenTenantChannelResult,
+    ) -> Result<Vec<ckb_types::packed::OutPoint>, fiber_lsp_sdk::SessionError> {
+        let funding: Transaction = result.unsigned_funding_tx.clone().into();
+        Ok(funding
+            .raw()
+            .inputs()
+            .into_iter()
+            .map(|i| i.previous_output())
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl fiber_lsp_sdk::OpeningPersistence for TestOpeningRpc {
+    async fn save_session(
+        &self,
+        state: &fiber_lsp_sdk::HostedSessionState,
+    ) -> Result<(), fiber_lsp_sdk::SessionError> {
+        *self.saved.lock().unwrap() = Some(state.clone());
+        Ok(())
+    }
+}
+
+pub(crate) async fn open_rpc_channel(
+    session: &mut fiber_lsp_sdk::HostedSession<MemoryStore>,
+    client: jsonrpsee::http_client::HttpClient,
+    request: fiber_json_types::OpenChannelWithExternalFundingParams,
+    saved: std::sync::Arc<std::sync::Mutex<Option<fiber_lsp_sdk::HostedSessionState>>>,
+) -> fiber_json_types::OpenTenantChannelResult {
+    let asset = request.funding_udt_type_script.clone().map(Into::into);
+    let network = fiber_lsp_sdk::OpeningNetwork {
+        funding_lock: crate::ckb::contracts::get_script_by_contract(
+            crate::ckb::contracts::Contract::FundingLock,
+            &[],
+        ),
+        commitment_lock: crate::ckb::contracts::get_script_by_contract(
+            crate::ckb::contracts::Contract::CommitmentLock,
+            &[],
+        ),
+        commitment_cell_deps: crate::ckb::contracts::get_cell_deps_count(
+            vec![crate::ckb::contracts::Contract::FundingLock],
+            &asset,
+        ),
+        epoch_duration_ms: crate::fiber::config::MILLI_SECONDS_PER_EPOCH,
+        minimum_shutdown_fee: crate::fiber::config::DEFAULT_MIN_SHUTDOWN_FEE,
+    };
+    let adapter = TestOpeningRpc { client, saved };
+    session
+        .open_tenant_channel(request, &network, &adapter, &adapter, &adapter)
+        .await
+        .expect("SDK opens and verifies production opening context")
+}
+
 pub(crate) async fn approve_fixture_opening(
     signer: &ChannelSigner<MemoryStore>,
     funding: &Transaction,
@@ -165,8 +228,20 @@ pub(crate) async fn approve_fixture_opening(
     };
     let ckb = state.funding_udt_type_script.is_none();
     signer
-        .approve_commitment_parameters(
+        .approve_opening(
             funding,
+            0,
+            if local_view {
+                state.get_local_shutdown_script()
+            } else {
+                state.get_remote_shutdown_script()
+            },
+            &funding
+                .raw()
+                .inputs()
+                .into_iter()
+                .map(|input| input.previous_output())
+                .collect::<Vec<_>>(),
             fiber_lsp_sdk::CommitmentParameters {
                 remote_shutdown_script: if local_view {
                     state.get_remote_shutdown_script()
@@ -558,7 +633,6 @@ async fn setup_pending_external_channel(
 
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    bind_external_signer(signer, &unsigned_tx, Script::default()).await;
     approve_fixture_opening(
         signer,
         &unsigned_tx,

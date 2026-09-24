@@ -17,6 +17,7 @@ getrandom = "0.3"
 molecule = { version = "0.9.2", default-features = false }
 musig2 = { version = "0.2.4", features = ["secp256k1", "serde"] }
 secp256k1 = { version = "0.30.0", features = ["serde", "recovery", "global-context"] }
+serde_json = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_with = "3.9"
 thiserror = "1.0"
@@ -33,7 +34,6 @@ json = ["dep:fiber-json-types", "dep:ckb-jsonrpc-types"]
 test-apis = []
 
 [dev-dependencies]
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [lints.clippy]

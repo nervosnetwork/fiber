@@ -6,10 +6,14 @@ approval or opening terms from an LSP signing response.
 
 Before polling a channel, the local fixture driver must:
 
-1. Bind the approved funding transaction with `bind_approved_funding`.
-2. Register independently obtained `CommitmentParameters` with `approve_opening`.
-   The command-line agent's `POST /bind` body requires `commitment_parameters` in
-   addition to the funding transaction, output index, and shutdown script.
+1. Send the original `OpenChannelWithExternalFundingParams` to `POST /open-channel` as
+   `{ "params": ... }`, setting `pubkey` to the LSP public node, `public: false`,
+   and the client-owned `external_channel_signer`, plus explicit commitment delay
+   and fee rate. The agent calls the SDK opening entrypoint, which saves intent, sends
+   `open_tenant_channel`, checks live funding inputs through
+   `--ckb-rpc`, and verifies the response using local dev-chain binaries from
+   `--contracts-dir`. It returns the opening result only after SDK verification and persistence.
+2. There is no `/bind` endpoint or driver-supplied commitment baseline.
 3. Use `open_channel` to register the test's exact payment/invoice authorizations,
    fulfillment preimages when settling TLCs, and close or announcement approvals.
    These authorizations and the verified channel history persist in the SDK store.

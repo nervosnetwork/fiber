@@ -1,7 +1,7 @@
 //! Hosted LSP session: registration, channel directory, and one-shot status handling.
 //!
-//! This module does not perform network I/O. The caller fetches RPC results and
-//! submits the returned parameters.
+//! Opening uses caller-provided transport, wallet verification and persistence.
+//! For signing, the caller fetches RPC results and submits the returned parameters.
 
 use std::collections::HashMap;
 
@@ -28,8 +28,10 @@ pub struct HostedSessionState {
     pub tenant_token: Option<String>,
     /// Fiber `channel_id` → local signer key id.
     pub bindings: HashMap<Hash256, ChannelKeyId>,
-    /// At most one unallocated channel key waiting for `open_channel_with_external_funding`.
+    /// At most one unallocated channel key waiting for `open_tenant_channel`.
     pub pending: Option<ChannelKeyId>,
+    /// Original opening request, retained after completion to validate retries.
+    pub opening_request: Option<Vec<u8>>,
 }
 
 /// Errors from [`HostedSession`] orchestration.
@@ -94,7 +96,7 @@ pub enum SubmitParams {
     Watchtower(SubmitWatchtowerSignatureParams),
 }
 
-/// Hosted tenant session. Does not talk to the network.
+/// Hosted tenant session with caller-provided I/O adapters.
 pub struct HostedSession<S> {
     root: RootSigner<S>,
     state: HostedSessionState,
@@ -231,35 +233,119 @@ impl<S: SignerStore> HostedSession<S> {
         Ok(signer.channel_open_material(false).await?)
     }
 
-    /// Bind the pending signer to a user-approved unsigned funding transaction.
-    pub async fn bind_approved_funding(
+    /// Open a tenant channel and return only after wallet/context verification and persistence.
+    /// The original intent is persisted before the RPC. Retry the identical request
+    /// after interruption; the existing pending signer and intent are reused.
+    pub async fn open_tenant_channel<R, V, P>(
         &mut self,
-        channel_id: Hash256,
-        unsigned_funding_tx: &ckb_types::packed::Transaction,
-        local_shutdown_script: ckb_types::packed::Script,
-        funding_output_index: u32,
-    ) -> Result<(), SessionError> {
-        if self.state.bindings.contains_key(&channel_id) {
-            return Ok(());
-        }
-        let pending = self.state.pending.ok_or(SessionError::NoPendingChannel)?;
-        let expected_inputs: Vec<_> = unsigned_funding_tx
-            .raw()
-            .inputs()
-            .into_iter()
-            .map(|input| input.previous_output())
-            .collect();
-        let signer = self.root.open_channel(pending).await?;
-        signer
-            .bind_from_approved_funding(
-                unsigned_funding_tx,
-                funding_output_index,
-                local_shutdown_script,
-                &expected_inputs,
-            )
+        request: fiber_json_types::OpenChannelWithExternalFundingParams,
+        network: &crate::OpeningNetwork,
+        rpc: &R,
+        wallet: &V,
+        persistence: &P,
+    ) -> Result<fiber_json_types::OpenTenantChannelResult, SessionError>
+    where
+        R: crate::TenantOpeningRpc,
+        V: crate::FundingVerifier,
+        P: crate::OpeningPersistence,
+    {
+        let token = self
+            .state
+            .tenant_token
+            .clone()
+            .ok_or(SessionError::NotRegistered)?;
+        let request = self.begin_channel_opening(request).await?;
+        persistence.save_session(&self.state).await?;
+        let result = rpc.open_tenant_channel(&token, request.clone()).await?;
+        let inputs = wallet.verify_funding(&request, &result).await?;
+        self.finish_channel_opening(&result, network, &inputs)
             .await?;
+        persistence.save_session(&self.state).await?;
+        Ok(result)
+    }
+
+    /// Persist the original client request before sending `open_tenant_channel`.
+    /// The caller must persist `state()` before performing network I/O.
+    pub(crate) async fn begin_channel_opening(
+        &mut self,
+        request: fiber_json_types::OpenChannelWithExternalFundingParams,
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingParams, SessionError> {
+        if request.public != Some(false) {
+            return Err(SessionError::Invalid(
+                "tenant opening requires public: false".into(),
+            ));
+        }
+        if !self.state.bindings.is_empty() {
+            let encoded =
+                serde_json::to_vec(&request).map_err(|e| SessionError::Invalid(e.to_string()))?;
+            if self.state.opening_request.as_ref() == Some(&encoded) {
+                return Ok(request);
+            }
+            return Err(SessionError::Invalid(
+                "tenant already has an approved channel".into(),
+            ));
+        }
+        let material = self.allocate_pending_channel().await?;
+        let expected = crate::json::open_material_to_rpc(&material);
+        if serde_json::to_value(Some(&expected))
+            .map_err(|e| SessionError::Invalid(e.to_string()))?
+            != serde_json::to_value(&request.external_channel_signer)
+                .map_err(|e| SessionError::Invalid(e.to_string()))?
+        {
+            return Err(SessionError::Invalid(
+                "opening material is not owned by the pending signer".into(),
+            ));
+        }
+        if request.commitment_delay_epoch.is_none() || request.commitment_fee_rate.is_none() {
+            return Err(SessionError::Invalid(
+                "choose commitment delay and fee rate before opening".into(),
+            ));
+        }
+        let encoded =
+            serde_json::to_vec(&request).map_err(|e| SessionError::Invalid(e.to_string()))?;
+        if self
+            .state
+            .opening_request
+            .as_ref()
+            .is_some_and(|old| old != &encoded)
+        {
+            return Err(SessionError::Invalid(
+                "cannot replace pending opening intent".into(),
+            ));
+        }
+        self.state.opening_request = Some(encoded);
+        Ok(request)
+    }
+
+    /// Validate a frozen proposal against local intent, then persist its baseline and binding.
+    /// The funding wallet must independently approve the complete transaction, its net
+    /// debit and fee, and its selected inputs. Network constants come from trusted config.
+    pub(crate) async fn finish_channel_opening(
+        &mut self,
+        result: &fiber_json_types::OpenTenantChannelResult,
+        network: &crate::OpeningNetwork,
+        expected_inputs: &[ckb_types::packed::OutPoint],
+    ) -> Result<(), SessionError> {
+        let request: fiber_json_types::OpenChannelWithExternalFundingParams =
+            serde_json::from_slice(
+                self.state
+                    .opening_request
+                    .as_deref()
+                    .ok_or(SessionError::NoPendingChannel)?,
+            )
+            .map_err(|e| SessionError::Invalid(e.to_string()))?;
+        let channel_id = result.channel_id.into();
+        let key = self
+            .state
+            .pending
+            .or_else(|| self.state.bindings.get(&channel_id).copied())
+            .ok_or(SessionError::NoPendingChannel)?;
+        let signer = self.root.open_channel(key).await?;
+        signer
+            .verify_and_record_opening(&request, result, network, expected_inputs)
+            .await?;
+        self.state.bindings.insert(channel_id, key);
         self.state.pending = None;
-        self.state.bindings.insert(channel_id, pending);
         Ok(())
     }
 
@@ -642,7 +728,6 @@ mod tests {
         LspTenantStatus, RegisterLspTenantResult,
     };
     use fiber_types::Privkey;
-    use musig2::KeyAggContext;
 
     use super::*;
     use crate::{json::musig2_to_rpc, MemoryStore, RootKey};
@@ -712,51 +797,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_consumes_the_pending_channel() {
+    async fn opening_consumes_the_pending_channel() {
         let mut session = session().await;
-        session.allocate_pending_channel().await.expect("allocate");
-        let pending = session.pending_channel_key_id().expect("pending");
-        let signer = session.root.open_channel(pending).await.expect("open");
-        let remote = Privkey::from(&[9; 32]).pubkey();
-        let input = ckb_types::packed::OutPoint::new_builder()
-            .tx_hash([7u8; 32].pack())
-            .index(0u32)
-            .build();
-        let ctx = KeyAggContext::new([
-            signer.public_material().base_public_keys.funding_pubkey,
-            remote,
-        ])
-        .expect("agg");
-        let point: musig2::secp::Point = ctx.aggregated_pubkey();
-        let digest = fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[]);
-        let lock = ckb_types::packed::Script::new_builder()
-            .args(digest[..20].to_vec().pack())
-            .build();
-        let shutdown = ckb_types::packed::Script::new_builder()
-            .args([1u8, 2, 3].pack())
-            .build();
-        let tx = ckb_types::core::TransactionBuilder::default()
-            .input(
-                ckb_types::packed::CellInput::new_builder()
-                    .previous_output(input.clone())
-                    .build(),
-            )
-            .output(
-                ckb_types::packed::CellOutput::new_builder()
-                    .lock(lock)
-                    .capacity(1000u64)
-                    .build(),
-            )
-            .output_data(ckb_types::packed::Bytes::default())
-            .build()
-            .data();
-        let channel_id = Hash256::from([0x11; 32]);
+        session.allocate_pending_channel().await.unwrap();
+        let pending = session.pending_channel_key_id().unwrap();
+        let signer = session.open_channel(pending).await.unwrap();
+        let (request, result, network, inputs) = crate::opening::tests::proposal(&signer).await;
+        session.begin_channel_opening(request).await.unwrap();
         session
-            .bind_approved_funding(channel_id, &tx, shutdown, 0)
+            .finish_channel_opening(&result, &network, &inputs)
             .await
-            .expect("bind");
+            .unwrap();
         assert!(session.pending_channel_key_id().is_none());
-        assert_eq!(session.binding(channel_id), Some(pending));
+        assert_eq!(session.binding(result.channel_id.into()), Some(pending));
     }
 
     async fn bound_session_with_inbound() -> (

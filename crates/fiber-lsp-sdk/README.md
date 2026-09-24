@@ -32,18 +32,18 @@ atomically compare-and-swap opaque byte values. An IndexedDB implementation can
 therefore live in a browser integration crate without adding browser
 dependencies here.
 
-After `open_channel_with_external_funding` returns a frozen unsigned funding
-transaction, call `ChannelSigner::bind_from_approved_funding` with that
-transaction, the cells the wallet agreed to spend, and the shutdown script from
-the open request. The intent-specific `prepare_*` methods validate signing requests
-against that approved funding identity and locally authorized state. The node does not supply a bindable
-channel identity.
+Call `HostedSession::open_tenant_channel` with trusted network configuration,
+a `TenantOpeningRpc` transport, an independent `FundingVerifier`, and durable
+`OpeningPersistence`. The SDK saves intent before sending the RPC, verifies the
+wallet transaction and opening context, and persists the baseline and binding
+before returning. Retry the same request after interruption. There is no separate
+approval or bind RPC.
 
 RPC clients should convert `get_channel_signing_status` and
 `get_watchtower_signing_status` through `fiber_lsp_sdk::json` (`json` feature,
 on by default). Production clients then drive [`HostedSession`]: feed each
 RPC result in, inspect [`ProcessOutcome`], and POST the returned submit
-params. The session performs no HTTP. Auto-approving poll loops stay in
+params. The session uses injected transport for opening and has no HTTP dependency. Auto-approving poll loops stay in
 `tests/fiber-lsp-sdk-agent` and must not be copied into production.
 
 The wallet's RPC transport uses the tenant Biscuit returned by
@@ -55,9 +55,16 @@ standard `send_payment` method for outbound payments.
 ## Client-side verification flow
 
 ```text
-Wallet-approved funding, opening balances, keys, scripts and fees
+Locally saved opening intent + pending signer (no channel ID yet)
                               |
-                 Bind funding + approve opening terms
+                    open_tenant_channel
+                              |
+             Frozen funding transaction + opening_context
+                              |
+          Verify local intent, keys, channel ID, asset, reserves,
+          fee, trusted contracts and wallet-approved funding inputs
+                              |
+          Persist verified commitment baseline + funding binding
                               |
                  Register payment / invoice authorizations
                               |

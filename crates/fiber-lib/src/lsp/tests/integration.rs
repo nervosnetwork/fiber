@@ -53,8 +53,8 @@ use crate::{
         channel::{
             to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
             GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
-            OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
-            SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+            OpenTenantChannelResult, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
+            SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
         },
         lsp::{
             GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, ListLspTenantsResult,
@@ -490,37 +490,98 @@ async fn open_hosted_external_channel(
     tenant_node_id: crate::fiber_types::Pubkey,
     public_node: &mut NetworkNode,
     signer: &ChannelSigner<MemoryStore>,
+    restart: &RestartableExternalSigner,
 ) -> crate::fiber_types::Hash256 {
     let material = signer
         .channel_open_material(false)
         .await
         .expect("external channel open material");
-    let open_client = client.clone();
-    let public_node_id = public_node.pubkey;
-    let open_task = tokio::spawn(async move {
-        open_client
-            .request::<OpenChannelWithExternalFundingResult, _>(
-                "open_channel_with_external_funding",
-                rpc_params![OpenChannelWithExternalFundingParams {
-                    pubkey: public_node_id.into(),
-                    funding_amount: HUGE_CKB_AMOUNT,
-                    public: Some(false),
-                    funding_udt_type_script: None,
-                    shutdown_script: Script::default().into(),
-                    funding_lock_script: Script::default().into(),
-                    funding_lock_script_cell_deps: None,
-                    commitment_delay_epoch: None,
-                    commitment_fee_rate: None,
-                    funding_fee_rate: None,
-                    tlc_expiry_delta: None,
-                    tlc_min_value: None,
-                    tlc_fee_proportional_millionths: None,
-                    max_tlc_value_in_flight: None,
-                    max_tlc_number_in_flight: None,
-                    external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
-                }],
-            )
+    let request = OpenChannelWithExternalFundingParams {
+        pubkey: public_node.private_key.pubkey().into(),
+        public: Some(false),
+        funding_amount: HUGE_CKB_AMOUNT,
+        funding_udt_type_script: None,
+        shutdown_script: Script::default().into(),
+        funding_lock_script: Script::default().into(),
+        funding_lock_script_cell_deps: None,
+        commitment_delay_epoch: Some(
+            ckb_types::core::EpochNumberWithFraction::new(1, 0, 1)
+                .full_value()
+                .into(),
+        ),
+        commitment_fee_rate: Some(1000),
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+    };
+    for (bad, message) in [
+        (
+            {
+                let mut bad = request.clone();
+                bad.pubkey = tenant_node_id.into();
+                bad
+            },
+            "tenant channel peer must be the LSP public node",
+        ),
+        (
+            {
+                let mut bad = request.clone();
+                bad.public = None;
+                bad
+            },
+            "tenant channel requires public: false",
+        ),
+        (
+            {
+                let mut bad = request.clone();
+                bad.public = Some(true);
+                bad
+            },
+            "tenant channel requires public: false",
+        ),
+        (
+            {
+                let mut bad = request.clone();
+                bad.external_channel_signer = None;
+                bad
+            },
+            "tenant channel requires external_channel_signer",
+        ),
+    ] {
+        let error = client
+            .request::<OpenTenantChannelResult, _>("open_tenant_channel", rpc_params![bad])
             .await
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+    }
+    let retry_request = request.clone();
+    let root = RootSigner::open(
+        RootKey::import(restart.root_key).unwrap(),
+        restart.store.clone(),
+    )
+    .await
+    .unwrap();
+    let mut session =
+        fiber_lsp_sdk::HostedSession::new(root).with_state(fiber_lsp_sdk::HostedSessionState {
+            pending: Some(restart.channel_key_id),
+            tenant_token: Some("client already carries tenant token".into()),
+            ..Default::default()
+        });
+    let saved = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let saved_before_disconnect = saved.clone();
+    let open_client = client.clone();
+    let open_task = tokio::spawn(async move {
+        crate::fiber::tests::external_signer_restart::open_rpc_channel(
+            &mut session,
+            open_client,
+            request,
+            saved_before_disconnect,
+        )
+        .await
     });
     let temporary_channel_id = public_node
         .expect_to_process_event(|event| match event {
@@ -532,6 +593,38 @@ async fn open_hosted_external_channel(
             _ => None,
         })
         .await;
+    // Losing the original HTTP caller must not release the tenant's opening slot.
+    open_task.abort();
+    let resumed_client = client.clone();
+    let resumed_request = retry_request.clone();
+    let root = RootSigner::open(
+        RootKey::import(restart.root_key).unwrap(),
+        restart.store.clone(),
+    )
+    .await
+    .unwrap();
+    let mut restored_session =
+        fiber_lsp_sdk::HostedSession::new(root).with_state(saved.lock().unwrap().clone().unwrap());
+    let open_task = tokio::spawn(async move {
+        crate::fiber::tests::external_signer_restart::open_rpc_channel(
+            &mut restored_session,
+            resumed_client,
+            resumed_request,
+            saved,
+        )
+        .await
+    });
+    let concurrent_client = client.clone();
+    let concurrent_request = retry_request.clone();
+    let concurrent_open = tokio::spawn(async move {
+        concurrent_client
+            .request::<OpenTenantChannelResult, _>(
+                "open_tenant_channel",
+                rpc_params![concurrent_request],
+            )
+            .await
+            .unwrap()
+    });
     ractor::call!(public_node.network_actor, |reply| {
         NetworkActorMessage::new_command(FiberActorCommand::AcceptChannel(
             AcceptChannelCommand {
@@ -551,27 +644,28 @@ async fn open_hosted_external_channel(
     .expect("accept hosted external channel");
     let open = open_task
         .await
-        .expect("join hosted external channel open request")
-        .expect("open hosted external-signer channel");
+        .expect("join hosted external channel open request");
+    let concurrent_result = concurrent_open.await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&open).unwrap(),
+        serde_json::to_value(concurrent_result).unwrap()
+    );
     let channel_id: crate::fiber_types::Hash256 = open.channel_id.into();
-    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    let expected_inputs: Vec<_> = unsigned_tx
-        .raw()
-        .inputs()
-        .into_iter()
-        .map(|input| input.previous_output())
-        .collect();
-    signer
-        .bind_from_approved_funding(&unsigned_tx, 0, Script::default(), &expected_inputs)
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.clone().into();
+    let repeated: OpenTenantChannelResult = client
+        .request("open_tenant_channel", rpc_params![retry_request.clone()])
         .await
-        .expect("bind hosted external signer to approved funding");
-    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
-        signer,
-        &unsigned_tx,
-        &public_node.get_channel_actor_state(channel_id),
-        false,
-    )
-    .await;
+        .expect("idempotent retry");
+    assert_eq!(
+        serde_json::to_value(&open).unwrap(),
+        serde_json::to_value(&repeated).unwrap()
+    );
+    let mut conflicting = retry_request;
+    conflicting.funding_amount += 1;
+    assert!(client
+        .request::<OpenTenantChannelResult, _>("open_tenant_channel", rpc_params![conflicting])
+        .await
+        .is_err());
     let signed_tx = unsigned_tx
         .as_advanced_builder()
         .set_witnesses(vec![Bytes::default()])
@@ -633,13 +727,14 @@ fn persisted_signer_state(node: &NetworkNode, channel_id: crate::fiber_types::Ha
 async fn hosted_signer_requests_are_isolated_across_concurrent_tenants() {
     init_tracing();
 
-    let mut network = create_lsp_test_network(
+    let mut network = create_lsp_test_network_inner(
         &[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT), true)],
         2,
         &[
             ((0, "u1"), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
             ((0, "u2"), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
         ],
+        false,
     )
     .await;
     let u1_client = network.tenant(0, "u1").client.clone();
@@ -648,12 +743,22 @@ async fn hosted_signer_requests_are_isolated_across_concurrent_tenants() {
     let u2_node_id = network.tenant(0, "u2").node.pubkey;
     let (u1_restart, u1_signer) = RestartableExternalSigner::create().await;
     let (u2_restart, u2_signer) = RestartableExternalSigner::create().await;
-    let u1_channel_id =
-        open_hosted_external_channel(&u1_client, u1_node_id, &mut network.nodes[0], &u1_signer)
-            .await;
-    let u2_channel_id =
-        open_hosted_external_channel(&u2_client, u2_node_id, &mut network.nodes[0], &u2_signer)
-            .await;
+    let u1_channel_id = open_hosted_external_channel(
+        &u1_client,
+        u1_node_id,
+        &mut network.nodes[0],
+        &u1_signer,
+        &u1_restart,
+    )
+    .await;
+    let u2_channel_id = open_hosted_external_channel(
+        &u2_client,
+        u2_node_id,
+        &mut network.nodes[0],
+        &u2_signer,
+        &u2_restart,
+    )
+    .await;
     let u1 = network.tenant(0, "u1");
     let u2 = network.tenant(0, "u2");
 
@@ -797,6 +902,16 @@ async fn create_lsp_test_network(
     network_channels: &[((usize, usize), (u128, u128), bool)],
     node_count: usize,
     tenant_channels: &[((usize, &str), (u128, u128))],
+) -> LspTestNetwork {
+    create_lsp_test_network_inner(network_channels, node_count, tenant_channels, true).await
+}
+
+#[allow(clippy::type_complexity)]
+async fn create_lsp_test_network_inner(
+    network_channels: &[((usize, usize), (u128, u128), bool)],
+    node_count: usize,
+    tenant_channels: &[((usize, &str), (u128, u128))],
+    establish_tenant_channels: bool,
 ) -> LspTestNetwork {
     assert!(node_count >= 2);
     assert!(!tenant_channels.is_empty());
@@ -980,24 +1095,30 @@ async fn create_lsp_test_network(
     for ((tenant_id, lsp_node_index, mut tenant, name, _), (_, funding)) in
         tenants.into_iter().zip(tenant_channels)
     {
-        let private_channel_id = establish_channel_between_nodes(
-            &mut nodes[lsp_node_index],
-            &mut tenant,
-            ChannelParameters {
-                public: false,
-                node_a_funding_amount: funding.0,
-                node_b_funding_amount: funding.1,
-                ..Default::default()
-            },
-        )
-        .await
-        .0;
+        let private_channel_id = if establish_tenant_channels {
+            establish_channel_between_nodes(
+                &mut nodes[lsp_node_index],
+                &mut tenant,
+                ChannelParameters {
+                    public: false,
+                    node_a_funding_amount: funding.0,
+                    node_b_funding_amount: funding.1,
+                    ..Default::default()
+                },
+            )
+            .await
+            .0
+        } else {
+            Default::default()
+        };
         let client = &lsp_services
             .iter()
             .find(|lsp| lsp.node_index == lsp_node_index)
             .expect("LSP service for tenant")
             .client;
-        wait_for_tenant_channel(client, &tenant_id, true).await;
+        if establish_tenant_channels {
+            wait_for_tenant_channel(client, &tenant_id, true).await;
+        }
         let tenant_token = tenant_tokens
             .remove(&(lsp_node_index, tenant_id.clone()))
             .expect("registered tenant token");
@@ -1476,8 +1597,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             rpc_params![fiber_json_types::OpenChannelParams {
                 pubkey: public_t.pubkey.into(),
                 funding_amount: 1_000,
-                public: Some(false),
                 one_way: None,
+                public: Some(false),
                 shutdown_script: None,
                 commitment_delay_epoch: None,
                 funding_udt_type_script: None,

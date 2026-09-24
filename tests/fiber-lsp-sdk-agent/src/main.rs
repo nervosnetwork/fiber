@@ -1,9 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
+use ckb_types::prelude::*;
 use clap::Parser;
 use fiber_lsp_sdk_agent::{Agent, AgentConfig, HttpFiberRpc};
-use fiber_types::Hash256;
 use serde::Deserialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -34,9 +34,17 @@ struct Args {
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_STATUS_FILE")]
     status_file: Option<PathBuf>,
 
-    /// Test-only HTTP address exposing GET /status, POST /bind, and POST /shutdown.
+    /// Test-only HTTP address exposing GET /status, POST /open-channel, and POST /shutdown.
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_CONTROL_ADDR")]
     control_addr: Option<String>,
+
+    /// Trusted local dev-chain contract binaries, independent of LSP responses.
+    #[arg(long, default_value = "../deploy/contracts")]
+    contracts_dir: PathBuf,
+
+    /// Independent CKB endpoint used to approve live funding inputs.
+    #[arg(long, default_value = "http://127.0.0.1:8114")]
+    ckb_rpc: String,
 
     /// Polling interval in milliseconds.
     #[arg(long, default_value_t = 200, env = "FIBER_LSP_SDK_AGENT_INTERVAL_MS")]
@@ -48,14 +56,14 @@ struct Args {
 }
 
 #[derive(Debug, Deserialize)]
-struct BindApprovedFundingRequest {
-    commitment_parameters: fiber_lsp_sdk::CommitmentParameters,
-    channel_id: fiber_json_types::Hash256,
-    unsigned_funding_tx: ckb_jsonrpc_types::Transaction,
-    shutdown_script: ckb_jsonrpc_types::Script,
-    #[serde(default)]
-    funding_output_index: u32,
+struct OpenChannelRequest {
+    params: fiber_json_types::OpenChannelWithExternalFundingParams,
 }
+
+type OpenCommand = (
+    OpenChannelRequest,
+    oneshot::Sender<Result<fiber_json_types::OpenTenantChannelResult>>,
+);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,7 +96,7 @@ async fn main() -> Result<()> {
 
     // Bind the test control server before initialize so wait.sh / Bruno can
     // connect while the agent retries tenant registration against node RPC.
-    let (bind_tx, mut bind_rx) = mpsc::channel::<BindApprovedFundingRequest>(4);
+    let (open_tx, mut open_rx) = mpsc::channel::<OpenCommand>(4);
     let (control, mut shutdown_rx) = match (args.control_addr, status_file) {
         (Some(address), Some(status_file)) => {
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -96,7 +104,7 @@ async fn main() -> Result<()> {
                 Some(tokio::spawn(run_control_server(
                     address,
                     status_file,
-                    bind_tx,
+                    open_tx,
                     shutdown_tx,
                 ))),
                 Some(shutdown_rx),
@@ -118,10 +126,9 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = wait_for_shutdown(&mut shutdown_rx) => break,
-            Some(request) = bind_rx.recv() => {
-                if let Err(error) = bind_request(&mut agent, request).await {
-                    tracing::warn!("SDK agent bind failed: {error}");
-                }
+            Some((request, reply)) = open_rx.recv() => {
+                let result = open_request(&mut agent, request, &args.contracts_dir, &args.ckb_rpc).await;
+                let _ = reply.send(result);
             }
             _ = tokio::time::sleep(interval) => {
                 if let Err(error) = agent.poll_once().await {
@@ -158,26 +165,40 @@ where
     }
 }
 
-async fn bind_request<R, S>(
+async fn open_request<R, S>(
     agent: &mut Agent<R, S>,
-    request: BindApprovedFundingRequest,
-) -> Result<()>
+    request: OpenChannelRequest,
+    contracts: &std::path::Path,
+    ckb_rpc: &str,
+) -> Result<fiber_json_types::OpenTenantChannelResult>
 where
     R: fiber_lsp_sdk_agent::FiberRpc,
     S: fiber_lsp_sdk::SignerStore,
 {
-    let channel_id: Hash256 = request.channel_id.into();
-    let funding: ckb_types::packed::Transaction = request.unsigned_funding_tx.into();
+    let script = |name: &str| -> Result<ckb_types::packed::Script> {
+        let bytes = std::fs::read(contracts.join(name))?;
+        Ok(ckb_types::packed::Script::new_builder()
+            .code_hash(fiber_types::blake2b_hash_with_salt(&bytes, &[]).pack())
+            .hash_type(ckb_types::core::ScriptHashType::Data2)
+            .build())
+    };
+    let network = fiber_lsp_sdk::OpeningNetwork {
+        funding_lock: script("funding-lock")?,
+        commitment_lock: script("commitment-lock")?,
+        commitment_cell_deps: if request.params.funding_udt_type_script.is_some() {
+            3
+        } else {
+            2
+        },
+        epoch_duration_ms: if cfg!(debug_assertions) {
+            2000
+        } else {
+            14_400_000
+        },
+        minimum_shutdown_fee: 100_000_000,
+    };
     agent
-        .bind_approved_funding(
-            channel_id,
-            funding.clone(),
-            request.shutdown_script.into(),
-            request.funding_output_index,
-        )
-        .await?;
-    agent
-        .approve_opening(channel_id, &funding, request.commitment_parameters)
+        .open_tenant_channel(request.params, &network, ckb_rpc)
         .await
 }
 
@@ -193,7 +214,7 @@ async fn wait_for_shutdown(receiver: &mut Option<oneshot::Receiver<()>>) {
 async fn run_control_server(
     address: String,
     status_file: PathBuf,
-    bind_tx: mpsc::Sender<BindApprovedFundingRequest>,
+    open_tx: mpsc::Sender<OpenCommand>,
     shutdown: oneshot::Sender<()>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&address)
@@ -203,7 +224,7 @@ async fn run_control_server(
     let mut shutdown = Some(shutdown);
     loop {
         let (stream, _) = listener.accept().await?;
-        if handle_control_connection(stream, &status_file, &bind_tx, &mut shutdown).await? {
+        if handle_control_connection(stream, &status_file, &open_tx, &mut shutdown).await? {
             return Ok(());
         }
     }
@@ -212,7 +233,7 @@ async fn run_control_server(
 async fn handle_control_connection(
     mut stream: TcpStream,
     status_file: &PathBuf,
-    bind_tx: &mpsc::Sender<BindApprovedFundingRequest>,
+    open_tx: &mpsc::Sender<OpenCommand>,
     shutdown: &mut Option<oneshot::Sender<()>>,
 ) -> Result<bool> {
     let request = read_http_request(&mut stream).await?;
@@ -225,16 +246,34 @@ async fn handle_control_connection(
                 false,
             ),
         }
-    } else if request.starts_with("POST /bind ") || request.starts_with("POST /bind\r\n") {
-        match bind_body(&request) {
-            Ok(payload) => match bind_tx.send(payload).await {
-                Ok(()) => ("200 OK", b"{\"status\":\"accepted\"}".to_vec(), false),
-                Err(error) => (
-                    "503 Service Unavailable",
-                    format!("{{\"error\":\"bind channel closed: {error}\"}}").into_bytes(),
-                    false,
-                ),
-            },
+    } else if request.starts_with("POST /open-channel ")
+        || request.starts_with("POST /open-channel\r\n")
+    {
+        match open_body(&request) {
+            Ok(payload) => {
+                let (sender, receiver) = oneshot::channel();
+                if open_tx.send((payload, sender)).await.is_err() {
+                    ("503 Service Unavailable", b"{}".to_vec(), false)
+                } else {
+                    match receiver.await {
+                        Ok(Ok(result)) => (
+                            "200 OK",
+                            serde_json::to_vec(&serde_json::json!({"result":result}))?,
+                            false,
+                        ),
+                        Ok(Err(error)) => (
+                            "400 Bad Request",
+                            serde_json::to_vec(&serde_json::json!({"error":error.to_string()}))?,
+                            false,
+                        ),
+                        Err(error) => (
+                            "503 Service Unavailable",
+                            serde_json::to_vec(&serde_json::json!({"error":error.to_string()}))?,
+                            false,
+                        ),
+                    }
+                }
+            }
             Err(error) => (
                 "400 Bad Request",
                 format!("{{\"error\":\"{error}\"}}").into_bytes(),
@@ -302,11 +341,11 @@ fn content_length(headers: &[u8]) -> Option<usize> {
     })
 }
 
-fn bind_body(request: &str) -> Result<BindApprovedFundingRequest> {
+fn open_body(request: &str) -> Result<OpenChannelRequest> {
     let body = request
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .unwrap_or_default()
         .trim_end_matches('\0');
-    serde_json::from_str(body).context("decode POST /bind body")
+    serde_json::from_str(body).context("decode POST /open-channel body")
 }

@@ -5,34 +5,30 @@ meta {
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{LSP_SDK_AGENT_URL}}/open-channel
   body: json
   auth: none
 }
 
 headers {
   Content-Type: application/json
-  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
 }
 
 body:json {
   {
-    "id":"42","jsonrpc":"2.0","method":"open_channel_with_external_funding","params":[{
-      "pubkey":"{{NODE2_PUBKEY}}","funding_amount":"0xba43b7400","public":false,
+    "params":{
+      "pubkey":"{{NODE2_PUBKEY}}","public":false,
+      "funding_amount":"0xba43b7400","commitment_fee_rate":"0x3e8","commitment_delay_epoch":"0x10000000001",
       "shutdown_script":{},"funding_lock_script":{},"external_channel_signer":{}
-    }]
+    }
   }
 }
 
 script:pre-request {
-  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
-  if (token) {
-    req.setHeader("Authorization", `Bearer ${token}`);
-  }
   const body = req.getBody();
-  body.params[0].shutdown_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
-  body.params[0].funding_lock_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
-  body.params[0].external_channel_signer = bru.getVar("REMOTE_OPEN_MATERIAL");
+  body.params.shutdown_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
+  body.params.funding_lock_script = bru.getVar("REMOTE_FUNDING_SCRIPT");
+  body.params.external_channel_signer = bru.getVar("REMOTE_OPEN_MATERIAL");
   req.setBody(body);
 }
 
@@ -43,6 +39,7 @@ assert {
 }
 
 script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
   bru.setVar("REMOTE_CHANNEL_ID", res.body.result.channel_id);
   bru.setEnvVar("REMOTE_CHANNEL_ID", res.body.result.channel_id);
   bru.setVar("REMOTE_UNSIGNED_TX", res.body.result.unsigned_funding_tx);

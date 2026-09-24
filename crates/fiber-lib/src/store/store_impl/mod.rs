@@ -1369,6 +1369,26 @@ impl ChannelActorStateStore for Store {
 }
 
 impl ChannelOpenRecordStore for Store {
+    // Use a tenant-namespaced Store: get() prefixes the key and reads only that tenant's record.
+    fn get_tenant_channel_opening(&self) -> Option<crate::fiber::channel::TenantChannelOpening> {
+        self.get([TENANT_CHANNEL_OPENING_PREFIX])
+            .map(|bytes| serde_json::from_slice(&bytes).expect("valid persisted tenant opening"))
+    }
+
+    // put()/delete() prefix the key with this Store's tenant namespace; each tenant has one slot.
+    fn put_tenant_channel_opening(
+        &self,
+        opening: Option<crate::fiber::channel::TenantChannelOpening>,
+    ) {
+        match opening {
+            Some(opening) => self.put(
+                [TENANT_CHANNEL_OPENING_PREFIX],
+                serde_json::to_vec(&opening).expect("serializable tenant opening"),
+            ),
+            None => self.delete([TENANT_CHANNEL_OPENING_PREFIX]),
+        }
+    }
+
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {
         let prefix = [CHANNEL_OPEN_RECORD_PREFIX];
         self.collect_by_prefix(&prefix)

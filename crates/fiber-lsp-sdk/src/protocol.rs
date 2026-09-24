@@ -13,13 +13,10 @@ pub use fiber_types::{
 
 /// Funding identity taken from a user-approved unsigned funding transaction.
 ///
-/// This is derived locally by [`crate::ChannelSigner::bind_from_approved_funding`].
-/// Later [`crate::ChannelSigner::prepare`] calls check that MuSig2
-/// aggregation matches this funding lock, that commitment/close txs spend this
-/// outpoint, that close txs pay the local shutdown script, and that
-/// announcements name the same outpoint. Commitments additionally require
-/// [`crate::ChannelSigner::approve_commitment_parameters`] and mandatory
-/// [`crate::ChannelSigner::prepare_commitment`] verification in every policy.
+/// This is derived locally by [`crate::ChannelSigner::approve_opening`].
+/// Intent-specific preparation verifies key aggregation, funding outpoint,
+/// approved destinations and the locally persisted commitment baseline.
+/// Every policy requires [`crate::ChannelSigner::prepare_commitment`] for commitments.
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ChannelBinding {
@@ -255,7 +252,7 @@ pub enum SignerError {
     /// MuSig2 or secp256k1 rejected the supplied signing context.
     #[error("signing failed: {0}")]
     Signing(String),
-    /// Bound signing was requested before [`crate::ChannelSigner::bind_from_approved_funding`].
+    /// Bound signing was requested before [`crate::ChannelSigner::approve_opening`].
     #[error("channel signer is not bound to a Fiber channel")]
     ChannelNotBound,
     /// The signer was bound again with a different approved funding identity.

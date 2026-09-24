@@ -54,6 +54,7 @@ struct StoredSignedRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StoredSigningState {
     format_version: u16,
+    opening_binding: Option<ChannelBinding>,
     commitment: Option<crate::commitment::CommitmentState>,
     revision: u64,
     local_highest_signed: Option<u64>,
@@ -83,8 +84,9 @@ impl StoredSigningState {
 impl Default for StoredSigningState {
     fn default() -> Self {
         Self {
+            opening_binding: None,
             commitment: None,
-            format_version: 3,
+            format_version: 4,
             revision: 0,
             local_highest_signed: None,
             remote_highest_signed: None,
@@ -413,7 +415,8 @@ impl<S: SignerStore> ChannelSigner<S> {
     /// agreed to spend and the shutdown script it sent in that open request.
     /// Fiber puts the funding cell at output index 0; pass another index only
     /// when reviewing a transaction that does not follow that layout.
-    pub async fn bind_from_approved_funding(
+    #[cfg(test)]
+    async fn fixture_funding_binding(
         &self,
         unsigned_funding_tx: &ckb_types::packed::Transaction,
         funding_output_index: u32,
@@ -432,7 +435,7 @@ impl<S: SignerStore> ChannelSigner<S> {
 
     /// Record a previously derived funding identity. Test-only shortcut.
     #[cfg(test)]
-    pub async fn bind_channel(&self, binding: ChannelBinding) -> Result<(), SignerError> {
+    async fn bind_channel(&self, binding: ChannelBinding) -> Result<(), SignerError> {
         self.persist_binding(binding).await
     }
 
@@ -515,19 +518,33 @@ impl<S: SignerStore> ChannelSigner<S> {
         })
     }
 
-    /// Approve immutable opening terms using the exact funding transaction already bound.
-    /// The caller must obtain contract, keys, fee and balances from its own opening approval,
-    /// not copy them from an untrusted signing request. Existing channels need trusted recovery.
-    pub async fn approve_commitment_parameters(
+    /// Validate wallet-approved opening terms and install their baseline and funding identity.
+    /// The funding wallet must approve the complete transaction and selected inputs.
+    /// Contract, keys, fee and balances come from the wallet's opening approval.
+    /// JSON-RPC clients should use `HostedSession::open_tenant_channel` to validate the response
+    /// against their original request and trusted network configuration.
+    pub async fn approve_opening(
         &self,
         funding: &ckb_types::packed::Transaction,
+        funding_output_index: u32,
+        local_shutdown_script: ckb_types::packed::Script,
+        expected_input_outpoints: &[ckb_types::packed::OutPoint],
         parameters: crate::CommitmentParameters,
     ) -> Result<(), SignerError> {
         use ckb_types::prelude::*;
-        let binding = self
+        let binding = approved_funding_identity(
+            funding,
+            funding_output_index,
+            local_shutdown_script,
+            expected_input_outpoints,
+        )?;
+        if self
             .load_binding()
             .await?
-            .ok_or(SignerError::ChannelNotBound)?;
+            .is_some_and(|existing| existing != binding)
+        {
+            return Err(SignerError::ChannelAlreadyBound);
+        }
         if funding.calc_tx_hash() != binding.funding_outpoint.tx_hash() {
             return Err(crate::commitment::invalid(
                 "opening transaction differs from bound funding",
@@ -568,8 +585,10 @@ impl<S: SignerStore> ChannelSigner<S> {
         loop {
             let (encoded, mut state) = self.load_signing_state().await?;
             if let Some(existing) = &state.commitment {
-                return if existing.parameters == commitment.parameters {
-                    Ok(())
+                return if existing.parameters == commitment.parameters
+                    && state.opening_binding.as_ref() == Some(&binding)
+                {
+                    self.persist_binding(binding).await
                 } else {
                     Err(crate::commitment::invalid(
                         "approved opening terms cannot be replaced",
@@ -586,12 +605,13 @@ impl<S: SignerStore> ChannelSigner<S> {
                 ));
             }
             state.commitment = Some(commitment.clone());
+            state.opening_binding = Some(binding.clone());
             state.revision = state
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| crate::commitment::invalid("state revision overflow"))?;
             if self.store_signing_state(encoded.as_deref(), &state).await? {
-                return Ok(());
+                return self.persist_binding(binding).await;
             }
         }
     }
@@ -1251,7 +1271,7 @@ impl<S: SignerStore> ChannelSigner<S> {
                         SignerError::CorruptStore("missing signing store version".to_string())
                     })?;
                 match version {
-                    3 => decode(bytes)?,
+                    4 => decode(bytes)?,
                     other => return Err(SignerError::UnsupportedStoreVersion(other)),
                 }
             }
@@ -2332,7 +2352,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_from_approved_funding_records_the_funding_outpoint() {
+    async fn funding_identity_records_the_funding_outpoint() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -2345,20 +2365,20 @@ mod tests {
         );
         let tx = approved_funding_tx(std::slice::from_ref(&input), lock.clone());
         let binding = channel
-            .bind_from_approved_funding(&tx, 0, shutdown_script(), std::slice::from_ref(&input))
+            .fixture_funding_binding(&tx, 0, shutdown_script(), std::slice::from_ref(&input))
             .await
             .expect("bind from approved funding");
         assert_eq!(binding.funding_lock_script, lock);
         assert_eq!(binding.local_shutdown_script, shutdown_script());
         assert_eq!(binding.funding_outpoint.tx_hash(), tx.calc_tx_hash());
         channel
-            .bind_from_approved_funding(&tx, 0, shutdown_script(), &[input])
+            .fixture_funding_binding(&tx, 0, shutdown_script(), &[input])
             .await
             .expect("binding the same approved funding is idempotent");
     }
 
     #[tokio::test]
-    async fn bind_from_approved_funding_rejects_unexpected_inputs() {
+    async fn funding_identity_rejects_unexpected_inputs() {
         let root = RootSigner::create(root_key(), MemoryStore::default())
             .await
             .expect("create root signer");
@@ -2373,7 +2393,7 @@ mod tests {
         );
         assert!(matches!(
             channel
-                .bind_from_approved_funding(
+                .fixture_funding_binding(
                     &tx,
                     0,
                     shutdown_script(),
@@ -2388,7 +2408,7 @@ mod tests {
         let store = MemoryStore::default();
         let root = RootSigner::create(root_key(), store.clone()).await.unwrap();
         let channel = root.create_channel().await.unwrap();
-        for version in [0u16, 1, 2, 4] {
+        for version in [0u16, 1, 2, 3, 5] {
             store
                 .put(
                     &signing_state_store_key(channel.channel_key_id()),

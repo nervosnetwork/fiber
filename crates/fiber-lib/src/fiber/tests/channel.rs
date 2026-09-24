@@ -1886,7 +1886,6 @@ async fn test_external_signer_commitment_pauses_until_signature_is_submitted() {
         .expect("open_channel_with_external_funding over HTTP");
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
     crate::fiber::tests::external_signer_restart::approve_fixture_opening(
         &channel_signer,
         &unsigned_tx,
@@ -2237,7 +2236,6 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
         .expect("open public channel with external funding over HTTP");
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    bind_external_signer(&channel_signer, &unsigned_tx, Script::default()).await;
     crate::fiber::tests::external_signer_restart::approve_fixture_opening(
         &channel_signer,
         &unsigned_tx,
@@ -2292,24 +2290,6 @@ async fn test_external_signer_public_channel_announcement_pauses_until_signature
         state.channel_signing_status(),
         fiber_types::ChannelSigningStatus::NoSignatureRequired
     ));
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn bind_external_signer(
-    signer: &ChannelSigner<MemoryStore>,
-    unsigned_tx: &Transaction,
-    shutdown_script: Script,
-) {
-    let expected_inputs: Vec<_> = unsigned_tx
-        .raw()
-        .inputs()
-        .into_iter()
-        .map(|input| input.previous_output())
-        .collect();
-    signer
-        .bind_from_approved_funding(unsigned_tx, 0, shutdown_script, &expected_inputs)
-        .await
-        .expect("bind approved funding");
 }
 
 /// Phone-SDK stand-in: HTTP RPC to Fiber plus an independent local `fiber-signer`.
@@ -2431,7 +2411,6 @@ async fn new_external_signer_channel() -> ([NetworkNode; 2], Hash256, ChannelSig
         .expect("open external-signer channel");
     let channel_id: Hash256 = open.channel_id.into();
     let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    bind_external_signer(&signer, &unsigned_tx, Script::default()).await;
     crate::fiber::tests::external_signer_restart::approve_fixture_opening(
         &signer,
         &unsigned_tx,

@@ -15,9 +15,161 @@ use fiber_lsp_sdk::{
 };
 use fiber_types::Hash256;
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 use crate::rpc::FiberRpc;
+
+struct RpcOpening<'a, R>(&'a R);
+
+#[async_trait::async_trait]
+impl<R: FiberRpc> fiber_lsp_sdk::TenantOpeningRpc for RpcOpening<'_, R> {
+    async fn open_tenant_channel(
+        &self,
+        token: &str,
+        request: fiber_json_types::OpenChannelWithExternalFundingParams,
+    ) -> Result<fiber_json_types::OpenTenantChannelResult, fiber_lsp_sdk::SessionError> {
+        self.0
+            .open_tenant_channel(token, request)
+            .await
+            .map_err(session_error)
+    }
+}
+
+fn session_error(error: impl std::fmt::Display) -> fiber_lsp_sdk::SessionError {
+    fiber_lsp_sdk::SessionError::Invalid(error.to_string())
+}
+
+struct SessionFile<'a>(&'a Path);
+impl SessionFile<'_> {
+    fn save(&self, state: &HostedSessionState) -> Result<()> {
+        let persisted = PersistedAgent {
+            opening_request: state.opening_request.clone(),
+            tenant_token: state.tenant_token.clone(),
+            bindings: state
+                .bindings
+                .iter()
+                .map(|(channel_id, key_id)| {
+                    (format!("{channel_id:#x}"), format!("{:#x}", key_id.0))
+                })
+                .collect(),
+            pending_channel_key_id: state.pending.map(|key_id| format!("{:#x}", key_id.0)),
+        };
+        atomic_write(self.0, &serde_json::to_vec_pretty(&persisted)?)
+    }
+}
+#[async_trait::async_trait]
+impl fiber_lsp_sdk::OpeningPersistence for SessionFile<'_> {
+    async fn save_session(
+        &self,
+        state: &HostedSessionState,
+    ) -> Result<(), fiber_lsp_sdk::SessionError> {
+        self.save(state).map_err(session_error)
+    }
+}
+
+struct FundingWallet<'a> {
+    ckb_rpc_url: &'a str,
+}
+impl FundingWallet<'_> {
+    async fn verify(
+        &self,
+        request: &fiber_json_types::OpenChannelWithExternalFundingParams,
+        result: &fiber_json_types::OpenTenantChannelResult,
+    ) -> Result<Vec<ckb_types::packed::OutPoint>> {
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        let mut inputs = Vec::new();
+        let mut wallet_capacity = 0u128;
+        let mut wallet_tokens = 0u128;
+        let token_amount = |data: &[u8]| -> Result<u128> {
+            Ok(u128::from_le_bytes(
+                data.try_into()
+                    .context("funding token data must contain 16 bytes")?,
+            ))
+        };
+        for input in &result.unsigned_funding_tx.inputs {
+            let body: serde_json::Value = client.post(self.ckb_rpc_url).json(&serde_json::json!({
+                "jsonrpc":"2.0", "id":1, "method":"get_live_cell", "params":[input.previous_output, true]
+            })).send().await?.error_for_status()?.json().await?;
+            anyhow::ensure!(
+                body["result"]["status"] == "live",
+                "funding input is not independently live"
+            );
+            let output: ckb_jsonrpc_types::CellOutput =
+                serde_json::from_value(body["result"]["cell"]["output"].clone())?;
+            if output.lock == request.funding_lock_script {
+                wallet_capacity += u128::from(output.capacity.value());
+                if output.type_.is_some() {
+                    anyhow::ensure!(
+                        output.type_ == request.funding_udt_type_script,
+                        "funding spends an unapproved wallet asset"
+                    );
+                    let data: ckb_jsonrpc_types::JsonBytes =
+                        serde_json::from_value(body["result"]["cell"]["data"]["content"].clone())?;
+                    wallet_tokens = wallet_tokens
+                        .checked_add(token_amount(data.as_bytes())?)
+                        .context("funding token input overflow")?;
+                }
+            }
+            inputs.push(input.previous_output.clone().into());
+        }
+        let change: u128 = result
+            .unsigned_funding_tx
+            .outputs
+            .iter()
+            .skip(1)
+            .filter(|output| output.lock == request.funding_lock_script)
+            .map(|output| u128::from(output.capacity.value()))
+            .sum();
+        if request.funding_udt_type_script.is_some() {
+            let mut token_change = 0u128;
+            for (output, data) in result
+                .unsigned_funding_tx
+                .outputs
+                .iter()
+                .zip(&result.unsigned_funding_tx.outputs_data)
+                .skip(1)
+            {
+                if output.lock == request.funding_lock_script
+                    && output.type_ == request.funding_udt_type_script
+                {
+                    token_change = token_change
+                        .checked_add(token_amount(data.as_bytes())?)
+                        .context("funding token change overflow")?;
+                }
+            }
+            anyhow::ensure!(
+                wallet_tokens.checked_sub(token_change) == Some(request.funding_amount),
+                "funding token debit differs from approved amount"
+            );
+        }
+        let contribution = if request.funding_udt_type_script.is_some() {
+            u128::from(result.opening_context.local_reserved_ckb_amount)
+        } else {
+            request.funding_amount
+        };
+        let tx: ckb_types::packed::Transaction = result.unsigned_funding_tx.clone().into();
+        let max_fee = u128::from(request.funding_fee_rate.unwrap_or(1000))
+            * (tx.serialized_size_in_block() as u128 + 1024)
+            / 1000;
+        let debit = wallet_capacity
+            .checked_sub(change)
+            .ok_or_else(|| anyhow!("invalid wallet change"))?;
+        anyhow::ensure!(
+            debit >= contribution && debit <= contribution + max_fee,
+            "funding wallet debit exceeds approved contribution and fee"
+        );
+        Ok(inputs)
+    }
+}
+#[async_trait::async_trait]
+impl fiber_lsp_sdk::FundingVerifier for FundingWallet<'_> {
+    async fn verify_funding(
+        &self,
+        request: &fiber_json_types::OpenChannelWithExternalFundingParams,
+        result: &fiber_json_types::OpenTenantChannelResult,
+    ) -> Result<Vec<ckb_types::packed::OutPoint>, fiber_lsp_sdk::SessionError> {
+        self.verify(request, result).await.map_err(session_error)
+    }
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -36,6 +188,7 @@ struct PersistedAgent {
     tenant_token: Option<String>,
     bindings: HashMap<String, String>,
     pending_channel_key_id: Option<String>,
+    opening_request: Option<Vec<u8>>,
 }
 
 /// Fixture information consumed by the external E2E driver.
@@ -90,6 +243,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 tenant_token: persisted.tenant_token,
                 bindings,
                 pending,
+                opening_request: persisted.opening_request,
             });
         Ok(Self {
             rpc,
@@ -125,10 +279,12 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
     /// Register the RootSigner tenant once and allocate channel open material.
     pub async fn initialize(&mut self) -> Result<()> {
         self.ensure_registered().await?;
-        self.session
-            .allocate_pending_channel()
-            .await
-            .map_err(|error| anyhow!("allocate pending channel: {error}"))?;
+        if self.session.state().bindings.is_empty() {
+            self.session
+                .allocate_pending_channel()
+                .await
+                .map_err(|error| anyhow!("allocate pending channel: {error}"))?;
+        }
         self.persist_state()?;
         self.write_status().await
     }
@@ -159,44 +315,25 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(())
     }
 
-    /// Bind the pending signer to the funding transaction the user already approved.
-    pub async fn bind_approved_funding(
+    /// Open through the production tenant RPC and validate before installing local state.
+    pub async fn open_tenant_channel(
         &mut self,
-        channel_id: Hash256,
-        unsigned_funding_tx: ckb_types::packed::Transaction,
-        local_shutdown_script: ckb_types::packed::Script,
-        funding_output_index: u32,
-    ) -> Result<()> {
-        self.session
-            .bind_approved_funding(
-                channel_id,
-                &unsigned_funding_tx,
-                local_shutdown_script,
-                funding_output_index,
+        request: fiber_json_types::OpenChannelWithExternalFundingParams,
+        network: &fiber_lsp_sdk::OpeningNetwork,
+        ckb_rpc_url: &str,
+    ) -> Result<fiber_json_types::OpenTenantChannelResult> {
+        let result = self
+            .session
+            .open_tenant_channel(
+                request,
+                network,
+                &RpcOpening(&self.rpc),
+                &FundingWallet { ckb_rpc_url },
+                &SessionFile(&self.state_file),
             )
-            .await
-            .map_err(|error| anyhow!("bind approved funding: {error}"))?;
-        self.persist_state()?;
+            .await?;
         self.write_status().await?;
-        info!(channel_id = %format!("{channel_id:#x}"), "bound SDK signer to approved funding");
-        Ok(())
-    }
-
-    /// Record opening terms provided by the local test driver, independently of LSP status.
-    pub async fn approve_opening(
-        &self,
-        channel_id: Hash256,
-        funding: &ckb_types::packed::Transaction,
-        parameters: fiber_lsp_sdk::CommitmentParameters,
-    ) -> Result<()> {
-        let key = self
-            .binding(channel_id)
-            .ok_or_else(|| anyhow!("unbound channel"))?;
-        self.open_channel(key)
-            .await?
-            .approve_commitment_parameters(funding, parameters)
-            .await
-            .map_err(|e| anyhow!("approve opening: {e}"))
+        Ok(result)
     }
 
     /// Service outstanding signing requests for already-bound channels.
@@ -346,19 +483,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
     }
 
     fn persist_state(&self) -> Result<()> {
-        let state = self.session.state();
-        let persisted = PersistedAgent {
-            tenant_token: state.tenant_token.clone(),
-            bindings: state
-                .bindings
-                .iter()
-                .map(|(channel_id, key_id)| {
-                    (format!("{channel_id:#x}"), format!("{:#x}", key_id.0))
-                })
-                .collect(),
-            pending_channel_key_id: state.pending.map(|key_id| format!("{:#x}", key_id.0)),
-        };
-        atomic_write(&self.state_file, &serde_json::to_vec_pretty(&persisted)?)
+        SessionFile(&self.state_file).save(self.session.state())
     }
 }
 
@@ -433,6 +558,7 @@ fn write_root_key(path: &Path, secret: &[u8; 32]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use ckb_types::prelude::*;
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -590,7 +716,6 @@ mod tests {
         local: fiber_types::Pubkey,
         remote: fiber_types::Pubkey,
     ) -> ckb_types::packed::Script {
-        use ckb_types::prelude::*;
         use musig2::KeyAggContext;
         let mut keys = [local, remote];
         keys.sort();
@@ -615,7 +740,7 @@ mod tests {
             .output(
                 ckb_types::packed::CellOutput::new_builder()
                     .lock(funding_lock)
-                    .capacity(1000u64)
+                    .capacity(100_000_000_000u64)
                     .build(),
             )
             .output_data(ckb_types::packed::Bytes::default())
@@ -623,30 +748,101 @@ mod tests {
             .data()
     }
 
-    async fn bind_pending<S: SignerStore>(
+    async fn approve_pending<S: SignerStore>(
         agent: &mut Agent<FakeNode, S>,
-        channel_id: Hash256,
-    ) -> ckb_types::packed::Transaction {
+    ) -> (Hash256, ckb_types::packed::Transaction) {
         let key_id = agent.pending_channel_key_id().expect("pending key");
-        let signer = agent.open_channel(key_id).await.expect("open signer");
+        let signer = agent.open_channel(key_id).await.unwrap();
+        let material = signer.channel_open_material(false).await.unwrap();
         let tx = approved_funding_tx(funding_lock_for(
-            signer.public_material().base_public_keys.funding_pubkey,
+            material.base_public_keys.funding_pubkey,
             convert_tests::remote_binding_pubkey(),
         ));
+        let terms = convert_tests::parameters();
+        let mut keys = [
+            material.base_public_keys.tlc_base_key.serialize(),
+            terms.remote_settlement_key.serialize(),
+        ];
+        keys.sort();
+        let channel_id: Hash256 = fiber_types::blake2b_hash_with_salt(&keys.concat(), &[]).into();
+        let request: fiber_json_types::OpenChannelWithExternalFundingParams = serde_json::from_value(serde_json::json!({
+            "pubkey": terms.remote_funding_key, "public": false,
+            "funding_amount": "0x9502f9000",
+            "shutdown_script": ckb_jsonrpc_types::Script::from(convert_tests::bound_shutdown_script()),
+            "funding_lock_script": ckb_jsonrpc_types::Script::from(convert_tests::bound_shutdown_script()),
+            "commitment_delay_epoch":"0x10000000001", "commitment_fee_rate":"0x0",
+            "external_channel_signer":fiber_lsp_sdk::json::open_material_to_rpc(&material),
+        })).unwrap();
+        let network = fiber_lsp_sdk::OpeningNetwork {
+            funding_lock: ckb_types::packed::Script::default(),
+            commitment_lock: terms.commitment_lock.clone(),
+            commitment_cell_deps: 0,
+            epoch_duration_ms: 2000,
+            minimum_shutdown_fee: 100_000_000,
+        };
+        let result = fiber_json_types::OpenTenantChannelResult {
+            channel_id: channel_id.into(),
+            unsigned_funding_tx: tx.clone().into(),
+            opening_context: fiber_json_types::TenantChannelOpeningContext {
+                remote_funding_key: terms.remote_funding_key.into(),
+                remote_settlement_key: terms.remote_settlement_key.into(),
+                remote_shutdown_script: terms.remote_shutdown_script.into(),
+                commitment_delay_epoch: request.commitment_delay_epoch.unwrap(),
+                commitment_fee_rate: 0,
+                local_amount: terms.local_amount,
+                remote_amount: terms.remote_amount,
+                local_reserved_ckb_amount: terms.local_reserved_ckb_amount,
+                remote_reserved_ckb_amount: terms.remote_reserved_ckb_amount,
+            },
+        };
+        struct Proposal(
+            fiber_json_types::OpenTenantChannelResult,
+            Vec<ckb_types::packed::OutPoint>,
+        );
+        #[async_trait::async_trait]
+        impl fiber_lsp_sdk::TenantOpeningRpc for Proposal {
+            async fn open_tenant_channel(
+                &self,
+                _token: &str,
+                _request: fiber_json_types::OpenChannelWithExternalFundingParams,
+            ) -> Result<fiber_json_types::OpenTenantChannelResult, fiber_lsp_sdk::SessionError>
+            {
+                Ok(self.0.clone())
+            }
+        }
+        #[async_trait::async_trait]
+        impl fiber_lsp_sdk::FundingVerifier for Proposal {
+            async fn verify_funding(
+                &self,
+                _request: &fiber_json_types::OpenChannelWithExternalFundingParams,
+                _result: &fiber_json_types::OpenTenantChannelResult,
+            ) -> Result<Vec<ckb_types::packed::OutPoint>, fiber_lsp_sdk::SessionError> {
+                Ok(self.1.clone())
+            }
+        }
+        let fixture = Proposal(
+            result,
+            tx.raw()
+                .inputs()
+                .into_iter()
+                .map(|i| i.previous_output())
+                .collect(),
+        );
         agent
-            .bind_approved_funding(
-                channel_id,
-                tx.clone(),
-                convert_tests::bound_shutdown_script(),
-                0,
+            .session
+            .open_tenant_channel(
+                request,
+                &network,
+                &fixture,
+                &fixture,
+                &SessionFile(&agent.state_file),
             )
             .await
-            .expect("bind approved funding");
-        agent
-            .approve_opening(channel_id, &tx, convert_tests::parameters())
-            .await
             .unwrap();
-        tx
+        agent.persist_state().unwrap();
+        agent.write_status().await.unwrap();
+        agent.rpc.insert_external_channel(channel_id);
+        (channel_id, tx)
     }
 
     async fn memory_agent(node: FakeNode, dir: &Path) -> Agent<FakeNode, MemoryStore> {
@@ -733,7 +929,8 @@ mod tests {
         agent.initialize().await.expect("initialize");
         let pending = agent.pending_channel_key_id().expect("pending key");
 
-        bind_pending(&mut agent, channel_id()).await;
+        let (id, _) = approve_pending(&mut agent).await;
+        let channel_id = || id;
 
         assert_eq!(agent.binding(channel_id()), Some(pending));
         assert!(agent.pending_channel_key_id().is_none());
@@ -787,7 +984,8 @@ mod tests {
         .await
         .unwrap();
         agent.initialize().await.expect("initialize");
-        let tx = bind_pending(&mut agent, channel_id()).await;
+        let (id, tx) = approve_pending(&mut agent).await;
+        let channel_id = || id;
         let signer = agent
             .open_channel(agent.binding(channel_id()).unwrap())
             .await
@@ -827,7 +1025,8 @@ mod tests {
             .await
             .expect("first open");
         first.initialize().await.expect("first initialize");
-        let funding = bind_pending(&mut first, channel_id()).await;
+        let (id, funding) = approve_pending(&mut first).await;
+        let channel_id = || id;
         let key = first.binding(channel_id()).unwrap();
         let signer = first.open_channel(key).await.unwrap();
         let status = convert_tests::commitment_status(&signer, &funding, false).await;

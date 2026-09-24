@@ -32,11 +32,11 @@ pub(crate) mod tests {
                 | ckb_types::core::EpochNumberWithFraction::new(1, 0, 1).full_value())
             .to_le_bytes(),
             epoch_duration_ms: 2000,
-            commitment_fee: 10,
-            local_amount: 400,
-            remote_amount: 600,
-            local_reserved_ckb_amount: 100,
-            remote_reserved_ckb_amount: 100,
+            commitment_fee: 0,
+            local_amount: 40_000_000_000,
+            remote_amount: 60_000_000_000,
+            local_reserved_ckb_amount: 9_900_000_000,
+            remote_reserved_ckb_amount: 9_900_000_000,
         }
     }
     pub(crate) fn remote_binding_pubkey() -> fiber_types::Pubkey {
@@ -67,8 +67,8 @@ pub(crate) mod tests {
         .unwrap();
         let point: musig2::secp::Point = lock_ctx.aggregated_pubkey();
         let data = SettlementData {
-            local_amount: 400,
-            remote_amount: 600,
+            local_amount: 40_000_000_000,
+            remote_amount: 60_000_000_000,
             tlcs: vec![],
         };
         let mut args =
@@ -86,7 +86,7 @@ pub(crate) mod tests {
             .input(CellInput::new(OutPoint::new(funding.calc_tx_hash(), 0), 0))
             .output(
                 CellOutput::new_builder()
-                    .capacity(990u64)
+                    .capacity(100_000_000_000u64)
                     .lock(
                         parameters()
                             .commitment_lock
@@ -135,8 +135,8 @@ pub(crate) mod tests {
                 content,
             }),
             settlement: Some(fiber_json_types::SigningSettlement {
-                local_amount: 400,
-                remote_amount: 600,
+                local_amount: 40_000_000_000,
+                remote_amount: 60_000_000_000,
                 local_settlement_pubkey: keys.tlc_base_key.into(),
                 remote_settlement_pubkey: remote.tlc_base_key.pubkey().into(),
                 for_remote,
@@ -229,14 +229,14 @@ pub(crate) mod tests {
                 source
                     .clone()
                     .as_builder()
-                    .capacity(590u64)
+                    .capacity(60_000_000_000u64)
                     .lock(source.lock().as_builder().args(args.pack()).build())
                     .build(),
             )
             .output_data(ckb_types::packed::Bytes::default())
             .output(
                 CellOutput::new_builder()
-                    .capacity(395u64)
+                    .capacity(39_999_999_995u64)
                     .lock(destination.clone())
                     .build(),
             )

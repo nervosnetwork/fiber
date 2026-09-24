@@ -58,15 +58,6 @@ impl Fixture {
             })
             .build()
             .data();
-        signer
-            .bind_from_approved_funding(
-                &funding,
-                0,
-                Script::default(),
-                &[OutPoint::new([7; 32].pack(), 0)],
-            )
-            .await
-            .unwrap();
         let parameters = CommitmentParameters {
             remote_shutdown_script: Script::default(),
             remote_funding_key: remote.funding_key.pubkey(),
@@ -86,7 +77,13 @@ impl Fixture {
             remote_reserved_ckb_amount: if udt { 500 } else { 100 },
         };
         signer
-            .approve_commitment_parameters(&funding, parameters.clone())
+            .approve_opening(
+                &funding,
+                0,
+                Script::default(),
+                &[OutPoint::new([7; 32].pack(), 0)],
+                parameters.clone(),
+            )
             .await
             .unwrap();
         Self {
@@ -905,7 +902,13 @@ async fn rejects_wrong_opening_parameters_and_rollback_after_settlement() {
         let before = f.store.snapshot().unwrap();
         assert!(f
             .signer
-            .approve_commitment_parameters(&f.funding, other)
+            .approve_opening(
+                &f.funding,
+                0,
+                Script::default(),
+                &[OutPoint::new([7; 32].pack(), 0)],
+                other
+            )
             .await
             .is_err());
         assert_eq!(

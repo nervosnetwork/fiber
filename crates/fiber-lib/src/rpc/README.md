@@ -28,6 +28,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
         * [Method `open_channel_with_external_funding`](#channel-open_channel_with_external_funding)
+        * [Method `open_tenant_channel`](#channel-open_tenant_channel)
         * [Method `submit_signed_funding_tx`](#channel-submit_signed_funding_tx)
         * [Method `get_channel_signing_status`](#channel-get_channel_signing_status)
         * [Method `submit_channel_signature`](#channel-submit_channel_signature)
@@ -123,6 +124,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `SettlementData`](#type-settlementdata)
     * [Type `SettlementTlc`](#type-settlementtlc)
     * [Type `TLCId`](#type-tlcid)
+    * [Type `TenantChannelOpeningContext`](#type-tenantchannelopeningcontext)
     * [Type `TlcStatus`](#type-tlcstatus)
     * [Type `TransportType`](#type-transporttype)
     * [Type `UdtArgInfo`](#type-udtarginfo)
@@ -458,6 +460,57 @@ Opens a channel with external funding. The node will negotiate the channel with 
 
 * `channel_id` - <em>[Hash256](#type-hash256)</em>, The channel ID of the channel being opened.
 * `unsigned_funding_tx` - <em>`Transaction`</em>, The final unsigned funding transaction that needs to be signed.
+
+---
+
+
+
+<a id="channel-open_tenant_channel"></a>
+#### Method `open_tenant_channel`
+
+Opens the authenticated tenant's single private channel with client-owned keys.
+ Requires the LSP public node as `pubkey`, explicit `public: false`, and `external_channel_signer`.
+ Repeating identical parameters resumes the pending opening or returns its frozen result.
+ Validate the returned terms locally before signing the funding transaction.
+
+##### Params
+
+* `pubkey` - <em>[Pubkey](#type-pubkey)</em>, The identity public key of the peer to open a channel with.
+ The peer must already be connected through the [connect_peer](#peer-connect_peer) rpc first.
+* `funding_amount` - <em>`u128`</em>, The amount of CKB or UDT to fund the channel with.
+* `public` - <em>`Option<bool>`</em>, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, The type script of the UDT to fund the channel with, an optional parameter.
+* `shutdown_script` - <em>`Script`</em>, The script used to receive the channel balance when the channel is closed. This is REQUIRED for external funding.
+* `funding_lock_script` - <em>`Script`</em>, The lock script that controls the funding cells. The node will collect cells with this lock script
+ to build the funding transaction. The user must be able to sign for this lock script.
+* `funding_lock_script_cell_deps` - <em>`Option<Vec<CellDep>>`</em>, Optional extra cell deps required by `funding_lock_script`.
+ This is useful for custom wallet lock scripts whose deps are not part of the genesis defaults.
+* `commitment_delay_epoch` - <em>`Option<EpochNumberWithFraction>`</em>, The delay time for the commitment transaction, must be an
+ [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png)
+ in u64 format, an optional parameter, default value is 1 epoch, which is 4 hours.
+* `commitment_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the commitment transaction, an optional parameter.
+* `funding_fee_rate` - <em>`Option<u64>`</em>, The fee rate for the funding transaction, an optional parameter.
+* `tlc_expiry_delta` - <em>`Option<u64>`</em>, The expiry delta to forward a tlc, in milliseconds, default to 4 hours, which is 4 * 60 * 60 * 1000 milliseconds
+ Expect it >= 2/3 commitment_delay_epoch.
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_min_value` - <em>`Option<u128>`</em>, The minimum value for a TLC our side can send,
+ an optional parameter, default is 0, which means we can send any TLC is larger than 0.
+ This parameter can be updated with rpc `update_channel` later.
+* `tlc_fee_proportional_millionths` - <em>`Option<u128>`</em>, The fee proportional millionths for a TLC, proportional to the amount of the forwarded tlc.
+ The unit is millionths of the amount. default is 1000 which means 0.1%.
+ This parameter can be updated with rpc `update_channel` later.
+* `max_tlc_value_in_flight` - <em>`Option<u128>`</em>, The maximum total value of in-flight TLCs our side will accept from the peer, an optional parameter.
+ This parameter can not be updated after channel is opened.
+* `max_tlc_number_in_flight` - <em>`Option<u64>`</em>, The maximum number of in-flight TLCs our side will accept from the peer, an optional parameter, default is 125
+ This parameter can not be updated after channel is opened.
+* `external_channel_signer` - <em>Option<[ChannelOpenSignerMaterial](#type-channelopensignermaterial)></em>, Optional public channel-signer material. When present, the node treats the
+ channel as externally signed and never holds or falls back to local channel keys.
+
+##### Returns
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Final channel ID, derived from both settlement base keys.
+* `unsigned_funding_tx` - <em>`Transaction`</em>, Frozen transaction. The client must independently approve its inputs and outputs.
+* `opening_context` - <em>[TenantChannelOpeningContext](#type-tenantchannelopeningcontext)</em>, Negotiated terms to validate against the client's original opening intent.
 
 ---
 
@@ -2221,6 +2274,25 @@ The id of a TLC, it can be either offered or received.
 
 * `Offered` - <em>`u64`</em>, Offered TLC id
 * `Received` - <em>`u64`</em>, Received TLC id
+---
+
+<a id="#type-tenantchannelopeningcontext"></a>
+### Type `TenantChannelOpeningContext`
+
+Frozen opening terms, expressed relative to the tenant signer.
+
+
+#### Fields
+
+* `remote_funding_key` - <em>[Pubkey](#type-pubkey)</em>, Peer funding public key.
+* `remote_settlement_key` - <em>[Pubkey](#type-pubkey)</em>, Peer settlement base public key.
+* `remote_shutdown_script` - <em>`Script`</em>, Peer close and revocation destination.
+* `commitment_delay_epoch` - <em>`EpochNumberWithFraction`</em>, Negotiated relative delay, encoded as an epoch fraction (without since flags).
+* `commitment_fee_rate` - <em>`u64`</em>, Negotiated commitment fee rate in shannons per 1000 bytes.
+* `local_amount` - <em>`u128`</em>, Initial tenant balance: includes reserve for CKB; token units for UDT.
+* `remote_amount` - <em>`u128`</em>, Initial peer balance, using the same units as local_amount.
+* `local_reserved_ckb_amount` - <em>`u64`</em>, Tenant CKB reserve, unavailable to off-chain payments.
+* `remote_reserved_ckb_amount` - <em>`u64`</em>, Peer CKB reserve.
 ---
 
 <a id="#type-tlcstatus"></a>

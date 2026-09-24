@@ -259,6 +259,51 @@ pub struct OpenChannelWithExternalFundingParams {
     pub external_channel_signer: Option<ChannelOpenSignerMaterial>,
 }
 
+/// Frozen opening terms, expressed relative to the tenant signer.
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct TenantChannelOpeningContext {
+    /// Peer funding public key.
+    pub remote_funding_key: Pubkey,
+    /// Peer settlement base public key.
+    pub remote_settlement_key: Pubkey,
+    /// Peer close and revocation destination.
+    pub remote_shutdown_script: Script,
+    /// Negotiated relative delay, encoded as an epoch fraction (without since flags).
+    pub commitment_delay_epoch: EpochNumberWithFraction,
+    /// Negotiated commitment fee rate in shannons per 1000 bytes.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub commitment_fee_rate: u64,
+    /// Initial tenant balance: includes reserve for CKB; token units for UDT.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub local_amount: u128,
+    /// Initial peer balance, using the same units as local_amount.
+    #[serde_as(as = "U128Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub remote_amount: u128,
+    /// Tenant CKB reserve, unavailable to off-chain payments.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub local_reserved_ckb_amount: u64,
+    /// Peer CKB reserve.
+    #[serde_as(as = "U64Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub remote_reserved_ckb_amount: u64,
+}
+
+/// Frozen proposal returned before the tenant signs funding or commitments.
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+pub struct OpenTenantChannelResult {
+    /// Final channel ID, derived from both settlement base keys.
+    pub channel_id: Hash256,
+    /// Frozen transaction. The client must independently approve its inputs and outputs.
+    pub unsigned_funding_tx: Transaction,
+    /// Negotiated terms to validate against the client's original opening intent.
+    pub opening_context: TenantChannelOpeningContext,
+}
+
 /// Result of opening a channel with external funding.
 #[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct OpenChannelWithExternalFundingResult {

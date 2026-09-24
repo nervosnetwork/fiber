@@ -30,7 +30,7 @@ pub(crate) const TENANT_ALLOWED_METHODS: &[&str] = &[
     "list_channels",
     "list_payments",
     "new_invoice",
-    "open_channel_with_external_funding",
+    "open_tenant_channel",
     "remove_preimage",
     "remove_watch_channel",
     "send_payment",

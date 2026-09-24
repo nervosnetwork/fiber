@@ -59,7 +59,7 @@ pub fn musig2_to_rpc(content: &Musig2SigningContent) -> JsonMusig2SigningContent
     }
 }
 
-/// Encode channel-open public material for `open_channel_with_external_funding`.
+/// Encode channel-open public material for `open_tenant_channel`.
 pub fn open_material_to_rpc(material: &ChannelOpenSignerMaterial) -> JsonChannelOpenSignerMaterial {
     JsonChannelOpenSignerMaterial {
         base_public_keys: fiber_json_types::ChannelBasePublicKeys {

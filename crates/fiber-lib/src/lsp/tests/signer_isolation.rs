@@ -32,8 +32,8 @@ use crate::{
         channel::{
             to_rpc_channel_open_signer_material, GetChannelSigningStatusParams,
             GetChannelSigningStatusResult, OpenChannelWithExternalFundingParams,
-            OpenChannelWithExternalFundingResult, SubmitChannelSignatureParams,
-            SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+            SubmitChannelSignatureParams, SubmitChannelSignatureResult,
+            SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
         },
         lsp::{
             GetLspTenantRegistryNonceParams, GetLspTenantRegistryNonceResult, LspServiceStatus,
@@ -346,65 +346,55 @@ impl ExternalSignerClient {
 }
 
 async fn open_hosted_external_channel(
-    fixture: &TestLspFixture,
+    _fixture: &TestLspFixture,
     tenant_client: &HttpClient,
 ) -> (Hash256, ExternalSignerClient) {
     let created = RootSigner::in_memory()
         .await
         .expect("create in-memory root signer");
-    let channel_signer = created
-        .root_signer
-        .create_channel()
+    let mut session = fiber_lsp_sdk::HostedSession::new(created.root_signer).with_state(
+        fiber_lsp_sdk::HostedSessionState {
+            tenant_token: Some("client already carries tenant token".into()),
+            ..Default::default()
+        },
+    );
+    let material = session.allocate_pending_channel().await.unwrap();
+    let channel_signer = session
+        .open_channel(session.pending_channel_key_id().unwrap())
         .await
-        .expect("create local channel signer");
-    let material = channel_signer
-        .channel_open_material(false)
-        .await
-        .expect("channel open material");
+        .unwrap();
 
-    let open: OpenChannelWithExternalFundingResult = tenant_client
-        .request(
-            "open_channel_with_external_funding",
-            rpc_params![OpenChannelWithExternalFundingParams {
-                pubkey: fixture.public_t.pubkey.into(),
-                funding_amount: 100_000_000_000,
-                public: Some(false),
-                funding_udt_type_script: None,
-                shutdown_script: Script::default().into(),
-                funding_lock_script: Script::default().into(),
-                funding_lock_script_cell_deps: None,
-                commitment_delay_epoch: None,
-                commitment_fee_rate: None,
-                funding_fee_rate: None,
-                tlc_expiry_delta: None,
-                tlc_min_value: None,
-                tlc_fee_proportional_millionths: None,
-                max_tlc_value_in_flight: None,
-                max_tlc_number_in_flight: None,
-                external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
-            }],
-        )
-        .await
-        .expect("open hosted channel with external funding");
-    let channel_id: Hash256 = open.channel_id.into();
-    let unsigned_tx: Transaction = open.unsigned_funding_tx.into();
-    let expected_inputs: Vec<_> = unsigned_tx
-        .raw()
-        .inputs()
-        .into_iter()
-        .map(|input| input.previous_output())
-        .collect();
-    channel_signer
-        .bind_from_approved_funding(&unsigned_tx, 0, Script::default(), &expected_inputs)
-        .await
-        .expect("bind approved funding");
-    crate::fiber::tests::external_signer_restart::approve_fixture_opening(
-        &channel_signer,
-        &unsigned_tx,
-        &fixture.public_t.get_channel_actor_state(channel_id),
-        false,
+    let request = OpenChannelWithExternalFundingParams {
+        pubkey: _fixture.public_t.pubkey.into(),
+        public: Some(false),
+        funding_amount: 100_000_000_000,
+        funding_udt_type_script: None,
+        shutdown_script: Script::default().into(),
+        funding_lock_script: Script::default().into(),
+        funding_lock_script_cell_deps: None,
+        commitment_delay_epoch: Some(
+            ckb_types::core::EpochNumberWithFraction::new(1, 0, 1)
+                .full_value()
+                .into(),
+        ),
+        commitment_fee_rate: Some(1000),
+        funding_fee_rate: None,
+        tlc_expiry_delta: None,
+        tlc_min_value: None,
+        tlc_fee_proportional_millionths: None,
+        max_tlc_value_in_flight: None,
+        max_tlc_number_in_flight: None,
+        external_channel_signer: Some(to_rpc_channel_open_signer_material(&material)),
+    };
+    let open = crate::fiber::tests::external_signer_restart::open_rpc_channel(
+        &mut session,
+        tenant_client.clone(),
+        request,
+        Default::default(),
     )
     .await;
+    let channel_id: Hash256 = open.channel_id.into();
+    let unsigned_tx: Transaction = open.unsigned_funding_tx.clone().into();
     let signed_tx = mock_sign_external_funding_tx(&unsigned_tx);
     let _: SubmitSignedFundingTxResult = tenant_client
         .request(

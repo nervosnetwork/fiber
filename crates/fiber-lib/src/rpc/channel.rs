@@ -37,8 +37,9 @@ pub use fiber_json_types::{
     ChannelState, GetChannelSigningStatusParams, GetChannelSigningStatusResult, Hash256, Htlc,
     ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
     OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    ShutdownChannelParams, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
-    SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, UpdateChannelParams,
+    OpenTenantChannelResult, ShutdownChannelParams, SubmitChannelSignatureParams,
+    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
+    UpdateChannelParams,
 };
 
 /// RPC module for channel management.
@@ -94,6 +95,16 @@ trait ChannelRpc {
         &self,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned>;
+
+    /// Opens the authenticated tenant's single private channel with client-owned keys.
+    /// Requires the LSP public node as `pubkey`, explicit `public: false`, and `external_channel_signer`.
+    /// Repeating identical parameters resumes the pending opening or returns its frozen result.
+    /// Validate the returned terms locally before signing the funding transaction.
+    #[method(name = "open_tenant_channel", with_extensions)]
+    async fn open_tenant_channel(
+        &self,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenTenantChannelResult, ErrorObjectOwned>;
 
     /// Submits a signed funding transaction for an externally funded channel.
     ///
@@ -329,6 +340,34 @@ where
                 .await;
         }
         self.open_channel_with_external_funding(params).await
+    }
+
+    async fn open_tenant_channel(
+        &self,
+        extensions: &Extensions,
+        params: OpenChannelWithExternalFundingParams,
+    ) -> Result<OpenTenantChannelResult, ErrorObjectOwned> {
+        let context = self
+            .tenant_rpc_context(extensions)
+            .await?
+            .ok_or_else(|| rpc_error("open_tenant_channel requires a tenant token"))?;
+        validate_tenant_opening_params(&params, context.public_node_id.into())?;
+        let command = external_funding_command(&params)?;
+        // The actor owns the durable opening; a disconnected caller can retry.
+        ractor::call_t!(
+            context.fiber_actor,
+            |reply| FiberActorMessage::new_command(FiberActorCommand::OpenTenantChannel {
+                command,
+                reply
+            }),
+            30_000
+        )
+        .map_err(|e| {
+            rpc_error(format!(
+                "tenant opening interrupted; retry the same request: {e}"
+            ))
+        })?
+        .map_err(rpc_error)
     }
 
     /// Submits a signed funding transaction for an externally funded channel.
@@ -740,46 +779,10 @@ where
         &self,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
-        let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
-        let funding_lock_script_cell_deps: Vec<packed::CellDep> = params
-            .funding_lock_script_cell_deps
-            .clone()
-            .unwrap_or_default()
-            .into_iter()
-            .map(Into::into)
-            .collect();
-        let external_channel_signer = params
-            .external_channel_signer
-            .clone()
-            .map(try_into_channel_open_signer_material)
-            .transpose()
-            .rpc_err()?;
+        let command = external_funding_command(&params)?;
         let message = |rpc_reply| {
             FiberActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
-                OpenChannelWithExternalFundingCommand {
-                    pubkey,
-                    funding_amount: params.funding_amount,
-                    public: params.public.unwrap_or(true),
-                    shutdown_script: params.shutdown_script.clone().into(),
-                    funding_lock_script: params.funding_lock_script.clone().into(),
-                    funding_lock_script_cell_deps: funding_lock_script_cell_deps.clone(),
-                    commitment_delay_epoch: params
-                        .commitment_delay_epoch
-                        .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
-                    funding_udt_type_script: params
-                        .funding_udt_type_script
-                        .clone()
-                        .map(|s| s.into()),
-                    commitment_fee_rate: params.commitment_fee_rate,
-                    funding_fee_rate: params.funding_fee_rate,
-                    tlc_expiry_delta: params.tlc_expiry_delta,
-                    tlc_min_value: params.tlc_min_value,
-                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
-                    max_tlc_value_in_flight: params.max_tlc_value_in_flight,
-                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
-                    external_channel_signer: external_channel_signer.clone(),
-                },
-                rpc_reply,
+                command, rpc_reply,
             ))
         };
         handle_actor_call!(self.actor, message, params).map(|response| {
@@ -1101,6 +1104,62 @@ pub(crate) fn to_rpc_channel_open_signer_material(
             .as_ref()
             .map(|nonce| nonce.serialize().to_vec()),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_tenant_opening_params(
+    params: &OpenChannelWithExternalFundingParams,
+    public_node_id: fiber_json_types::Pubkey,
+) -> Result<(), ErrorObjectOwned> {
+    if params.pubkey != public_node_id {
+        return Err(rpc_error("tenant channel peer must be the LSP public node"));
+    }
+    if params.public != Some(false) {
+        return Err(rpc_error("tenant channel requires public: false"));
+    }
+    if params.external_channel_signer.is_none() {
+        return Err(rpc_error("tenant channel requires external_channel_signer"));
+    }
+    Ok(())
+}
+
+pub(crate) fn external_funding_command(
+    params: &OpenChannelWithExternalFundingParams,
+) -> Result<OpenChannelWithExternalFundingCommand, ErrorObjectOwned> {
+    let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
+    let funding_lock_script_cell_deps: Vec<packed::CellDep> = params
+        .funding_lock_script_cell_deps
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let external_channel_signer = params
+        .external_channel_signer
+        .clone()
+        .map(try_into_channel_open_signer_material)
+        .transpose()
+        .rpc_err()?;
+    Ok(OpenChannelWithExternalFundingCommand {
+        pubkey,
+        funding_amount: params.funding_amount,
+        public: params.public.unwrap_or(true),
+        shutdown_script: params.shutdown_script.clone().into(),
+        funding_lock_script: params.funding_lock_script.clone().into(),
+        funding_lock_script_cell_deps: funding_lock_script_cell_deps.clone(),
+        commitment_delay_epoch: params
+            .commitment_delay_epoch
+            .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
+        funding_udt_type_script: params.funding_udt_type_script.clone().map(|s| s.into()),
+        commitment_fee_rate: params.commitment_fee_rate,
+        funding_fee_rate: params.funding_fee_rate,
+        tlc_expiry_delta: params.tlc_expiry_delta,
+        tlc_min_value: params.tlc_min_value,
+        tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+        max_tlc_value_in_flight: params.max_tlc_value_in_flight,
+        max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+        external_channel_signer: external_channel_signer.clone(),
+    })
 }
 
 #[cfg(test)]

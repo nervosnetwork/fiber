@@ -16,6 +16,14 @@ use serde_json::Value;
 /// standard `new_invoice` and `send_payment` data-plane RPCs directly.
 #[async_trait]
 pub trait FiberRpc: Clone + Send + Sync + 'static {
+    async fn open_tenant_channel(
+        &self,
+        _token: &str,
+        _params: fiber_json_types::OpenChannelWithExternalFundingParams,
+    ) -> Result<fiber_json_types::OpenTenantChannelResult> {
+        anyhow::bail!("opening RPC is not implemented by this transport")
+    }
+
     async fn get_tenant_registry_nonce(
         &self,
         root_signer_pubkey: fiber_json_types::Pubkey,
@@ -109,6 +117,14 @@ impl HttpFiberRpc {
 
 #[async_trait]
 impl FiberRpc for HttpFiberRpc {
+    async fn open_tenant_channel(
+        &self,
+        token: &str,
+        params: fiber_json_types::OpenChannelWithExternalFundingParams,
+    ) -> Result<fiber_json_types::OpenTenantChannelResult> {
+        self.call("open_tenant_channel", &params, token).await
+    }
+
     async fn get_tenant_registry_nonce(
         &self,
         root_signer_pubkey: fiber_json_types::Pubkey,

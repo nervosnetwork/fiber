@@ -112,6 +112,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "open_channel_with_external_funding",
         r#"allow if write("channels");"#,
     );
+    b.rule("open_tenant_channel", r#"allow if write("channels");"#);
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
     b.rule(
         "get_channel_signing_status",
