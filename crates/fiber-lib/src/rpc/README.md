@@ -78,6 +78,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `ChannelUpdateInfo`](#type-channelupdateinfo)
     * [Type `CkbInvoice`](#type-ckbinvoice)
     * [Type `CkbInvoiceStatus`](#type-ckbinvoicestatus)
+    * [Type `CommitmentContractFeatures`](#type-commitmentcontractfeatures)
     * [Type `Currency`](#type-currency)
     * [Type `GetPaymentCommandResult`](#type-getpaymentcommandresult)
     * [Type `Hash256`](#type-hash256)
@@ -1112,6 +1113,7 @@ Create a new watched channel
 * `local_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The local party's funding public key (hex without 0x prefix)
 * `remote_funding_pubkey` - <em>[Pubkey](#type-pubkey)</em>, The remote party's funding public key (hex without 0x prefix)
 * `settlement_data` - <em>[SettlementData](#type-settlementdata)</em>, Settlement data
+* `commitment_contract_features` - <em>[CommitmentContractFeatures](#type-commitmentcontractfeatures)</em>, Commitment-lock feature bitmap as hex: "0x0" (Legacy) or "0x1" (full payment hash).
 
 ##### Returns
 
@@ -1422,6 +1424,15 @@ The status of an invoice.
 * `Expired` - The invoice is expired.
 * `Received` - The invoice is received, but not settled yet.
 * `Paid` - The invoice is paid.
+---
+
+<a id="#type-commitmentcontractfeatures"></a>
+### Type `CommitmentContractFeatures`
+
+Commitment-lock feature bits (0x0: Legacy; 0x1: full payment hash).
+
+
+
 ---
 
 <a id="#type-currency"></a>

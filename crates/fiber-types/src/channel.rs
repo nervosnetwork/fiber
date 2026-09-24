@@ -1395,6 +1395,9 @@ pub struct ChannelOpenRecord {
     pub created_at: u64,
     /// Timestamp (milliseconds since UNIX epoch) of the last status update.
     pub last_updated_at: u64,
+    /// Commitment-lock feature bitmap selected when the channel-open request was received or sent.
+    #[serde(default)]
+    pub commitment_contract_features: CommitmentContractFeatures,
 }
 
 impl ChannelOpenRecord {
@@ -1410,7 +1413,20 @@ impl ChannelOpenRecord {
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
+            commitment_contract_features: CommitmentContractFeatures::default(),
         }
+    }
+
+    /// Create a new opening record with the negotiated commitment-lock features.
+    pub fn new_with_features(
+        channel_id: Hash256,
+        pubkey: Pubkey,
+        funding_amount: u128,
+        commitment_contract_features: CommitmentContractFeatures,
+    ) -> Self {
+        let mut record = Self::new(channel_id, pubkey, funding_amount);
+        record.commitment_contract_features = commitment_contract_features;
+        record
     }
 
     /// Create a new inbound record in the `WaitingForPeer` state.
@@ -1419,6 +1435,27 @@ impl ChannelOpenRecord {
         let mut record = Self::new(channel_id, pubkey, remote_funding_amount);
         record.is_acceptor = true;
         record
+    }
+
+    /// Create a new inbound record with the negotiated commitment-lock features.
+    pub fn new_inbound_with_features(
+        channel_id: Hash256,
+        pubkey: Pubkey,
+        remote_funding_amount: u128,
+        commitment_contract_features: CommitmentContractFeatures,
+    ) -> Self {
+        Self::new_with_features(
+            channel_id,
+            pubkey,
+            remote_funding_amount,
+            commitment_contract_features,
+        )
+        .with_acceptor()
+    }
+
+    fn with_acceptor(mut self) -> Self {
+        self.is_acceptor = true;
+        self
     }
 
     /// Transition to a new status.
@@ -1472,6 +1509,74 @@ impl PendingNotifySettleTlc {
                 .unwrap_or_default()
                 .saturating_sub(now_millis_since_unix_epoch),
         )
+    }
+}
+
+/// Feature bits committed to a channel's commitment-lock args and witness layout.
+///
+/// Zero represents the 57-byte Legacy args without a features byte. The only
+/// supported nonzero value is bit 0, appended to the 58-byte args.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CommitmentContractFeatures(u8);
+
+impl CommitmentContractFeatures {
+    /// Legacy commitment-lock layout, with no feature byte in the args.
+    pub const LEGACY: Self = Self(0);
+    /// Commit the full 32-byte TLC payment hash on-chain.
+    pub const ONCHAIN_FULL_PAYMENT_HASH: Self = Self(1);
+
+    /// Accept only feature combinations supported by the current contract.
+    pub fn from_bits(bits: u8) -> Result<Self, String> {
+        match bits {
+            0 | 1 => Ok(Self(bits)),
+            _ => Err(format!(
+                "unsupported commitment contract features: 0x{bits:x}"
+            )),
+        }
+    }
+
+    /// Return the byte stored with the channel and appended to upgraded args.
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether the settlement witness commits the full payment hash.
+    pub fn has_full_payment_hash(self) -> bool {
+        self.0 & Self::ONCHAIN_FULL_PAYMENT_HASH.0 != 0
+    }
+
+    /// Length of the commitment-lock args in bytes.
+    pub fn lock_args_len(self) -> usize {
+        if self.has_full_payment_hash() {
+            58
+        } else {
+            57
+        }
+    }
+
+    /// Length of a TLC payment hash in the settlement witness.
+    pub fn payment_hash_len(self) -> usize {
+        if self.has_full_payment_hash() {
+            32
+        } else {
+            20
+        }
+    }
+
+    /// Select the bitmap for a new channel from both peers' advertised support.
+    pub fn for_negotiated(ours_supports: bool, peer_supports: Option<bool>) -> Self {
+        if ours_supports && peer_supports == Some(true) {
+            Self::ONCHAIN_FULL_PAYMENT_HASH
+        } else {
+            Self::LEGACY
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CommitmentContractFeatures {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_bits(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1615,6 +1720,10 @@ pub struct ChannelActorData {
     /// Persisted state for an in-progress external funding flow.
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
+
+    /// Commitment-lock features decided once at channel-open and never changed.
+    #[serde(default)]
+    pub commitment_contract_features: CommitmentContractFeatures,
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {

@@ -12,10 +12,31 @@ pub use fiber_json_types::RpcContext;
 #[cfg(feature = "watchtower")]
 use fiber_types::{NodeId, Pubkey};
 
+#[cfg(feature = "watchtower")]
+fn validate_commitment_contract_features(
+    bits: u8,
+) -> Result<fiber_types::CommitmentContractFeatures, ErrorObjectOwned> {
+    fiber_types::CommitmentContractFeatures::from_bits(bits).map_err(rpc_error)
+}
+
 pub use fiber_json_types::{
     CreatePreimageParams, CreateWatchChannelParams, RemovePreimageParams, RemoveWatchChannelParams,
     UpdateLocalSettlementParams, UpdatePendingRemoteSettlementParams, UpdateRevocationParams,
 };
+
+#[cfg(all(test, feature = "watchtower"))]
+mod commitment_feature_tests {
+    use super::*;
+
+    #[test]
+    fn create_watch_channel_rejects_unknown_features() {
+        assert!(validate_commitment_contract_features(2).is_err());
+        assert_eq!(
+            validate_commitment_contract_features(1).unwrap(),
+            fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+        );
+    }
+}
 
 /// RPC module for watchtower related operations
 #[cfg(feature = "watchtower")]
@@ -156,13 +177,15 @@ where
         let remote_settlement_key = Pubkey::try_from(params.remote_settlement_key).rpc_err()?;
         let local_funding_pubkey = Pubkey::try_from(params.local_funding_pubkey).rpc_err()?;
         let remote_funding_pubkey = Pubkey::try_from(params.remote_funding_pubkey).rpc_err()?;
+        let commitment_contract_features =
+            validate_commitment_contract_features(params.commitment_contract_features.0)?;
         // Move fields out of params last, after all borrows of params are done.
         let funding_udt_type_script = params.funding_udt_type_script;
         let settlement_data: fiber_types::SettlementData = params
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
-        self.store.insert_watch_channel(
+        self.store.insert_watch_channel_with_features(
             node_id,
             channel_id,
             funding_udt_type_script.map(Into::into),
@@ -171,6 +194,7 @@ where
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
+            commitment_contract_features,
         );
         Ok(())
     }
