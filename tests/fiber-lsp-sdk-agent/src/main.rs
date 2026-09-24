@@ -34,7 +34,7 @@ struct Args {
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_STATUS_FILE")]
     status_file: Option<PathBuf>,
 
-    /// Test-only HTTP address exposing GET /status, POST /open-channel, and POST /shutdown.
+    /// Test-only HTTP address exposing GET /status, POST /open-channel, POST /authorize, and POST /shutdown.
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_CONTROL_ADDR")]
     control_addr: Option<String>,
 
@@ -42,7 +42,7 @@ struct Args {
     #[arg(long, default_value = "../deploy/contracts")]
     contracts_dir: PathBuf,
 
-    /// Independent CKB endpoint used to approve live funding inputs.
+    /// Independent CKB endpoint used to verify funding and on-chain spends.
     #[arg(long, default_value = "http://127.0.0.1:8114")]
     ckb_rpc: String,
 
@@ -60,10 +60,11 @@ struct OpenChannelRequest {
     params: fiber_json_types::OpenChannelWithExternalFundingParams,
 }
 
-type OpenCommand = (
-    OpenChannelRequest,
-    oneshot::Sender<Result<fiber_json_types::OpenTenantChannelResult>>,
-);
+enum ControlCommand {
+    Open(Box<OpenChannelRequest>),
+    Authorize(fiber_lsp_sdk_agent::FixtureAuthorization),
+}
+type ControlRequest = (ControlCommand, oneshot::Sender<Result<serde_json::Value>>);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -90,13 +91,16 @@ async fn main() -> Result<()> {
     if args.once {
         initialize_with_retry(&mut agent, &mut None).await?;
         info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
+        agent
+            .configure_chain(&args.ckb_rpc, &args.contracts_dir)
+            .await?;
         agent.poll_once().await?;
         return Ok(());
     }
 
     // Bind the test control server before initialize so wait.sh / Bruno can
     // connect while the agent retries tenant registration against node RPC.
-    let (open_tx, mut open_rx) = mpsc::channel::<OpenCommand>(4);
+    let (control_tx, mut control_rx) = mpsc::channel::<ControlRequest>(4);
     let (control, mut shutdown_rx) = match (args.control_addr, status_file) {
         (Some(address), Some(status_file)) => {
             let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -104,7 +108,7 @@ async fn main() -> Result<()> {
                 Some(tokio::spawn(run_control_server(
                     address,
                     status_file,
-                    open_tx,
+                    control_tx,
                     shutdown_tx,
                 ))),
                 Some(shutdown_rx),
@@ -120,14 +124,21 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    agent
+        .configure_chain(&args.ckb_rpc, &args.contracts_dir)
+        .await?;
     info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
     let interval = Duration::from_millis(args.interval_ms);
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = wait_for_shutdown(&mut shutdown_rx) => break,
-            Some((request, reply)) = open_rx.recv() => {
-                let result = open_request(&mut agent, request, &args.contracts_dir, &args.ckb_rpc).await;
+            Some((request, reply)) = control_rx.recv() => {
+                let result = match request {
+                    ControlCommand::Open(request) => open_request(&mut agent, *request, &args.contracts_dir, &args.ckb_rpc)
+                        .await.and_then(|result| Ok(serde_json::to_value(result)?)),
+                    ControlCommand::Authorize(request) => agent.authorize(request).await.map(|()| serde_json::json!({"authorized":true})),
+                };
                 let _ = reply.send(result);
             }
             _ = tokio::time::sleep(interval) => {
@@ -214,7 +225,7 @@ async fn wait_for_shutdown(receiver: &mut Option<oneshot::Receiver<()>>) {
 async fn run_control_server(
     address: String,
     status_file: PathBuf,
-    open_tx: mpsc::Sender<OpenCommand>,
+    control_tx: mpsc::Sender<ControlRequest>,
     shutdown: oneshot::Sender<()>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&address)
@@ -224,7 +235,7 @@ async fn run_control_server(
     let mut shutdown = Some(shutdown);
     loop {
         let (stream, _) = listener.accept().await?;
-        if handle_control_connection(stream, &status_file, &open_tx, &mut shutdown).await? {
+        if handle_control_connection(stream, &status_file, &control_tx, &mut shutdown).await? {
             return Ok(());
         }
     }
@@ -233,7 +244,7 @@ async fn run_control_server(
 async fn handle_control_connection(
     mut stream: TcpStream,
     status_file: &PathBuf,
-    open_tx: &mpsc::Sender<OpenCommand>,
+    control_tx: &mpsc::Sender<ControlRequest>,
     shutdown: &mut Option<oneshot::Sender<()>>,
 ) -> Result<bool> {
     let request = read_http_request(&mut stream).await?;
@@ -248,11 +259,23 @@ async fn handle_control_connection(
         }
     } else if request.starts_with("POST /open-channel ")
         || request.starts_with("POST /open-channel\r\n")
+        || request.starts_with("POST /authorize ")
     {
-        match open_body(&request) {
+        let payload = if request.starts_with("POST /authorize ") {
+            let body = request
+                .split_once("\r\n\r\n")
+                .map(|(_, body)| body)
+                .unwrap_or_default();
+            serde_json::from_str(body)
+                .map(ControlCommand::Authorize)
+                .context("decode local authorization")
+        } else {
+            open_body(&request).map(|request| ControlCommand::Open(Box::new(request)))
+        };
+        match payload {
             Ok(payload) => {
                 let (sender, receiver) = oneshot::channel();
-                if open_tx.send((payload, sender)).await.is_err() {
+                if control_tx.send((payload, sender)).await.is_err() {
                     ("503 Service Unavailable", b"{}".to_vec(), false)
                 } else {
                     match receiver.await {

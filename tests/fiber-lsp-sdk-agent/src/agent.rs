@@ -5,10 +5,12 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use ckb_types::prelude::*;
 use fiber_json_types::{
     ChannelOpenSignerMaterial as JsonChannelOpenSignerMaterial, SubmitChannelSignatureResult,
     WatchtowerSigningStatus,
 };
+use fiber_lsp_sdk::ChainVerifier;
 use fiber_lsp_sdk::{
     json::open_material_to_rpc, ChannelKeyId, HostedSession, HostedSessionState, ProcessOutcome,
     RootKey, RootSigner, SignerStore, SigningPolicy, SubmitParams, TenantId,
@@ -191,6 +193,32 @@ struct PersistedAgent {
     opening_request: Option<Vec<u8>>,
 }
 
+/// Local E2E-driver intent, never accepted from an LSP signing response.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum FixtureAuthorization {
+    /// Approve both fee shares for a plain CKB close at explicit fixture rates.
+    Close {
+        channel_id: Hash256,
+        local_script: ckb_jsonrpc_types::Script,
+        remote_script: ckb_jsonrpc_types::Script,
+        local_fee_rate: u64,
+        remote_fee_rate: u64,
+    },
+    /// Permit settlement to the fixture's sponsor wallet, within a local fee cap.
+    Watchtower {
+        channel_id: Hash256,
+        destination: ckb_jsonrpc_types::Script,
+        max_fee: u64,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WatchtowerApproval {
+    destination: ckb_jsonrpc_types::Script,
+    max_fee: u64,
+}
+
 /// Fixture information consumed by the external E2E driver.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentStatus {
@@ -199,6 +227,8 @@ pub struct AgentStatus {
     pub tenant_token: String,
     pub channel_open_signer_material: Option<JsonChannelOpenSignerMaterial>,
     pub bound_channel_ids: Vec<String>,
+    /// Request IDs whose signatures were accepted by the watchtower RPC.
+    pub watchtower_submissions: HashMap<String, Vec<String>>,
 }
 
 pub struct AgentConfig {
@@ -216,6 +246,9 @@ pub struct Agent<R, S> {
     session: HostedSession<S>,
     config: AgentConfig,
     state_file: PathBuf,
+    watchtower_approvals: HashMap<String, WatchtowerApproval>,
+    watchtower_submissions: HashMap<String, Vec<String>>,
+    chain: Option<(crate::DevChain, Vec<ckb_types::packed::CellDep>)>,
 }
 
 impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
@@ -245,7 +278,22 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 pending,
                 opening_request: persisted.opening_request,
             });
+        let approvals_path = config.store_dir.join("watchtower-approvals.json");
+        let watchtower_approvals = if approvals_path.exists() {
+            serde_json::from_slice(&fs::read(approvals_path)?)?
+        } else {
+            HashMap::new()
+        };
+        let submissions_path = config.store_dir.join("watchtower-submissions.json");
+        let watchtower_submissions = if submissions_path.exists() {
+            serde_json::from_slice(&fs::read(submissions_path)?)?
+        } else {
+            HashMap::new()
+        };
         Ok(Self {
+            watchtower_approvals,
+            watchtower_submissions,
+            chain: None,
             rpc,
             session,
             config,
@@ -336,6 +384,81 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(result)
     }
 
+    /// Install an independent dev-chain source and trusted contract dependencies.
+    pub async fn configure_chain(&mut self, url: &str, contracts: &Path) -> Result<()> {
+        let mut chain = crate::DevChain::new(url)?;
+        let deps = chain.settlement_deps(contracts).await?;
+        self.chain = Some((chain, deps));
+        Ok(())
+    }
+
+    /// Record explicit test-driver intent before asking the LSP to close or settle.
+    pub async fn authorize(&mut self, request: FixtureAuthorization) -> Result<()> {
+        match request {
+            FixtureAuthorization::Close {
+                channel_id,
+                local_script,
+                remote_script,
+                local_fee_rate,
+                remote_fee_rate,
+            } => {
+                let key = self.binding(channel_id).context("unknown channel")?;
+                let tx = ckb_types::core::TransactionBuilder::default()
+                    .cell_deps(vec![ckb_types::packed::CellDep::default(); 2])
+                    .input(ckb_types::packed::CellInput::default())
+                    .outputs([local_script, remote_script].into_iter().map(|script| {
+                        ckb_types::packed::CellOutput::new_builder()
+                            .lock(Into::<ckb_types::packed::Script>::into(script))
+                            .build()
+                    }))
+                    .outputs_data(vec![ckb_types::packed::Bytes::default(); 2])
+                    .witness([0u8; 112].pack())
+                    .build();
+                let size = tx.data().serialized_size_in_block() as u64;
+                let local_fee_share = local_fee_rate
+                    .checked_mul(size)
+                    .context("close fee overflow")?
+                    / 1000;
+                let remote_fee_share = remote_fee_rate
+                    .checked_mul(size)
+                    .context("close fee overflow")?
+                    / 1000;
+                self.open_channel(key)
+                    .await?
+                    .authorize_close(fiber_lsp_sdk::CloseAuthorization {
+                        fee: local_fee_share
+                            .checked_add(remote_fee_share)
+                            .context("close fee overflow")?,
+                        local_fee_share,
+                        remote_fee_share,
+                    })
+                    .await?;
+            }
+            FixtureAuthorization::Watchtower {
+                channel_id,
+                destination,
+                max_fee,
+            } => {
+                anyhow::ensure!(self.binding(channel_id).is_some(), "unknown channel");
+                anyhow::ensure!(max_fee > 0, "fee cap must be positive");
+                let mut approvals = self.watchtower_approvals.clone();
+                approvals.insert(
+                    format!("{channel_id:#x}"),
+                    WatchtowerApproval {
+                        destination,
+                        max_fee,
+                    },
+                );
+                atomic_write(
+                    &self.config.store_dir.join("watchtower-approvals.json"),
+                    &serde_json::to_vec_pretty(&approvals)?,
+                )?;
+                self.watchtower_approvals = approvals;
+            }
+        }
+        Ok(())
+    }
+
     /// Service outstanding signing requests for already-bound channels.
     pub async fn poll_once(&mut self) -> Result<()> {
         let token = self
@@ -348,7 +471,11 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             self.poll_channel(&token, channel_id).await?;
             self.poll_watchtower(&token, channel_id).await?;
         }
-        Ok(())
+        let receipts = self.config.store_dir.join("watchtower-submissions.json");
+        if receipts.exists() {
+            self.watchtower_submissions = serde_json::from_slice(&fs::read(receipts)?)?;
+        }
+        self.write_status().await
     }
 
     async fn poll_channel(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
@@ -402,7 +529,95 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         if matches!(status, WatchtowerSigningStatus::NoSignatureRequired) {
             return Ok(());
         }
-        Err(anyhow!("watchtower request requires local authorization and an independent ChainVerifier; use poll_watchtower_verified"))
+        let approval = self
+            .watchtower_approvals
+            .get(&format!("{channel_id:#x}"))
+            .context("watchtower request requires local authorization")?
+            .clone();
+        let (chain, deps) = self
+            .chain
+            .clone()
+            .context("watchtower requires independent ChainVerifier")?;
+        let WatchtowerSigningStatus::SignatureRequired { content, .. } = &status else {
+            unreachable!()
+        };
+        let authorization = self
+            .watchtower_authorization(channel_id, content, approval, &chain, deps)
+            .await?;
+        self.sign_watchtower_status(channel_id, status, authorization, &chain)
+            .await
+    }
+
+    async fn watchtower_authorization<C: ChainVerifier>(
+        &self,
+        channel_id: Hash256,
+        content: &fiber_json_types::OnchainSigningContent,
+        approval: WatchtowerApproval,
+        chain: &C,
+        deps: Vec<ckb_types::packed::CellDep>,
+    ) -> Result<fiber_lsp_sdk::OnchainSpendAuthorization> {
+        let tx: ckb_types::packed::Transaction = content.transaction.clone().into();
+        let first = tx
+            .raw()
+            .inputs()
+            .get(0)
+            .context("missing commitment input")?
+            .previous_output();
+        let signer = self
+            .open_channel(self.binding(channel_id).context("unknown channel")?)
+            .await?;
+        let mut source = None;
+        let mut lineage_errors = Vec::new();
+        for record in signer.recovery_records().await? {
+            match chain
+                .verify_commitment_lineage(record.reference.tx_hash, &first)
+                .await
+            {
+                Ok(()) => {
+                    source = Some(record.reference);
+                    break;
+                }
+                Err(error) => lineage_errors.push(error.to_string()),
+            }
+        }
+        let source = source.ok_or_else(|| {
+            anyhow!(
+                "spend has no independently verified commitment ancestor: {}",
+                lineage_errors.join("; ")
+            )
+        })?;
+        let destination: ckb_types::packed::Script = approval.destination.into();
+        let mut total = 0u64;
+        let mut additional_inputs = Vec::new();
+        for (index, input) in tx.raw().inputs().into_iter().enumerate() {
+            let cell = chain.live_cell(&input.previous_output()).await?;
+            if index > 0 {
+                anyhow::ensure!(
+                    cell.output.lock() == destination
+                        && cell.output.type_().to_opt().is_none()
+                        && cell.data.is_empty(),
+                    "unapproved sponsor input"
+                );
+                additional_inputs.push(input.previous_output());
+            }
+            let capacity: u64 = cell.output.capacity().unpack();
+            total = total.checked_add(capacity).context("capacity overflow")?;
+        }
+        for output in tx.raw().outputs() {
+            let capacity: u64 = output.capacity().unpack();
+            total = total.checked_sub(capacity).context("negative fee")?;
+        }
+        anyhow::ensure!(
+            total <= approval.max_fee,
+            "watchtower fee exceeds local cap"
+        );
+        Ok(fiber_lsp_sdk::OnchainSpendAuthorization {
+            source,
+            destination,
+            fee: total,
+            additional_inputs,
+            cell_deps: deps,
+        })
     }
 
     /// Sign a watchtower request only with locally approved terms and independent live chain evidence.
@@ -421,6 +636,21 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .get_watchtower_signing_status(token, channel_id.into())
             .await?
             .status;
+        self.sign_watchtower_status(channel_id, status, authorization, chain)
+            .await
+    }
+
+    async fn sign_watchtower_status<C: fiber_lsp_sdk::ChainVerifier>(
+        &self,
+        channel_id: Hash256,
+        status: WatchtowerSigningStatus,
+        authorization: fiber_lsp_sdk::OnchainSpendAuthorization,
+        chain: &C,
+    ) -> Result<()> {
+        let token = self
+            .session
+            .tenant_token()
+            .context("agent is not registered")?;
         let outcome = self
             .session
             .handle_watchtower_status_verified(channel_id, status, authorization, chain)
@@ -437,7 +667,19 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 else {
                     return Err(anyhow!("expected watchtower signature"));
                 };
+                let request_id = format!("{:#x}", Hash256::from(params.request_id));
                 self.rpc.submit_watchtower_signature(token, params).await?;
+                let path = self.config.store_dir.join("watchtower-submissions.json");
+                let mut receipts: HashMap<String, Vec<String>> = if path.exists() {
+                    serde_json::from_slice(&fs::read(&path)?)?
+                } else {
+                    HashMap::new()
+                };
+                let entries = receipts.entry(format!("{channel_id:#x}")).or_default();
+                if !entries.contains(&request_id) {
+                    entries.push(request_id);
+                }
+                atomic_write(&path, &serde_json::to_vec_pretty(&receipts)?)?;
                 Ok(())
             }
             _ => Err(anyhow!("watchtower must require explicit confirmation")),
@@ -478,6 +720,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 .to_string(),
             channel_open_signer_material: material,
             bound_channel_ids,
+            watchtower_submissions: self.watchtower_submissions.clone(),
         };
         atomic_write(path, &serde_json::to_vec_pretty(&status)?)
     }
@@ -1065,8 +1308,51 @@ mod tests {
         assert!(node.state().watchtower_submissions.is_empty());
         assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
         chain.live = true;
+        let WatchtowerSigningStatus::SignatureRequired { content, .. } =
+            node.state().watchtower_statuses[&channel_id().into()].clone()
+        else {
+            panic!()
+        };
+        let mut approval = WatchtowerApproval {
+            destination: authorization.destination.clone().into(),
+            max_fee: 4,
+        };
+        assert!(reopened
+            .watchtower_authorization(channel_id(), &content, approval.clone(), &chain, vec![])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("fee exceeds local cap"));
+        approval.max_fee = 5;
+        let checked = reopened
+            .watchtower_authorization(channel_id(), &content, approval.clone(), &chain, vec![])
+            .await
+            .unwrap();
+        assert_eq!(checked.fee, authorization.fee);
+        let mut wrong_destination = checked.clone();
+        wrong_destination.destination = ckb_types::packed::Script::default();
+        assert!(reopened
+            .poll_watchtower_verified(channel_id(), wrong_destination, &chain)
+            .await
+            .is_err());
+        assert!(node.state().watchtower_submissions.is_empty());
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
         reopened
-            .poll_watchtower_verified(channel_id(), authorization, &chain)
+            .authorize(FixtureAuthorization::Watchtower {
+                channel_id: channel_id(),
+                destination: approval.destination,
+                max_fee: approval.max_fee,
+            })
+            .await
+            .unwrap();
+        drop(reopened);
+        let reopened = Agent::open(node.clone(), config()).await.unwrap();
+        assert_eq!(
+            reopened.watchtower_approvals[&format!("{:#x}", channel_id())].max_fee,
+            5
+        );
+        reopened
+            .poll_watchtower_verified(channel_id(), checked, &chain)
             .await
             .expect("checked watchtower after restart");
 
