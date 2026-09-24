@@ -9,7 +9,9 @@ mod convert;
 mod rpc;
 mod store;
 
-pub use agent::{Agent, AgentConfig, AgentStatus, FixtureAuthorization};
+pub use agent::{
+    Agent, AgentConfig, AgentStatus, FixtureAuthorization, PreimageTarget, WatchtowerSubmission,
+};
 pub use chain::DevChain;
 pub use rpc::{FiberRpc, HttpFiberRpc};
 pub use store::FileSignerStore;

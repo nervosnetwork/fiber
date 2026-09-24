@@ -34,6 +34,7 @@ pub(crate) const TENANT_ALLOWED_METHODS: &[&str] = &[
     "remove_preimage",
     "remove_watch_channel",
     "send_payment",
+    "settle_invoice",
     "shutdown_channel",
     "submit_channel_signature",
     "submit_commitment_transaction",

@@ -40,6 +40,7 @@ assert {
 
 script:post-response {
   if (res.body.error) throw new Error(JSON.stringify(res.body.error));
+  bru.setVar("REMOTE_PEER_SHUTDOWN_SCRIPT", res.body.result.opening_context.remote_shutdown_script);
   bru.setVar("REMOTE_CHANNEL_ID", res.body.result.channel_id);
   bru.setVar("REMOTE_UNSIGNED_TX", res.body.result.unsigned_funding_tx);
 }

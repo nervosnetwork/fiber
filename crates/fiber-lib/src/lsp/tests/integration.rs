@@ -1621,6 +1621,8 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         "open_channel should be unauthorized for tenant tokens, got {open_channel_error}"
     );
 
+    let invoice_preimage = crate::fiber_types::Hash256::from([0x42; 32]);
+    let invoice_hash = crate::fiber_types::HashAlgorithm::CkbHash.hash(invoice_preimage);
     let invoice: fiber_json_types::InvoiceResult = tenant_client
         .request(
             "new_invoice",
@@ -1629,7 +1631,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
                 description: Some("tenant-scoped RPC invoice".to_string()),
                 currency: fiber_json_types::Currency::Fibd,
                 payment_preimage: None,
-                payment_hash: Some(crate::fiber_types::Hash256::from([0x42; 32]).into()),
+                payment_hash: Some(crate::fiber_types::Hash256::from(invoice_hash).into()),
                 expiry: Some(60 * 60),
                 fallback_address: None,
                 final_expiry_delta: None,
@@ -1706,6 +1708,65 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     {
         panic!("public node must not see a tenant invoice");
     }
+
+    // The method must reach the tenant actor, but cannot settle the public namespace.
+    let settle = || fiber_json_types::SettleInvoiceParams {
+        payment_hash: (*payment_hash).into(),
+        payment_preimage: invoice_preimage.into(),
+    };
+    let own_error = tenant_client
+        .request::<fiber_json_types::SettleInvoiceResult, _>(
+            "settle_invoice",
+            rpc_params![settle()],
+        )
+        .await
+        .expect_err("unreceived tenant invoice must stay open");
+    assert!(
+        own_error.to_string().contains("Invoice is still open"),
+        "{own_error}"
+    );
+    let public_error = public_client
+        .request::<fiber_json_types::SettleInvoiceResult, _>(
+            "settle_invoice",
+            rpc_params![settle()],
+        )
+        .await
+        .expect_err("public actor must not see tenant invoice");
+    assert!(
+        public_error.to_string().contains("Invoice not found"),
+        "{public_error}"
+    );
+
+    let public_preimage = crate::fiber_types::Hash256::from([0x43; 32]);
+    let public_hash = crate::fiber_types::Hash256::from(
+        crate::fiber_types::HashAlgorithm::CkbHash.hash(public_preimage),
+    );
+    let _: fiber_json_types::InvoiceResult = public_client
+        .request(
+            "new_invoice",
+            rpc_params![fiber_json_types::NewInvoiceParams {
+                amount: 1_000,
+                currency: fiber_json_types::Currency::Fibd,
+                payment_hash: Some(public_hash.into()),
+                ..Default::default()
+            }],
+        )
+        .await
+        .expect("create public hold invoice");
+    let tenant_error = tenant_client
+        .request::<fiber_json_types::SettleInvoiceResult, _>(
+            "settle_invoice",
+            rpc_params![fiber_json_types::SettleInvoiceParams {
+                payment_hash: public_hash.into(),
+                payment_preimage: public_preimage.into(),
+            }],
+        )
+        .await
+        .expect_err("tenant actor must not see public invoice");
+    assert!(
+        tenant_error.to_string().contains("Invoice not found"),
+        "{tenant_error}"
+    );
 
     rpc_handle
         .stop()

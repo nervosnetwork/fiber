@@ -197,6 +197,20 @@ struct PersistedAgent {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum FixtureAuthorization {
+    /// Register wallet-owned invoice terms and prove possession of the preimage.
+    Invoice {
+        channel_id: Hash256,
+        #[serde(deserialize_with = "deserialize_invoice_terms")]
+        terms: fiber_lsp_sdk::PaymentAuthorization,
+        preimage: Hash256,
+    },
+    /// Verify enforceable recovery before immediately sending a preimage to the LSP.
+    ReleasePreimage {
+        channel_id: Hash256,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        target: PreimageTarget,
+    },
     /// Approve both fee shares for a plain CKB close at explicit fixture rates.
     Close {
         channel_id: Hash256,
@@ -213,10 +227,35 @@ pub enum FixtureAuthorization {
     },
 }
 
+// serde's internally tagged enum buffer does not deserialize u128 directly.
+// Keep SDK amounts intact by decoding this nested JSON object through serde_json.
+fn deserialize_invoice_terms<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<fiber_lsp_sdk::PaymentAuthorization, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+/// LSP operation to invoke immediately after SDK preimage release authorization.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum PreimageTarget {
+    /// Fulfill a received hold invoice off chain.
+    Invoice,
+    /// Provide the watchtower with a preimage for an on-chain claim.
+    Watchtower,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct WatchtowerApproval {
     destination: ckb_jsonrpc_types::Script,
     max_fee: u64,
+}
+
+/// A signature accepted by the watchtower RPC, including the exercised key path.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WatchtowerSubmission {
+    pub request_id: String,
+    pub key_purpose: fiber_json_types::OnchainKeyPurpose,
 }
 
 /// Fixture information consumed by the external E2E driver.
@@ -227,8 +266,10 @@ pub struct AgentStatus {
     pub tenant_token: String,
     pub channel_open_signer_material: Option<JsonChannelOpenSignerMaterial>,
     pub bound_channel_ids: Vec<String>,
-    /// Request IDs whose signatures were accepted by the watchtower RPC.
-    pub watchtower_submissions: HashMap<String, Vec<String>>,
+    /// Requests and key purposes whose signatures were accepted by the watchtower RPC.
+    pub watchtower_submissions: HashMap<String, Vec<WatchtowerSubmission>>,
+    /// Revoked states with complete punishment signatures verified by the SDK.
+    pub revoked_commitments: HashMap<String, Vec<fiber_lsp_sdk::CommitmentReference>>,
 }
 
 pub struct AgentConfig {
@@ -247,7 +288,7 @@ pub struct Agent<R, S> {
     config: AgentConfig,
     state_file: PathBuf,
     watchtower_approvals: HashMap<String, WatchtowerApproval>,
-    watchtower_submissions: HashMap<String, Vec<String>>,
+    watchtower_submissions: HashMap<String, Vec<WatchtowerSubmission>>,
     chain: Option<(crate::DevChain, Vec<ckb_types::packed::CellDep>)>,
 }
 
@@ -392,9 +433,33 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(())
     }
 
-    /// Record explicit test-driver intent before asking the LSP to close or settle.
+    /// Apply explicit test-driver intent, verifying recovery before releasing preimages.
     pub async fn authorize(&mut self, request: FixtureAuthorization) -> Result<()> {
         match request {
+            FixtureAuthorization::Invoice {
+                channel_id,
+                terms,
+                preimage,
+            } => {
+                self.session
+                    .channel_signer(channel_id)
+                    .await?
+                    .authorize_invoice(terms, preimage)
+                    .await?;
+            }
+            FixtureAuthorization::ReleasePreimage {
+                channel_id,
+                payment_hash,
+                preimage,
+                target,
+            } => {
+                let (chain, _) = self
+                    .chain
+                    .as_ref()
+                    .context("preimage release requires independent ChainVerifier")?;
+                self.release_preimage_verified(channel_id, payment_hash, preimage, target, chain)
+                    .await?;
+            }
             FixtureAuthorization::Close {
                 channel_id,
                 local_script,
@@ -454,6 +519,51 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                     &serde_json::to_vec_pretty(&approvals)?,
                 )?;
                 self.watchtower_approvals = approvals;
+            }
+        }
+        Ok(())
+    }
+
+    async fn release_preimage_verified<C: ChainVerifier>(
+        &self,
+        channel_id: Hash256,
+        payment_hash: Hash256,
+        preimage: Hash256,
+        target: PreimageTarget,
+        chain: &C,
+    ) -> Result<()> {
+        let token = self
+            .session
+            .tenant_token()
+            .context("agent is not registered")?;
+        self.session
+            .channel_signer(channel_id)
+            .await?
+            .authorize_preimage_release(payment_hash, preimage, now_ms(), chain)
+            .await?;
+        // Never send the secret before the SDK has durably authorized its release.
+        match target {
+            PreimageTarget::Invoice => {
+                self.rpc
+                    .settle_invoice(
+                        token,
+                        fiber_json_types::SettleInvoiceParams {
+                            payment_hash: payment_hash.into(),
+                            payment_preimage: preimage.into(),
+                        },
+                    )
+                    .await?
+            }
+            PreimageTarget::Watchtower => {
+                self.rpc
+                    .create_preimage(
+                        token,
+                        fiber_json_types::CreatePreimageParams {
+                            payment_hash: payment_hash.into(),
+                            preimage: preimage.into(),
+                        },
+                    )
+                    .await?
             }
         }
         Ok(())
@@ -651,6 +761,10 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .session
             .tenant_token()
             .context("agent is not registered")?;
+        let key_purpose = match &status {
+            WatchtowerSigningStatus::NoSignatureRequired => return Ok(()),
+            WatchtowerSigningStatus::SignatureRequired { content, .. } => content.key_purpose,
+        };
         let outcome = self
             .session
             .handle_watchtower_status_verified(channel_id, status, authorization, chain)
@@ -670,14 +784,17 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 let request_id = format!("{:#x}", Hash256::from(params.request_id));
                 self.rpc.submit_watchtower_signature(token, params).await?;
                 let path = self.config.store_dir.join("watchtower-submissions.json");
-                let mut receipts: HashMap<String, Vec<String>> = if path.exists() {
+                let mut receipts: HashMap<String, Vec<WatchtowerSubmission>> = if path.exists() {
                     serde_json::from_slice(&fs::read(&path)?)?
                 } else {
                     HashMap::new()
                 };
                 let entries = receipts.entry(format!("{channel_id:#x}")).or_default();
-                if !entries.contains(&request_id) {
-                    entries.push(request_id);
+                if !entries.iter().any(|entry| entry.request_id == request_id) {
+                    entries.push(WatchtowerSubmission {
+                        request_id,
+                        key_purpose,
+                    });
                 }
                 atomic_write(&path, &serde_json::to_vec_pretty(&receipts)?)?;
                 Ok(())
@@ -709,7 +826,25 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             .map(|channel_id| format!("{channel_id:#x}"))
             .collect::<Vec<_>>();
         bound_channel_ids.sort();
+        let mut revoked_commitments = HashMap::new();
+        for (id, key) in &self.session.state().bindings {
+            let records = self
+                .session
+                .open_channel(*key)
+                .await?
+                .revocation_records()
+                .await?;
+            revoked_commitments.insert(
+                format!("{id:#x}"),
+                records
+                    .into_iter()
+                    .filter(|record| record.signature.is_some())
+                    .map(|record| record.context.revoked)
+                    .collect(),
+            );
+        }
         let status = AgentStatus {
+            revoked_commitments,
             tenant_id: self.session.tenant_id().as_str().to_string(),
             root_signer_pubkey: fiber_types::Pubkey::from(self.session.identity_public_key())
                 .into(),
@@ -826,6 +961,7 @@ mod tests {
     #[derive(Default)]
     struct FakeNodeState {
         nonce_calls: usize,
+        preimage_releases: usize,
         register_calls: usize,
         statuses: HashMap<JsonHash256, ChannelSigningStatus>,
         submissions: Vec<SubmitChannelSignatureParams>,
@@ -857,6 +993,23 @@ mod tests {
 
     #[async_trait]
     impl FiberRpc for FakeNode {
+        async fn settle_invoice(
+            &self,
+            _token: &str,
+            _params: fiber_json_types::SettleInvoiceParams,
+        ) -> Result<()> {
+            self.state().preimage_releases += 1;
+            Ok(())
+        }
+        async fn create_preimage(
+            &self,
+            _token: &str,
+            _params: fiber_json_types::CreatePreimageParams,
+        ) -> Result<()> {
+            self.state().preimage_releases += 1;
+            Ok(())
+        }
+
         async fn get_tenant_registry_nonce(
             &self,
             root_signer_pubkey: fiber_json_types::Pubkey,
@@ -1253,6 +1406,103 @@ mod tests {
         assert_eq!(state.submissions[0].request_id, JsonHash256([0x22; 32]));
         assert_eq!(state.submissions[0].partial_signature.len(), 32);
         assert!(state.submissions[0].next_material.is_some());
+    }
+
+    #[tokio::test]
+    async fn invoice_authorization_rejects_wrong_proof_and_never_releases_unprotected_preimage() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = FakeNode::default();
+        let mut agent = Agent::open(
+            node.clone(),
+            AgentConfig {
+                store_dir: dir.path().into(),
+                status_file: None,
+            },
+        )
+        .await
+        .unwrap();
+        agent.initialize().await.unwrap();
+        let (id, funding) = approve_pending(&mut agent).await;
+        let preimage = Hash256::from([0x22; 32]);
+        let payment_hash = fiber_types::HashAlgorithm::CkbHash
+            .hash(preimage.as_ref())
+            .into();
+        let terms = fiber_lsp_sdk::PaymentAuthorization {
+            payment_hash,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            inbound: true,
+            amount: 1_000_000,
+            expires_at_ms: now_ms() + 3_600_000,
+            min_tlc_expiry_delta_ms: 60_000,
+            max_tlc_expiry_ms: now_ms() + 86_400_000,
+        };
+        let request = FixtureAuthorization::Invoice {
+            channel_id: id,
+            terms: terms.clone(),
+            preimage,
+        };
+        let decoded: FixtureAuthorization =
+            serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        assert!(matches!(decoded, FixtureAuthorization::Invoice { .. }));
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        assert!(agent
+            .authorize(FixtureAuthorization::Invoice {
+                channel_id: id,
+                terms: terms.clone(),
+                preimage: Hash256::from([0x33; 32]),
+            })
+            .await
+            .is_err());
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        agent
+            .authorize(FixtureAuthorization::Invoice {
+                channel_id: id,
+                terms: terms.clone(),
+                preimage,
+            })
+            .await
+            .unwrap();
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        let mut changed = terms;
+        changed.amount += 1;
+        assert!(agent
+            .authorize(FixtureAuthorization::Invoice {
+                channel_id: id,
+                terms: changed,
+                preimage
+            })
+            .await
+            .is_err());
+        let mut chain = convert_tests::Chain {
+            point: ckb_types::packed::OutPoint::new(funding.calc_tx_hash(), 0),
+            cell: fiber_lsp_sdk::VerifiedCell {
+                output: funding.raw().outputs().get(0).unwrap(),
+                data: funding
+                    .raw()
+                    .outputs_data()
+                    .get(0)
+                    .unwrap()
+                    .raw_data()
+                    .to_vec(),
+            },
+            live: true,
+        };
+        for target in [PreimageTarget::Invoice, PreimageTarget::Watchtower] {
+            let error = agent
+                .release_preimage_verified(id, payment_hash, preimage, target, &chain)
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("no recoverable local commitment"));
+        }
+        chain.live = false;
+        assert!(agent
+            .release_preimage_verified(id, payment_hash, preimage, PreimageTarget::Invoice, &chain)
+            .await
+            .is_err());
+        assert_eq!(node.state().preimage_releases, 0);
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
     }
 
     #[tokio::test]

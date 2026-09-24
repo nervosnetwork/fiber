@@ -1,7 +1,7 @@
 meta {
-  name: safely release preimage to Watchtower
+  name: authorize Watchtower
   type: http
-  seq: 18
+  seq: 9.5
 }
 
 post {
@@ -15,14 +15,14 @@ headers {
 }
 
 body:json {
-  {"type":"ReleasePreimage","channel_id":"placeholder","payment_hash":"placeholder","preimage":"placeholder","target":"Watchtower"}
+  {"type":"Watchtower","channel_id":"placeholder","destination":{},"max_fee":10000}
 }
 
 script:pre-request {
   const body = req.getBody();
   body.channel_id = bru.getVar("REMOTE_CHANNEL_ID");
-  body.payment_hash = bru.getVar("LSP_INCOMING_PAYMENT_HASH");
-  body.preimage = bru.getVar("LSP_INCOMING_PREIMAGE");
+  // Explicit fixture consent: settlement and sponsor change go to Public T.
+  body.destination = bru.getVar("REMOTE_PEER_SHUTDOWN_SCRIPT");
   req.setBody(body);
 }
 

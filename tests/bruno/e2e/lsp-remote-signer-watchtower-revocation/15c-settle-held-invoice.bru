@@ -1,7 +1,7 @@
 meta {
-  name: safely release preimage to Watchtower
+  name: safely release preimage to Invoice
   type: http
-  seq: 18
+  seq: 15.6
 }
 
 post {
@@ -15,7 +15,7 @@ headers {
 }
 
 body:json {
-  {"type":"ReleasePreimage","channel_id":"placeholder","payment_hash":"placeholder","preimage":"placeholder","target":"Watchtower"}
+  {"type":"ReleasePreimage","channel_id":"placeholder","payment_hash":"placeholder","preimage":"placeholder","target":"Invoice"}
 }
 
 script:pre-request {

@@ -2,8 +2,13 @@
 
 Opens an external-signer U-T channel, pays a hosted hold invoice so an inbound
 TLC is pending, force-closes from Public T, then the tenant pushes the preimage
-with `create_preimage`. The SDK agent signs the watchtower settlement that
-claims that TLC.
+through the test agent. The agent checks SDK preimage-release authorization
+against live funding and the recoverable commitment, then immediately calls
+`create_preimage`. No blocks are mined between force-close and this release, so
+the funding input is still live. The driver independently authorizes the exact
+incoming amount/hash/expiry bounds before payment, and approves the settlement
+destination and fee cap. The final assertion requires an accepted SDK TLC-key
+signature, not just a consumed commitment cell.
 
 The hold invoice uses a fixed CKB-hash pair:
 

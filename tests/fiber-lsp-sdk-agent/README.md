@@ -20,6 +20,12 @@ Before polling a channel, the local fixture driver must:
 
 The test-only `POST /authorize` control endpoint records driver intent:
 
+- `Invoice`: `channel_id`, SDK `PaymentAuthorization` in `terms`, and the
+  wallet-held `preimage`. Calls `authorize_invoice` before the LSP sees a payment.
+- `ReleasePreimage`: `channel_id`, `payment_hash`, `preimage`, and `target`
+  (`Invoice` or `Watchtower`). Calls SDK `authorize_preimage_release` with the
+  independent chain source, then immediately invokes `settle_invoice` or
+  `create_preimage`. SDK validation failure sends no preimage to the LSP.
 - `Close`: `channel_id`, `local_script`, `remote_script`, `local_fee_rate`,
   `remote_fee_rate`. The fixture computes exact plain-CKB close fees from those
   scripts and rates and calls SDK `authorize_close`. An automatically accepting
@@ -38,12 +44,15 @@ message. The adapter supports this plain-CKB fixture; unsupported
 relative timestamp inputs and histories over 128 ancestors fail closed.
 It builds exact `OnchainSpendAuthorization` within the local policy, then uses
 SDK preparation and confirmation, both of which recheck chain evidence.
-`GET /status` includes accepted watchtower request IDs per channel; the settlement
-E2E asserts an actual SDK submission in addition to chain settlement.
+`GET /status` includes accepted watchtower request IDs and key purposes per
+channel, plus commitment references with complete SDK-verified revocation
+signatures. Settlement scenarios assert SDK submissions; the preimage scenario
+requires a TLC-key submission, and the revocation scenario requires complete
+evidence for the old peer commitment before broadcasting it.
 
-Payment/invoice/preimage control endpoints remain unwired. Payment scenarios
-must supply these authorizations before signing; never restore unchecked signing
-for a driver. Nonce reuse protection also remains enabled in the normal build.
+The inbound fixtures create hold invoices from wallet-owned terms; they never
+give the LSP a preimage before SDK recovery checks pass. Outbound payment control
+is not implemented. Nonce reuse is reported as a review warning and does not block signing policy.
 
 The Rust fixtures construct valid commitment locks, participant nonces and peer
 partial signatures. The watchtower restart test first signs a complete local

@@ -16,6 +16,24 @@ use serde_json::Value;
 /// standard `new_invoice` and `send_payment` data-plane RPCs directly.
 #[async_trait]
 pub trait FiberRpc: Clone + Send + Sync + 'static {
+    /// Release a checked preimage to fulfill an invoice.
+    async fn settle_invoice(
+        &self,
+        _token: &str,
+        _params: fiber_json_types::SettleInvoiceParams,
+    ) -> Result<()> {
+        anyhow::bail!("settle_invoice is not implemented by this transport")
+    }
+
+    /// Release a checked preimage to the watchtower.
+    async fn create_preimage(
+        &self,
+        _token: &str,
+        _params: fiber_json_types::CreatePreimageParams,
+    ) -> Result<()> {
+        anyhow::bail!("create_preimage is not implemented by this transport")
+    }
+
     async fn open_tenant_channel(
         &self,
         _token: &str,
@@ -117,6 +135,24 @@ impl HttpFiberRpc {
 
 #[async_trait]
 impl FiberRpc for HttpFiberRpc {
+    async fn settle_invoice(
+        &self,
+        token: &str,
+        params: fiber_json_types::SettleInvoiceParams,
+    ) -> Result<()> {
+        let _: fiber_json_types::SettleInvoiceResult =
+            self.call("settle_invoice", &params, token).await?;
+        Ok(())
+    }
+
+    async fn create_preimage(
+        &self,
+        token: &str,
+        params: fiber_json_types::CreatePreimageParams,
+    ) -> Result<()> {
+        self.call("create_preimage", &params, token).await
+    }
+
     async fn open_tenant_channel(
         &self,
         token: &str,

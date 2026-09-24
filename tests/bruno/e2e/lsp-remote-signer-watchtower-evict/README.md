@@ -14,3 +14,7 @@ REMOVE_OLD_STATE=y ./tests/nodes/start.sh e2e/lsp-remote-signer-watchtower-evict
 cd tests/bruno
 npm exec -- @usebruno/cli@1.20.0 run e2e/lsp-remote-signer-watchtower-evict -r --env test
 ```
+
+Before eviction, the driver authorizes the settlement destination and fee cap
+through the local SDK agent. The final assertion requires an accepted SDK
+watchtower signature, so a chain-only settlement is insufficient.

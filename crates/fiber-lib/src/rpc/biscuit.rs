@@ -395,6 +395,7 @@ mod tests {
             .unwrap();
         auth.check_permission("list_channels", &token).unwrap();
         auth.check_permission("new_invoice", &token).unwrap();
+        auth.check_permission("settle_invoice", &token).unwrap();
         auth.check_permission("send_payment", &token).unwrap();
         auth.check_permission("get_invoice", &token).unwrap();
         auth.check_permission("get_payment", &token).unwrap();
@@ -414,6 +415,7 @@ mod tests {
         auth.check_permission("create_preimage", &token).unwrap();
         crate::rpc::tenant::enforce_tenant_method_allowlist("create_preimage", &biscuit).unwrap();
         crate::rpc::tenant::enforce_tenant_method_allowlist("new_invoice", &biscuit).unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist("settle_invoice", &biscuit).unwrap();
         crate::rpc::tenant::enforce_tenant_method_allowlist("send_payment", &biscuit).unwrap();
         assert!(auth
             .check_permission("lsp_register_tenant", &token)

@@ -8,7 +8,7 @@ use fiber_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{ChannelSigningContent, Musig2SignableContent, SigningReview, SigningWarning};
+use crate::{ChannelSigningContent, Musig2SignableContent, SigningReview};
 
 /// How a client decides whether to apply a prepared signature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,14 +121,6 @@ impl SigningPolicy {
     /// Decide from an immutable SDK preparation. Commitment automation requires the
     /// mandatory verifier's result, not a node-supplied balance or a hash-only registry.
     pub fn decide_prepared(self, prepared: &crate::PreparedSigning) -> SigningDecision {
-        if prepared.review().warnings.iter().any(|warning| {
-            matches!(
-                warning,
-                SigningWarning::NoncePreviouslyUsedForDifferentMessage { .. }
-            )
-        }) {
-            return SigningDecision::Deny;
-        }
         match self {
             #[cfg(any(test, feature = "test-apis"))]
             Self::Always => SigningDecision::Allow,
@@ -157,15 +149,6 @@ impl SigningPolicy {
 }
 
 fn decide_auto(input: SigningPolicyInput<'_>) -> SigningDecision {
-    if input.review.warnings.iter().any(|warning| {
-        matches!(
-            warning,
-            SigningWarning::NoncePreviouslyUsedForDifferentMessage { .. }
-        )
-    }) {
-        return SigningDecision::Deny;
-    }
-
     match input.review.intent {
         SigningIntent::Revocation => SigningDecision::RequireConfirmation,
         SigningIntent::CommitmentTransaction => decide_auto_commitment(input),
@@ -513,13 +496,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_denies_nonce_reuse_for_different_message() {
+    fn auto_keeps_nonce_reuse_as_a_review_warning() {
         let mut review = review(SigningIntent::CommitmentTransaction);
-        review
-            .warnings
-            .push(SigningWarning::NoncePreviouslyUsedForDifferentMessage {
+        review.warnings.push(
+            crate::SigningWarning::NoncePreviouslyUsedForDifferentMessage {
                 previous_message: [9u8; 32],
-            });
+            },
+        );
         let hash = Hash256::from([9; 32]);
         let mut registry = PaymentRegistry::default();
         registry.record_issued_invoice(hash);
@@ -533,7 +516,7 @@ mod tests {
                 settlement: Some(binding(&settlement)),
                 registry: &registry,
             }),
-            SigningDecision::Deny
+            SigningDecision::Allow
         );
     }
 }
