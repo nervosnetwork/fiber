@@ -17,8 +17,9 @@ use crate::fiber::network::DebugEvent;
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
     collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
-    OnChainConfirmedPayerTlc, OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
+    collect_onchain_timeout_settled_tlcs, confirm_onchain_payer_fulfill,
+    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, OnChainConfirmedPayerTlc,
+    OnChainTimeoutTlcRole, StoredOnChainTlcSettlement,
 };
 use crate::fiber::types::{BroadcastMessageWithTimestamp, TxSignatures};
 use crate::store::actor::StoreActorMessage;
@@ -3230,7 +3231,13 @@ where
         }
 
         for tlc in confirmed_payer_tlcs {
-            payer_effects_applied &= self.reconcile_onchain_payer_tlc(channel_id, tlc).await;
+            if self.reconcile_onchain_payer_tlc(channel_id, tlc).await {
+                if confirm_onchain_payer_fulfill(state, tlc) {
+                    self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
+                }
+            } else {
+                payer_effects_applied = false;
+            }
         }
 
         if !onchain_fulfilled_invoice_hashes.is_empty() {
@@ -3829,9 +3836,15 @@ where
                         .get(&tlc_id)
                         .is_some_and(|tlc| tlc.removed_reason.is_none())
                     {
-                        state.tlc_state.set_offered_tlc_removed(id, reason);
+                        state.tlc_state.set_offered_tlc_removed(id, reason.clone());
                     }
                     if let Some(tlc) = state.tlc_state.get_mut(&tlc_id) {
+                        if tlc.removed_confirmed_at.is_none()
+                            && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                        {
+                            // The delivered chain outcome supersedes an uncommitted peer reason.
+                            tlc.removed_reason = Some(reason);
+                        }
                         // Receipt of a peer fulfill alone does not prove upstream delivery.
                         // Only this durable relay acknowledgement completes its side effects.
                         tlc.applied_flags.insert(AppliedFlags::REMOVE);
