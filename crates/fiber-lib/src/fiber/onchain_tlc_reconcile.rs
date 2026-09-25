@@ -11,8 +11,8 @@ use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use fiber_types::{
-    ChannelData, ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus,
-    OutboundTlcStatus, Pubkey, RemoveTlcReason, SettlementData, TLCId, TlcInfo,
+    AppliedFlags, ChannelData, ChannelState, CloseFlags, Hash256, HashAlgorithm, InboundTlcStatus,
+    OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData, TLCId, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -289,8 +289,8 @@ pub(crate) struct OnChainFulfilledTlc {
     pub preimage: Hash256,
 }
 
-/// An origin-payer TLC whose fulfill was learned off-chain before the channel closed, and whose
-/// preimage is now independently confirmed by this channel's on-chain settlement record.
+/// An origin-payer TLC already marked removed off-chain whose preimage is independently
+/// confirmed by this channel's on-chain settlement record.
 ///
 /// Such a TLC may already be `RemoteRemoved`, while the corresponding payment attempt is still
 /// inflight because the remove commitment handshake never reached `apply_remove_tlc_operation`.
@@ -433,7 +433,7 @@ pub(crate) fn collect_onchain_fulfilled_tlcs(
         .collect()
 }
 
-/// Collect already-fulfilled first-hop TLCs that still need their payer-side attempt outcome
+/// Collect already-removed first-hop TLCs that still need their payer-side attempt outcome
 /// reconciled. The `attempt_id` is local metadata persisted on the offered TLC; forwarded TLCs do
 /// not carry one and are deliberately excluded.
 pub(crate) fn collect_onchain_confirmed_payer_tlcs(
@@ -449,11 +449,14 @@ pub(crate) fn collect_onchain_confirmed_payer_tlcs(
         .filter(|tlc| tlc.forwarding_tlc.is_none())
         .filter_map(|tlc| {
             let attempt_id = tlc.attempt_id?;
-            let Some(RemoveTlcReason::RemoveTlcFulfill(fulfill)) = &tlc.removed_reason else {
+            let reason = tlc.removed_reason.as_ref()?;
+            if !matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
+                && !is_uncommitted_payer_failure(tlc)
+            {
                 return None;
-            };
+            }
             let preimage = onchain_fulfilled_preimage(&channel_id, store, tlc)?;
-            if preimage != fulfill.payment_preimage {
+            if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(fulfill) if preimage != fulfill.payment_preimage) {
                 warn!(
                     "Skipping payer TLC {:?} in channel {:?}: local fulfill preimage does not match on-chain preimage",
                     tlc.tlc_id, channel_id
@@ -468,6 +471,33 @@ pub(crate) fn collect_onchain_confirmed_payer_tlcs(
             })
         })
         .collect()
+}
+
+fn is_uncommitted_payer_failure(tlc: &TlcInfo) -> bool {
+    tlc.is_offered()
+        && tlc.forwarding_tlc.is_none()
+        && tlc.attempt_id.is_some()
+        && matches!(tlc.removed_reason, Some(RemoveTlcReason::RemoveTlcFail(_)))
+        && tlc.removed_confirmed_at.is_none()
+        && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+}
+
+/// Replace an uncommitted peer failure only after payer reconciliation has acknowledged it.
+pub(crate) fn confirm_onchain_payer_fulfill(
+    state: &mut ChannelActorState,
+    fulfilled: OnChainConfirmedPayerTlc,
+) -> bool {
+    let Some(tlc) = state.tlc_state.get_mut(&fulfilled.tlc_id) else {
+        return false;
+    };
+    if !is_uncommitted_payer_failure(tlc) {
+        return false;
+    }
+    tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: fulfilled.preimage,
+    }));
+    tlc.applied_flags.insert(AppliedFlags::REMOVE);
+    true
 }
 
 /// Offered updates excluded by a confirmed force close can no longer be paid on this channel.
@@ -658,7 +688,30 @@ pub(crate) fn has_unresolved_onchain_tlcs(
             state,
             &record.settlement_data,
             record.for_remote,
-        );
+        ) || record.settlement_data.tlcs.iter().any(|settlement_tlc| {
+            let tlc_id = if record.for_remote {
+                settlement_tlc.tlc_id
+            } else {
+                settlement_tlc.tlc_id.flip()
+            };
+            let Some(tlc) = state.tlc_state.get(&tlc_id) else {
+                return false;
+            };
+            // A peer fail is not a terminal payer outcome. Preserve recovery while evidence
+            // is unknown or payer fulfillment is pending. Proven timeouts retain their
+            // existing failure path rather than waiting for a fulfillment acknowledgement.
+            is_uncommitted_payer_failure(tlc)
+                && !matches!(
+                    resolve_onchain_tlc(
+                        &state.get_id(),
+                        store,
+                        tlc_id,
+                        tlc.payment_hash,
+                        tlc.hash_algorithm
+                    ),
+                    OnChainTlcResolution::SettledWithoutPreimage
+                )
+        });
     }
     if matches!(state.state, ChannelState::Closed(flags)
         if flags.intersects(CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::UNCOOPERATIVE_REMOTE))
@@ -674,8 +727,17 @@ pub(crate) fn has_unresolved_onchain_tlcs(
 }
 
 pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
-    if tlc.removed_reason.is_some() || tlc.removed_confirmed_at.is_some() {
+    if tlc.removed_confirmed_at.is_some() {
         return false;
+    }
+
+    if tlc.removed_reason.is_some() {
+        // A peer removal during force-close may never finish its handshake. Its reason is
+        // not final: even a failed TLC can still be fulfilled on-chain. Keep the forwarded
+        // TLC pending until the chain outcome has been durably delivered upstream.
+        return tlc.is_offered()
+            && tlc.forwarding_tlc.is_some()
+            && !tlc.applied_flags.contains(AppliedFlags::REMOVE);
     }
 
     if tlc.is_offered() {

@@ -145,6 +145,483 @@ fn tlc_info(
 }
 
 #[test]
+fn collect_fulfilled_includes_uncommitted_remote_removed() {
+    assert_collect_uncommitted_removed(false);
+}
+
+#[test]
+fn collect_fulfilled_includes_uncommitted_peer_fail() {
+    assert_collect_uncommitted_removed(true);
+}
+
+fn uncommitted_peer_fail() -> RemoveTlcReason {
+    RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+        TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+        &TEST_SHARED_SECRET,
+    ))
+}
+
+fn assert_collect_uncommitted_removed(peer_failed: bool) {
+    let channel_id = gen_rand_sha256_hash();
+    let upstream_channel_id = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::Committed),
+        payment_hash,
+        hash_algorithm,
+    );
+    tlc.forwarding_tlc = Some((upstream_channel_id, 7));
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.tlc_state.offered_tlcs.tlcs = vec![tlc];
+    let store = MockStore::new().with_onchain_preimage(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+        preimage,
+    );
+
+    // Control: closing before receiving the peer removal leaves a relay candidate.
+    assert_eq!(collect_onchain_fulfilled_tlcs(&state, &store).len(), 1);
+
+    // A peer removal during WAITING_COMMITMENT_CONFIRMATION records the removal,
+    // but its commitment handshake cannot finish and has not relayed upstream.
+    let reason = if peer_failed {
+        uncommitted_peer_fail()
+    } else {
+        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: preimage,
+        })
+    };
+    state.tlc_state.set_offered_tlc_removed(0, reason);
+    let removed = &state.tlc_state.offered_tlcs.tlcs[0];
+    assert_eq!(removed.outbound_status(), OutboundTlcStatus::RemoteRemoved);
+    assert!(removed.removed_confirmed_at.is_none());
+
+    let fulfilled = collect_onchain_fulfilled_tlcs(&state, &store);
+    assert_eq!(
+        fulfilled.len(),
+        1,
+        "uncommitted RemoteRemoved fulfill must be relayed upstream"
+    );
+    assert_eq!(fulfilled[0].forwarding_tlc, Some((upstream_channel_id, 7)));
+    assert_eq!(fulfilled[0].preimage, preimage);
+
+    assert!(collect_onchain_timeout_settled_tlcs(&state, &store, u64::MAX).is_empty());
+    assert!(collect_onchain_fulfilled_tlcs(&state, &MockStore::new()).is_empty());
+    let tlc = &mut state.tlc_state.offered_tlcs.tlcs[0];
+    tlc.removed_confirmed_at = Some(1);
+    assert!(collect_onchain_fulfilled_tlcs(&state, &store).is_empty());
+    let tlc = &mut state.tlc_state.offered_tlcs.tlcs[0];
+    tlc.removed_confirmed_at = None;
+    tlc.applied_flags.insert(AppliedFlags::REMOVE);
+    assert!(collect_onchain_fulfilled_tlcs(&state, &store).is_empty());
+}
+
+#[cfg(feature = "watchtower")]
+#[derive(Clone, Copy, Debug)]
+enum TestChainOutcome {
+    Fulfilled,
+    TimedOut,
+    Unknown,
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_uncommitted_remove_relay(
+    live_actor: bool,
+    restart_after_queue: bool,
+    peer_failed: bool,
+    outcome: TestChainOutcome,
+) {
+    eprintln!("live={live_actor}, restart={restart_after_queue}, peer_failed={peer_failed}, chain={outcome:?}");
+    let mut node = NetworkNode::new().await;
+    let channel_id = gen_rand_sha256_hash();
+    let upstream_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = payment_hash_for(preimage, HashAlgorithm::CkbHash);
+    let fulfill = RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    });
+    let peer_reason = if peer_failed {
+        uncommitted_peer_fail()
+    } else {
+        fulfill.clone()
+    };
+    let reason = match outcome {
+        TestChainOutcome::Fulfilled | TestChainOutcome::Unknown => fulfill,
+        TestChainOutcome::TimedOut => RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::ExpiryTooSoon),
+            &TEST_SHARED_SECRET,
+        )),
+    };
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    state.shutdown_transaction_hash = Some(gen_rand_sha256_hash().into());
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    );
+    tlc.forwarding_tlc = Some((upstream_id, 0));
+    tlc.removed_reason = Some(peer_reason.clone());
+    let mut settlement_tlc = settlement_tlc_for(&tlc);
+    settlement_tlc.tlc_id = tlc.tlc_id.flip();
+    state.tlc_state.add_offered_tlc(tlc);
+    node.store.insert_channel_actor_state(state.clone());
+    node.store.store_shutdown_settlement_record(
+        &channel_id,
+        &ShutdownSettlementRecord {
+            shutdown_tx_hash: state.shutdown_transaction_hash.clone().unwrap(),
+            for_remote: false,
+            commitment_number: 1,
+            settlement_data: SettlementData {
+                local_amount: 1000,
+                remote_amount: 1000,
+                tlcs: vec![settlement_tlc],
+            },
+        },
+    );
+    if !matches!(outcome, TestChainOutcome::Unknown) {
+        node.store.insert_onchain_tlc_settlement(
+            &NodeId::local(),
+            &channel_id,
+            TLCId::Offered(0),
+            OnChainTlcSettlement {
+                payment_hash,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                preimage: matches!(outcome, TestChainOutcome::Fulfilled).then_some(preimage),
+                tx_hash: gen_rand_sha256_hash(),
+                tlc_index: 0,
+            },
+        );
+    }
+    let mut live_ref = None;
+    if live_actor {
+        let private_key = Privkey::from([11; 32]);
+        let (actor, _) = Actor::spawn(
+            None,
+            ChannelActor::new(
+                private_key.pubkey(),
+                gen_rand_fiber_public_key(),
+                node.network_actor.clone(),
+                node.store.clone(),
+                None,
+            ),
+            ChannelInitializationParameter {
+                operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
+                ephemeral_config: Default::default(),
+                private_key,
+            },
+        )
+        .await
+        .unwrap();
+        ractor::call!(
+            node.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::InstallTestChannelActor(
+                channel_id,
+                actor.clone(),
+                reply
+            ))
+        )
+        .unwrap();
+        live_ref = Some(actor);
+    }
+    node.network_actor
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+        ))
+        .unwrap();
+    node.node_info().await;
+    if let Some(actor) = &live_ref {
+        let _ = ractor::call!(actor, |reply| ChannelActorMessage::Command(
+            ChannelCommand::TestBarrier(reply)
+        ));
+    }
+    let pending = node.store.get_channel_actor_state(&channel_id).unwrap();
+    assert!(
+        pending.is_waiting_onchain_settlement(),
+        "missing upstream or unknown chain result must keep recovery pending"
+    );
+    assert_eq!(
+        pending
+            .tlc_state
+            .get(&TLCId::Offered(0))
+            .unwrap()
+            .removed_reason,
+        Some(peer_reason.clone()),
+        "do not replace the peer reason before durable upstream delivery"
+    );
+    assert!(!pending
+        .tlc_state
+        .get(&TLCId::Offered(0))
+        .unwrap()
+        .applied_flags
+        .contains(AppliedFlags::REMOVE));
+    assert!(node
+        .store
+        .get_shutdown_settlement_record(&channel_id)
+        .is_some());
+
+    let mut upstream = empty_channel_state(upstream_id);
+    upstream.state = ChannelState::ChannelReady;
+    upstream.tlc_state.add_received_tlc(tlc_info(
+        TLCId::Received(0),
+        TlcStatus::Inbound(InboundTlcStatus::Committed),
+        payment_hash,
+        HashAlgorithm::CkbHash,
+    ));
+    // Keep unrelated upstream expiry handling out of the relay recovery scenario.
+    upstream
+        .tlc_state
+        .get_mut(&TLCId::Received(0))
+        .unwrap()
+        .expiry = u64::MAX;
+    if restart_after_queue {
+        // Crash window: the upstream queue is durable, but the downstream has not received
+        // its relay acknowledgement. Recovery must not duplicate the queued operation.
+        upstream
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::RemoveTlc(
+                TLCId::Received(0),
+                reason.clone(),
+            ));
+    }
+    node.store.insert_channel_actor_state(upstream);
+    if restart_after_queue {
+        node.stop().await;
+        node.start().await;
+    }
+    for _ in 0..3 {
+        node.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::CheckChannels,
+            ))
+            .unwrap();
+        node.node_info().await;
+    }
+    if matches!(outcome, TestChainOutcome::Unknown) {
+        // Even a completed-channel notification cannot stand in for TLC settlement evidence.
+        node.network_actor
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelSettlementCompleted(channel_id),
+            ))
+            .unwrap();
+        node.node_info().await;
+        if let Some(actor) = &live_ref {
+            ractor::call!(actor, |reply| ChannelActorMessage::Command(
+                ChannelCommand::TestBarrier(reply)
+            ))
+            .unwrap();
+        }
+        let pending = node.store.get_channel_actor_state(&channel_id).unwrap();
+        let tlc = pending.tlc_state.get(&TLCId::Offered(0)).unwrap();
+        assert!(pending.is_waiting_onchain_settlement());
+        assert_eq!(tlc.removed_reason, Some(peer_reason));
+        assert!(!tlc.applied_flags.contains(AppliedFlags::REMOVE));
+        assert!(node
+            .store
+            .get_shutdown_settlement_record(&channel_id)
+            .is_some());
+        assert!(node
+            .store
+            .get_channel_actor_state(&upstream_id)
+            .unwrap()
+            .retryable_tlc_operations
+            .is_empty());
+        if let Some(actor) = live_ref {
+            actor.stop(None);
+        }
+        node.stop().await;
+        return;
+    }
+    wait_for_settlement_completion(&node, channel_id).await;
+    let upstream = node.store.get_channel_actor_state(&upstream_id).unwrap();
+    assert_eq!(
+        upstream.retryable_tlc_operations,
+        std::collections::VecDeque::from([RetryableTlcOperation::RemoveTlc(
+            TLCId::Received(0),
+            reason.clone()
+        ),])
+    );
+    let finished = node.store.get_channel_actor_state(&channel_id).unwrap();
+    let tlc = finished.tlc_state.get(&TLCId::Offered(0)).unwrap();
+    assert_eq!(tlc.removed_reason, Some(reason));
+    assert!(tlc.applied_flags.contains(AppliedFlags::REMOVE));
+    assert!(collect_onchain_fulfilled_tlcs(&finished, &node.store).is_empty());
+    node.stop().await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_uncommitted_remove_state_matrix(live_actor: bool) {
+    for peer_failed in [false, true] {
+        for outcome in [
+            TestChainOutcome::Fulfilled,
+            TestChainOutcome::TimedOut,
+            TestChainOutcome::Unknown,
+        ] {
+            assert_uncommitted_remove_relay(live_actor, false, peer_failed, outcome).await;
+        }
+    }
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_uncommitted_remove_state_matrix_live() {
+    assert_uncommitted_remove_state_matrix(true).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_uncommitted_remove_state_matrix_offline() {
+    assert_uncommitted_remove_state_matrix(false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_uncommitted_fulfill_relay_restart_after_queue() {
+    assert_uncommitted_remove_relay(false, true, false, TestChainOutcome::Fulfilled).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_uncommitted_peer_fail_then_fulfill_restart() {
+    assert_uncommitted_remove_relay(false, true, true, TestChainOutcome::Fulfilled).await;
+}
+
+#[test]
+fn collect_payer_fulfilled_after_uncommitted_peer_fail() {
+    use crate::fiber::onchain_tlc_reconcile::collect_onchain_confirmed_payer_tlcs;
+
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let mut state = empty_channel_state(channel_id);
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved),
+        payment_hash,
+        hash_algorithm,
+    );
+    tlc.attempt_id = Some(1);
+    tlc.removed_reason = Some(uncommitted_peer_fail());
+    state.tlc_state.add_offered_tlc(tlc);
+    let store = MockStore::new().with_onchain_preimage(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+        preimage,
+    );
+    assert_eq!(
+        resolve_onchain_tlc(
+            &channel_id,
+            &store,
+            TLCId::Offered(0),
+            payment_hash,
+            hash_algorithm
+        ),
+        OnChainTlcResolution::Fulfilled(preimage)
+    );
+    assert_eq!(
+        collect_onchain_fulfilled_tlcs(&state, &store).len()
+            + collect_onchain_confirmed_payer_tlcs(&state, &store).len(),
+        1,
+        "origin payer must recover the on-chain fulfill despite an uncommitted peer fail"
+    );
+}
+
+#[test]
+fn payer_peer_failure_waits_for_evidence_and_acknowledgement() {
+    use crate::fiber::onchain_tlc_reconcile::{
+        collect_onchain_confirmed_payer_tlcs, confirm_onchain_payer_fulfill,
+    };
+
+    let channel_id = gen_rand_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
+    let hash_algorithm = HashAlgorithm::CkbHash;
+    let payment_hash = payment_hash_for(preimage, hash_algorithm);
+    let mut state = empty_channel_state(channel_id);
+    state.state = ChannelState::Closed(
+        CloseFlags::UNCOOPERATIVE_REMOTE | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
+    );
+    let mut tlc = tlc_info(
+        TLCId::Offered(0),
+        TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved),
+        payment_hash,
+        hash_algorithm,
+    );
+    tlc.attempt_id = Some(1);
+    tlc.removed_reason = Some(uncommitted_peer_fail());
+    let snapshot = SettlementData {
+        local_amount: 1000,
+        remote_amount: 1000,
+        tlcs: vec![settlement_tlc_for(&tlc)],
+    };
+    state.tlc_state.add_offered_tlc(tlc);
+
+    let unknown = MockStore::new();
+    install_unit_snapshot(&mut state, &unknown, true, snapshot.clone());
+    assert!(has_unresolved_onchain_tlcs(&state, &unknown));
+    assert!(collect_onchain_confirmed_payer_tlcs(&state, &unknown).is_empty());
+
+    let timed_out = MockStore::new().with_onchain_settled(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+    );
+    install_unit_snapshot(&mut state, &timed_out, true, snapshot.clone());
+    assert!(!has_unresolved_onchain_tlcs(&state, &timed_out));
+    assert_eq!(
+        collect_onchain_timeout_settled_tlcs(&state, &timed_out, u64::MAX).len(),
+        1
+    );
+    assert!(collect_onchain_confirmed_payer_tlcs(&state, &timed_out).is_empty());
+
+    let fulfilled = MockStore::new().with_onchain_preimage(
+        channel_id,
+        TLCId::Offered(0),
+        payment_hash,
+        hash_algorithm,
+        preimage,
+    );
+    install_unit_snapshot(&mut state, &fulfilled, true, snapshot);
+    assert!(has_unresolved_onchain_tlcs(&state, &fulfilled));
+    let candidate = collect_onchain_confirmed_payer_tlcs(&state, &fulfilled)[0];
+    // Reading evidence must not mark the payer effect complete.
+    assert_eq!(
+        state
+            .tlc_state
+            .get(&TLCId::Offered(0))
+            .unwrap()
+            .removed_reason,
+        Some(uncommitted_peer_fail())
+    );
+    assert!(confirm_onchain_payer_fulfill(&mut state, candidate));
+    assert!(!has_unresolved_onchain_tlcs(&state, &fulfilled));
+    assert!(!confirm_onchain_payer_fulfill(&mut state, candidate));
+
+    // Already-confirmed/applied failures must not be revived by the new candidate branch.
+    let tlc = state.tlc_state.get_mut(&TLCId::Offered(0)).unwrap();
+    tlc.removed_reason = Some(uncommitted_peer_fail());
+    assert!(collect_onchain_confirmed_payer_tlcs(&state, &fulfilled).is_empty());
+    let tlc = state.tlc_state.get_mut(&TLCId::Offered(0)).unwrap();
+    tlc.applied_flags.remove(AppliedFlags::REMOVE);
+    tlc.removed_confirmed_at = Some(1);
+    assert!(collect_onchain_confirmed_payer_tlcs(&state, &fulfilled).is_empty());
+}
+
+#[test]
 fn resolve_returns_fulfilled_when_preimage_matches() {
     let channel_id = gen_rand_sha256_hash();
     let preimage = gen_rand_sha256_hash();

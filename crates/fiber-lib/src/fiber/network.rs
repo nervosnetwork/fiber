@@ -92,8 +92,9 @@ use crate::fiber::gossip::{GossipConfig, GossipService, SubscribableGossipMessag
 use crate::fiber::onchain_tlc_reconcile::{
     collect_onchain_confirmed_payer_tlcs, collect_onchain_excluded_tlcs,
     collect_onchain_fulfilled_tlcs, collect_onchain_received_timeout_settled_tlcs,
-    collect_onchain_timeout_settled_tlcs, has_unresolved_onchain_tlcs, onchain_fulfilled_preimage,
-    recover_shutdown_settlement_data, verify_and_select_settlement_data, OnChainTimeoutTlcRole,
+    collect_onchain_timeout_settled_tlcs, confirm_onchain_payer_fulfill,
+    has_unresolved_onchain_tlcs, onchain_fulfilled_preimage, recover_shutdown_settlement_data,
+    verify_and_select_settlement_data, OnChainTimeoutTlcRole,
 };
 use crate::fiber::payment::{
     PaymentActor, PaymentActorArguments, PaymentActorMessage, PaymentTlcRemoveContext,
@@ -119,13 +120,13 @@ pub use fiber_types::HopRequire;
 #[cfg(any(debug_assertions, test, feature = "bench"))]
 use fiber_types::SessionRoute;
 use fiber_types::{
-    blake2b_hash_with_salt, AddTlcCommand, AwaitingTxSignaturesFlags, ChannelOpenRecord,
-    ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags, EcdsaSignature, EntityHex,
-    FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords, PaymentStatus,
-    PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey,
-    PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevocationData,
-    RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr,
-    TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingTxSignaturesFlags,
+    ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags,
+    EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement, PaymentCustomRecords,
+    PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState, PrevTlcInfo, Privkey,
+    Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord, ShuttingDownFlags, TLCId,
+    TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -3603,7 +3604,20 @@ where
                         .get(&downstream_tlc_id)
                         .is_some_and(|tlc| tlc.removed_reason.is_none())
                     {
-                        channel_state.tlc_state.set_offered_tlc_removed(id, reason);
+                        channel_state
+                            .tlc_state
+                            .set_offered_tlc_removed(id, reason.clone());
+                    }
+                    if let Some(tlc) = channel_state.tlc_state.get_mut(&downstream_tlc_id) {
+                        if tlc.removed_confirmed_at.is_none()
+                            && !tlc.applied_flags.contains(AppliedFlags::REMOVE)
+                        {
+                            // The delivered chain outcome supersedes an uncommitted peer reason.
+                            tlc.removed_reason = Some(reason);
+                        }
+                        // Persist relay completion even when a peer fulfill already set the
+                        // removal reason before the channel closed.
+                        tlc.applied_flags.insert(AppliedFlags::REMOVE);
                         self.store.insert_channel_actor_state(channel_state);
                     }
                 }
@@ -3839,6 +3853,9 @@ where
                     tlc.tlc_id, channel_id, err
                 );
                 payer_effects_applied = false;
+            } else if confirm_onchain_payer_fulfill(actor_state, tlc) {
+                self.store.insert_preimage(tlc.payment_hash, tlc.preimage);
+                actor_state_changed = true;
             }
         }
         invoice_hashes.extend(self.already_fulfilled_onchain_invoice_hashes(actor_state));
