@@ -17,7 +17,11 @@ thiserror = "1.0.58"
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 # Fiber types for migration
-fiber-types-090 = { package = "fiber-types", version = "0.9.0-rc4" }
+# 0.9.1 is the latest published 0.9.x: it shares the 0.9.0-rc4 struct layout
+# (only additive methods/variants) and serves as the "old" types for the
+# 0.9.x -> 0.10.0-rc1 migration below.
+fiber-types-090 = { package = "fiber-types", version = "0.9.1", features = ["watchtower"] }
+fiber-types-0100 = { package = "fiber-types", version = "0.10.0-rc1" }
 
 # Old fiber types for deserializing legacy data
 fiber-types-081 = { package = "fiber-types", version = "0.8.1" }
@@ -42,6 +46,7 @@ web-sys = "0.3.72"
 
 [dev-dependencies]
 fiber-types-081 = { package = "fiber-types", version = "0.8.1", features = ["sample"] }
+fiber-types-090 = { package = "fiber-types", version = "0.9.1", features = ["sample", "watchtower"] }
 tempfile = "3.10.1"
 
 [features]
