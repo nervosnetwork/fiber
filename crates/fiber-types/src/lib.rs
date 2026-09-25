@@ -20,6 +20,7 @@ pub mod channel;
 pub mod config;
 pub mod gen;
 pub mod invoice;
+pub mod liquidity;
 pub mod network;
 pub mod onion;
 pub mod payment;
@@ -38,6 +39,7 @@ pub use cch::{
 pub use channel::*;
 pub use config::*;
 pub use invoice::*;
+pub use liquidity::*;
 pub use network::{HopRequire, PersistentNetworkActorState};
 pub use onion::*;
 pub use payment::*;

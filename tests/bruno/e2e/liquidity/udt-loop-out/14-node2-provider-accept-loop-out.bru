@@ -1,0 +1,58 @@
+meta {
+  name: node2 provider accept loop out
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_accept_loop_out",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const response = res.body.result;
+  if (!response || response.swap_id !== bru.getVar("QUOTE_ID")) {
+    throw new Error(`provider accept swap_id must equal the quote_id: ${JSON.stringify(res.body)}`);
+  }
+  if (response.state !== "PayoutPending") {
+    throw new Error(`provider accept must start in PayoutPending, got: ${response.state}`);
+  }
+  if (response.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`provider accept payment_hash mismatch: ${response.payment_hash}`);
+  }
+  const outpoint = response.payout_outpoint;
+  if (!outpoint || typeof outpoint.tx_hash !== "string" || outpoint.tx_hash.length !== 66) {
+    throw new Error(`provider accept must return the payout outpoint: ${JSON.stringify(response)}`);
+  }
+  if (typeof outpoint.index !== "string" || !outpoint.index.startsWith("0x")) {
+    throw new Error(`payout outpoint index must be a hex quantity: ${JSON.stringify(outpoint)}`);
+  }
+
+  bru.setVar("PAYOUT_OUTPOINT_JSON", JSON.stringify(outpoint));
+  bru.setVar("PAYOUT_TX_HASH", outpoint.tx_hash);
+  bru.setVar("PAYOUT_INDEX", outpoint.index);
+  console.log("payout outpoint:", bru.getVar("PAYOUT_OUTPOINT_JSON"));
+}

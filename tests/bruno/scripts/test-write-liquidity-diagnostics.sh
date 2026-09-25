@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+source_writer="$script_dir/write-liquidity-diagnostics.sh"
+fixture="$script_dir/fixtures/sensitive-diagnostics.json"
+sandbox="$(mktemp -d "${TMPDIR:-/tmp}/liquidity-diagnostics-test.XXXXXX")"
+external="$(mktemp -d "${TMPDIR:-/tmp}/liquidity-diagnostics-external.XXXXXX")"
+
+cleanup() {
+  rm -rf "$sandbox" "$external"
+}
+trap cleanup EXIT
+
+mkdir -p "$sandbox/tests/bruno/scripts"
+cp "$source_writer" "$sandbox/tests/bruno/scripts/write-liquidity-diagnostics.sh"
+writer="$sandbox/tests/bruno/scripts/write-liquidity-diagnostics.sh"
+artifacts="$sandbox/tests/artifacts"
+printf 'outside-unchanged' >"$external/outside.json"
+
+assert_external_unchanged() {
+  if [[ "$(<"$external/outside.json")" != "outside-unchanged" ]]; then
+    printf 'external file was modified through symlink\n' >&2
+    exit 1
+  fi
+}
+
+assert_rejected() {
+  if printf '{}' | bash "$writer" evil-suite outside.json >/dev/null 2>&1; then
+    printf 'symlink attack was accepted\n' >&2
+    exit 1
+  fi
+  assert_external_unchanged
+}
+
+ln -s "$external" "$artifacts"
+assert_rejected
+rm "$artifacts"
+
+mkdir "$artifacts"
+ln -s "$external" "$artifacts/liquidity"
+assert_rejected
+rm "$artifacts/liquidity"
+
+mkdir "$artifacts/liquidity"
+ln -s "$external" "$artifacts/liquidity/evil-suite"
+assert_rejected
+rm "$artifacts/liquidity/evil-suite"
+
+mkdir "$artifacts/liquidity/evil-suite"
+ln -s "$external/outside.json" "$artifacts/liquidity/evil-suite/outside.json"
+assert_rejected
+rm -rf "$artifacts"
+
+output="$(bash "$writer" safe-suite diagnostics.json <"$fixture")"
+if mode="$(stat -f '%Lp' "$output" 2>/dev/null)"; then
+  :
+else
+  mode="$(stat -c '%a' "$output")"
+fi
+if [[ "$mode" != "600" ]]; then
+  printf 'expected artifact mode 600, got %s\n' "$mode" >&2
+  exit 1
+fi
+
+serialized="$(jq -c . "$output")"
+secrets=(
+  encoded%40user p%40ss query-token-value query-api-key-value query-key-value
+  query-secret-value query-password-value query-payment-secret query-preimage query-invoice
+  encoded%2Daccess%2Dvalue encoded%2Drefresh%2Dvalue encoded%2Dbearer%2Dvalue
+  encoded%2Dapi%2Dvalue access-token-value refresh-token-value bearer-value api-token-value
+  invoice-address-secret invoice-object-secret payment-secret-value payment-preimage-secret
+  private-key-value passphrase-value authorization-value auth-header-value api-key-value
+  header-secret standalone-bearer-secret basic-secret token-scheme-secret
+  standalone-basic-secret standalone-token-secret standalone-api-secret free-api-credential
+  double-quoted-bearer-secret double-quoted-basic-secret single-quoted-bearer-secret
+  single-quoted-token-secret
+  seed-value mnemonic-value suffix-secret-value
+)
+for secret in "${secrets[@]}"; do
+  if [[ "$serialized" == *"$secret"* ]]; then
+    printf 'leaked secret: %s\n' "$secret" >&2
+    exit 1
+  fi
+done
+if [[ "$serialized" != *"safe=visible"* ]]; then
+  printf 'safe URL query diagnostic was removed\n' >&2
+  exit 1
+fi
+if [[ "$serialized" != *"request failed before"* || "$serialized" != *"and after"* ]]; then
+  printf 'free-form URL context was removed\n' >&2
+  exit 1
+fi
+if ! jq -e '
+  .nested[0].message_one == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_two == "before Bearer [REDACTED] after" and
+  .nested[0].message_three == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_four == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_five == "before Basic [REDACTED] after" and
+  .nested[0].message_six == "before Token [REDACTED] after" and
+  .nested[0].message_seven == "before ApiKey [REDACTED] after" and
+  .nested[0].message_eight == "upstream X-API-Key: [REDACTED] rejected" and
+  .nested[0].message_nine == "before Bearer [REDACTED] after" and
+  .nested[0].message_ten == "upstream Authorization: [REDACTED] rejected" and
+  .nested[0].message_eleven == "before Bearer [REDACTED] after" and
+  .nested[0].message_twelve == "upstream Authorization: [REDACTED] rejected"
+' "$output" >/dev/null; then
+  printf 'free-form authorization credentials were not fully redacted\n' >&2
+  exit 1
+fi
+
+printf 'write-liquidity-diagnostics checks passed\n'

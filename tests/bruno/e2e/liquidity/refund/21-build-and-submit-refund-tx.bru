@@ -1,0 +1,76 @@
+meta {
+  name: build and submit the mature refund transaction
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_tip_block_number",
+    "params": []
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const { buildRefundTx, mineAndConfirmRefundTx } = require(
+    process.cwd() + "/scripts/refund-tx",
+  );
+
+  const ckbRpcUrl = bru.getEnvVar("CKB_RPC_URL");
+
+  // Build the exact runtime-shaped refund transaction: input since is the
+  // encoded quote maturity without any offset, the output returns the gross
+  // UDT amount to the client refund lock, and the witness uses the
+  // liquidity-lock refund marker. The liquidity-lock refund path needs no
+  // secp256k1 signature, so the sidecar response is final.
+  const built = await buildRefundTx({
+    mutatorUrl: bru.getEnvVar("CKB_MUTATOR_URL"),
+    request: {
+      kind: "refund",
+      lock_tx_hash: bru.getVar("LOCK_TX_HASH"),
+      lock_index: "0x" + BigInt(bru.getVar("LOCK_INDEX")).toString(16),
+      refund_after_lock_time: bru.getVar("QUOTE_REFUND_AFTER_LOCK_TIME"),
+      since_offset: 0,
+      refund_lock: bru.getVar("REFUND_LOCK"),
+      gross_amount: bru.getVar("QUOTE_GROSS_UDT"),
+      capacity_ckb: bru.getVar("QUOTE_CAPACITY_CKB"),
+      liquidity_lock_code_hash: bru.getEnvVar("LIQUIDITY_LOCK_CODE_HASH"),
+      liquidity_lock_hash_type: bru.getEnvVar("LIQUIDITY_LOCK_HASH_TYPE"),
+      udt_type_script: JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT")),
+    },
+  });
+  if (built.tx_hash === bru.getVar("PREMATURE_REFUND_TX_HASH")) {
+    throw new Error("mature refund tx hash must differ from the premature variant");
+  }
+
+  const sent = await rpc(ckbRpcUrl, "send_transaction", [built.tx, null]);
+  if (sent.result !== built.tx_hash) {
+    throw new Error(
+      `send_transaction must return the refund tx hash ${built.tx_hash}, got: ${JSON.stringify(sent.result)}`,
+    );
+  }
+
+  // Mine and wait (bounded) for the refund transaction to commit.
+  await mineAndConfirmRefundTx({ ckbRpcUrl, txHash: built.tx_hash });
+
+  bru.setVar("REFUND_TX_HASH", built.tx_hash);
+  console.log("refund transaction committed:", built.tx_hash);
+}

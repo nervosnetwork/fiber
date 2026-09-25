@@ -1,0 +1,95 @@
+meta {
+  name: assert payout broadcast record persisted before the stop
+  type: http
+  seq: 16
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // This request pins the exact durable state the provider restart recovers
+  // from: provider_accept_loop_out persists the payout broadcast record with
+  // its outpoint before returning, and that record (not a re-broadcast) is
+  // what the restarted process resumes from. The suite stops node2 right
+  // after this request with the payout deliberately still unconfirmed.
+  const decodeOutpoint = (hex) => {
+    if (typeof hex !== "string" || !hex.startsWith("0x") || hex.length !== 74) {
+      throw new Error(`outpoint must be 36 molecule bytes: ${hex}`);
+    }
+    const bytes = hex.slice(2).match(/.{2}/g).map((b) => parseInt(b, 16));
+    const index = bytes[32] | (bytes[33] << 8) | (bytes[34] << 16) | (bytes[35] << 24);
+    return {
+      txHash: "0x" + bytes.slice(0, 32).map((b) => b.toString(16).padStart(2, "0")).join(""),
+      index,
+    };
+  };
+
+  const transactions = res.body.result.transactions || [];
+  const payouts = transactions.filter((tx) => tx.role === "payout");
+  if (payouts.length !== 1) {
+    throw new Error(`provider must hold exactly one payout record, got: ${payouts.length}`);
+  }
+  const payout = payouts[0];
+  if (payout.status !== "broadcast") {
+    throw new Error(`provider payout record must still be broadcast before the stop, got: ${payout.status}`);
+  }
+  if (payout.tx_hash !== bru.getVar("PAYOUT_TX_HASH")) {
+    throw new Error(`provider payout tx_hash mismatch: ${payout.tx_hash}`);
+  }
+  const payoutOutpoint = decodeOutpoint(payout.outpoint);
+  if (payoutOutpoint.txHash !== bru.getVar("PAYOUT_TX_HASH")) {
+    throw new Error(`provider payout outpoint tx_hash mismatch: ${payout.outpoint}`);
+  }
+  if (BigInt(payoutOutpoint.index) !== BigInt(bru.getVar("PAYOUT_INDEX"))) {
+    throw new Error(`provider payout outpoint index mismatch: ${payout.outpoint}`);
+  }
+
+  // The client swap record must carry the same payment hash; it stays in
+  // payout_pending with the payout unconfirmed (no mining happens after the
+  // accept), which is what keeps the payment leg parked until phase 2.
+  const clientSwap = await rpc(bru.getEnvVar("NODE1_RPC_URL"), "get_swap", [
+    { swap_id: bru.getVar("QUOTE_ID") },
+  ]);
+  if (clientSwap.result.state !== "payout_pending") {
+    throw new Error(`client swap must stay payout_pending before the stop, got: ${clientSwap.result.state}`);
+  }
+  if (clientSwap.result.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`client swap payment_hash mismatch: ${clientSwap.result.payment_hash}`);
+  }
+
+  console.log(
+    "pre-stop persistence pinned: payout",
+    payout.status,
+    payout.tx_hash,
+    "client swap",
+    clientSwap.result.state,
+  );
+}

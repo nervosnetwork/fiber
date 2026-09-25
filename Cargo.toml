@@ -9,6 +9,7 @@ members = [
     "crates/fiber-types",
     "crates/fiber-json-types",
     "crates/fiber-cli",
+    "tests/deploy/udt-init",
 ]
 exclude = ["rpc-doc-gen"]
 resolver = "2"

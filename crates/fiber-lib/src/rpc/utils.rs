@@ -83,6 +83,8 @@ fn is_sensitive_rpc_param_key(key: &str) -> bool {
         || key.contains("preimage")
         || key.contains("settlement_key")
         || key == "local_key"
+        || key == "client_invoice"
+        || key == "invoice"
         || key.ends_with("_secret")
 }
 

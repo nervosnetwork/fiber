@@ -1,0 +1,52 @@
+meta {
+  name: node2 capture provider funding lock script
+  type: http
+  seq: 13
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "node_info",
+    "params": []
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { encodeMoleculeScript } = require(process.cwd() + "/scripts/molecule-script");
+
+  // The provider stamps its own default funding lock script into the quote as
+  // claimant_lock: it is the destination of the provider claim transaction
+  // that spends the loop-in lock cell after the payment settles.
+  const script = res.body.result.default_funding_lock_script;
+  if (!script || typeof script.code_hash !== "string" || script.code_hash.length !== 66) {
+    throw new Error(`node_info must expose a default_funding_lock_script: ${JSON.stringify(res.body.result)}`);
+  }
+  if (typeof script.args !== "string" || !script.args.startsWith("0x")) {
+    throw new Error(`default funding lock args must be hex: ${JSON.stringify(script)}`);
+  }
+
+  const providerLock = encodeMoleculeScript({
+    codeHash: script.code_hash,
+    hashType: script.hash_type,
+    args: script.args,
+  });
+  bru.setVar("PROVIDER_FUNDING_LOCK", providerLock);
+  console.log("provider funding lock:", providerLock);
+}
