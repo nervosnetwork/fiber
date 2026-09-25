@@ -244,6 +244,7 @@ pub mod feature_bits {
         BASIC_MPP, 3;
         TRAMPOLINE_ROUTING, 5;
         // more features, please note that base bit must be defined as increasing odd numbers
+        ONCHAIN_FULL_PAYMENT_HASH, 7;
     }
 }
 

@@ -2,12 +2,21 @@
 
 use crate::invoice::HashAlgorithm;
 use crate::schema_helpers::*;
-use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex};
+use crate::serde_utils::{EntityHex, Hash256, Privkey, Pubkey, SliceHex, U128Hex, U64Hex, U8Hex};
 use ckb_jsonrpc_types::Script;
 use ckb_types::packed::{Bytes, CellOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+
+/// Commitment-lock feature bits (0x0: Legacy; 0x1: full payment hash).
+#[serde_as]
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CommitmentContractFeatures(
+    #[serde_as(as = "U8Hex")]
+    #[schemars(schema_with = "schema_as_uint_hex")]
+    pub u8,
+);
 
 /// The id of a TLC, it can be either offered or received.
 #[serde_as]
@@ -107,6 +116,9 @@ pub struct CreateWatchChannelParams {
     pub remote_funding_pubkey: Pubkey,
     /// Settlement data
     pub settlement_data: SettlementData,
+    /// Commitment-lock feature bitmap as hex: "0x0" (Legacy) or "0x1" (full payment hash).
+    #[serde(default)]
+    pub commitment_contract_features: CommitmentContractFeatures,
 }
 
 /// Parameters for removing a watch channel.

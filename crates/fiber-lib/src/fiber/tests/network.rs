@@ -18,7 +18,8 @@ use crate::{
         graph::ChannelUpdateInfo,
         network::{
             select_connect_peer_address, AcceptChannelCommand, DebugEvent, FiberMessageWithTarget,
-            NetworkActorStateStore, OpenChannelCommand, PeerDisconnectReason, TestFiberMessageKind,
+            NetworkActorStateStore, OpenChannelCommand, OpenChannelWithExternalFundingCommand,
+            PeerDisconnectReason, TestFiberMessageKind,
         },
         payment::{SendPaymentCommand, SendPaymentDataExt},
         types::{
@@ -63,6 +64,175 @@ fn get_test_priv_key() -> Privkey {
 
 fn get_test_pub_key() -> Pubkey {
     get_test_priv_key().pubkey()
+}
+
+#[tokio::test]
+async fn test_reject_legacy_channel_open_without_full_hash_feature() {
+    let mut node_a = NetworkNode::new().await;
+    let mut legacy_peer = NetworkNode::new().await;
+    let mut features = legacy_peer.node_info().await.features;
+    features.unset_onchain_full_payment_hash_optional();
+    legacy_peer.update_node_features_and_wait(features).await;
+    node_a.connect_to(&mut legacy_peer).await;
+
+    let result = call!(node_a.network_actor, |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: legacy_peer.pubkey,
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_amount: 10_000_000_000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            reply,
+        ))
+    })
+    .expect("network actor alive");
+
+    assert!(result.is_err(), "new Legacy channel must be rejected");
+    assert_eq!(node_a.store.get_channel_open_records().len(), 0);
+}
+
+#[tokio::test]
+async fn test_reject_legacy_external_funding_channel_open() {
+    let mut node = NetworkNode::new().await;
+    let mut legacy_peer = NetworkNode::new().await;
+    let mut features = legacy_peer.node_info().await.features;
+    features.unset_onchain_full_payment_hash_optional();
+    legacy_peer.update_node_features_and_wait(features).await;
+    node.connect_to(&mut legacy_peer).await;
+
+    let result = call!(node.network_actor, |reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannelWithExternalFunding(
+            OpenChannelWithExternalFundingCommand {
+                pubkey: legacy_peer.pubkey,
+                funding_amount: 10_000_000_000,
+                public: false,
+                shutdown_script: ckb_types::packed::Script::default(),
+                funding_lock_script: ckb_types::packed::Script::default(),
+                funding_lock_script_cell_deps: vec![],
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+            reply,
+        ))
+    })
+    .expect("network actor alive");
+
+    assert!(
+        result.is_err(),
+        "external funding must not open a Legacy channel"
+    );
+    assert!(node.store.get_channel_open_records().is_empty());
+}
+
+#[tokio::test]
+async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
+    let mut node = NetworkNode::new().await;
+    let mut legacy_peer = NetworkNode::new().await;
+    let mut features = legacy_peer.node_info().await.features;
+    features.unset_onchain_full_payment_hash_optional();
+    legacy_peer.update_node_features_and_wait(features).await;
+    node.connect_to(&mut legacy_peer).await;
+
+    let privkey = gen_rand_fiber_private_key();
+    let nonce = SecNonce::build(privkey.as_ref()).build().public_nonce();
+    let open_channel = OpenChannel {
+        chain_hash: get_chain_hash(),
+        channel_id: gen_rand_sha256_hash(),
+        funding_udt_type_script: None,
+        funding_amount: 10_000_000_000,
+        shutdown_script: Default::default(),
+        reserved_ckb_amount: 10_000_000_000,
+        funding_fee_rate: DEFAULT_FEE_RATE,
+        commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+        commitment_delay_epoch: EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1)
+            .full_value(),
+        max_tlc_value_in_flight: 0,
+        max_tlc_number_in_flight: MAX_TLC_NUMBER_IN_FLIGHT,
+        channel_flags: ChannelFlags::empty(),
+        first_per_commitment_point: privkey.pubkey(),
+        second_per_commitment_point: privkey.pubkey(),
+        funding_pubkey: privkey.pubkey(),
+        tlc_basepoint: privkey.pubkey(),
+        next_commitment_nonce: nonce.clone(),
+        next_revocation_nonce: nonce,
+        channel_announcement_nonce: None,
+    };
+
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            legacy_peer.pubkey,
+            FiberMessage::ChannelInitialization(open_channel),
+            None,
+        )))
+        .expect("network actor alive");
+    node.expect_debug_event("ChannelPendingToBeRejected").await;
+    assert!(node.store.get_channel_open_records().is_empty());
+}
+
+#[tokio::test]
+async fn test_existing_channel_reestablishes_when_peer_drops_full_hash_feature() {
+    let (mut node, mut peer, channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, false)
+            .await;
+    assert_eq!(
+        node.get_channel_actor_state(channel_id)
+            .commitment_contract_features,
+        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+    );
+
+    let before_restart = node.send_payment_keysend(&peer, 1_000, true).await;
+    assert!(
+        before_restart.is_ok(),
+        "baseline payment: {before_restart:?}"
+    );
+
+    let mut features = peer.node_info().await.features;
+    features.unset_onchain_full_payment_hash_optional();
+    peer.update_node_features_and_wait(features).await;
+    node.restart().await;
+    node.connect_to(&mut peer).await;
+
+    for _ in 0..100 {
+        let state = node.get_channel_actor_state(channel_id);
+        if !state.reestablishing
+            && state.connectivity_state == fiber_types::ChannelConnectivityState::Online
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let state_after = node.get_channel_actor_state(channel_id);
+    assert_eq!(
+        state_after.commitment_contract_features,
+        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+    );
+    let payment = node.send_payment_keysend(&peer, 1_000, true).await;
+    assert!(
+        payment.is_ok(),
+        "existing channel payment: {payment:?}; state: {:?}; online: {:?}; reestablishing: {}",
+        state_after.state,
+        state_after.connectivity_state,
+        state_after.reestablishing
+    );
 }
 
 fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
@@ -1978,7 +2148,7 @@ async fn test_inbound_peer_with_only_closed_channels_consumes_no_channel_peer_bu
 async fn test_new_inbound_peer_can_open_channel_after_replacing_oldest_no_channel_peer() {
     init_tracing();
 
-    let funding_amount = 9_900_000_000u128;
+    let funding_amount = 10_000_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
 
     let mut target = NetworkNode::new_with_config(
@@ -2561,7 +2731,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
 async fn test_abort_funding_on_building_funding_tx() {
     init_tracing();
 
-    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_a = 10_000_000_000u128;
     let funding_amount_b: u128 = u64::MAX as u128 + 1 - funding_amount_a;
     let mut node_a = NetworkNode::new().await;
     let mut node_b = NetworkNode::new().await;
@@ -2681,7 +2851,7 @@ impl MockChainActorMiddleware for SignFundingTxFailureMockMiddleware {
 
 #[tokio::test]
 async fn test_abort_funding_on_committing_funding_tx_on_chain() {
-    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_a = 10_000_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     let middleware = Box::new(CkbTxFailureMockMiddleware);
     let mut node_a = NetworkNode::new_with_config(
@@ -2771,7 +2941,7 @@ async fn test_abort_funding_on_committing_funding_tx_on_chain() {
 
 #[tokio::test]
 async fn test_abort_funding_on_sign_funding_tx_failure() {
-    let funding_amount_a = 9_900_000_000u128;
+    let funding_amount_a = 10_000_000_000u128;
     let funding_amount_b: u128 = funding_amount_a;
     // Put middleware on both nodes since either one might trigger signing
     let middleware = Box::new(SignFundingTxFailureMockMiddleware);
@@ -2922,7 +3092,7 @@ async fn test_abort_funding_on_sign_funding_tx_failure() {
 
 #[tokio::test]
 async fn test_to_be_accepted_channels_number_limit() {
-    let funding_amount = 9_900_000_000u128;
+    let funding_amount = 10_000_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
@@ -3195,7 +3365,7 @@ async fn test_to_be_accepted_channels_bytes_limit() {
         single_open_channel_size
     );
 
-    let funding_amount = 9_900_000_000u128;
+    let funding_amount = 10_000_000_000u128;
     let open_channel_auto_accept_min_ckb_funding_amount = Some(funding_amount as u64 + 1);
     let mut node = NetworkNode::new_with_config(
         NetworkNodeConfigBuilder::new()
