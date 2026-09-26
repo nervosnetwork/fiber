@@ -1,0 +1,63 @@
+meta {
+  name: wait channel ready on both nodes after the restart
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [{}]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  const { waitChannelReady } = require(process.cwd() + "/scripts/wait-channel-ready");
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // The channel id comes from the supervisor handoff; when running the phase
+  // by hand, fall back to the unique ChannelReady channel on the client.
+  if (!bru.getVar("CHANNEL_ID")) {
+    const injected = bru.getEnvVar("RESTART_CHANNEL_ID");
+    if (injected) {
+      bru.setVar("CHANNEL_ID", injected);
+    } else {
+      const result = await rpc(bru.getEnvVar("NODE1_RPC_URL"), "list_channels", [{}]);
+      const ready = (result.result.channels || []).filter(
+        (channel) => channel.state && channel.state.state_name === "ChannelReady",
+      );
+      if (ready.length !== 1) {
+        throw new Error(`expected exactly one ChannelReady channel on the client, found ${ready.length}`);
+      }
+      bru.setVar("CHANNEL_ID", ready[0].channel_id);
+    }
+  }
+
+  // Re-establishment must complete on both sides before the payment leg can
+  // run against the restarted provider.
+  await waitChannelReady({
+    bru,
+    rpcUrls: ["NODE1_RPC_URL", "NODE2_RPC_URL"],
+    channelIdVar: "CHANNEL_ID",
+    maxAttempts: 120,
+    intervalMs: 1000,
+  });
+}

@@ -1,4 +1,4 @@
-#[cfg(not(any(feature = "bench")))]
+#[cfg(all(not(feature = "bench"), not(target_arch = "wasm32")))]
 mod actor;
 #[cfg(not(any(feature = "bench")))]
 mod config;
@@ -8,6 +8,8 @@ mod error;
 mod funding_limits_tests;
 #[cfg(test)]
 mod funding_tx_tests;
+#[cfg(test)]
+mod liquidity_lock_tests;
 #[cfg(test)]
 mod tx_tracing_actor_tests;
 

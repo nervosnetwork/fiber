@@ -1,0 +1,61 @@
+meta {
+  name: node2 list liquidity assets
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_assets",
+    "params": []
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const expectedScript = JSON.parse(bru.getEnvVar("SIMPLE_UDT_TYPE_SCRIPT"));
+
+  const expectedAssetId = bru.getEnvVar("LIQUIDITY_SIMPLE_UDT_ASSET_ID");
+  const assets = res.body.result.assets || [];
+  const udtAsset = assets.find((asset) => asset.asset_id === expectedAssetId);
+  if (!udtAsset) {
+    throw new Error(`udt asset ${expectedAssetId} missing from provider registry: ${JSON.stringify(assets)}`);
+  }
+  if (udtAsset.enabled !== true) {
+    throw new Error(`udt asset must be enabled: ${JSON.stringify(udtAsset)}`);
+  }
+  if (udtAsset.kind !== "udt") {
+    throw new Error(`unexpected udt asset kind: ${JSON.stringify(udtAsset)}`);
+  }
+  if (!udtAsset.udt_type_script
+    || udtAsset.udt_type_script.code_hash !== expectedScript.code_hash
+    || udtAsset.udt_type_script.hash_type !== expectedScript.hash_type
+    || udtAsset.udt_type_script.args !== expectedScript.args) {
+    throw new Error(`udt asset must carry the generated simple UDT type script: ${JSON.stringify(udtAsset.udt_type_script)}`);
+  }
+  if (udtAsset.max_amount !== "0xf4240" || udtAsset.available_capacity !== "0xf4240") {
+    throw new Error(`unexpected udt asset capacity: ${JSON.stringify(udtAsset)}`);
+  }
+
+  // Propagate the registry fee parameters so the quote request derives its
+  // expected provider fee from the registry response instead of duplicated
+  // constants.
+  bru.setVar("REGISTRY_BASE_FEE", udtAsset.base_fee);
+  bru.setVar("REGISTRY_FEE_PPM", udtAsset.proportional_fee_ppm);
+}

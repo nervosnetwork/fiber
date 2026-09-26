@@ -1,0 +1,46 @@
+meta {
+  name: node2 provider accept loop in rejected for imported quote while disabled
+  type: http
+  seq: 25
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "provider_accept_loop_in",
+    "params": [
+      {
+        "quote_id": "{{QUOTE_ID}}",
+        "lock_tx_hash": "{{LOCK_TX_HASH}}",
+        "lock_output_index": {{LOCK_INDEX}}
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  // F2 failure side: the accept targets the actually imported quote of this
+  // suite (with its confirmed, fully valid lock cell) and must still be
+  // rejected with the mode error before any quote lookup or cell validation.
+  // Request 32 repeats the identical acceptance after re-enabling.
+  const message = String(res.body.error && res.body.error.message);
+  if (!message.includes("provider mode is disabled")) {
+    throw new Error(`provider_accept_loop_in must be rejected for the imported quote while disabled, got: ${message}`);
+  }
+}

@@ -1,0 +1,166 @@
+meta {
+  name: liquidity helper redaction and diagnostics bounds
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "local_node_info",
+    "params": []
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  const {
+    collectLiquidityDiagnostics,
+    redact,
+  } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const fixture = require(process.cwd() + "/scripts/fixtures/sensitive-diagnostics.json");
+  const secretValues = [
+    "encoded%40user",
+    "p%40ss",
+    "query-token-value",
+    "query-api-key-value",
+    "query-key-value",
+    "query-secret-value",
+    "query-password-value",
+    "query-payment-secret",
+    "query-preimage",
+    "query-invoice",
+    "encoded%2Daccess%2Dvalue",
+    "encoded%2Drefresh%2Dvalue",
+    "encoded%2Dbearer%2Dvalue",
+    "encoded%2Dapi%2Dvalue",
+    "invoice-address-secret",
+    "invoice-object-secret",
+    "payment-secret-value",
+    "payment-preimage-secret",
+    "private-key-value",
+    "passphrase-value",
+    "authorization-value",
+    "auth-header-value",
+    "access-token-value",
+    "refresh-token-value",
+    "bearer-value",
+    "api-token-value",
+    "api-key-value",
+    "header-secret",
+    "standalone-bearer-secret",
+    "basic-secret",
+    "token-scheme-secret",
+    "standalone-basic-secret",
+    "standalone-token-secret",
+    "standalone-api-secret",
+    "free-api-credential",
+    "double-quoted-bearer-secret",
+    "double-quoted-basic-secret",
+    "single-quoted-bearer-secret",
+    "single-quoted-token-secret",
+    "seed-value",
+    "mnemonic-value",
+    "suffix-secret-value",
+  ];
+
+  const redacted = redact(fixture);
+  const redactedFixture = JSON.stringify(redacted);
+  const diagnostics = await collectLiquidityDiagnostics({
+    nodes: [
+      {
+        name: "provider",
+        rpcUrl: "http://127.0.0.1:21714",
+        swapId: "0x01",
+        paymentHash: "0x02",
+      },
+      {
+        name: "client",
+        rpcUrl: "http://127.0.0.1:21715",
+        swapId: "0x03",
+        paymentHash: "0x04",
+      },
+    ],
+    listParams: { state: "Pending", limit: "0xffff" },
+  });
+  const serializedDiagnostics = JSON.stringify(diagnostics);
+  const providerCalls = diagnostics.nodes.provider.calls;
+
+  bru.setVar(
+    "LIQUIDITY_HELPER_REDACTION_PASSED",
+    secretValues.every((secret) => !redactedFixture.includes(secret)
+      && !serializedDiagnostics.includes(secret)),
+  );
+  bru.setVar(
+    "LIQUIDITY_HELPER_SAFE_URL_PRESERVED",
+    redactedFixture.includes("request failed before")
+      && redactedFixture.includes("safe=visible")
+      && redactedFixture.includes("and after"),
+  );
+  const messages = redacted.nested[0];
+  bru.setVar(
+    "LIQUIDITY_HELPER_AUTHORIZATION_REDACTION_PASSED",
+    messages.message_one === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_two === "before Bearer [REDACTED] after"
+      && messages.message_three === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_four === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_five === "before Basic [REDACTED] after"
+      && messages.message_six === "before Token [REDACTED] after"
+      && messages.message_seven === "before ApiKey [REDACTED] after"
+      && messages.message_eight === "upstream X-API-Key: [REDACTED] rejected"
+      && messages.message_nine === "before Bearer [REDACTED] after"
+      && messages.message_ten === "upstream Authorization: [REDACTED] rejected"
+      && messages.message_eleven === "before Bearer [REDACTED] after"
+      && messages.message_twelve === "upstream Authorization: [REDACTED] rejected",
+  );
+  bru.setVar(
+    "LIQUIDITY_HELPER_LIST_LIMIT_PASSED",
+    providerCalls.list_swaps.result.received_params[0].limit === "0x64",
+  );
+  bru.setVar(
+    "LIQUIDITY_HELPER_LIST_CAP_PASSED",
+    providerCalls.list_swaps.result.swaps.length === 100
+      && providerCalls.list_swaps.result.truncated === true
+      && providerCalls.list_liquidity_chain_transactions.result.transactions.length === 100
+      && providerCalls.list_liquidity_chain_transactions.result.truncated === true,
+  );
+}
+
+tests {
+  test("helper recursively redacts DTO and URL credentials", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_REDACTION_PASSED")).to.equal(true);
+  });
+
+  test("helper preserves non-secret free-form URL diagnostics", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_SAFE_URL_PRESERVED")).to.equal(true);
+  });
+
+  test("helper redacts complete free-form authorization credentials", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_AUTHORIZATION_REDACTION_PASSED")).to.equal(true);
+  });
+
+  test("helper sends the bounded hexadecimal list limit", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_LIST_LIMIT_PASSED")).to.equal(true);
+  });
+
+  test("helper caps serialized list diagnostics", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_LIST_CAP_PASSED")).to.equal(true);
+  });
+}

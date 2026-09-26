@@ -30,4 +30,5 @@ crates/fiber-lib/fuzz/corpus/
 crash-*
 target
 /tests/perf/artifacts/
+/tests/artifacts/
 .tool-versions

@@ -65,7 +65,7 @@ pub mod native {
     const DEFAULT_CCH_DIR_NAME: &str = "cch";
     use crate::config::SerializedConfig;
     use crate::config::Service;
-    use std::{fs::File, io::BufReader, path::PathBuf, process::exit, str::FromStr};
+    use std::{fs::File, io::BufReader, path::PathBuf, str::FromStr};
 
     use clap::CommandFactory;
     use clap_serde_derive::{
@@ -164,8 +164,25 @@ pub mod native {
     impl Config {
         pub fn parse() -> Self {
             // Parse whole args with clap
-            let mut args = Args::parse();
+            Self::parse_args(Args::parse()).unwrap_or_else(|err| {
+                error!("{err}");
+                print_help_and_exit(1);
+                unreachable!()
+            })
+        }
 
+        /// Parse a configuration file with the same defaults and merging as the native binary.
+        pub fn parse_from_file(
+            config_file: impl Into<PathBuf>,
+            base_dir: impl Into<PathBuf>,
+        ) -> Result<Self, String> {
+            let mut args = Args::try_parse_from(["fnn"]).map_err(|err| err.to_string())?;
+            args.config_file = Some(config_file.into());
+            args.base_dir = Some(base_dir.into());
+            Self::parse_args(args)
+        }
+
+        fn parse_args(mut args: Args) -> Result<Self, String> {
             // Base directory for all things to be stored to disk
             let base_dir = args.base_dir.clone().unwrap_or(get_default_base_dir());
             let check_validate = args.check_validate;
@@ -180,22 +197,11 @@ pub mod native {
                 .or(args.base_dir.map(|x| x.join(DEFAULT_CONFIG_FILE_NAME)))
                 .unwrap_or(get_default_config_file());
 
-            let config_from_file = match File::open(config_file) {
-                Ok(file) => {
-                    let reader = BufReader::new(file);
-                    match serde_yaml::from_reader::<_, SerializedConfig>(reader) {
-                        Ok(config) => config,
-                        Err(err) => {
-                            error!("Failed to parse config file: {}", err);
-                            exit(1);
-                        }
-                    }
-                }
-                Err(err) => {
-                    error!("Failed to read config file: {}", err);
-                    exit(1);
-                }
-            };
+            let file = File::open(config_file)
+                .map_err(|err| format!("Failed to read config file: {err}"))?;
+            let reader = BufReader::new(file);
+            let config_from_file = serde_yaml::from_reader::<_, SerializedConfig>(reader)
+                .map_err(|err| format!("Failed to parse config file: {err}"))?;
 
             // Services to run can be passed from
             // 1. command line
@@ -209,8 +215,7 @@ pub mod native {
             };
 
             if services.is_empty() && !check_validate {
-                error!("Must run at least one service. Specifying services to run by command line or config file.");
-                print_help_and_exit(1);
+                return Err("Must run at least one service. Specifying services to run by command line or config file.".to_string());
             };
 
             // Set default fiber/ckb base directory. These may be overridden by values explicitly set by the user.
@@ -250,7 +255,7 @@ pub mod native {
             let rpc = services.contains(&Service::RPC).then_some(rpc);
             let ckb = services.contains(&Service::CkbChain).then_some(ckb);
 
-            Self {
+            Ok(Self {
                 fiber,
                 disabled_fiber,
                 cch,
@@ -259,7 +264,7 @@ pub mod native {
                 base_dir,
                 check_validate,
                 restore,
-            }
+            })
         }
     }
 }

@@ -1,0 +1,76 @@
+meta {
+  name: liquidity helper transient HTTP timeout diagnostics
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "local_node_info",
+    "params": []
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  const { waitLiquidityState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+  const closedRpcUrl = "http://127.0.0.1:1";
+  const expectedState = "unreachable";
+  let timeoutError;
+
+  try {
+    await waitLiquidityState({
+      rpcUrl: closedRpcUrl,
+      method: "get_swap",
+      params: [{ swap_id: "0x00" }],
+      expectedState,
+      maxAttempts: 3,
+      intervalMs: 1,
+      deadlineMs: 1000,
+    });
+  } catch (error) {
+    timeoutError = error;
+  }
+
+  if (!timeoutError) {
+    throw new Error("expected closed-port polling to time out");
+  }
+  const message = String(timeoutError.message);
+  const requiredDetails = [
+    closedRpcUrl,
+    "get_swap",
+    expectedState,
+    "attempts=3",
+    "last_error=",
+  ];
+  for (const detail of requiredDetails) {
+    if (!message.includes(detail)) {
+      throw new Error(`transient timeout diagnostic missing ${detail}: ${message}`);
+    }
+  }
+  bru.setVar("LIQUIDITY_HELPER_HTTP_TIMEOUT_DIAGNOSTICS", true);
+}
+
+tests {
+  test("helper bounds transient HTTP retries with last-error diagnostics", function() {
+    expect(bru.getVar("LIQUIDITY_HELPER_HTTP_TIMEOUT_DIAGNOSTICS")).to.equal(true);
+  });
+}

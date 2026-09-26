@@ -1,0 +1,61 @@
+meta {
+  name: assert invoice open and no provider payment before lock
+  type: http
+  seq: 18
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // The client invoice is held by node1 and must still be open before the
+  // on-chain lock is funded and confirmed.
+  const result = res.body.result;
+  if (!result || !result.invoice) {
+    throw new Error(`client invoice for ${bru.getVar("PAYMENT_HASH")} not found: ${JSON.stringify(res.body)}`);
+  }
+  if (result.status !== "Open") {
+    throw new Error(`client invoice must be Open before the loop in lock confirms, got: ${result.status}`);
+  }
+
+  // The provider (node2) is the payer of the client invoice; before the lock
+  // is confirmed and accepted it must not hold any payment record yet.
+  const paymentHash = bru.getVar("PAYMENT_HASH");
+  const listResult = await rpc(
+    bru.getEnvVar("NODE2_RPC_URL"),
+    "list_payments",
+    [{ limit: "0x190" }],
+  );
+  const payments = (listResult.result && listResult.result.payments) || [];
+  if (payments.some((payment) => payment.payment_hash === paymentHash)) {
+    throw new Error(`provider must not hold a payment record before the lock confirms: ${JSON.stringify(payments.filter((payment) => payment.payment_hash === paymentHash))}`);
+  }
+  console.log("pre-lock invariants hold: invoice Open, provider has no payment record");
+}

@@ -1,0 +1,76 @@
+meta {
+  name: wait for swap success on both nodes with the same payout hash
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_swap",
+    "params": [
+      {
+        "swap_id": "{{SWAP_ID}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  const { waitSwapState } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  const options = {
+    maxAttempts: 240,
+    intervalMs: 1000,
+    deadlineMs: 240000,
+  };
+
+  const client = await waitSwapState({
+    ...options,
+    rpcUrl: bru.getEnvVar("NODE1_RPC_URL"),
+    swapId: bru.getVar("SWAP_ID"),
+    expectedState: "success",
+  });
+  const provider = await waitSwapState({
+    ...options,
+    rpcUrl: bru.getEnvVar("NODE2_RPC_URL"),
+    swapId: bru.getVar("SWAP_ID"),
+    expectedState: "success",
+  });
+
+  // Core restart-recovery requirement: both sides terminate in Success for
+  // the same payment hash that was captured before the provider stop.
+  const injectedHash = bru.getEnvVar("RESTART_PAYMENT_HASH");
+  for (const [node, record] of [["client", client.result], ["provider", provider.result]]) {
+    if (record.swap_kind !== "loop_out") {
+      throw new Error(`${node} swap_kind must be loop_out: ${JSON.stringify(record)}`);
+    }
+    if (record.asset_id !== bru.getEnvVar("LIQUIDITY_CKB_ASSET_ID")) {
+      throw new Error(`${node} swap asset_id mismatch: ${record.asset_id}`);
+    }
+    if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+      throw new Error(`${node} swap payment_hash mismatch: ${record.payment_hash}`);
+    }
+    if (injectedHash && record.payment_hash !== injectedHash) {
+      throw new Error(`${node} payment_hash must match the phase-1 handoff: ${record.payment_hash} != ${injectedHash}`);
+    }
+  }
+  if (client.result.payment_hash !== provider.result.payment_hash) {
+    throw new Error(
+      `client and provider payment hashes must be identical: ${client.result.payment_hash} != ${provider.result.payment_hash}`,
+    );
+  }
+  console.log("both swaps reached success with payment hash", client.result.payment_hash);
+}

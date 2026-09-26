@@ -1,0 +1,39 @@
+meta {
+  name: reconnect node1 to the restarted node2
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "connect_peer",
+    "params": [
+      {
+        "address": "{{NODE2_ADDR}}"
+      }
+    ]
+  }
+}
+
+script:post-response {
+  if (res.body.error && !String(res.body.error.message).includes("Peer already connected")) {
+    throw new Error(`connect_peer failed: ${res.body.error.message}`);
+  }
+
+  // Dialing a peer is async in tentacle. Sleep for some time to make sure
+  // we're connected to the peer.
+  await new Promise((r) => setTimeout(r, 4000));
+}

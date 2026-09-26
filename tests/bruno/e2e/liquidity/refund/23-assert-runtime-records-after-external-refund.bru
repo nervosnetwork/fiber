@@ -1,0 +1,78 @@
+meta {
+  name: assert runtime records after the external refund
+  type: http
+  seq: 23
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_liquidity_chain_transactions",
+    "params": [
+      {
+        "swap_id": "{{QUOTE_ID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const { rpc } = require(process.cwd() + "/scripts/wait-liquidity-state");
+
+  // M0 refund semantics (documented in the suite README): the client loop-in
+  // swap stays in OnchainLocked because the runtime never transitions a swap
+  // into RefundPending on its own - the recovery rebroadcast path
+  // (resume_non_terminal -> resume_refund_pending_swap) only fires for swaps
+  // already persisted as RefundPending when the actor starts. This request
+  // pins the observable record surface the runtime exposes after an external
+  // refund settled on chain: the swap record stays reachable and consistent,
+  // the lock transaction record stays confirmed, and no refund record exists
+  // because the runtime did not build one.
+  const swap = await rpc(bru.getEnvVar("NODE1_RPC_URL"), "get_swap", [
+    { swap_id: bru.getVar("QUOTE_ID") },
+  ]);
+  const record = swap.result;
+  if (!record) {
+    throw new Error(`swap record must stay reachable after the refund: ${JSON.stringify(swap)}`);
+  }
+  if (record.state !== "onchain_locked") {
+    throw new Error(
+      `M0 client loop-in swap stays onchain_locked after an external refund, got: ${record.state}`,
+    );
+  }
+  if (record.payment_hash !== bru.getVar("PAYMENT_HASH")) {
+    throw new Error(`swap payment_hash must be unchanged: ${record.payment_hash}`);
+  }
+
+  const lock = (res.body.result.transactions || []).find((tx) => tx.role === "loop_in_lock");
+  if (!lock || lock.status !== "confirmed") {
+    throw new Error(`loop in lock record must stay confirmed: ${JSON.stringify(lock)}`);
+  }
+  const refundRecord = (res.body.result.transactions || []).find((tx) => tx.role === "refund");
+  if (refundRecord) {
+    throw new Error(
+      `M0 runtime must not persist a refund record for a swap it never marked refund_pending: ${JSON.stringify(refundRecord)}`,
+    );
+  }
+  console.log(
+    "runtime records after external refund: swap", record.state,
+    "lock", lock.status,
+    "refund records: none (M0 semantics)",
+  );
+}
