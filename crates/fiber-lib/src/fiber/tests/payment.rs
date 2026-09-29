@@ -705,6 +705,82 @@ async fn test_send_payment_custom_records_with_limit_error() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_router_custom_records() {
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .expect("build router")
+        .router_hops;
+
+    let data: HashMap<_, _> = vec![
+        (1, "hello".to_string().into_bytes()),
+        (2, "world".to_string().into_bytes()),
+    ]
+    .into_iter()
+    .collect();
+    let custom_records = PaymentCustomRecords { data };
+    let payment_hash = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.clone(),
+            keysend: Some(true),
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment with router")
+        .payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+
+    // The records must reach the final hop, not just be accepted by the command.
+    let got_custom_records = node_2
+        .get_payment_custom_records(&payment_hash)
+        .expect("custom records should be delivered to the final hop");
+    assert_eq!(got_custom_records, custom_records);
+
+    // Router payments are subject to the same size limit as `send_payment`.
+    let long_value = "a".repeat(MAX_CUSTOM_RECORDS_SIZE + 1);
+    let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
+    let err = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router,
+            keysend: Some(true),
+            custom_records: Some(PaymentCustomRecords { data }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("oversized custom records should be rejected");
+    assert!(
+        err.contains("custom_records encoded size"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
 async fn test_receive_payment_rejects_oversized_custom_records() {
     init_tracing();
 
