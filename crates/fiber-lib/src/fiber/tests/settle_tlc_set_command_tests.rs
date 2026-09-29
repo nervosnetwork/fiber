@@ -6,7 +6,9 @@ use crate::fiber::channel::{
 use crate::fiber::onchain_tlc_reconcile::{
     LegacyOnChainTlcSettlement, OnChainTlcSettlement, StoredOnChainTlcSettlement,
 };
-use crate::fiber::settle_tlc_set_command::{SettleTlcSetCommand, TlcSettlement};
+use crate::fiber::settle_tlc_set_command::{
+    SettleOnChainFulfilledInvoiceCommand, SettleTlcSetCommand, TlcSettlement,
+};
 use crate::fiber::types::{Hash256, HoldTlc, Pubkey, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceError};
@@ -22,7 +24,7 @@ use fiber_types::{
     TlcInfo, TlcState, TlcStatus,
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
-use fiber_types::{HashAlgorithm, TlcErr, TlcErrorCode};
+use fiber_types::{HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrorCode};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -520,6 +522,75 @@ fn test_preimage_cleanup_ignores_stale_current_channel_state() {
     assert!(
         !has_pending_tlc_for_payment_hash(&store, &current_state, payment_hash),
         "stale persisted state for the channel currently applying removal must not keep preimage"
+    );
+}
+
+#[test]
+fn test_invoice_settlement_skips_pending_forwarded_tlcs() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let waiting_channel_id = gen_rand_sha256_hash();
+    let forwarded_channel_id = gen_rand_sha256_hash();
+    let mut waiting =
+        create_test_channel_state_with_tlc(waiting_channel_id, 0, 1000, payment_hash, None);
+    waiting
+        .waiting_forward_tlc_tasks
+        .insert(TLCId::Received(0), TEST_SHARED_SECRET);
+    let mut forwarded =
+        create_test_channel_state_with_tlc(forwarded_channel_id, 0, 1000, payment_hash, None);
+    forwarded.tlc_state.received_tlcs.tlcs[0].forwarding_tlc = Some((gen_rand_sha256_hash(), 0));
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Open,
+        )
+        .with_preimage(payment_hash, preimage)
+        .with_channel_state(waiting)
+        .with_channel_state(forwarded);
+
+    let settlements = SettleTlcSetCommand::new(
+        payment_hash,
+        vec![(waiting_channel_id, 0), (forwarded_channel_id, 0)],
+        &store,
+    )
+    .run();
+
+    assert!(settlements.is_empty());
+    assert_eq!(
+        store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+}
+
+#[test]
+fn test_onchain_forwarded_tlc_does_not_pay_local_invoice() {
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::CkbHash.hash(preimage).into();
+    let channel_id = gen_rand_sha256_hash();
+    let mut state = create_test_channel_state_with_tlc(channel_id, 0, 1000, payment_hash, None);
+    let tlc = &mut state.tlc_state.received_tlcs.tlcs[0];
+    tlc.forwarding_tlc = Some((gen_rand_sha256_hash(), 0));
+    tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: preimage,
+    }));
+    let store = MockStore::new()
+        .with_invoice(
+            create_test_invoice(payment_hash, Some(1000), false),
+            CkbInvoiceStatus::Open,
+        )
+        .with_channel_state(state)
+        .with_onchain_preimage(
+            channel_id,
+            TLCId::Received(0),
+            payment_hash,
+            HashAlgorithm::CkbHash,
+            preimage,
+        );
+
+    assert!(!SettleOnChainFulfilledInvoiceCommand::new(payment_hash, &store).run());
+    assert_eq!(
+        store.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
     );
 }
 

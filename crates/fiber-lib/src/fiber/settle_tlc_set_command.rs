@@ -410,7 +410,13 @@ fn collect_onchain_fulfilled_received_tlcs(
                 .tlc_state
                 .received_tlcs
                 .tlcs
-                .clone()
+                .iter()
+                .filter(|tlc| {
+                    tlc.forwarding_tlc.is_none()
+                        && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
                 .into_iter()
                 .map(move |tlc| (channel_id, tlc))
         })
@@ -436,6 +442,7 @@ fn make_sttlement_context<S: ChannelActorStateStore>(
     let tlc_id = TLCId::Received(tlc_id);
     state
         .get_received_tlc(tlc_id)
+        .filter(|tlc_info| state.can_auto_fulfill_received_tlc(tlc_info))
         .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
 }
 
