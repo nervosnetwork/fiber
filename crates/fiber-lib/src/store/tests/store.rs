@@ -141,6 +141,46 @@ fn test_store_invoice() {
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_invoice_preimage_origin_is_persistent() {
+    let (store, dir) = generate_store();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .build()
+        .expect("build regular invoice");
+    let payment_hash = *invoice.payment_hash();
+    store
+        .insert_invoice(invoice, Some(preimage))
+        .expect("insert regular invoice");
+    assert!(store.has_invoice_preimage(&payment_hash));
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1000))
+        .payment_hash(ckb_hash::blake2b_256(hold_preimage).into())
+        .build()
+        .expect("build hold invoice");
+    let hold_hash = *hold_invoice.payment_hash();
+    store
+        .insert_invoice(hold_invoice, None)
+        .expect("insert hold invoice");
+    store.insert_preimage(hold_hash, hold_preimage);
+    assert!(!store.has_invoice_preimage(&hold_hash));
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        drop(store);
+        let reopened = open_store(dir.as_ref()).expect("reopen store");
+        assert!(reopened.has_invoice_preimage(&payment_hash));
+        assert!(!reopened.has_invoice_preimage(&hold_hash));
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = dir;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_store_get_broadcast_messages_iter() {
     let (store, _dir) = generate_store();
     let timestamp = now_timestamp_as_millis_u64();

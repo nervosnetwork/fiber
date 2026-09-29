@@ -1936,7 +1936,12 @@ where
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            if !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash) {
+            let retain_invoice_preimage = self.store.has_invoice_preimage(&tlc_info.payment_hash)
+                && self.store.get_invoice_status(&tlc_info.payment_hash)
+                    == Some(CkbInvoiceStatus::Open);
+            if !retain_invoice_preimage
+                && !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash)
+            {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
