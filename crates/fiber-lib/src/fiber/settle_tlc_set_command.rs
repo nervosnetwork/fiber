@@ -406,18 +406,17 @@ fn collect_onchain_fulfilled_received_tlcs(
         .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
         .flat_map(|state| {
             let channel_id = state.get_id();
+            let waiting_forward_tlc_tasks = state.core.waiting_forward_tlc_tasks;
             state
+                .core
                 .tlc_state
                 .received_tlcs
                 .tlcs
-                .iter()
-                .filter(|tlc| {
-                    tlc.forwarding_tlc.is_none()
-                        && !state.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
                 .into_iter()
+                .filter(move |tlc| {
+                    tlc.forwarding_tlc.is_none()
+                        && !waiting_forward_tlc_tasks.contains_key(&tlc.tlc_id)
+                })
                 .map(move |tlc| (channel_id, tlc))
         })
         .filter_map(|(channel_id, tlc)| {
