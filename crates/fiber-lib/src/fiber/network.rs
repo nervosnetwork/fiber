@@ -4688,6 +4688,18 @@ where
                         state.get_public_key(),
                     ));
                 }
+                // Enforce the same hash-algorithm invariant that the outer onion
+                // path enforces at the channel boundary.
+                if prev_tlc_info.hash_algorithm != hash_algorithm {
+                    error!(
+                        "Trampoline forwarding rejected: inner hash_algorithm {:?} does not match upstream TLC hash_algorithm {:?}",
+                        hash_algorithm, prev_tlc_info.hash_algorithm
+                    );
+                    return Err(TlcErr::new_node_fail(
+                        TlcErrorCode::InvalidOnionPayload,
+                        state.get_public_key(),
+                    ));
+                }
 
                 let max_outgoing_tlc_expiry = prev_tlc_info
                     .expiry
