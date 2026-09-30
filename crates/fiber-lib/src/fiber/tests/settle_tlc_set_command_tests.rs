@@ -456,6 +456,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
+        revocation_nonce_unbalanced_since: None,
         reestablish_started_at: None,
         network: None,
         scheduled_channel_update_handle: None,

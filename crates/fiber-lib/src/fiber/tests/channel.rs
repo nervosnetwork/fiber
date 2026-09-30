@@ -8,7 +8,7 @@ use crate::fiber::channel::{
     ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    XUDT_COMPATIBLE_WITNESS,
+    PEER_CHANNEL_RESPONSE_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -10105,6 +10105,158 @@ async fn test_payments_finish_after_lost_commitment_and_two_rapid_reconnects() {
     }
 }
 
+/// Reaches the #1584 revocation-nonce stall with the schedule of
+/// `test_payments_finish_after_lost_commitment_and_two_rapid_reconnects` (a lost
+/// CommitmentSigned, then two rapid reconnects). Afterwards neither side can add or
+/// remove TLCs and no peer message will rebalance the nonces (#1561), so the channel
+/// must be force-closed once the peer response timeout passes instead of staying
+/// wedged in ChannelReady.
+#[tokio::test]
+async fn test_revocation_nonce_stall_is_force_closed_after_peer_response_timeout() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
+
+    node_a
+        .hold_next_fiber_messages(
+            node_b.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    for index in 0..5 {
+        node_a
+            .send_payment_keysend(&node_b, 100_000_000, false)
+            .await
+            .unwrap_or_else(|err| panic!("start keysend payment {index}: {err}"));
+    }
+    node_a.wait_for_held_fiber_messages(1).await;
+
+    disconnect_peers_and_wait_for_channel_offline(
+        &mut node_a,
+        &mut node_b,
+        channel_id,
+        "lost CommitmentSigned disconnect",
+    )
+    .await;
+    let lost_messages = take_held_fiber_messages_bounded(&node_a, "lost CommitmentSigned").await;
+    assert_eq!(lost_messages.len(), 1);
+
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            let state_a = node_a.get_channel_actor_state(channel_id);
+            let state_b = node_b.get_channel_actor_state(channel_id);
+            if !state_a.reestablishing && !state_b.reestablishing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first reestablishment must complete");
+
+    disconnect_peers_and_wait_for_channel_offline(
+        &mut node_a,
+        &mut node_b,
+        channel_id,
+        "second rapid disconnect",
+    )
+    .await;
+    node_a.connect_to(&mut node_b).await;
+
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT * 3);
+    loop {
+        let state_a = node_a.get_channel_actor_state(channel_id);
+        let state_b = node_b.get_channel_actor_state(channel_id);
+        if state_a.state != ChannelState::ChannelReady
+            || state_b.state != ChannelState::ChannelReady
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "channel stayed ChannelReady for {} ms with an unbalanced revocation nonce ledger: \
+             A send/verify present = {}/{}, B send/verify present = {}/{}",
+            PEER_CHANNEL_RESPONSE_TIMEOUT * 3,
+            state_a.remote_revocation_nonce_for_send.is_some(),
+            state_a.remote_revocation_nonce_for_verify.is_some(),
+            state_b.remote_revocation_nonce_for_send.is_some(),
+            state_b.remote_revocation_nonce_for_verify.is_some(),
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// The watchdog must leave healthy channels alone. After ordinary rounds in both
+/// directions, including one whose CommitmentSigned arrives late but does arrive, the
+/// revocation nonce ledger is balanced at rest and the channel stays usable past the
+/// peer response timeout.
+#[tokio::test]
+async fn test_revocation_nonce_watchdog_keeps_healthy_idle_channel_open() {
+    init_tracing();
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 50_000_000_000, true).await;
+
+    for _ in 0..3 {
+        let a_to_b = node_a
+            .send_payment_keysend(&node_b, 100_000_000, false)
+            .await
+            .expect("A pays B");
+        let b_to_a = node_b
+            .send_payment_keysend(&node_a, 100_000_000, false)
+            .await
+            .expect("B pays A");
+        node_a.wait_until_success(a_to_b.payment_hash).await;
+        node_b.wait_until_success(b_to_a.payment_hash).await;
+    }
+
+    // A late but delivered CommitmentSigned is an ordinary in-flight round.
+    node_a
+        .hold_next_fiber_messages(
+            node_b.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    let late = node_a
+        .send_payment_keysend(&node_b, 100_000_000, false)
+        .await
+        .expect("late payment");
+    node_a.wait_for_held_fiber_messages(1).await;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    node_a.release_held_fiber_messages().await;
+    node_a.wait_until_success(late.payment_hash).await;
+
+    // Stay idle for longer than the watchdog timeout.
+    tokio::time::sleep(Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT + 5_000)).await;
+
+    for (name, node) in [("A", &node_a), ("B", &node_b)] {
+        let state = node.get_channel_actor_state(channel_id);
+        assert_eq!(
+            state.state,
+            ChannelState::ChannelReady,
+            "{name} must keep the channel open"
+        );
+        assert!(
+            state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_some(),
+            "{name} must be balanced at rest: send/verify present = {}/{}",
+            state.remote_revocation_nonce_for_send.is_some(),
+            state.remote_revocation_nonce_for_verify.is_some(),
+        );
+    }
+
+    let after_idle = node_a
+        .send_payment_keysend(&node_b, 100_000_000, false)
+        .await
+        .expect("payment after idle");
+    node_a.wait_until_success(after_idle.payment_hash).await;
+}
+
 #[tokio::test]
 async fn test_reestablish_restores_send_nonce() {
     init_tracing();
@@ -12579,6 +12731,7 @@ mod udt_funding_cell_capacity {
                 commitment_contract_features: Default::default(),
             },
             waiting_peer_response: None,
+            revocation_nonce_unbalanced_since: None,
             reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
