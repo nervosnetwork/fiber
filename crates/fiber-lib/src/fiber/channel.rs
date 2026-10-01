@@ -1927,12 +1927,21 @@ where
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
 
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
-            if self.store.get_invoice(&tlc_info.payment_hash).is_some() {
+            if tlc_info.is_received()
+                && tlc_info.forwarding_tlc.is_none()
+                && !state.is_waiting_forward_result_for_received_tlc(tlc_id)
+                && self.store.get_invoice(&tlc_info.payment_hash).is_some()
+            {
                 self.store
                     .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
                     .expect("update invoice status failed");
             }
-            if !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash) {
+            let retain_invoice_preimage = self.store.has_invoice_preimage(&tlc_info.payment_hash)
+                && self.store.get_invoice_status(&tlc_info.payment_hash)
+                    == Some(CkbInvoiceStatus::Open);
+            if !retain_invoice_preimage
+                && !has_pending_tlc_for_payment_hash(&self.store, state, tlc_info.payment_hash)
+            {
                 self.remove_preimage(tlc_info.payment_hash);
             }
         }
@@ -2925,6 +2934,10 @@ where
             .collect();
 
         for tlc in &committed_tlcs {
+            // An invoice with the same hash does not make a forwarded TLC a local payment.
+            if !state.can_auto_fulfill_received_tlc(tlc) {
+                continue;
+            }
             let tlc_id = tlc.tlc_id;
             let id = tlc.id();
             let payment_hash = tlc.payment_hash;
@@ -2953,10 +2966,6 @@ where
                         NetworkActorCommand::SettleTlcSet(payment_hash, vec![(state.id, id)]),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                continue;
-            }
-
-            if !state.can_auto_fulfill_received_tlc(tlc) {
                 continue;
             }
 

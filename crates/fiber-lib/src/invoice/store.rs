@@ -17,6 +17,12 @@ pub trait InvoiceStore {
         status: CkbInvoiceStatus,
     ) -> Result<(), InvoiceError>;
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus>;
+
+    /// Whether the preimage was supplied when this invoice was created.
+    fn has_invoice_preimage(&self, id: &Hash256) -> bool {
+        let _ = id;
+        false
+    }
 }
 
 pub trait PreimageStore {

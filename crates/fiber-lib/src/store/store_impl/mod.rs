@@ -278,6 +278,9 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     &mut errors,
                 );
             }
+            INVOICE_PREIMAGE_PREFIX => {
+                check_deserialization::<()>(&value, "INVOICE_PREIMAGE_PREFIX", &mut errors);
+            }
             PUBKEY_CHANNEL_ID_PREFIX => {}
             CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
                 check_deserialization::<Hash256>(
@@ -1289,6 +1292,10 @@ impl InvoiceStore for Store {
         if let Some(preimage) = preimage {
             let kv = KeyValue::Preimage(payment_hash, preimage);
             batch.put(kv.key(), kv.value());
+            batch.put(
+                [&[INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat(),
+                serialize_to_vec(&(), "invoice preimage marker"),
+            );
         }
         batch.commit();
         self.notify(StoreChange::PutCkbInvoiceStatus {
@@ -1325,6 +1332,11 @@ impl InvoiceStore for Store {
         let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
+    }
+
+    fn has_invoice_preimage(&self, id: &Hash256) -> bool {
+        let key = [&[INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
+        self.get(key).is_some()
     }
 }
 
@@ -1363,6 +1375,7 @@ impl PreimageStore for Store {
     fn remove_preimage(&self, payment_hash: &Hash256) {
         let mut batch = self.batch();
         batch.delete([&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
+        batch.delete([&[INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
         batch.commit();
     }
 
