@@ -27,8 +27,46 @@ impl StoreSample for ChannelActorData {
     const TYPE_NAME: &'static str = "ChannelActorData";
 
     fn samples(seed: u64) -> Vec<Self> {
-        vec![sample_minimal(seed), sample_full(seed)]
+        vec![sample_minimal(seed), sample_full(seed), sample_v2(seed)]
     }
+}
+
+/// Genuine current V2 bootstrap codec, alongside historical migration fixtures.
+fn sample_v2(seed: u64) -> ChannelActorData {
+    let mut channel = sample_minimal(seed);
+    channel.id = deterministic_hash256(seed, 1561);
+    channel.commitment_contract_features = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
+    let mut own = crate::SigningNonceV2 {
+        seed: deterministic_hash(seed, 1561),
+        channel_id: channel.id,
+        owner: channel.signer.funding_key.pubkey(),
+        number: 1,
+        purpose: crate::NoncePurposeV2::Commitment,
+        public_nonce: deterministic_pub_nonce(seed, 1561),
+        context: None,
+        signature: None,
+    };
+    own.public_nonce =
+        crate::channel_v2_validation::secret_nonce_v2(&own, &channel.signer.funding_key)
+            .public_nonce();
+    channel.session_v2 = Some(crate::ChannelSessionV2 {
+        marker: 0x56320001,
+        own,
+        remote_nonce: None,
+        remote_number: 1,
+        bootstrap_remote_nonce: None,
+        remote_ready: None,
+        outgoing: None,
+        incoming: None,
+        pending_incoming: None,
+        pending_ack: None,
+        last_ack: None,
+        revocation_effect: None,
+        bootstrap_settlement: None,
+        remove_effects: vec![],
+        closing: None,
+    });
+    channel
 }
 
 /// Create a deterministic InMemorySigner from a seed and index.
@@ -124,6 +162,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         last_was_revoke: false,
         external_funding: None,
         commitment_contract_features: Default::default(),
+        session_v2: None,
         created_at: SystemTime::UNIX_EPOCH,
     }
 }
@@ -351,6 +390,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         last_was_revoke: true,
         external_funding: None,
         commitment_contract_features: CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        session_v2: None,
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
     }
 }
