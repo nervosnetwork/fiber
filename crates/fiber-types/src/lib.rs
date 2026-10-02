@@ -17,6 +17,7 @@
 #[cfg(feature = "cch")]
 pub mod cch;
 pub mod channel;
+pub mod channel_v2_validation;
 pub mod config;
 pub mod gen;
 pub mod invoice;

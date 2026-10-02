@@ -581,6 +581,45 @@ pub(crate) async fn create_nodes_with_established_channel(
     (node_a, node_b, channel_id)
 }
 
+/// Explicit zero-feature fixture for tests of the legacy nonce chain / CommitDiff.
+#[cfg(test)]
+pub(crate) async fn create_legacy_nodes_with_established_channel(
+    node_a_funding_amount: u128,
+    node_b_funding_amount: u128,
+    public: bool,
+) -> (NetworkNode, NetworkNode, Hash256) {
+    let mut features = FeatureVector::default();
+    features.unset_channel_v2_optional();
+    features.unset_channel_v2_required();
+    let mut node_a = NetworkNode::new_with_node_name("legacy_a").await;
+    let mut node_b = NetworkNode::new_with_node_name("legacy_b").await;
+    node_a.update_node_features_and_wait(features.clone()).await;
+    node_b.update_node_features_and_wait(features).await;
+    for node in [&node_a, &node_b] {
+        ractor::call!(
+            node.network_actor,
+            |reply| NetworkActorMessage::new_command(NetworkActorCommand::TestEnableLegacyFixture(
+                reply
+            ))
+        )
+        .unwrap();
+    }
+    node_a.connect_to(&mut node_b).await;
+    let (id, _) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        ChannelParameters {
+            public,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(node_a.get_channel_actor_state(id).session_v2.is_none());
+    (node_a, node_b, id)
+}
+
 #[cfg(test)]
 pub(crate) async fn create_3_nodes_with_established_channel(
     (channel_1_amount_a, channel_1_amount_b): (u128, u128),

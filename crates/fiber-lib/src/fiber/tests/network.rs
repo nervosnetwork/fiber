@@ -67,11 +67,11 @@ fn get_test_pub_key() -> Pubkey {
 }
 
 #[tokio::test]
-async fn test_reject_legacy_channel_open_without_full_hash_feature() {
+async fn test_reject_legacy_channel_open_without_channel_v2_feature() {
     let mut node_a = NetworkNode::new().await;
     let mut legacy_peer = NetworkNode::new().await;
     let mut features = legacy_peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     legacy_peer.update_node_features_and_wait(features).await;
     node_a.connect_to(&mut legacy_peer).await;
 
@@ -107,7 +107,7 @@ async fn test_reject_legacy_external_funding_channel_open() {
     let mut node = NetworkNode::new().await;
     let mut legacy_peer = NetworkNode::new().await;
     let mut features = legacy_peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     legacy_peer.update_node_features_and_wait(features).await;
     node.connect_to(&mut legacy_peer).await;
 
@@ -147,7 +147,7 @@ async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
     let mut node = NetworkNode::new().await;
     let mut legacy_peer = NetworkNode::new().await;
     let mut features = legacy_peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     legacy_peer.update_node_features_and_wait(features).await;
     node.connect_to(&mut legacy_peer).await;
 
@@ -188,7 +188,7 @@ async fn test_reject_legacy_inbound_open_before_creating_pending_record() {
 }
 
 #[tokio::test]
-async fn test_existing_channel_reestablishes_when_peer_drops_full_hash_feature() {
+async fn test_existing_channel_reestablishes_when_peer_drops_channel_v2_feature() {
     let (mut node, mut peer, channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, false)
             .await;
@@ -205,7 +205,7 @@ async fn test_existing_channel_reestablishes_when_peer_drops_full_hash_feature()
     );
 
     let mut features = peer.node_info().await.features;
-    features.unset_onchain_full_payment_hash_optional();
+    features.unset_channel_v2_optional();
     peer.update_node_features_and_wait(features).await;
     node.restart().await;
     node.connect_to(&mut peer).await;
@@ -3303,14 +3303,14 @@ async fn test_malicious_open_channel_reserved_overflow_rejected_before_pending_a
         funding_pubkey: gen_rand_fiber_public_key(),
         tlc_basepoint: gen_rand_fiber_public_key(),
         next_commitment_nonce: rand_nonce.clone(),
-        next_revocation_nonce: rand_nonce,
+        next_revocation_nonce: rand_nonce.clone(),
         channel_announcement_nonce: None,
     };
 
     node.network_actor
         .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
             peer.pubkey,
-            FiberMessage::ChannelInitialization(open_channel),
+            crate::fiber::session_v2::opening_message(open_channel, rand_nonce),
             None,
         )))
         .expect("network actor alive");

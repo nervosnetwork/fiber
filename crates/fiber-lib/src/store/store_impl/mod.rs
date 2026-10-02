@@ -1730,6 +1730,11 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        // Registration is at-least-once across channel actor crashes. Never reset
+        // an already monitored channel's usable settlement/revocation snapshots.
+        if self.get(&key).is_some() {
+            return;
+        }
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
@@ -1805,6 +1810,15 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
+            // Recovery replays exact durable snapshots. An older queued delivery
+            // must not replace a newer revocation (or its settlement snapshot).
+            if channel_data
+                .revocation_data
+                .as_ref()
+                .is_some_and(|old| old.commitment_number >= revocation_data.commitment_number)
+            {
+                return;
+            }
             channel_data.remote_settlement_data = remote_settlement_data;
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();

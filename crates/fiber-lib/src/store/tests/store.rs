@@ -484,6 +484,55 @@ fn test_store_watchtower() {
         }]
     );
 
+    let old = RevocationData {
+        commitment_number: 0,
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+    let mut newer = old.clone();
+    newer.commitment_number = 1;
+    let newer_settlement = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        newer.clone(),
+        newer_settlement.clone(),
+    );
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        old,
+        SettlementData {
+            local_amount: 1,
+            remote_amount: 2,
+            tlcs: vec![],
+        },
+    );
+    let stored = store.get_watch_channels().pop().unwrap();
+    assert_eq!(stored.revocation_data, Some(newer));
+    assert_eq!(stored.remote_settlement_data, newer_settlement);
+    // Replayed bootstrap registration cannot erase accepted revocation data.
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        Privkey::from(&[1; 32]),
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 200,
+            tlcs: vec![],
+        },
+    );
+    assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
+
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
 }
@@ -1310,9 +1359,11 @@ fn test_channel_actor_state_store() {
             external_funding: None,
             commitment_contract_features: Default::default(),
             created_at: SystemTime::now(),
+            session_v2: None,
         },
         waiting_peer_response: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -1452,9 +1503,11 @@ fn sample_channel_actor_state(
             external_funding: None,
             commitment_contract_features: Default::default(),
             created_at: SystemTime::now(),
+            session_v2: None,
         },
         waiting_peer_response: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
