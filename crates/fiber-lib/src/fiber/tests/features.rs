@@ -219,28 +219,22 @@ fn test_channel_v2_feature_bit() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn commitment_contract_features_are_validated_bytes() {
-    use fiber_types::CommitmentContractFeatures as Features;
+fn channel_features_are_validated_bytes() {
+    use fiber_types::ChannelFeatures as Features;
 
     assert_eq!(Features::LEGACY.bits(), 0);
-    assert_eq!(Features::ONCHAIN_FULL_PAYMENT_HASH.bits(), 1);
+    assert_eq!(Features::V2.bits(), 1);
     assert_eq!(Features::LEGACY.lock_args_len(), 57);
-    assert_eq!(Features::ONCHAIN_FULL_PAYMENT_HASH.lock_args_len(), 58);
+    assert_eq!(Features::V2.lock_args_len(), 58);
     assert_eq!(Features::LEGACY.payment_hash_len(), 20);
-    assert_eq!(Features::ONCHAIN_FULL_PAYMENT_HASH.payment_hash_len(), 32);
-    assert_eq!(
-        bincode::serialize(&Features::ONCHAIN_FULL_PAYMENT_HASH).unwrap(),
-        vec![1]
-    );
+    assert_eq!(Features::V2.payment_hash_len(), 32);
+    assert_eq!(bincode::serialize(&Features::V2).unwrap(), vec![1]);
     assert!(bincode::deserialize::<Features>(&[2]).is_err());
     assert_eq!(
         Features::for_negotiated(true, Some(false)),
         Features::LEGACY
     );
-    assert_eq!(
-        Features::for_negotiated(true, Some(true)),
-        Features::ONCHAIN_FULL_PAYMENT_HASH
-    );
+    assert_eq!(Features::for_negotiated(true, Some(true)), Features::V2);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

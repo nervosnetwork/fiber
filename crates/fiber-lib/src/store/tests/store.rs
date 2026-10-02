@@ -47,7 +47,7 @@ use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, CommitmentContractFeatures, CommitmentNumbers, OutboundTlcStatus,
+    AddTlcCommand, AppliedFlags, ChannelFeatures, CommitmentNumbers, OutboundTlcStatus,
     RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
@@ -450,7 +450,7 @@ fn test_store_watchtower() {
             local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
 
@@ -480,7 +480,7 @@ fn test_store_watchtower() {
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
 
@@ -559,7 +559,7 @@ fn test_store_watchtower_v1_registration_round_trip() {
         Privkey::from(&[3; 32]).pubkey(),
         Privkey::from(&[4; 32]).pubkey(),
         settlement_data,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        ChannelFeatures::V2,
     );
 
     assert_eq!(
@@ -568,8 +568,8 @@ fn test_store_watchtower_v1_registration_round_trip() {
             .into_iter()
             .find(|channel| channel.channel_id == channel_id)
             .expect("stored channel")
-            .commitment_contract_features,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+            .channel_features,
+        ChannelFeatures::V2
     );
 }
 
@@ -1218,7 +1218,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
-        commitment_contract_features: Default::default(),
+        channel_features: Default::default(),
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 
@@ -1357,7 +1357,7 @@ fn test_channel_actor_state_store() {
             })],
             last_was_revoke: true,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
             session_v2: None,
         },
@@ -1501,7 +1501,7 @@ fn sample_channel_actor_state(
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
             session_v2: None,
         },

@@ -193,9 +193,8 @@ async fn test_existing_channel_reestablishes_when_peer_drops_channel_v2_feature(
         NetworkNode::new_2_nodes_with_established_channel(100_000_000_000, 100_000_000_000, false)
             .await;
     assert_eq!(
-        node.get_channel_actor_state(channel_id)
-            .commitment_contract_features,
-        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+        node.get_channel_actor_state(channel_id).channel_features,
+        fiber_types::ChannelFeatures::V2
     );
 
     let before_restart = node.send_payment_keysend(&peer, 1_000, true).await;
@@ -222,8 +221,8 @@ async fn test_existing_channel_reestablishes_when_peer_drops_channel_v2_feature(
 
     let state_after = node.get_channel_actor_state(channel_id);
     assert_eq!(
-        state_after.commitment_contract_features,
-        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+        state_after.channel_features,
+        fiber_types::ChannelFeatures::V2
     );
     let payment = node.send_payment_keysend(&peer, 1_000, true).await;
     assert!(

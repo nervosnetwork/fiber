@@ -35,7 +35,7 @@ use fiber_store::migration::{
 };
 use fiber_types::schema::*;
 #[cfg(feature = "watchtower")]
-use fiber_types::CommitmentContractFeatures;
+use fiber_types::ChannelFeatures;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
     ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
@@ -185,6 +185,12 @@ where
         .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
+fn deserialize_channel_state(bytes: &[u8]) -> ChannelActorState {
+    fiber_types::channel_v2_validation::decode_channel_actor_data(bytes)
+        .unwrap_or_else(|e| panic!("deserialization of ChannelActorState failed: {e}"))
+        .into()
+}
+
 /// Open a store at `path`, running auto-migration with auto-confirm.
 /// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
@@ -252,11 +258,15 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
 
         match key[0] {
             CHANNEL_ACTOR_STATE_PREFIX => {
-                check_deserialization::<ChannelActorState>(
-                    &value,
-                    "CHANNEL_ACTOR_STATE_PREFIX",
-                    &mut errors,
-                );
+                if let Err(e) =
+                    fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data(
+                        &value,
+                    )
+                {
+                    errors.insert(format!(
+                        "Failed to deserialize CHANNEL_ACTOR_STATE_PREFIX: {e}"
+                    ));
+                }
             }
             PUBLIC_KEY_NETWORK_ACTOR_STATE_PREFIX => {
                 check_deserialization::<PersistentNetworkActorState>(
@@ -945,8 +955,7 @@ impl NetworkActorStateStore for Store {
 impl ChannelActorStateStore for Store {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-        self.get(key)
-            .map(|v| deserialize_from(v.as_ref(), "ChannelActorState"))
+        self.get(key).map(|v| deserialize_channel_state(v.as_ref()))
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
@@ -1091,7 +1100,7 @@ impl ChannelActorStateStore for Store {
         let prefix = &[CHANNEL_ACTOR_STATE_PREFIX];
         self.collect_by_prefix(prefix)
             .into_iter()
-            .map(|kv| deserialize_from(kv.value.as_ref(), "ChannelActorState"))
+            .map(|kv| deserialize_channel_state(kv.value.as_ref()))
             .collect()
     }
 
@@ -1706,7 +1715,7 @@ impl WatchtowerStore for Store {
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
         );
     }
 
@@ -1720,7 +1729,7 @@ impl WatchtowerStore for Store {
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
@@ -1747,7 +1756,7 @@ impl WatchtowerStore for Store {
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
-                commitment_contract_features,
+                channel_features,
             },
             "ChannelData",
         );

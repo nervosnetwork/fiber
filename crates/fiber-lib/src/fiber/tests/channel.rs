@@ -59,7 +59,7 @@ use ckb_types::{
 use fiber_types::{
     derive_private_key, is_tlc_key_derivation_safe, try_derive_tlc_pubkey, AddTlcCommand,
     AppliedFlags, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags, ChannelConstraints,
-    ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags, CommitmentContractFeatures,
+    ChannelFeatures, ChannelOpeningStatus, ChannelState, CollaboratingFundingTxFlags,
     HashAlgorithm, InMemorySigner, InboundTlcStatus, NegotiatingFundingFlags, OutboundTlcStatus,
     PaymentHopData, PaymentStatus, Privkey, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason,
     RetryableTlcOperation, SettlementTlc, ShuttingDownFlags, SigningCommitmentFlags, TLCId,
@@ -12963,7 +12963,7 @@ fn check_accept_channel_parameters_rejects_total_reserved_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
         ),
         "Total reserved CKB amount overflows",
     );
@@ -12983,7 +12983,7 @@ fn check_accept_channel_parameters_rejects_commitment_fee_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
         ),
         "overflows commitment fee",
     );
@@ -13002,7 +13002,7 @@ fn check_accept_channel_parameters_rejects_non_udt_total_capacity_overflow() {
             &Script::default(),
             MAX_TLC_NUMBER_IN_FLIGHT,
             MAX_TLC_NUMBER_IN_FLIGHT,
-            CommitmentContractFeatures::LEGACY,
+            ChannelFeatures::LEGACY,
         ),
         "The total funding amount",
     );
@@ -13017,7 +13017,7 @@ fn check_open_channel_parameters_rejects_commitment_fee_overflow() {
         u64::MAX - 1_000_000_000_000,
         DEFAULT_FEE_RATE,
         u64::MAX,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -13037,7 +13037,7 @@ fn check_open_channel_parameters_rejects_total_reserved_overflow() {
         u64::MAX,
         DEFAULT_FEE_RATE,
         DEFAULT_COMMITMENT_FEE_RATE,
-        CommitmentContractFeatures::LEGACY,
+        ChannelFeatures::LEGACY,
         EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1).full_value(),
         MAX_TLC_NUMBER_IN_FLIGHT,
     )
@@ -13132,7 +13132,7 @@ mod udt_funding_cell_capacity {
                 last_was_revoke: false,
                 created_at: SystemTime::now(),
                 external_funding: None,
-                commitment_contract_features: Default::default(),
+                channel_features: Default::default(),
                 session_v2: None,
             },
             waiting_peer_response: None,
@@ -13436,14 +13436,10 @@ fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
         local_key: Privkey::from(&[5; 32]),
         remote_key: Privkey::from(&[6; 32]).pubkey(),
     };
-    let legacy = settlement_tlc_to_witness(&tlc, false, CommitmentContractFeatures::LEGACY);
+    let legacy = settlement_tlc_to_witness(&tlc, false, ChannelFeatures::LEGACY);
     assert_eq!(legacy.len(), 85); // htlc_type(1) + amount(16) + hash(20) + keys(40) + expiry(8)
 
-    let v1 = settlement_tlc_to_witness(
-        &tlc,
-        false,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-    );
+    let v1 = settlement_tlc_to_witness(&tlc, false, ChannelFeatures::V2);
     assert_eq!(v1.len(), 97);
     // the first 17 bytes are identical; the hash field is the difference
     assert_eq!(&legacy[0..17], &v1[0..17]);
@@ -13453,19 +13449,11 @@ fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
     assert_eq!(&legacy[37..], &v1[49..]);
     // amount and htlc_type are the same for for_remote = true and false
     assert_eq!(
-        &settlement_tlc_to_witness(
-            &tlc,
-            true,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
-        )[0..17],
+        &settlement_tlc_to_witness(&tlc, true, ChannelFeatures::V2)[0..17],
         &v1[0..17]
     );
     assert_eq!(
-        &settlement_tlc_to_witness(
-            &tlc,
-            true,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
-        )[1..17],
+        &settlement_tlc_to_witness(&tlc, true, ChannelFeatures::V2)[1..17],
         &tlc.payment_amount.to_le_bytes()
     );
 }

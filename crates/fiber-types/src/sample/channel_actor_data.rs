@@ -3,9 +3,9 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::channel::{
     AddTlcCommand, ChannelActorData, ChannelBasePublicKeys, ChannelConnectivityState,
-    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentContractFeatures,
-    CommitmentNumbers, InMemorySigner, PendingTlcs, RemoveTlcFulfill, RemoveTlcReason,
-    RetryableTlcOperation, RevokeAndAck, ShutdownInfo, TLCId, TlcInfo, TlcState, TlcStatus,
+    ChannelConstraints, ChannelFeatures, ChannelState, ChannelTlcInfo, CommitmentNumbers,
+    InMemorySigner, PendingTlcs, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation,
+    RevokeAndAck, ShutdownInfo, TLCId, TlcInfo, TlcState, TlcStatus,
 };
 use crate::channel::{InboundTlcStatus, OutboundTlcStatus};
 use crate::crate_time::SystemTime;
@@ -34,8 +34,9 @@ impl StoreSample for ChannelActorData {
 /// Genuine current V2 bootstrap codec, alongside historical migration fixtures.
 fn sample_v2(seed: u64) -> ChannelActorData {
     let mut channel = sample_minimal(seed);
+    channel.state = ChannelState::NegotiatingFunding(crate::NegotiatingFundingFlags::empty());
     channel.id = deterministic_hash256(seed, 1561);
-    channel.commitment_contract_features = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
+    channel.channel_features = ChannelFeatures::V2;
     let mut own = crate::SigningNonceV2 {
         seed: deterministic_hash(seed, 1561),
         channel_id: channel.id,
@@ -161,7 +162,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         pending_replay_updates: vec![],
         last_was_revoke: false,
         external_funding: None,
-        commitment_contract_features: Default::default(),
+        channel_features: Default::default(),
         session_v2: None,
         created_at: SystemTime::UNIX_EPOCH,
     }
@@ -389,7 +390,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         pending_replay_updates: vec![],
         last_was_revoke: true,
         external_funding: None,
-        commitment_contract_features: CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        channel_features: ChannelFeatures::LEGACY,
         session_v2: None,
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
     }

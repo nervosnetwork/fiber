@@ -452,7 +452,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             session_v2: None,
             created_at: SystemTime::now(),
         },

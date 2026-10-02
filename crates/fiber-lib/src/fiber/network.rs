@@ -121,13 +121,13 @@ pub use fiber_types::HopRequire;
 use fiber_types::SessionRoute;
 use fiber_types::{
     blake2b_hash_with_salt, AddTlcCommand, AppliedFlags, AwaitingTxSignaturesFlags,
-    ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo, CloseFlags,
-    CommitmentContractFeatures, EcdsaSignature, EntityHex, FeatureVector, Hash256,
-    NodeAnnouncement, PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket,
-    PersistentNetworkActorState, PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill,
-    RemoveTlcReason, RetryableTlcOperation, RevocationData, RouterHop, SettlementData,
-    ShutdownSettlementRecord, ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode,
-    TrampolineContext, UdtCfgInfos, NO_SHARED_SECRET,
+    ChannelFeatures, ChannelOpenRecord, ChannelOpeningStatus, ChannelState, ChannelTlcInfo,
+    CloseFlags, EcdsaSignature, EntityHex, FeatureVector, Hash256, NodeAnnouncement,
+    PaymentCustomRecords, PaymentStatus, PeeledPaymentOnionPacket, PersistentNetworkActorState,
+    PrevTlcInfo, Privkey, Pubkey, PublicChannelInfo, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevocationData, RouterHop, SettlementData, ShutdownSettlementRecord,
+    ShuttingDownFlags, TLCId, TlcErr, TlcErrPacket, TlcErrorCode, TrampolineContext, UdtCfgInfos,
+    NO_SHARED_SECRET,
 };
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1255,7 +1255,7 @@ pub enum NetworkServiceEvent {
         Pubkey,
         Pubkey,
         SettlementData,
-        CommitmentContractFeatures,
+        ChannelFeatures,
     ),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
@@ -1684,7 +1684,7 @@ where
             FiberMessage::ChannelInitializationV2(open) => {
                 if open.channel_features != 1
                     || !state
-                        .negotiated_commitment_contract_features(&peer_pubkey)
+                        .negotiated_channel_features(&peer_pubkey)
                         .has_full_payment_hash()
                 {
                     return Err(ProcessingChannelError::InvalidState(
@@ -1696,7 +1696,7 @@ where
             }
             FiberMessage::ChannelInitialization(_)
                 if state
-                    .negotiated_commitment_contract_features(&peer_pubkey)
+                    .negotiated_channel_features(&peer_pubkey)
                     .has_full_payment_hash() =>
             {
                 return Err(ProcessingChannelError::InvalidState(
@@ -6062,7 +6062,7 @@ where
         } = open_channel;
         let remote_pubkey = pubkey;
         self.check_feature_compatibility(&remote_pubkey)?;
-        let commitment_contract_features = self.required_new_channel_features(&remote_pubkey)?;
+        let channel_features = self.required_new_channel_features(&remote_pubkey)?;
 
         if public && one_way {
             return Err(ProcessingChannelError::InvalidParameter(
@@ -6144,7 +6144,7 @@ where
                         .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                    commitment_contract_features,
+                    channel_features,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6162,7 +6162,7 @@ where
             temp_channel_id,
             remote_pubkey,
             funding_amount,
-            commitment_contract_features,
+            channel_features,
         );
         self.store.insert_channel_open_record(record);
 
@@ -6206,7 +6206,7 @@ where
             )))?;
 
         self.check_feature_compatibility(&remote_pubkey)?;
-        let commitment_contract_features = self.required_new_channel_features(&remote_pubkey)?;
+        let channel_features = self.required_new_channel_features(&remote_pubkey)?;
 
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
@@ -6270,7 +6270,7 @@ where
                             .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                         max_tlc_number_in_flight: max_tlc_number_in_flight
                             .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                        commitment_contract_features,
+                        channel_features,
                     },
                 ),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -6290,7 +6290,7 @@ where
             temp_channel_id,
             remote_pubkey,
             funding_amount,
-            commitment_contract_features,
+            channel_features,
         );
         self.store.insert_channel_open_record(record);
 
@@ -6329,7 +6329,7 @@ where
             funding_amount,
             &shutdown_script,
             &pending_open.open_channel.funding_udt_type_script,
-            pending_open.commitment_contract_features,
+            pending_open.channel_features,
         )?;
 
         let network = self.network.clone();
@@ -6375,7 +6375,7 @@ where
                     max_tlc_number_in_flight: max_tlc_number_in_flight
                         .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
-                    commitment_contract_features: pending_open.commitment_contract_features,
+                    channel_features: pending_open.channel_features,
                 }),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
                 private_key: self.private_key.clone(),
@@ -6451,26 +6451,20 @@ where
 
     /// Select the commitment-lock features for a new channel from both peers'
     /// advertised feature vectors.
-    fn negotiated_commitment_contract_features(
-        &self,
-        peer_pubkey: &Pubkey,
-    ) -> CommitmentContractFeatures {
+    fn negotiated_channel_features(&self, peer_pubkey: &Pubkey) -> ChannelFeatures {
         let peer_supports = self
             .peer_session_map
             .get(peer_pubkey)
             .and_then(|peer| peer.features.as_ref())
             .map(|features| features.supports_channel_v2());
-        CommitmentContractFeatures::for_negotiated(
-            self.features.supports_channel_v2(),
-            peer_supports,
-        )
+        ChannelFeatures::for_negotiated(self.features.supports_channel_v2(), peer_supports)
     }
 
     fn required_new_channel_features(
         &self,
         peer_pubkey: &Pubkey,
-    ) -> Result<CommitmentContractFeatures, ProcessingChannelError> {
-        let features = self.negotiated_commitment_contract_features(peer_pubkey);
+    ) -> Result<ChannelFeatures, ProcessingChannelError> {
+        let features = self.negotiated_channel_features(peer_pubkey);
         #[cfg(test)]
         if self.to_be_accepted_channels.test_allow_legacy {
             return Ok(features);
@@ -7555,8 +7549,7 @@ where
             )));
         }
 
-        let commitment_contract_features =
-            self.negotiated_commitment_contract_features(&peer_pubkey);
+        let channel_features = self.negotiated_channel_features(&peer_pubkey);
         let result = self
             .required_new_channel_features(&peer_pubkey)
             .and_then(|_| {
@@ -7566,7 +7559,7 @@ where
                     open_channel.reserved_ckb_amount,
                     open_channel.funding_fee_rate,
                     open_channel.commitment_fee_rate,
-                    commitment_contract_features,
+                    channel_features,
                     open_channel.commitment_delay_epoch,
                     open_channel.max_tlc_number_in_flight,
                 )
@@ -7579,7 +7572,7 @@ where
                     id,
                     peer_pubkey,
                     open_channel,
-                    commitment_contract_features,
+                    channel_features,
                 )
             });
 
@@ -7591,7 +7584,7 @@ where
                     id,
                     peer_pubkey,
                     remote_funding_amount,
-                    commitment_contract_features,
+                    channel_features,
                 );
                 self.store.insert_channel_open_record(record);
 
@@ -8711,7 +8704,7 @@ struct ToBeAcceptedChannels {
 #[derive(Debug)]
 struct PendingOpenChannel {
     open_channel: OpenChannel,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 }
 
 impl Default for ToBeAcceptedChannels {
@@ -8742,7 +8735,7 @@ impl ToBeAcceptedChannels {
         if self
             .map
             .get(id)
-            .is_some_and(|(_, pending)| !pending.commitment_contract_features.is_v2())
+            .is_some_and(|(_, pending)| !pending.channel_features.is_v2())
         {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Cannot accept Legacy channel: CHANNEL_V2 is required".to_string(),
@@ -8782,7 +8775,7 @@ impl ToBeAcceptedChannels {
         id: Hash256,
         pubkey: Pubkey,
         open_channel: OpenChannel,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     ) -> ProcessingChannelResult {
         if let Some(existing_value) = self.map.get(&id) {
             let err_message = format!(
@@ -8827,7 +8820,7 @@ impl ToBeAcceptedChannels {
                 pubkey,
                 PendingOpenChannel {
                     open_channel,
-                    commitment_contract_features,
+                    channel_features,
                 },
             ),
         );
@@ -8868,31 +8861,18 @@ mod pending_open_tests {
         };
 
         pending
-            .try_insert(
-                channel_id,
-                peer,
-                open_channel.clone(),
-                CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-            )
+            .try_insert(channel_id, peer, open_channel.clone(), ChannelFeatures::V2)
             .expect("pending open should be inserted");
 
         let legacy_id = [5u8; 32].into();
         pending
-            .try_insert(
-                legacy_id,
-                peer,
-                open_channel,
-                CommitmentContractFeatures::LEGACY,
-            )
+            .try_insert(legacy_id, peer, open_channel, ChannelFeatures::LEGACY)
             .expect("legacy pending fixture");
         assert!(pending.require_channel_v2(&legacy_id).is_err());
         assert!(pending.map.contains_key(&legacy_id));
         assert!(pending.require_channel_v2(&channel_id).is_ok());
 
         let (_, pending_open) = pending.remove(&channel_id).expect("pending open exists");
-        assert_eq!(
-            pending_open.commitment_contract_features,
-            CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
-        );
+        assert_eq!(pending_open.channel_features, ChannelFeatures::V2);
     }
 }

@@ -1396,9 +1396,9 @@ pub struct ChannelOpenRecord {
     pub created_at: u64,
     /// Timestamp (milliseconds since UNIX epoch) of the last status update.
     pub last_updated_at: u64,
-    /// Commitment-lock feature bitmap selected when the channel-open request was received or sent.
+    /// Channel feature bitmap selected when the channel-open request was received or sent.
     #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
 }
 
 /// Domain separation for a V2 nonce allocation.
@@ -1595,19 +1595,19 @@ impl ChannelOpenRecord {
             failure_detail: None,
             created_at: now,
             last_updated_at: now,
-            commitment_contract_features: CommitmentContractFeatures::default(),
+            channel_features: ChannelFeatures::default(),
         }
     }
 
-    /// Create a new opening record with the negotiated commitment-lock features.
+    /// Create a new opening record with the negotiated channel features.
     pub fn new_with_features(
         channel_id: Hash256,
         pubkey: Pubkey,
         funding_amount: u128,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     ) -> Self {
         let mut record = Self::new(channel_id, pubkey, funding_amount);
-        record.commitment_contract_features = commitment_contract_features;
+        record.channel_features = channel_features;
         record
     }
 
@@ -1619,20 +1619,15 @@ impl ChannelOpenRecord {
         record
     }
 
-    /// Create a new inbound record with the negotiated commitment-lock features.
+    /// Create a new inbound record with the negotiated channel features.
     pub fn new_inbound_with_features(
         channel_id: Hash256,
         pubkey: Pubkey,
         remote_funding_amount: u128,
-        commitment_contract_features: CommitmentContractFeatures,
+        channel_features: ChannelFeatures,
     ) -> Self {
-        Self::new_with_features(
-            channel_id,
-            pubkey,
-            remote_funding_amount,
-            commitment_contract_features,
-        )
-        .with_acceptor()
+        Self::new_with_features(channel_id, pubkey, remote_funding_amount, channel_features)
+            .with_acceptor()
     }
 
     fn with_acceptor(mut self) -> Self {
@@ -1694,27 +1689,25 @@ impl PendingNotifySettleTlc {
     }
 }
 
-/// Feature bits committed to a channel's commitment-lock args and witness layout.
+/// Channel version features selecting the nonce protocol and commitment layout.
 ///
 /// Zero represents the 57-byte Legacy args without a features byte. The only
 /// supported nonzero value is bit 0, appended to the 58-byte args.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct CommitmentContractFeatures(u8);
+pub struct ChannelFeatures(u8);
 
-impl CommitmentContractFeatures {
+impl ChannelFeatures {
     /// Legacy commitment-lock layout, with no feature byte in the args.
     pub const LEGACY: Self = Self(0);
-    /// Commit the full 32-byte TLC payment hash on-chain.
-    pub const ONCHAIN_FULL_PAYMENT_HASH: Self = Self(1);
+    /// Channel V2 nonce sessions and full 32-byte TLC payment hashes on-chain.
+    pub const V2: Self = Self(1);
 
-    /// Accept only feature combinations supported by the current contract.
+    /// Accept only feature combinations supported by the current channel protocol.
     pub fn from_bits(bits: u8) -> Result<Self, String> {
         match bits {
             0 | 1 => Ok(Self(bits)),
-            _ => Err(format!(
-                "unsupported commitment contract features: 0x{bits:x}"
-            )),
+            _ => Err(format!("unsupported channel features: 0x{bits:x}")),
         }
     }
 
@@ -1725,12 +1718,12 @@ impl CommitmentContractFeatures {
 
     /// Whether the settlement witness commits the full payment hash.
     pub fn has_full_payment_hash(self) -> bool {
-        self.0 & Self::ONCHAIN_FULL_PAYMENT_HASH.0 != 0
+        self.is_v2()
     }
 
     /// Whether this persisted feature byte selects Channel V2 in the node.
     pub fn is_v2(self) -> bool {
-        self.has_full_payment_hash()
+        self.0 & Self::V2.0 != 0
     }
 
     /// Length of the commitment-lock args in bytes.
@@ -1754,14 +1747,14 @@ impl CommitmentContractFeatures {
     /// Select the bitmap for a new channel from both peers' advertised support.
     pub fn for_negotiated(ours_supports: bool, peer_supports: Option<bool>) -> Self {
         if ours_supports && peer_supports == Some(true) {
-            Self::ONCHAIN_FULL_PAYMENT_HASH
+            Self::V2
         } else {
             Self::LEGACY
         }
     }
 }
 
-impl<'de> Deserialize<'de> for CommitmentContractFeatures {
+impl<'de> Deserialize<'de> for ChannelFeatures {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::from_bits(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
@@ -1908,9 +1901,9 @@ pub struct ChannelActorData {
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
 
-    /// Commitment-lock features decided once at channel-open and never changed.
+    /// Channel features decided once at channel-open and never changed.
     #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
     /// Independent V2 owner sessions; legacy zero-feature channels have none.
     #[serde(default)]
     pub session_v2: Option<ChannelSessionV2>,
