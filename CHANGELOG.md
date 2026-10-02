@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - New channels require both peers to support the on-chain full payment hash feature; nodes no longer open Legacy channels.
 - Existing Legacy channels retain their original settlement layout. After the database migration ships, operators should close existing Legacy channels when practical.
-- This RC requires a new database. Upgrading an existing database is not supported until a subsequent release provides the migration.
+- Existing databases upgrade in place via a migration that adds the `commitment_contract_features` field (defaulting to Legacy) to channel actor state, channel open records, and watchtower channel data.
 - Watchtower `create_watch_channel` now accepts `commitment_contract_features` as `"0x0"` (Legacy) or `"0x1"` (full payment hash).
 
 ## [v0.8.0] - 2026-03-28
