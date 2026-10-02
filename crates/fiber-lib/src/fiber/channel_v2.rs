@@ -79,7 +79,7 @@ impl ChannelActorState {
     }
 
     pub(crate) fn ensure_v2_not_quarantined(&self) -> ProcessingChannelResult {
-        if self.commitment_contract_features.is_v2() && self.state == ChannelState::Stale {
+        if self.channel_features.is_v2() && self.state == ChannelState::Stale {
             return Err(invalid(
                 "Backup-restored V2 channel is quarantined: freshness is unknown",
             ));
@@ -196,7 +196,7 @@ impl ChannelActorState {
     }
 
     pub(super) fn initialize_session_v2(&mut self, remote_nonce: Option<PubNonce>) {
-        if !self.commitment_contract_features.is_v2() {
+        if !self.channel_features.is_v2() {
             return;
         }
         self.session_v2 = Some(ChannelSessionV2 {
@@ -301,7 +301,7 @@ impl ChannelActorState {
         let fee = checked_calculate_commitment_tx_fee(
             self.commitment_fee_rate,
             &self.funding_udt_type_script,
-            self.commitment_contract_features,
+            self.channel_features,
         )?;
         let lock = if for_remote {
             self.get_local_shutdown_script()
@@ -1549,7 +1549,7 @@ where
                         *state.get_local_funding_pubkey(),
                         *state.get_remote_funding_pubkey(),
                         settlement.clone(),
-                        state.commitment_contract_features,
+                        state.channel_features,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -1827,8 +1827,7 @@ mod tests {
 
     struct CaptureNetwork;
 
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[async_trait::async_trait]
     impl Actor for CaptureNetwork {
         type Msg = NetworkActorMessage;
         type State = Arc<Mutex<Vec<NetworkActorMessage>>>;
@@ -1874,6 +1873,75 @@ mod tests {
             5000
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_storage_codec_defers_corrupt_intent_to_preflight_and_restore() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut channel = a.get_channel_actor_state(id);
+        channel
+            .validate_session_v2()
+            .expect("genuine funded channel");
+        a.stop().await;
+        b.stop().await;
+
+        // Complete, correctly versioned bytes can contain a corrupt signing
+        // intent. Reading them must not panic before the owning boundary checks it.
+        channel.session_v2.as_mut().unwrap().own.seed[0] ^= 1;
+        let encoded = bincode::serialize(&channel.core).unwrap();
+        let path = tempfile::tempdir().unwrap();
+        let store = crate::store::open_store(path.path()).unwrap();
+        store.insert_channel_actor_state(channel);
+        let key = [&[0], id.as_ref()].concat();
+        let restored = store.get_channel_actor_state(&id).unwrap();
+        assert_eq!(bincode::serialize(&restored.core).unwrap(), encoded);
+        assert_eq!(store.get_all_channel_states().len(), 1);
+        let raw: fiber_types::ChannelActorData = fiber_types::deserialize(&encoded).unwrap();
+        assert_eq!(bincode::serialize(&raw).unwrap(), encoded);
+        assert!(restored.validate_session_v2().is_err());
+
+        assert!(
+            crate::store::open_store(path.path()).is_err(),
+            "preflight must reject corrupt intent"
+        );
+        assert!(crate::store::check_validate(path.path()).is_err());
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), store.clone(), None);
+        let result = Actor::spawn(
+            None,
+            actor,
+            super::super::ChannelInitializationParameter {
+                operation: super::super::ChannelInitializationOperation::RestoreOfflineChannel(id),
+                ephemeral_config: Default::default(),
+                private_key: a.private_key.clone(),
+            },
+        )
+        .await;
+        let error = result.expect_err("actor restore must reject corrupt intent");
+        assert!(
+            error
+                .to_string()
+                .contains("V2 nonce seed/key/public mismatch"),
+            "{error}"
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "restore must not send or sign"
+        );
+        assert_eq!(store.get(&key).unwrap(), encoded);
+        assert_eq!(
+            store
+                .get(fiber_store::migration::MIGRATION_VERSION_KEY)
+                .unwrap(),
+            fiber_store::migration::LATEST_DB_VERSION.as_bytes()
+        );
+        network.stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -2763,7 +2831,26 @@ mod tests {
             );
             store.put(&key, &good);
         }
-        drop(crate::store::open_store(path.path()).expect("genuine V2 database reopens"));
+        {
+            let store = crate::store::open_store(path.path()).expect("genuine V2 database reopens");
+            let restored = store
+                .get_channel_actor_state(&id)
+                .expect("genuine V2 is readable");
+            assert_eq!(bincode::serialize(&restored.core).unwrap(), good);
+            assert_eq!(store.get_all_channel_states().len(), 1);
+        }
+        for bytes in [good[..good.len() - 1].to_vec(), [&good[..], &[0]].concat()] {
+            {
+                let store = fiber_store::Store::open_db(path.path()).unwrap();
+                store.put(&key, &bytes);
+            }
+            assert!(
+                crate::store::open_store(path.path()).is_err(),
+                "exact current schema required"
+            );
+            let store = fiber_store::Store::open_db(path.path()).unwrap();
+            assert_eq!(store.get(&key).unwrap(), bytes);
+        }
         for mutation in 0..9 {
             let mut bad = sa.core.clone();
             let session = bad.session_v2.as_mut().unwrap();

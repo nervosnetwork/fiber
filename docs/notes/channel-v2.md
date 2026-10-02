@@ -4,8 +4,9 @@ The node capability `CHANNEL_V2` uses the existing required/optional feature pai
 at bits 6/7. It combines independent commitment-owner nonce sessions with full
 32-byte on-chain payment hashes. The commitment contract feature byte remains
 `1`; released legacy channels with byte `0` continue to use V1 messages and their
-original contract layout. `CommitmentContractFeatures` describes the on-chain
-layout; its `is_v2()` accessor selects the node protocol.
+original contract layout. `ChannelFeatures::V2` has value `1` and selects both
+nonce sessions and the full payment hash layout; `LEGACY` is `0`.
+`has_full_payment_hash()` delegates to `is_v2()`, without a separate feature bit.
 
 Cooperative close uses fresh `NoncePurposeV2::Closing` nonces, advertised in
 `ShutdownV2`. The durable closing session retains both shutdown advertisements,
@@ -53,6 +54,25 @@ intents before any migration writes. An epoch alone cannot establish that a
 full-hash record contains genuine V2 state. Unsupported unpublished full-hash V1
 databases are refused without conversion; released zero-feature records retain
 their legacy payload and an empty V2 session.
+
+The latest migration epoch remains `20260925120000` from #1665. Its frozen
+published target ends at the feature byte. The shared
+`fiber_types::channel_v2_validation::decode_channel_actor_data` decoder reads
+that exact legacy-zero shape by appending only a serialized `None` in memory,
+then decoding the complete current schema and checking feature/session
+correspondence. Store getters,
+channel iteration, and raw `fiber_types::deserialize::<ChannelActorData>` calls
+use this codec without revalidating cryptographic snapshots or counters on every
+runtime read. `decode_and_validate_channel_actor_data` additionally invokes the
+full intent validator for September preflight and database validation. Actor
+restore invokes `validate_session_v2` before any writes or signing. Opening an
+already-current published database does not rewrite records or its version.
+V2 sessions, signed history, and trailing bytes must always decode exactly.
+
+The public raw-KV helper `fiber_types::deserialize` now requires
+`DeserializeOwned + 'static` rather than `Deserialize<'a>`. This source-level
+API change enables safe actual-type dispatch for owned stored values. Callers
+that need borrowed decoded values can use `bincode::deserialize` directly.
 
 Current preflight uses the backend's existing paged prefix iterator (100 records
 per page), so retained closed histories are not all materialized at once. Every

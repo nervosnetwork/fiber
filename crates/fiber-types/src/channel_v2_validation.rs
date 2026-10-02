@@ -1,12 +1,72 @@
 //! Validation of the actual current persisted channel schema before database writes.
-use crate::{
-    ChannelActorData, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
-};
+use std::io::{Cursor, ErrorKind};
+
 use ckb_types::{packed, prelude::*};
 use molecule::prelude::Entity;
 use musig2::{
     AggNonce, BinaryEncoding, KeyAggContext, PartialSignature, PubNonce, SecNonce, SecNonceBuilder,
 };
+
+use crate::{
+    ChannelActorData, NoncePurposeV2, Privkey, Pubkey, RevocationContextV2, SigningNonceV2,
+};
+
+/// Decode an exact persisted channel and check feature/session correspondence.
+///
+/// Published 0.10.0-rc1 legacy records end at the zero feature byte. Only that
+/// shape may omit the final session `None`: serde defaults cannot supply it at
+/// bincode EOF. No stored bytes are rewritten, and V2 records must be complete.
+/// Signing intents and counters are validated separately at preflight/restore,
+/// rather than on every runtime storage read.
+pub fn decode_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
+    fn decode_exact(bytes: &[u8]) -> Result<ChannelActorData, bincode::Error> {
+        let mut cursor = Cursor::new(bytes);
+        let channel = bincode::deserialize_from(&mut cursor)?;
+        if cursor.position() != bytes.len() as u64 {
+            return Err(Box::new(bincode::ErrorKind::Custom(
+                "Trailing bytes in channel record".to_owned(),
+            )));
+        }
+        Ok(channel)
+    }
+
+    let channel = match decode_exact(bytes) {
+        Ok(channel) => channel,
+        Err(error) if matches!(error.as_ref(), bincode::ErrorKind::Io(e) if e.kind() == ErrorKind::UnexpectedEof) =>
+        {
+            let mut with_session = bytes.to_vec();
+            with_session
+                .extend(bincode::serialize(&Option::<()>::None).map_err(|e| e.to_string())?);
+            let channel = decode_exact(&with_session).map_err(|e| e.to_string())?;
+            check(
+                channel.channel_features == crate::ChannelFeatures::LEGACY
+                    && channel.session_v2.is_none(),
+                "Only legacy zero channels may omit the final session tag",
+            )?;
+            channel
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    match &channel.session_v2 {
+        None => check(
+            !channel.channel_features.is_v2(),
+            "Missing V2 session for full-hash channel",
+        )?,
+        Some(session) => check(
+            channel.channel_features.is_v2() && session.marker == 0x56320001,
+            "Invalid V2 feature/session marker",
+        )?,
+    }
+    Ok(channel)
+}
+
+/// Decode a compatible stored channel and fully validate retained signing intents.
+/// Use at database preflight/validation boundaries before writes or actor startup.
+pub fn decode_and_validate_channel_actor_data(bytes: &[u8]) -> Result<ChannelActorData, String> {
+    let channel = decode_channel_actor_data(bytes)?;
+    validate_channel_v2(&channel).map_err(|e| format!("Invalid channel {}: {e}", channel.id))?;
+    Ok(channel)
+}
 
 /// Canonical funding witness prefix required for XUDT compatibility.
 pub const XUDT_COMPATIBLE_WITNESS: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
@@ -177,7 +237,7 @@ fn commitment_snapshot(
     let witness = crate::watchtower::settlement_data_witness(
         settlement,
         for_remote,
-        channel.commitment_contract_features,
+        channel.channel_features,
         channel.signer.tlc_base_key.pubkey(),
         remote.tlc_base_key,
     )?;
@@ -186,7 +246,7 @@ fn commitment_snapshot(
         &(channel.commitment_delay_epoch | 0xa000000000000000).to_le_bytes(),
         &number.to_be_bytes(),
         &ckb_hash::blake2b_256(witness)[..20],
-        &[0, channel.commitment_contract_features.bits()],
+        &[0, channel.channel_features.bits()],
     ]
     .concat();
     check(
@@ -218,12 +278,12 @@ fn commitment_snapshot(
 pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
     let Some(session) = &channel.session_v2 else {
         return check(
-            !channel.commitment_contract_features.is_v2(),
+            !channel.channel_features.is_v2(),
             "Missing V2 session for full-hash channel",
         );
     };
     check(
-        channel.commitment_contract_features.is_v2() && session.marker == 0x56320001,
+        channel.channel_features.is_v2() && session.marker == 0x56320001,
         "Invalid V2 feature/session marker",
     )?;
     let funded = matches!(

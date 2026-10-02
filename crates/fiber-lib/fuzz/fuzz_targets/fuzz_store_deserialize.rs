@@ -2,7 +2,6 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use fnn::fiber::channel::ChannelActorState;
 use fnn::fiber::history::TimedResult;
 use fnn::fiber::payment::PaymentSession;
 use fnn::fiber::types::BroadcastMessage;
@@ -17,7 +16,7 @@ fuzz_target!(|data: &[u8]| {
     //
     // Any panic (not Err) here indicates a bug in the deserialization logic.
 
-    let _ = bincode::deserialize::<ChannelActorState>(data);
+    let _ = fnn::fiber::channel::decode_channel_actor_data(data);
     let _ = bincode::deserialize::<PersistentNetworkActorState>(data);
     let _ = bincode::deserialize::<PaymentSession>(data);
     let _ = bincode::deserialize::<TimedResult>(data);

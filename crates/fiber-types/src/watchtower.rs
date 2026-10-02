@@ -3,7 +3,7 @@
 //! Contains the data structures used by the watchtower service to monitor channels
 //! and handle force-close scenarios.
 
-use crate::channel::{CommitmentContractFeatures, TLCId};
+use crate::channel::{ChannelFeatures, TLCId};
 use crate::invoice::HashAlgorithm;
 use crate::serde_utils::{CompactSignatureAsBytes, EntityHex};
 use crate::{Hash256, Privkey, Pubkey};
@@ -63,7 +63,7 @@ pub struct SettlementTlc {
 pub fn settlement_tlc_witness(
     tlc: &SettlementTlc,
     for_remote: bool,
-    features: CommitmentContractFeatures,
+    features: ChannelFeatures,
 ) -> Vec<u8> {
     let mut bytes = vec![((tlc.hash_algorithm as u8) << 1) + u8::from(tlc.tlc_id.is_received())];
     bytes.extend_from_slice(&tlc.payment_amount.to_le_bytes());
@@ -86,7 +86,7 @@ pub fn settlement_tlc_witness(
 pub fn settlement_data_witness(
     data: &SettlementData,
     for_remote: bool,
-    features: CommitmentContractFeatures,
+    features: ChannelFeatures,
     local: Pubkey,
     remote: Pubkey,
 ) -> Result<Vec<u8>, String> {
@@ -136,5 +136,5 @@ pub struct ChannelData {
     pub revocation_data: Option<RevocationData>,
     /// The commitment-lock features used by this channel.
     #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
 }

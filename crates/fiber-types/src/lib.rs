@@ -73,17 +73,31 @@ pub fn now_timestamp_as_millis_u64() -> u64 {
 ///
 /// This function is used to deserialize values stored in the node's RocksDB.
 /// External applications can use this to read and parse store data directly.
+/// Channel actor data uses the exact, structurally checked published-legacy compatibility
+/// decoder. Stored values are owned so this dispatch can use their actual type.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use fiber_types::{schema, ChannelActorState, deserialize};
+/// use fiber_types::{schema, ChannelActorData, deserialize};
 ///
 /// let key = [&[schema::CHANNEL_ACTOR_STATE_PREFIX], channel_id.as_ref()].concat();
 /// let value = db.get(&key)?;
-/// let state: ChannelActorState = deserialize(&value)?;
+/// let state: ChannelActorData = deserialize(&value)?;
 /// ```
-pub fn deserialize<'a, T: serde::Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, bincode::Error> {
+pub fn deserialize<T: serde::de::DeserializeOwned + 'static>(
+    bytes: &[u8],
+) -> Result<T, bincode::Error> {
+    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<ChannelActorData>() {
+        let channel = channel_v2_validation::decode_channel_actor_data(bytes)
+            .map_err(|e| Box::new(bincode::ErrorKind::Custom(e)))?;
+        let value: Box<dyn std::any::Any> = Box::new(channel);
+        return value.downcast::<T>().map(|channel| *channel).map_err(|_| {
+            Box::new(bincode::ErrorKind::Custom(
+                "Stored channel type mismatch".to_owned(),
+            ))
+        });
+    }
     bincode::deserialize(bytes)
 }
 
