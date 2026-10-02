@@ -936,12 +936,14 @@ where
         state: &mut ChannelActorState,
         command: super::ShutdownCommand,
     ) -> ProcessingChannelResult {
-        if state.connectivity_state != fiber_types::ChannelConnectivityState::Online
-            || state.state != ChannelState::ChannelReady
-        {
-            return Err(invalid(
-                "V2 cooperative shutdown requires an online ready channel",
-            ));
+        if state.connectivity_state != fiber_types::ChannelConnectivityState::Online {
+            return Err(invalid(format!(
+                "Cannot cooperatively shutdown channel {} while peer is offline",
+                state.get_id()
+            )));
+        }
+        if state.state != ChannelState::ChannelReady {
+            return Err(invalid("V2 cooperative shutdown requires a ready channel"));
         }
         if state.tlc_state.all_tlcs().any(|tlc| {
             matches!(
