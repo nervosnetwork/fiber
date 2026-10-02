@@ -863,6 +863,9 @@ async fn test_rpc_auth_with_fixed_token() {
 async fn test_rpc_shutdown_following_disconnect() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
+    // Keep the connectivity regression runnable on hosts without IPv6 loopback.
+    let mut rpc_config = gen_rpc_config();
+    rpc_config.listening_addr = Some("127.0.0.1:0".to_owned());
     let (nodes, channels) = create_n_nodes_network_with_params(
         &[(
             (0, 1),
@@ -874,7 +877,7 @@ async fn test_rpc_shutdown_following_disconnect() {
             },
         )],
         2,
-        Some(gen_rpc_config()),
+        Some(rpc_config),
     )
     .await;
     let [mut node_0, mut node_1] = nodes.try_into().expect("2 nodes");

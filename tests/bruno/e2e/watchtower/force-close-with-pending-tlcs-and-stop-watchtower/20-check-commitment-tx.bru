@@ -1,5 +1,5 @@
 meta {
-  name: check submitted commitment tx should be settled
+  name: wait for final settlement refund capacity
   type: http
   seq: 20
 }
@@ -19,21 +19,56 @@ body:json {
   {
     "id": 42,
     "jsonrpc": "2.0",
-    "method": "get_live_cell",
+    "method": "get_cells_capacity",
     "params": [
       {
-        "index": "0x0",
-        "tx_hash": "{{TX_HASH}}"
-      },
-      false
+        "script_type": "lock"
+      }
     ]
   }
 }
 
-assert {
-  res.body.result.status: eq "unknown"
+script:pre-request {
+  let body = req.getBody();
+  body.params[0].script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  req.setBody(body);
+  if (bru.getVar("settlement_poll_iteration") === undefined) {
+    bru.setVar("settlement_poll_iteration", 0);
+    bru.setVar("settlement_poll_started_at", Date.now());
+  }
+  if (bru.getVar("settlement_poll_max") === undefined) {
+    bru.setVar("settlement_poll_max", 120);
+  }
+  if (bru.getVar("settlement_poll_timeout_ms") === undefined) {
+    bru.setVar("settlement_poll_timeout_ms", 120000);
+  }
 }
 
 script:post-response {
-  console.log("generated result: ", res.body);
+  const capacity = res.body?.result?.capacity;
+  if (res.status !== 200 || res.body?.error || capacity === undefined) {
+    throw new Error(`Final settlement capacity RPC failed: ${JSON.stringify(res.body)}`);
+  }
+  const deficit = BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(capacity);
+  // The RPC root hash can be absent, or spent before the last party unlock.
+  // Both manual TLCs time out here: NODE1 must receive its refund, leaving only
+  // fees within the original 5,000 budget. Indexed capacity excludes pool txs.
+  if (deficit >= BigInt(0) && deficit < BigInt(5000)) {
+    bru.setVar("settlement_poll_iteration", undefined);
+    bru.setVar("settlement_poll_started_at", undefined);
+  } else {
+    const iteration = bru.getVar("settlement_poll_iteration") + 1;
+    const max = bru.getVar("settlement_poll_max");
+    const elapsed = Date.now() - bru.getVar("settlement_poll_started_at");
+    const timeout = bru.getVar("settlement_poll_timeout_ms");
+    console.log(`Final settlement refund poll ${iteration}/${max}: capacity=${capacity}, deficit=${deficit}, elapsed=${elapsed}ms`);
+    if (iteration >= max || elapsed >= timeout) {
+      throw new Error(`Final settlement refund not indexed after ${iteration} polling attempts (max=${max}, elapsed=${elapsed}ms, timeout=${timeout}ms): capacity=${capacity}, deficit=${deficit}, commitment=${bru.getVar("TX_HASH")}`);
+    }
+    bru.setVar("settlement_poll_iteration", iteration);
+    // Polling cadence gives watchtower/indexer work a chance to progress. Mine
+    // again before rechecking, so a late pool payout can actually be committed.
+    await new Promise(r => setTimeout(r, Math.min(1000, timeout - elapsed)));
+    bru.setNextRequest("generate a few blocks for final settlement tx1 to be committed");
+  }
 }
