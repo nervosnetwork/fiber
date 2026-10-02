@@ -59,6 +59,55 @@ pub struct SettlementTlc {
     pub remote_key: Pubkey,
 }
 
+/// Encode a TLC using the channel's exact on-chain witness layout.
+pub fn settlement_tlc_witness(
+    tlc: &SettlementTlc,
+    for_remote: bool,
+    features: CommitmentContractFeatures,
+) -> Vec<u8> {
+    let mut bytes = vec![((tlc.hash_algorithm as u8) << 1) + u8::from(tlc.tlc_id.is_received())];
+    bytes.extend_from_slice(&tlc.payment_amount.to_le_bytes());
+    bytes.extend_from_slice(&tlc.payment_hash.as_ref()[..features.payment_hash_len()]);
+    let local = tlc.local_key.pubkey();
+    let keys = if for_remote {
+        [tlc.remote_key, local]
+    } else {
+        [local, tlc.remote_key]
+    };
+    for key in keys {
+        bytes.extend_from_slice(&ckb_hash::blake2b_256(key.serialize())[..20]);
+    }
+    // CKB absolute timestamp since, in seconds.
+    bytes.extend_from_slice(&(0x4000000000000000u64 | (tlc.expiry / 1000)).to_le_bytes());
+    bytes
+}
+
+/// Encode the settlement snapshot committed by the commitment-lock args.
+pub fn settlement_data_witness(
+    data: &SettlementData,
+    for_remote: bool,
+    features: CommitmentContractFeatures,
+    local: Pubkey,
+    remote: Pubkey,
+) -> Result<Vec<u8>, String> {
+    let len = u8::try_from(data.tlcs.len())
+        .map_err(|_| "TLC count exceeds witness encoding limit (max 255)")?;
+    let mut bytes = vec![len];
+    for tlc in &data.tlcs {
+        bytes.extend_from_slice(&settlement_tlc_witness(tlc, for_remote, features));
+    }
+    let sides = if for_remote {
+        [(remote, data.remote_amount), (local, data.local_amount)]
+    } else {
+        [(local, data.local_amount), (remote, data.remote_amount)]
+    };
+    for (key, amount) in sides {
+        bytes.extend_from_slice(&ckb_hash::blake2b_256(key.serialize())[..20]);
+        bytes.extend_from_slice(&amount.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 /// The data of a channel that the watchtower is monitoring.
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

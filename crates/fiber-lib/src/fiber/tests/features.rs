@@ -1,7 +1,6 @@
 use crate::fiber::FeatureVector;
 use fiber_types::feature_bits::{
-    GOSSIP_QUERIES_OPTIONAL, GOSSIP_QUERIES_REQUIRED, ONCHAIN_FULL_PAYMENT_HASH_OPTIONAL,
-    ONCHAIN_FULL_PAYMENT_HASH_REQUIRED,
+    CHANNEL_V2_OPTIONAL, CHANNEL_V2_REQUIRED, GOSSIP_QUERIES_OPTIONAL, GOSSIP_QUERIES_REQUIRED,
 };
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -196,26 +195,26 @@ fn test_feature_compatibility() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn test_onchain_full_payment_hash_feature_bit() {
+fn test_channel_v2_feature_bit() {
     let mut vector = FeatureVector::default();
-    assert!(!vector.supports_onchain_full_payment_hash());
-    vector.set_onchain_full_payment_hash_optional();
-    assert!(vector.supports_onchain_full_payment_hash());
-    assert!(!vector.requires_onchain_full_payment_hash());
-    vector.set_onchain_full_payment_hash_required();
-    assert!(vector.requires_onchain_full_payment_hash());
-    vector.unset_onchain_full_payment_hash_required();
-    vector.unset_onchain_full_payment_hash_optional();
-    assert!(!vector.supports_onchain_full_payment_hash());
-    assert!(!vector.requires_onchain_full_payment_hash());
+    assert!(!vector.supports_channel_v2());
+    vector.set_channel_v2_optional();
+    assert!(vector.supports_channel_v2());
+    assert!(!vector.requires_channel_v2());
+    vector.set_channel_v2_required();
+    assert!(vector.requires_channel_v2());
+    vector.unset_channel_v2_required();
+    vector.unset_channel_v2_optional();
+    assert!(!vector.supports_channel_v2());
+    assert!(!vector.requires_channel_v2());
 
     // backward compat: the pre-existing features still work
     vector.unset_gossip_queries_required();
     assert!(!vector.supports_feature(GOSSIP_QUERIES_OPTIONAL));
     vector.set_gossip_queries_optional();
     assert!(vector.supports_feature(GOSSIP_QUERIES_OPTIONAL));
-    assert_eq!(ONCHAIN_FULL_PAYMENT_HASH_OPTIONAL, 7);
-    assert_eq!(ONCHAIN_FULL_PAYMENT_HASH_REQUIRED, 6);
+    assert_eq!(CHANNEL_V2_OPTIONAL, 7);
+    assert_eq!(CHANNEL_V2_REQUIRED, 6);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
