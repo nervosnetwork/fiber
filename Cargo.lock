@@ -2667,6 +2667,8 @@ dependencies = [
  "fiber-sphinx 3.0.0",
  "fiber-store",
  "fiber-types 0.10.0-rc1",
+ "fiber-types 0.10.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "fiber-types 0.9.1",
  "futures",
  "getrandom 0.3.4",
  "git-version",
