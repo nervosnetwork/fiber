@@ -8,6 +8,14 @@ original contract layout. `ChannelFeatures::V2` has value `1` and selects both
 nonce sessions and the full payment hash layout; `LEGACY` is `0`.
 `has_full_payment_hash()` delegates to `is_v2()`, without a separate feature bit.
 
+Deployment prerequisite: a node must only advertise `CHANNEL_V2` once its
+configured commitment-lock contract accepts the 58-byte V2 arguments (the legacy
+57-byte args plus the trailing feature byte) and the full 32-byte on-chain
+payment hash. The code hash of the deployed contract is not versioned in this
+repository, so enabling the capability on a network requires confirming the
+resolved mainnet/testnet commitment-lock binary from the deployment records
+before rollout.
+
 Cooperative close uses fresh `NoncePurposeV2::Closing` nonces, advertised in
 `ShutdownV2`. The durable closing session retains both shutdown advertisements,
 the original transaction, the exact signing context and both partial responses.
