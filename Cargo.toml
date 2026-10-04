@@ -13,6 +13,10 @@ members = [
 exclude = ["rpc-doc-gen"]
 resolver = "2"
 default-members = ["crates/fiber-bin", "crates/fiber-lib", "crates/fiber-cli"]
+
+[workspace.package]
+license = "MIT"
+
 [profile.release]
 overflow-checks = true
 
