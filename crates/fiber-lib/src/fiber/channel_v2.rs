@@ -1004,17 +1004,23 @@ where
         }) {
             return Err(invalid("Pending inbound TLCs prevent shutdown"));
         }
+        // Validate the auto-accept minimum before changing shutdown state: the
+        // actor persists state even when this handler fails, so rejecting here
+        // after recording remote_shutdown_info would leave a stale remote info
+        // next to a later local closing session without a remote advertisement,
+        // and V2 validation would reject the channel after a restart.
+        let auto_accept = state.session_v2.as_ref().expect("V2").closing.is_none();
+        if auto_accept && message.fee_rate < state.commitment_fee_rate {
+            return Err(invalid(
+                "V2 shutdown fee does not allow automatic acceptance",
+            ));
+        }
         state.remote_shutdown_info = Some(fiber_types::ShutdownInfo {
             close_script: message.close_script,
             fee_rate: message.fee_rate,
             signature: None,
         });
-        if state.session_v2.as_ref().expect("V2").closing.is_none() {
-            if !state.check_valid_to_auto_accept_shutdown() {
-                return Err(invalid(
-                    "V2 shutdown fee does not allow automatic acceptance",
-                ));
-            }
+        if auto_accept {
             self.advertise_close_v2(
                 state,
                 state.get_local_shutdown_script(),
@@ -2911,6 +2917,96 @@ mod tests {
                 fiber_store::migration::LATEST_DB_VERSION.as_bytes()
             );
         }
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_rejected_shutdown_leaves_no_stale_remote_info_across_restore() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sa = a.get_channel_actor_state(id);
+        let mut sb = b.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        sa.network = Some(network.clone());
+        sb.network = Some(network.clone());
+        let actor_a = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+
+        // The peer advertises a genuine closing nonce with a fee below the
+        // minimum this node auto-accepts, but still affordable for the peer.
+        actor_b
+            .shutdown_v2(
+                &mut sb,
+                super::super::ShutdownCommand {
+                    force: false,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut peer_shutdown = ShutdownV2::try_from(
+            sb.session_v2
+                .as_ref()
+                .unwrap()
+                .closing
+                .as_ref()
+                .unwrap()
+                .shutdown
+                .clone(),
+        )
+        .unwrap();
+        peer_shutdown.fee_rate = 0;
+        assert!(peer_shutdown.fee_rate < sa.commitment_fee_rate);
+        assert!(sa.check_shutdown_fee_valid(&peer_shutdown.close_script, peer_shutdown.fee_rate));
+
+        assert!(actor_a
+            .receive_shutdown_v2(&mut sa, peer_shutdown)
+            .await
+            .is_err());
+        // A rejected shutdown must not leave any durable trace. The actor
+        // persists the channel state even when the handler returns an error.
+        assert!(sa.remote_shutdown_info.is_none());
+        assert!(sa.session_v2.as_ref().unwrap().closing.is_none());
+        assert_eq!(sa.state, ChannelState::ChannelReady);
+
+        // Persist the rejected state, then start a local cooperative close from
+        // it. Before the fix the stale remote info survived and paired with a
+        // closing session that has no remote advertisement.
+        let encoded = bincode::serialize(&sa.core).unwrap();
+        sa.core = bincode::deserialize(&encoded).unwrap();
+        actor_a
+            .shutdown_v2(
+                &mut sa,
+                super::super::ShutdownCommand {
+                    force: false,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(sa.remote_shutdown_info.is_none());
+        assert!(sa
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .closing
+            .as_ref()
+            .unwrap()
+            .remote_shutdown
+            .is_none());
+
+        // Restoring the closing session must pass V2 validation instead of
+        // failing with "V2 remote shutdown without advertisement".
+        let encoded = bincode::serialize(&sa.core).unwrap();
+        sa.core = bincode::deserialize(&encoded).unwrap();
+        fiber_types::channel_v2_validation::validate_channel_v2(&sa.core).unwrap();
+
         network.stop(None);
         task.await.unwrap();
     }
