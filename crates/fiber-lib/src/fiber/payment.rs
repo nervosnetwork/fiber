@@ -1907,9 +1907,20 @@ where
 
         let mut already_processed = false;
         if let Some(completion) = completion {
-            if !attempt.first_hop_channel_outpoint_eq(&completion.channel_outpoint)
-                || attempt.is_success()
-            {
+            if !attempt.first_hop_channel_outpoint_eq(&completion.channel_outpoint) {
+                return Ok(false);
+            }
+            if attempt.is_success() {
+                // The attempt and aggregate session are separate writes. Recovery
+                // can repeat delivery after the attempt write but before the session
+                // write; repair the aggregate before acknowledging the source outbox.
+                session.update_with_attempt(attempt);
+                if !session.is_dry_run() {
+                    self.store.insert_payment_session(session.clone());
+                    if session.status.is_final() {
+                        self.store.clear_attempts_channel_index(payment_hash);
+                    }
+                }
                 return Ok(false);
             }
             let same_execution = attempt.tried_times == completion.tried_times;

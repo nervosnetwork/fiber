@@ -1872,6 +1872,7 @@ dependencies = [
  "anyhow",
  "bincode 1.3.3",
  "console_error_panic_hook",
+ "fiber-types 0.10.0-rc1",
  "fiber-types 0.10.0-rc1 (registry+https://github.com/rust-lang/crates.io-index)",
  "fiber-types 0.8.1",
  "fiber-types 0.9.1",

@@ -14,7 +14,9 @@ impl StoreSample for ChannelActorState {
     const TYPE_NAME: &'static str = "ChannelActorState";
 
     fn samples(seed: u64) -> Vec<Self> {
-        vec![Self::sample_minimal(seed), Self::sample_full(seed)]
+        let mut v2 = Self::sample_minimal(seed);
+        v2.core = fiber_types::ChannelActorData::samples(seed).remove(2);
+        vec![Self::sample_minimal(seed), Self::sample_full(seed), v2]
     }
 }
 
@@ -30,6 +32,7 @@ impl ChannelActorState {
             core,
             waiting_peer_response: None,
             reestablish_started_at: None,
+            recovery_peer_v2: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -55,6 +58,7 @@ impl ChannelActorState {
             core,
             waiting_peer_response: None,
             reestablish_started_at: None,
+            recovery_peer_v2: None,
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
@@ -98,6 +102,19 @@ mod tests {
     #[test]
     fn test_channel_actor_state_sample_count() {
         let samples = ChannelActorState::samples(42);
-        assert_eq!(samples.len(), 2, "Should produce 2 sample variants");
+        assert_eq!(
+            samples.len(),
+            3,
+            "Minimal V1, full V1, and genuine V2 samples"
+        );
+        let ids = samples
+            .iter()
+            .map(|sample| sample.id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            ids.len(),
+            samples.len(),
+            "Each sample needs a unique store key"
+        );
     }
 }

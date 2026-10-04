@@ -29,11 +29,11 @@ assert {
 }
 
 script:pre-request {
-  // Give watchtower a chance to push the final settlement tx into the pool
-  // before mining the final blocks.
-  await new Promise(r => setTimeout(r, 5000));
-}
-
-script:post-response {
-  await new Promise(r => setTimeout(r, 1000));
+  // The first pass advances the settlement timelocks. Subsequent passes mine
+  // for proposal/commitment while request 23 polls the actual returned capacity.
+  if (bru.getVar("settlement_poll_iteration") > 0) {
+    let body = req.getBody();
+    body.params = ["0x1"];
+    req.setBody(body);
+  }
 }

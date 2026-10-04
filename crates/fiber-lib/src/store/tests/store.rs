@@ -47,7 +47,7 @@ use fiber_types::protocol::AnnouncedNodeName;
 use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, CommitmentContractFeatures, CommitmentNumbers, OutboundTlcStatus,
+    AddTlcCommand, AppliedFlags, ChannelFeatures, CommitmentNumbers, OutboundTlcStatus,
     RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 use fiber_types::{
@@ -450,7 +450,7 @@ fn test_store_watchtower() {
             local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
 
@@ -480,9 +480,58 @@ fn test_store_watchtower() {
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
         }]
     );
+
+    let old = RevocationData {
+        commitment_number: 0,
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+    let mut newer = old.clone();
+    newer.commitment_number = 1;
+    let newer_settlement = SettlementData {
+        local_amount: 300,
+        remote_amount: 400,
+        tlcs: vec![],
+    };
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        newer.clone(),
+        newer_settlement.clone(),
+    );
+    store.update_revocation(
+        node_id.clone(),
+        channel_id,
+        old,
+        SettlementData {
+            local_amount: 1,
+            remote_amount: 2,
+            tlcs: vec![],
+        },
+    );
+    let stored = store.get_watch_channels().pop().unwrap();
+    assert_eq!(stored.revocation_data, Some(newer));
+    assert_eq!(stored.remote_settlement_data, newer_settlement);
+    // Replayed bootstrap registration cannot erase accepted revocation data.
+    store.insert_watch_channel(
+        node_id.clone(),
+        channel_id,
+        None,
+        Privkey::from(&[1; 32]),
+        remote_settlement_key,
+        local_funding_pubkey,
+        remote_funding_pubkey,
+        SettlementData {
+            local_amount: 100,
+            remote_amount: 200,
+            tlcs: vec![],
+        },
+    );
+    assert_eq!(store.get_watch_channels().pop().unwrap(), stored);
 
     store.remove_watch_channel(node_id, channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
@@ -510,7 +559,7 @@ fn test_store_watchtower_v1_registration_round_trip() {
         Privkey::from(&[3; 32]).pubkey(),
         Privkey::from(&[4; 32]).pubkey(),
         settlement_data,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+        ChannelFeatures::V2,
     );
 
     assert_eq!(
@@ -519,8 +568,8 @@ fn test_store_watchtower_v1_registration_round_trip() {
             .into_iter()
             .find(|channel| channel.channel_id == channel_id)
             .expect("stored channel")
-            .commitment_contract_features,
-        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+            .channel_features,
+        ChannelFeatures::V2
     );
 }
 
@@ -1169,7 +1218,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
-        commitment_contract_features: Default::default(),
+        channel_features: Default::default(),
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 
@@ -1308,11 +1357,13 @@ fn test_channel_actor_state_store() {
             })],
             last_was_revoke: true,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
+            session_v2: None,
         },
         waiting_peer_response: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
@@ -1450,11 +1501,13 @@ fn sample_channel_actor_state(
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
             created_at: SystemTime::now(),
+            session_v2: None,
         },
         waiting_peer_response: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
