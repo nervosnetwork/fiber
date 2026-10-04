@@ -4,6 +4,7 @@ version = "0.10.0-rc1"
 edition = "2021"
 description = "Key-value store backends and migration framework for Fiber Network"
 build = "build.rs"
+license.workspace = true
 
 [dependencies]
 # Logging

@@ -2,6 +2,7 @@
 name = "fiber-bin"
 version = "0.10.0-rc1"
 edition = "2021"
+license.workspace = true
 
 [[bin]]
 name = "fnn"

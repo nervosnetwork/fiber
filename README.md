@@ -132,3 +132,7 @@ For the v0.7.x to v0.8.0 legacy migration flow, see
 
 [fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts
 [fiber-js]: https://www.npmjs.com/package/@nervosnetwork/fiber-js
+
+## License
+
+This project is licensed under the [MIT License](./LICENSE).
