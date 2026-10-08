@@ -1558,6 +1558,18 @@ fn build_settlement_tx<S: WatchtowerStore>(
         (fiber_types::OnchainKeyPurpose::Settlement, unlock_key)
     };
 
+    let fee_input_since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+        let tracked_tlc = tracked_tlcs
+            .get(unlock.unlock_type as usize)
+            .ok_or_else(|| anyhow!("missing tracked TLC for settlement unlock"))?;
+        // The contract requires an absolute timestamp since >= the TLC expiry.
+        // Reuse the verified witness's expiry so advancing chain median time
+        // does not change the transaction awaiting an external signature.
+        Htlc::build_from_witness(&tracked_tlc.witness).htlc_expiry
+    } else {
+        0
+    };
+
     let mut new_commitment_lock_script_args = lock_script_args[0..36].to_vec();
     let new_script_hash = {
         let mut sw = SettlementWitness::build_from_witness(
@@ -1678,11 +1690,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = capacity;
-        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
-            Since::new(SinceType::Timestamp, current_time / 1000, false).value()
-        } else {
-            0
-        };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity = checked_add_u64(
@@ -1693,7 +1700,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since)
+                    .since(fee_input_since)
                     .build(),
             );
             let tx_size =
@@ -1911,11 +1918,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.min_total_capacity = min_total_capacity;
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
-        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
-            Since::new(SinceType::Timestamp, current_time / 1000, false).value()
-        } else {
-            0
-        };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity = checked_add_u64(
@@ -1926,7 +1928,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since)
+                    .since(fee_input_since)
                     .build(),
             );
             let tx_size =

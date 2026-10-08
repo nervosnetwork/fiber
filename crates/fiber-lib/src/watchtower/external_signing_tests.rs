@@ -204,6 +204,13 @@ impl Fixture {
     }
 
     fn build(&self) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+        self.build_at(200_000)
+    }
+
+    fn build_at(
+        &self,
+        current_time: u64,
+    ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
         let signer =
             LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
         // Keep the original commitment's snapshot even after a successor cell
@@ -217,7 +224,7 @@ impl Fixture {
             self.cell.clone(),
             EpochNumberWithFraction::new(10, 0, 1),
             EpochNumberWithFraction::new(14, 0, 1),
-            200_000,
+            current_time,
             &self.node_id,
             self.for_remote,
             self.channel.clone(),
@@ -275,6 +282,93 @@ fn assert_applied_signature(tx: &TransactionView, content: &OnchainSigningConten
     verify_onchain_signature(&key.pubkey(), content, &unlock.signature)
         .expect("correct unlock signature");
     assert_eq!(tx.hash(), content.transaction.calc_tx_hash());
+}
+
+#[test]
+fn external_timeout_signing_waits_for_tlc_expiry() {
+    for for_remote in [false, true] {
+        for subsequent in [false, true] {
+            let fixture = Fixture::new(for_remote, subsequent, false, false);
+            assert!(fixture.build_at(99_999).expect("before expiry").is_none());
+            let WatchtowerSignerState::External(state) = fixture
+                .store
+                .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+            else {
+                panic!("expected external signer state");
+            };
+            assert!(state.pending_requests.is_empty());
+            assert!(fixture.build_at(100_001).expect("after expiry").is_none());
+            let (_, content) = fixture.pending();
+            let fee_since: u64 = content
+                .transaction
+                .raw()
+                .inputs()
+                .get(1)
+                .expect("fee input")
+                .since()
+                .unpack();
+            assert_eq!(
+                fee_since,
+                fiber_types::watchtower::settlement_timestamp_since(100_000)
+            );
+        }
+    }
+}
+
+#[test]
+fn external_tlc_signature_survives_advancing_chain_time() {
+    for for_remote in [false, true] {
+        for subsequent in [false, true] {
+            for with_preimage in [false, true] {
+                for with_udt in [false, true] {
+                    let mut fixture = Fixture::new(for_remote, subsequent, with_preimage, false);
+                    if with_udt {
+                        let type_script = get_script_by_contract(Contract::SimpleUDT, &[31; 32]);
+                        let output: CellOutput = fixture.cell.output.clone().into();
+                        fixture.cell.output = output
+                            .as_builder()
+                            .type_(Some(type_script).pack())
+                            .build()
+                            .into();
+                        fixture.cell.output_data = Some(ckb_jsonrpc_types::JsonBytes::from_vec(
+                            240_000_000_000u128.to_le_bytes().to_vec(),
+                        ));
+                    }
+                    assert!(fixture.build_at(200_000).expect("queue request").is_none());
+                    let (request_id, content) = fixture.pending();
+                    let signature =
+                        sign_onchain_request(&fixture.tlc_key, &content).expect("TLC signature");
+                    assert_eq!(
+                        fixture.submit(request_id, signature).expect("submit"),
+                        SubmitWatchtowerSignatureResult::Applied
+                    );
+
+                    // The next scan observes a later chain median time, but the
+                    // same commitment, TLC and fee cell must reuse this signature.
+                    let tx = fixture
+                        .build_at(260_000)
+                        .expect("next scan")
+                        .expect("accepted signature must produce a signed transaction");
+                    assert_applied_signature(&tx, &content, &fixture.tlc_key);
+                    let expected_since = if with_preimage {
+                        0
+                    } else {
+                        fiber_types::watchtower::settlement_timestamp_since(100_000)
+                    };
+                    let fee_since: u64 = tx.inputs().get(1).expect("fee input").since().unpack();
+                    assert_eq!(fee_since, expected_since);
+                    let WatchtowerSignerState::External(state) = fixture
+                        .store
+                        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+                    else {
+                        panic!("expected external signer state");
+                    };
+                    assert!(state.pending_requests.is_empty());
+                    assert_eq!(state.signed_signatures.len(), 1);
+                }
+            }
+        }
+    }
 }
 
 #[test]
