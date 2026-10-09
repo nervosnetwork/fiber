@@ -45,7 +45,7 @@ pub struct LspServiceStatus {
     pub active_tenants: usize,
 }
 
-/// Result of the idempotent hosted tenant registration operation.
+/// Result of hosted tenant registration or authenticated credential refresh.
 #[derive(Debug)]
 pub struct HostedTenantRegistration {
     pub status: HostedTenantStatus,
@@ -157,7 +157,7 @@ impl LspServiceState {
             .ok_or_else(|| format!("tenant {tenant_id} is not registered"))
     }
 
-    fn issue_created_tenant_token(
+    fn issue_tenant_token(
         &self,
         record: &crate::lsp::HostedTenantRecord,
     ) -> Result<String, String> {
@@ -364,15 +364,29 @@ impl Actor for LspService {
                         format!("invalid RootSigner registration proof: {error}")
                     })?;
                     let tenant_id = TenantId::from_root_signer_pubkey(&payload.root_signer_pubkey);
-                    let mut record = state.supervisor.provision(&tenant_id)?;
-                    record.root_signer_pubkey = Some(payload.root_signer_pubkey);
-                    let record = state
-                        .registry
-                        .register_authenticated(record, payload.nonce)?;
-                    let access_token = state.issue_created_tenant_token(&record)?;
+                    let (record, created) = if state.registry.get(&tenant_id)?.is_some() {
+                        // Reauthentication uses a new proof, and preserves all existing
+                        // tenant state instead of provisioning a new protocol identity.
+                        (
+                            state
+                                .registry
+                                .refresh_authenticated(payload.root_signer_pubkey, payload.nonce)?,
+                            false,
+                        )
+                    } else {
+                        let mut record = state.supervisor.provision(&tenant_id)?;
+                        record.root_signer_pubkey = Some(payload.root_signer_pubkey);
+                        (
+                            state
+                                .registry
+                                .register_authenticated(record, payload.nonce)?,
+                            true,
+                        )
+                    };
+                    let access_token = state.issue_tenant_token(&record)?;
                     Ok(HostedTenantRegistration {
                         status: state.tenant_status(record),
-                        created: true,
+                        created,
                         access_token,
                     })
                 })();

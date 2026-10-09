@@ -1552,12 +1552,17 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         registered.tenant.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
-    let tenant_token = registered.access_token;
-    let duplicate = match register_root_signer_tenant(&admin_client, &root_signer_key).await {
-        Ok(_) => panic!("registration proof must be one-time"),
-        Err(error) => error,
-    };
-    assert!(duplicate.to_string().contains("already registered"));
+    // The helper obtains a fresh challenge and proof, so it must refresh the
+    // existing tenant credential rather than be treated as a replay.
+    let refreshed = register_root_signer_tenant(&admin_client, &root_signer_key)
+        .await
+        .expect("refresh RootSigner tenant credentials through RPC");
+    assert_eq!(refreshed.tenant.tenant_id, registered.tenant.tenant_id);
+    assert_eq!(
+        refreshed.tenant.root_signer_pubkey,
+        registered.tenant.root_signer_pubkey
+    );
+    let tenant_token = refreshed.access_token;
     let tenant_client = authenticated_client(rpc_addr, &tenant_token);
 
     let channels: fiber_json_types::ListChannelsResult = tenant_client

@@ -175,7 +175,8 @@ impl<S: SignerStore> HostedSession<S> {
         Ok(self.root.open_channel(key_id).await?)
     }
 
-    /// Build a registration request from an LSP nonce. The caller sends it.
+    /// Build a registration or credential refresh request from a fresh LSP nonce.
+    /// The caller sends it through the registration RPC in either case.
     pub fn begin_registration(
         &self,
         nonce: GetLspTenantRegistryNonceResult,

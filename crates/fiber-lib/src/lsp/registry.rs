@@ -202,13 +202,37 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
                 .find_by_root_signer_pubkey(&root_signer_pubkey)?
                 .is_some()
         {
-            return Err("RootSigner is already registered; use credential recovery".to_string());
+            return Err("RootSigner is already registered; use credential refresh".to_string());
         }
         if let Some(existing) = self.find_by_tenant_pubkey(&record.tenant_pubkey)? {
             return Err(format!(
                 "protocol key is already registered to tenant {}",
                 existing.tenant_id
             ));
+        }
+        self.store.register_and_consume_nonce(&record, nonce)?;
+        Ok(record)
+    }
+
+    /// Refresh credentials for an existing tenant after verifying a fresh RootSigner proof.
+    ///
+    /// Consume the challenge without replacing protocol keys, channel bindings, or
+    /// creation metadata. A consumed proof cannot be reused to mint another token.
+    pub fn refresh_authenticated(
+        &self,
+        root_signer_pubkey: crate::fiber_types::Pubkey,
+        nonce: [u8; 32],
+    ) -> Result<HostedTenantRecord, String> {
+        let _guard = self
+            .registration_lock
+            .lock()
+            .map_err(|_| "tenant registration lock is poisoned".to_string())?;
+        let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
+        let record = self
+            .get(&tenant_id)?
+            .ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
+        if record.root_signer_pubkey != Some(root_signer_pubkey) {
+            return Err("tenant is not registered to this RootSigner".to_string());
         }
         self.store.register_and_consume_nonce(&record, nonce)?;
         Ok(record)

@@ -1471,7 +1471,7 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     })
     .unwrap()
     .unwrap_err();
-    assert!(replay_result.contains("already registered"));
+    assert!(replay_result.contains("missing, replaced, or consumed"));
 }
 
 #[tokio::test]
@@ -1556,6 +1556,151 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     crate::rpc::tenant::enforce_tenant_method_allowlist("create_watch_channel", &biscuit).unwrap();
     assert!(crate::rpc::tenant::enforce_tenant_method_allowlist("open_channel", &biscuit).is_err());
     auth.check_permission("create_preimage", &token).unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart() {
+    use crate::lsp::tenant_watchtower_node_id;
+    use crate::rpc::biscuit::BiscuitAuth;
+    use biscuit_auth::KeyPair;
+
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let registry = TenantRegistry::new(store.clone());
+    let biscuit_root = KeyPair::new();
+    let issuer = BiscuitTokenIssuer::from_private_key(
+        &biscuit_root.private().to_prefixed_string(),
+        &biscuit_root.public().to_string(),
+    )
+    .unwrap();
+    let factory = Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0))));
+    let lsp_key = Privkey::from(&[9; 32]);
+    let public_network_actor = Actor::spawn(None, NoopNetworkActor, ()).await.unwrap().0;
+    let args = || LspServiceArgs {
+        config: config.clone(),
+        public_node_id: lsp_key.pubkey(),
+        public_network_actor: public_network_actor.clone(),
+        watchtower_store: store.clone(),
+        store: store.clone(),
+        runtime_factory: factory.clone(),
+        signing_key: lsp_key.clone(),
+        token_issuer: issuer.clone(),
+    };
+    let (service, handle) = Actor::spawn(None, LspService, args()).await.unwrap();
+    let root_key = test_root_signer();
+    let tenant_id = TenantId::from_root_signer_pubkey(&root_key.pubkey());
+    let nonce = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_key.pubkey()
+    )
+    .unwrap()
+    .unwrap();
+    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), nonce);
+    let (send, receive) = tokio::sync::oneshot::channel();
+    drop(receive); // The registration response cannot reach the client.
+    service
+        .send_message(LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_key, &payload),
+            payload,
+            reply: send.into(),
+        })
+        .unwrap();
+    ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
+    let channel_id = Hash256::from([76; 32]);
+    let original = registry
+        .bind_private_channel(&tenant_id, channel_id)
+        .unwrap();
+    service.stop(None);
+    handle.await.unwrap();
+    let (service, handle) = Actor::spawn(None, LspService, args()).await.unwrap();
+
+    let replaced = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_key.pubkey()
+    )
+    .unwrap()
+    .unwrap();
+    let nonce = ractor::call!(
+        service,
+        LspServiceMessage::IssueTenantRegistryNonce,
+        root_key.pubkey()
+    )
+    .unwrap()
+    .unwrap();
+    let old_payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), replaced);
+    let _stale = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_key, &old_payload),
+            payload: old_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), nonce);
+    let invalid = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&Privkey::from(&[5; 32]), &payload),
+            payload: payload.clone(),
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(invalid.contains("invalid RootSigner registration proof"));
+    assert_eq!(
+        registry.registration_nonce(&root_key.pubkey()).unwrap(),
+        Some(nonce)
+    );
+
+    let refreshed = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_key, &payload),
+            payload: payload.clone(),
+            reply,
+        }
+    })
+    .unwrap()
+    .expect("fresh RootSigner proof must refresh the existing tenant token");
+    assert!(!refreshed.created);
+    assert_eq!(refreshed.status.record, original);
+    assert_eq!(registry.list().unwrap(), vec![original.clone()]);
+    assert_eq!(
+        registry.registration_nonce(&root_key.pubkey()).unwrap(),
+        None
+    );
+    let auth = BiscuitAuth::from_pubkey(biscuit_root.public().to_string()).unwrap();
+    let (biscuit, _) = auth
+        .check_permission("get_invoice", &refreshed.access_token)
+        .unwrap();
+    assert_eq!(
+        crate::rpc::biscuit::extract_tenant_id(&biscuit).unwrap(),
+        Some(tenant_id)
+    );
+    assert_eq!(
+        crate::rpc::biscuit::scoped_rpc_node_id(&biscuit).unwrap(),
+        tenant_watchtower_node_id(&original.tenant_pubkey)
+    );
+    assert!(auth
+        .check_permission("lsp_register_tenant", &refreshed.access_token)
+        .is_err());
+    let replay = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_key, &payload),
+            payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(replay.contains("missing, replaced, or consumed"));
+    assert_eq!(registry.list().unwrap(), vec![original]);
+    service.stop(None);
+    handle.await.unwrap();
+    public_network_actor.stop(None);
 }
 
 async fn register_test_invoice(
