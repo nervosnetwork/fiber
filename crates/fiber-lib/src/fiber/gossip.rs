@@ -55,8 +55,8 @@ use super::{
         GossipPolicyConfig, GossipPolicyState, GossipViolation,
     },
     network::{
-        check_chain_hash, get_chain_hash, GossipMessageWithTarget, NetworkActorCommand,
-        NetworkActorMessage, PeerChannelIndex, PeerDisconnectReason, GOSSIP_PROTOCOL_ID,
+        check_chain_hash, get_chain_hash, GossipMessageWithTarget, NetworkActorMessage,
+        PeerChannelIndex, PeerDisconnectReason, PublicNetworkCommand, GOSSIP_PROTOCOL_ID,
     },
     types::{
         BroadcastMessageQuery, BroadcastMessageQueryFlags, BroadcastMessageWithTimestamp,
@@ -3168,7 +3168,7 @@ where
             return;
         };
         if let Err(error) = network_actor.send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::DisconnectPeer(*peer, PeerDisconnectReason::Banned, None),
+            PublicNetworkCommand::DisconnectPeer(*peer, PeerDisconnectReason::Banned, None),
         )) {
             error!(
                 "Failed to request disconnect for gossip-banned peer {:?}: {:?}",

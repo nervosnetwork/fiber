@@ -10,11 +10,11 @@ use crate::{
     ckb::{
         client::CkbChainClient, CkbChainMessage, CkbTxTracer, CkbTxTracingMask, CkbTxTracingResult,
     },
-    fiber::{types::Pubkey, NetworkActorEvent},
+    fiber::{types::Pubkey, FiberActorEvent},
     utils::actor::ActorHandleLogGuard,
 };
 
-use super::{NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE};
+use super::{FiberActorMessage, FiberActorRef, ASSUME_NETWORK_ACTOR_ALIVE};
 use fiber_types::Hash256;
 
 /// Check if an RPC error is a permanent error that should not be retried.
@@ -37,7 +37,7 @@ pub enum InFlightCkbTxKind {
 pub struct InFlightCkbTxActor<C> {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub chain_client: C,
-    pub network_actor: ActorRef<NetworkActorMessage>,
+    pub network_actor: FiberActorRef,
     pub tx_hash: Hash256,
     pub tx_kind: InFlightCkbTxKind,
     /// Number of blocks to wait to confirm the tx status
@@ -317,7 +317,7 @@ where
                     .get_block_timestamp(block_hash.clone().into())
                     .await
                 {
-                    NetworkActorEvent::FundingTransactionConfirmed(
+                    FiberActorEvent::FundingTransactionConfirmed(
                         OutPoint::new(self.tx_hash.into(), DUMMY_FUNDING_TX_INDEX),
                         block_hash.clone(),
                         tx_index,
@@ -334,7 +334,7 @@ where
                     self.tx_hash,
                     status
                 );
-                NetworkActorEvent::FundingTransactionFailed(OutPoint::new(
+                FiberActorEvent::FundingTransactionFailed(OutPoint::new(
                     self.tx_hash.into(),
                     DUMMY_FUNDING_TX_INDEX,
                 ))
@@ -347,7 +347,7 @@ where
 
                 // set close_by_us if we broadcast a force close
                 let close_by_us = force_closing;
-                NetworkActorEvent::ClosingTransactionConfirmed(
+                FiberActorEvent::ClosingTransactionConfirmed(
                     pubkey,
                     channel_id,
                     self.tx_hash.into(),
@@ -361,12 +361,12 @@ where
                     self.tx_hash,
                     status
                 );
-                NetworkActorEvent::ClosingTransactionFailed(pubkey, channel_id, self.tx_hash.into())
+                FiberActorEvent::ClosingTransactionFailed(pubkey, channel_id, self.tx_hash.into())
             }
         };
 
         self.network_actor
-            .send_message(NetworkActorMessage::new_event(message))
+            .send_message(FiberActorMessage::new_event(message))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         // The actor has done its job

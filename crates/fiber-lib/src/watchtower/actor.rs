@@ -24,7 +24,6 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
-use secp256k1::{Message, SecretKey, SECP256K1};
 use strum::AsRefStr;
 use tracing::{debug, error, info, warn};
 
@@ -35,13 +34,12 @@ use crate::{
         signer::LocalSigner,
         CkbConfig,
     },
-    fiber::channel::{
-        settlement_data_to_witness, settlement_tlc_local_pubkey_hash, settlement_tlc_to_witness,
-        XUDT_COMPATIBLE_WITNESS,
-    },
-    fiber::onchain_tlc_reconcile::{
-        tracked_settlement_tlcs, verify_and_select_settlement_data, OnChainTlcSettlement,
-        TrackedSettlementTlc,
+    fiber::{
+        channel::{settlement_data_to_witness, settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS},
+        onchain_tlc_reconcile::{
+            tracked_settlement_tlcs, verify_and_select_settlement_data, OnChainTlcSettlement,
+            TrackedSettlementTlc,
+        },
     },
     now_timestamp_as_millis_u64,
     utils::{
@@ -49,7 +47,6 @@ use crate::{
         arithmetic::{
             checked_add_u64, checked_mul_u64, checked_sub_u64, checked_sub_usize, ArithmeticError,
         },
-        tx::compute_tx_message,
     },
     watchtower::{
         channel_data_funding_tx_lock, channel_data_local_settlement_pubkey_hash,
@@ -58,10 +55,10 @@ use crate::{
 };
 use fiber_types::{
     ChannelData, CommitmentContractFeatures, Hash256, HashAlgorithm, NodeId, Privkey, Pubkey,
-    RevocationData, SettlementData,
+    RevocationData, SettlementData, SettlementTlc,
 };
 
-use super::WatchtowerStore;
+use super::{WatchtowerSignOutcome, WatchtowerSigner, WatchtowerStore};
 
 pub const DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS: u64 = 60;
 
@@ -105,12 +102,13 @@ impl<S: WatchtowerStore> WatchtowerActor<S> {
     }
 }
 
-#[derive(AsRefStr)]
+#[derive(AsRefStr, Debug)]
 pub enum WatchtowerMessage {
     CreateChannel(
         Hash256,
         Option<Script>,
-        Privkey,
+        Option<Privkey>,
+        Pubkey,
         Pubkey,
         Pubkey,
         Pubkey,
@@ -173,6 +171,7 @@ where
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
+                local_settlement_key_pubkey,
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
@@ -183,6 +182,7 @@ where
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
+                local_settlement_key_pubkey,
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
@@ -340,6 +340,12 @@ where
                                                 Ok(cell_with_status) => {
                                                     if cell_with_status.status == "live" {
                                                         warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
+                                                        let stored_commitment_number =
+                                                            revocation_data.commitment_number;
+                                                        let output_data_len = revocation_data
+                                                            .output_data
+                                                            .raw_data()
+                                                            .len();
                                                         match build_revocation_tx(
                                                             first_commitment_tx_out_point,
                                                             revocation_data,
@@ -356,12 +362,27 @@ where
                                                                         info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
                                                                     }
                                                                     Err(err) => {
-                                                                        error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                        error!(
+                                                                            channel_id = %channel_data.channel_id,
+                                                                            stored_commitment_number,
+                                                                            on_chain_commitment_number = commitment_number,
+                                                                            output_data_len,
+                                                                            "Failed to send revocation tx: {:?}, error: {:?}",
+                                                                            tx,
+                                                                            err
+                                                                        );
                                                                     }
                                                                 }
                                                             }
                                                             Err(err) => {
-                                                                error!("Failed to build revocation tx: {:?}", err);
+                                                                error!(
+                                                                    channel_id = %channel_data.channel_id,
+                                                                    stored_commitment_number,
+                                                                    on_chain_commitment_number = commitment_number,
+                                                                    output_data_len,
+                                                                    "Failed to build revocation tx: {:?}",
+                                                                    err
+                                                                );
                                                             }
                                                         }
                                                     }
@@ -779,6 +800,72 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     }
 }
 
+impl TrackedSettlementTlc {
+    fn from_settlement_tlc(
+        tlc: &SettlementTlc,
+        for_remote: bool,
+        features: CommitmentContractFeatures,
+    ) -> Self {
+        Self {
+            commitment_contract_features: features,
+            tlc_id: if for_remote {
+                tlc.tlc_id
+            } else {
+                tlc.tlc_id.flip()
+            },
+            payment_hash: tlc.payment_hash,
+            hash_algorithm: tlc.hash_algorithm,
+            witness: settlement_tlc_to_witness(tlc, for_remote, features),
+        }
+    }
+
+    fn signing_key(
+        &self,
+        settlement_data: &SettlementData,
+        channel_data: &ChannelData,
+        for_remote: bool,
+        commitment_number: u64,
+    ) -> Result<(fiber_types::OnchainKeyPurpose, Option<Privkey>), Box<dyn std::error::Error>> {
+        // Witness indices shift after unlocks, so resolve the verified identity
+        // before reading the key's original derivation index from the snapshot.
+        let tlc = settlement_data
+            .tlcs
+            .iter()
+            .find(|tlc| {
+                Self::from_settlement_tlc(
+                    tlc,
+                    for_remote,
+                    channel_data.commitment_contract_features,
+                ) == *self
+            })
+            .ok_or_else(|| {
+                anyhow!("settlement unlock TLC is missing from the selected snapshot")
+            })?;
+        let derivation_index = match tlc.local_key_commitment_number {
+            Some(index) => index,
+            // Legacy local keys sign directly; their request purpose is never sent
+            // to an external signer and does not enter the signature digest.
+            None if tlc.local_key.is_some() => commitment_number,
+            None => return Err(anyhow!("external TLC signing derivation index is missing").into()),
+        };
+        let purpose = fiber_types::OnchainKeyPurpose::Tlc {
+            commitment_number: derivation_index,
+        };
+        if tlc.local_key.is_none() {
+            let expected = channel_data
+                .expected_onchain_pubkey(&purpose)
+                .map_err(std::io::Error::other)?;
+            if Some(expected) != tlc.local_key_pubkey {
+                return Err(anyhow!(
+                    "external TLC signing public key does not match the selected snapshot"
+                )
+                .into());
+            }
+        }
+        Ok((purpose, tlc.local_key.clone()))
+    }
+}
+
 struct WatchedSettlementScan {
     witness_input_indices: HashMap<ckb_types::packed::Byte32, usize>,
     tracked_tlcs_by_outpoint: HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
@@ -1147,7 +1234,7 @@ fn first_settlement_witness(
     settlement_data: &SettlementData,
     for_remote: bool,
     commitment_contract_features: CommitmentContractFeatures,
-    local_settlement_key: Privkey,
+    local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
     settlement_data_to_witness(
@@ -1172,12 +1259,15 @@ fn build_settlement_tx<S: WatchtowerStore>(
     settlement_witness: Option<SettlementWitness>,
     tracked_tlcs: &[TrackedSettlementTlc],
     signer: &LocalSigner,
-    cell_collector: &mut impl CellCollector,
+    cell_collector: &mut dyn CellCollector,
     store: &S,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
     let since = u64::from_le_bytes(lock_script_args[20..28].try_into().expect("u64 from slice"));
+    let commitment_number =
+        u64::from_be_bytes(lock_script_args[28..36].try_into().expect("u64 from slice"));
+
     let delay_epoch = {
         let since = Since::from_raw_value(since);
         since
@@ -1202,6 +1292,13 @@ fn build_settlement_tx<S: WatchtowerStore>(
     }
     let mut delay_epoch = delay_epoch.unwrap();
     let is_first_settlement = settlement_witness.is_none();
+    if settlement_data
+        .tlcs
+        .iter()
+        .any(|tlc| tlc.local_key.is_none() && tlc.local_key_pubkey.is_none())
+    {
+        return Err(anyhow!("TLC signing public key is missing").into());
+    }
 
     let fee_provider_lock_script =
         get_script_by_contract(Contract::Secp256k1Lock, signer.pubkey_hash());
@@ -1255,53 +1352,39 @@ fn build_settlement_tx<S: WatchtowerStore>(
                                 };
 
                                 if tlc.is_offered() {
-                                    if let Some(private_key) =
-                                        tlc.find_matched_private_key(settlement_data, false)
-                                    {
-                                        if current_time > expiry {
-                                            unlock_option = Some((
-                                                Unlock {
-                                                    unlock_type: i as u8,
-                                                    with_preimage: false,
-                                                    signature: [0u8; 65],
-                                                    preimage: None,
-                                                },
-                                                tlc.payment_amount,
-                                                private_key.clone(),
-                                            ));
-                                            break;
-                                        }
-                                    } else {
-                                        warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
-                                    }
-                                } else if let Some(private_key) =
-                                    tlc.find_matched_private_key(settlement_data, true)
-                                {
-                                    if let Some(preimage) = verified_watch_preimage(
-                                        store,
-                                        self_node_id,
-                                        &tracked_tlcs[i],
-                                    ) {
+                                    if current_time > expiry {
                                         unlock_option = Some((
                                             Unlock {
                                                 unlock_type: i as u8,
-                                                with_preimage: true,
+                                                with_preimage: false,
                                                 signature: [0u8; 65],
-                                                preimage: Some(preimage),
+                                                preimage: None,
                                             },
                                             tlc.payment_amount,
-                                            private_key.clone(),
+                                            None,
                                         ));
                                         break;
-                                    } else if current_time > expiry {
-                                        pending_tlcs_count = checked_sub_usize(
-                                            pending_tlcs_count,
-                                            1,
-                                            "pending TLC count",
-                                        )?;
                                     }
-                                } else {
-                                    warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
+                                } else if let Some(preimage) =
+                                    verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
+                                {
+                                    unlock_option = Some((
+                                        Unlock {
+                                            unlock_type: i as u8,
+                                            with_preimage: true,
+                                            signature: [0u8; 65],
+                                            preimage: Some(preimage),
+                                        },
+                                        tlc.payment_amount,
+                                        None,
+                                    ));
+                                    break;
+                                } else if current_time > expiry {
+                                    pending_tlcs_count = checked_sub_usize(
+                                        pending_tlcs_count,
+                                        1,
+                                        "pending TLC count",
+                                    )?;
                                 }
                             }
 
@@ -1354,55 +1437,36 @@ fn build_settlement_tx<S: WatchtowerStore>(
                             };
 
                             if !tlc.is_offered() {
-                                if let Some(private_key) =
-                                    tlc.find_matched_private_key(settlement_data, false)
-                                {
-                                    if current_time > expiry {
-                                        unlock_option = Some((
-                                            Unlock {
-                                                unlock_type: i as u8,
-                                                with_preimage: false,
-                                                signature: [0u8; 65],
-                                                preimage: None,
-                                            },
-                                            tlc.payment_amount,
-                                            private_key.clone(),
-                                        ));
-                                        break;
-                                    }
-                                } else {
-                                    warn!("Can not find private key for tlc: {:?}, settlement tlcs: {:?}", tlc, settlement_data.tlcs.iter().collect::<Vec<_>>());
-                                }
-                            } else if let Some(private_key) =
-                                tlc.find_matched_private_key(settlement_data, true)
-                            {
-                                if let Some(preimage) =
-                                    verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
-                                {
+                                if current_time > expiry {
                                     unlock_option = Some((
                                         Unlock {
                                             unlock_type: i as u8,
-                                            with_preimage: true,
+                                            with_preimage: false,
                                             signature: [0u8; 65],
-                                            preimage: Some(preimage),
+                                            preimage: None,
                                         },
                                         tlc.payment_amount,
-                                        private_key.clone(),
+                                        None,
                                     ));
                                     break;
-                                } else if current_time > expiry {
-                                    pending_tlcs_count = checked_sub_usize(
-                                        pending_tlcs_count,
-                                        1,
-                                        "pending TLC count",
-                                    )?;
                                 }
-                            } else {
-                                warn!(
-                                    "Can not find private key for tlc: {:?}, settlement tlcs: {:?}",
-                                    tlc,
-                                    settlement_data.tlcs.iter().collect::<Vec<_>>()
-                                );
+                            } else if let Some(preimage) =
+                                verified_watch_preimage(store, self_node_id, &tracked_tlcs[i])
+                            {
+                                unlock_option = Some((
+                                    Unlock {
+                                        unlock_type: i as u8,
+                                        with_preimage: true,
+                                        signature: [0u8; 65],
+                                        preimage: Some(preimage),
+                                    },
+                                    tlc.payment_amount,
+                                    None,
+                                ));
+                                break;
+                            } else if current_time > expiry {
+                                pending_tlcs_count =
+                                    checked_sub_usize(pending_tlcs_count, 1, "pending TLC count")?;
                             }
                         }
 
@@ -1546,7 +1610,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                         settlement_data,
                         for_remote,
                         channel_data.commitment_contract_features,
-                        channel_data.local_settlement_key.clone(),
+                        channel_data.local_settlement_pubkey(),
                         channel_data.remote_settlement_key,
                     ),
                 )
@@ -1554,6 +1618,36 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 return Ok(None);
             }
         }
+    };
+
+    let (key_purpose, unlock_key) = if unlock.unlock_type < 0xFE {
+        tracked_tlcs
+            .get(unlock.unlock_type as usize)
+            .ok_or_else(|| anyhow!("missing tracked TLC for settlement unlock"))?
+            .signing_key(
+                settlement_data,
+                &channel_data,
+                for_remote,
+                commitment_number,
+            )?
+    } else {
+        (fiber_types::OnchainKeyPurpose::Settlement, unlock_key)
+    };
+
+    let fee_input_since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
+        let tracked_tlc = tracked_tlcs
+            .get(unlock.unlock_type as usize)
+            .ok_or_else(|| anyhow!("missing tracked TLC for settlement unlock"))?;
+        // The contract requires an absolute timestamp since >= the TLC expiry.
+        // Reuse the verified witness's expiry so advancing chain median time
+        // does not change the transaction awaiting an external signature.
+        Htlc::build_from_witness(
+            &tracked_tlc.witness,
+            tracked_tlc.commitment_contract_features.payment_hash_len(),
+        )
+        .htlc_expiry
+    } else {
+        0
     };
 
     let mut new_commitment_lock_script_args = lock_script_args[0..36].to_vec();
@@ -1685,11 +1779,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
         }
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = capacity;
-        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
-            Since::new(SinceType::Timestamp, current_time / 1000, false).value()
-        } else {
-            0
-        };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity = checked_add_u64(
@@ -1700,7 +1789,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since)
+                    .since(fee_input_since)
                     .build(),
             );
             let tx_size =
@@ -1735,8 +1824,16 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     vec![new_commitment_output, adjusted_settlement_output]
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
-                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
-                return Ok(Some(tx));
+                return build_signed_settlement_tx(
+                    store,
+                    self_node_id,
+                    channel_data.channel_id,
+                    tx,
+                    key_purpose,
+                    unlock.with_preimage,
+                    unlock_key,
+                    signer,
+                );
             }
         }
 
@@ -1913,11 +2010,6 @@ fn build_settlement_tx<S: WatchtowerStore>(
         query.min_total_capacity = min_total_capacity;
         let (cells, _total_capacity) = cell_collector.collect_live_cells(&query, false)?;
         let mut inputs_capacity = commitment_cell.output.capacity.value();
-        let since = if unlock.unlock_type < 0xFE && !unlock.with_preimage {
-            Since::new(SinceType::Timestamp, current_time / 1000, false).value()
-        } else {
-            0
-        };
         for cell in cells {
             let input_capacity: u64 = cell.output.capacity().unpack();
             inputs_capacity = checked_add_u64(
@@ -1928,7 +2020,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
             tx_builder = tx_builder.input(
                 CellInput::new_builder()
                     .previous_output(cell.out_point)
-                    .since(since)
+                    .since(fee_input_since)
                     .build(),
             );
             let tx_size =
@@ -1969,13 +2061,155 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs(outputs)
                     .set_outputs_data(outputs_data)
                     .build();
-                let tx = sign_tx_with_settlement(tx, signer, unlock_key.0, unlock.with_preimage)?;
-                return Ok(Some(tx));
+                return build_signed_settlement_tx(
+                    store,
+                    self_node_id,
+                    channel_data.channel_id,
+                    tx,
+                    key_purpose,
+                    unlock.with_preimage,
+                    unlock_key,
+                    signer,
+                );
             }
         }
 
         Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_signed_settlement_tx<S: WatchtowerStore>(
+    store: &S,
+    node_id: &NodeId,
+    channel_id: Hash256,
+    tx: TransactionView,
+    key_purpose: fiber_types::OnchainKeyPurpose,
+    with_preimage: bool,
+    unlock_key: Option<Privkey>,
+    change_signer: &LocalSigner,
+) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+    use fiber_types::OnchainSigningContent;
+
+    let content = OnchainSigningContent {
+        key_purpose,
+        transaction: tx.data(),
+    };
+
+    let watchtower_signer = match store.get_watch_channel(node_id, &channel_id) {
+        Some(channel) => WatchtowerSigner::from_channel_data(&channel),
+        None => WatchtowerSigner::external(),
+    };
+    let outcome = watchtower_signer
+        .request_onchain_with_key(content.clone(), unlock_key)
+        .map_err(|e| Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error>)?;
+    match outcome {
+        WatchtowerSignOutcome::Ready(signature) => Ok(Some(apply_settlement_signature(
+            tx,
+            change_signer,
+            signature,
+            with_preimage,
+        )?)),
+        WatchtowerSignOutcome::AwaitingExternal {
+            request_id,
+            content: awaiting,
+        } => {
+            let signature = store.update_watchtower_signer(
+                node_id,
+                &channel_id,
+                |state| -> Result<Option<[u8; 65]>, std::convert::Infallible> {
+                    let fiber_types::WatchtowerSignerState::External(external) = state else {
+                        warn!(
+                            channel_id = %channel_id,
+                            "watchtower settlement has no local key and no external signer state"
+                        );
+                        return Ok(None);
+                    };
+
+                    if let Some((signed_content, signature)) =
+                        external.signed_signatures.get(&request_id)
+                    {
+                        if signed_content == &awaiting {
+                            let signature = *signature;
+                            external.last_applied =
+                                Some(fiber_types::LastAppliedWatchtowerSignature {
+                                    request_id,
+                                    signature,
+                                });
+                            return Ok(Some(signature));
+                        }
+                        external.signed_signatures.remove(&request_id);
+                        if external
+                            .last_applied
+                            .as_ref()
+                            .is_some_and(|a| a.request_id == request_id)
+                        {
+                            external.last_applied = None;
+                        }
+                    }
+
+                    if external.pending_requests.get(&request_id) == Some(&awaiting) {
+                        return Ok(None);
+                    }
+
+                    external.pending_requests.insert(request_id, awaiting);
+                    if external
+                        .last_applied
+                        .as_ref()
+                        .is_some_and(|a| a.request_id == request_id)
+                    {
+                        external.last_applied = None;
+                    }
+                    Ok(None)
+                },
+            )?;
+            // Only signer-state mutation holds the lock; transaction construction
+            // and broadcasting must not block other signer submissions.
+            signature
+                .map(|signature| {
+                    apply_settlement_signature(tx, change_signer, signature, with_preimage)
+                })
+                .transpose()
+        }
+    }
+}
+
+fn apply_settlement_signature(
+    tx: TransactionView,
+    change_signer: &LocalSigner,
+    signature_bytes: [u8; 65],
+    with_preimage: bool,
+) -> Result<TransactionView, Box<dyn std::error::Error>> {
+    let tx = tx.data().into_view();
+    let mut settlement_witness = tx
+        .witnesses()
+        .get(0)
+        .expect("get witness at index 0")
+        .raw_data()
+        .to_vec();
+    if with_preimage {
+        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
+        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
+        settlement_witness.splice(start..end, signature_bytes);
+    } else {
+        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
+        settlement_witness.splice(start.., signature_bytes);
+    }
+
+    let witness = tx.witnesses().get(1).expect("get witness at index 1");
+    let mut blake2b = new_blake2b();
+    blake2b.update(tx.hash().as_slice());
+    blake2b.update(&(witness.item_count() as u64).to_le_bytes());
+    blake2b.update(&witness.raw_data());
+    let mut message = [0u8; 32];
+    blake2b.finalize(&mut message);
+    let change_signature = change_signer.sign_recoverable(&message);
+    let change_witness = WitnessArgs::new_builder()
+        .lock(Some(ckb_types::bytes::Bytes::from(change_signature.to_vec())).pack())
+        .build()
+        .as_bytes();
+    let witnesses = vec![settlement_witness.pack(), change_witness.pack()];
+    Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
 }
 
 fn sign_tx(
@@ -2004,55 +2238,7 @@ fn sign_tx(
     Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
 }
 
-fn sign_tx_with_settlement(
-    tx: TransactionView,
-    change_signer: &LocalSigner,
-    settlement_secret_key: SecretKey,
-    with_preimage: bool,
-) -> Result<TransactionView, Box<dyn std::error::Error>> {
-    let tx = tx.data().into_view();
-
-    let message = compute_tx_message(&tx);
-    let secp256k1_message = Message::from_digest_slice(&message)?;
-    let signature = SECP256K1.sign_ecdsa_recoverable(&secp256k1_message, &settlement_secret_key);
-    let (recov_id, data) = signature.serialize_compact();
-    let mut signature_bytes = [0u8; 65];
-    signature_bytes[0..64].copy_from_slice(&data[0..64]);
-    signature_bytes[64] = i32::from(recov_id) as u8;
-    let mut settlement_witness = tx
-        .witnesses()
-        .get(0)
-        .expect("get witness at index 0")
-        .raw_data()
-        .to_vec();
-    if with_preimage {
-        let start = checked_sub_usize(settlement_witness.len(), 97, "settlement witness length")?;
-        let end = checked_sub_usize(settlement_witness.len(), 32, "settlement witness length")?;
-        settlement_witness.splice(start..end, signature_bytes);
-    } else {
-        let start = checked_sub_usize(settlement_witness.len(), 65, "settlement witness length")?;
-        settlement_witness.splice(start.., signature_bytes);
-    }
-
-    let witness = tx.witnesses().get(1).expect("get witness at index 1");
-    let mut blake2b = new_blake2b();
-    blake2b.update(tx.hash().as_slice());
-    blake2b.update(&(witness.item_count() as u64).to_le_bytes());
-    blake2b.update(&witness.raw_data());
-    let mut message = [0u8; 32];
-    blake2b.finalize(&mut message);
-    let signature_bytes = change_signer.sign_recoverable(&message);
-    let change_witness = WitnessArgs::new_builder()
-        .lock(Some(ckb_types::bytes::Bytes::from(signature_bytes.to_vec())).pack())
-        .build()
-        .as_bytes();
-
-    let witnesses = vec![settlement_witness.pack(), change_witness.pack()];
-
-    Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SettlementWitness {
     pending_htlc_count: usize,
     pending_htlcs: Vec<Htlc>,
@@ -2102,7 +2288,7 @@ impl<'a> WitnessReader<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Htlc {
     htlc_type: u8,
     payment_amount: u128,
@@ -2160,28 +2346,6 @@ impl Htlc {
         } else {
             None
         }
-    }
-
-    pub fn find_matched_private_key<'a>(
-        &self,
-        settlement_data: &'a SettlementData,
-        with_preimage: bool,
-    ) -> Option<&'a Privkey> {
-        settlement_data.tlcs.iter().find_map(|settlement_tlc| {
-            let payment_hash_matches = settlement_tlc
-                .payment_hash
-                .as_ref()
-                .starts_with(&self.payment_hash);
-            let pubkey_hash_matches = match (self.is_offered(), with_preimage) {
-                (true, true) | (false, false) => {
-                    self.remote_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
-                }
-                _ => {
-                    self.local_htlc_pubkey_hash == settlement_tlc_local_pubkey_hash(settlement_tlc)
-                }
-            };
-            (payment_hash_matches && pubkey_hash_matches).then_some(&settlement_tlc.local_key)
-        })
     }
 }
 
@@ -2363,6 +2527,7 @@ mod tests {
 
     use ckb_types::{core::ScriptHashType, packed::Byte32, prelude::*};
     use fiber_types::TLCId;
+    use secp256k1::SecretKey;
 
     use crate::fiber::onchain_tlc_reconcile::StoredOnChainTlcSettlement;
 
@@ -2405,7 +2570,8 @@ mod tests {
             _node_id: NodeId,
             _channel_id: Hash256,
             _funding_udt_type_script: Option<Script>,
-            _local_settlement_key: Privkey,
+            _local_settlement_key: Option<Privkey>,
+            _local_settlement_key_pubkey: Pubkey,
             _remote_settlement_key: Pubkey,
             _local_funding_pubkey: Pubkey,
             _remote_funding_pubkey: Pubkey,
@@ -2422,7 +2588,8 @@ mod tests {
             _node_id: NodeId,
             _channel_id: Hash256,
             _funding_udt_type_script: Option<Script>,
-            _local_settlement_key: Privkey,
+            _local_settlement_key: Option<Privkey>,
+            _local_settlement_key_pubkey: Pubkey,
             _remote_settlement_key: Pubkey,
             _local_funding_pubkey: Pubkey,
             _remote_funding_pubkey: Pubkey,
@@ -2480,6 +2647,31 @@ mod tests {
                     (stored_node_id == node_id && stored_payment_hash == payment_hash)
                         .then_some(*preimage)
                 })
+        }
+
+        fn get_watchtower_signer(
+            &self,
+            _node_id: &NodeId,
+            _channel_id: &Hash256,
+        ) -> fiber_types::WatchtowerSignerState {
+            fiber_types::WatchtowerSignerState::Internal
+        }
+
+        fn put_watchtower_signer(
+            &self,
+            _node_id: &NodeId,
+            _channel_id: &Hash256,
+            _state: fiber_types::WatchtowerSignerState,
+        ) {
+        }
+
+        fn update_watchtower_signer<R, E>(
+            &self,
+            _node_id: &NodeId,
+            _channel_id: &Hash256,
+            update: impl FnOnce(&mut fiber_types::WatchtowerSignerState) -> Result<R, E>,
+        ) -> Result<R, E> {
+            update(&mut fiber_types::WatchtowerSignerState::Internal)
         }
 
         fn insert_onchain_tlc_settlement(
@@ -2576,6 +2768,54 @@ mod tests {
                 .map(|(index, payment_hash)| tracked_tlc(*payment_hash, index as u64))
                 .collect(),
         )])
+    }
+
+    #[test]
+    fn tracked_settlement_tlcs_accepts_legacy_private_key_only_channel() {
+        let local_settlement_key = Privkey::from(&[1; 32]);
+        let remote_settlement_key = Privkey::from(&[2; 32]).pubkey();
+        let settlement_data = SettlementData {
+            local_amount: 3_000,
+            remote_amount: 2_000,
+            tlcs: Vec::new(),
+        };
+        let channel_data = ChannelData {
+            channel_id: [9u8; 32].into(),
+            funding_udt_type_script: None,
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: None,
+            remote_settlement_key,
+            local_funding_pubkey: Privkey::from(&[3; 32]).pubkey(),
+            remote_funding_pubkey: Privkey::from(&[4; 32]).pubkey(),
+            remote_settlement_data: settlement_data.clone(),
+            pending_remote_settlement_data: settlement_data.clone(),
+            local_settlement_data: settlement_data.clone(),
+            revocation_data: None,
+            commitment_contract_features: CommitmentContractFeatures::LEGACY,
+        };
+        let witness = settlement_data_to_witness(
+            &settlement_data,
+            false,
+            CommitmentContractFeatures::LEGACY,
+            local_settlement_key.pubkey(),
+            remote_settlement_key,
+        );
+        let mut lock_args =
+            ckb_hash::blake2b_256(channel_data_x_only_aggregated_pubkey(&channel_data, true))[..20]
+                .to_vec();
+        lock_args.extend_from_slice(&0u64.to_le_bytes());
+        lock_args.extend_from_slice(&0u64.to_be_bytes());
+        lock_args.extend_from_slice(blake160(&witness).as_ref());
+        let commitment_lock = get_script_by_contract(Contract::CommitmentLock, &lock_args);
+
+        assert_eq!(
+            crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+                &commitment_lock,
+                &channel_data,
+                false
+            ),
+            Some(Vec::new())
+        );
     }
 
     fn settlement_witness_with_unlock(payment_hash: [u8; 20], unlock: Unlock) -> Vec<u8> {
@@ -2695,7 +2935,9 @@ mod tests {
             payment_amount: 1_000,
             payment_hash: queried_payment_hash,
             expiry: 60_000,
-            local_key: Privkey::from(&[3; 32]),
+            local_key: Some(Privkey::from(&[3; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[4; 32]).pubkey(),
         };
         let tracked_tlcs = vec![TrackedSettlementTlc {
@@ -2717,7 +2959,8 @@ mod tests {
         let channel_data = ChannelData {
             channel_id: [9u8; 32].into(),
             funding_udt_type_script: None,
-            local_settlement_key: local_settlement_key.clone(),
+            local_settlement_key: Some(local_settlement_key.clone()),
+            local_settlement_key_pubkey: Some(local_settlement_key.pubkey()),
             remote_settlement_key,
             local_funding_pubkey: Privkey::from(&[5; 32]).pubkey(),
             remote_funding_pubkey: Privkey::from(&[6; 32]).pubkey(),
@@ -2734,7 +2977,7 @@ mod tests {
                     &settlement_data,
                     false,
                     CommitmentContractFeatures::LEGACY,
-                    local_settlement_key,
+                    local_settlement_key.pubkey(),
                     remote_settlement_key,
                 )
                 .as_slice(),
@@ -2869,7 +3112,9 @@ mod tests {
                 payment_amount: 1_000,
                 payment_hash,
                 expiry: 0,
-                local_key: Privkey::from(&[1u8; 32]),
+                local_key: Some(Privkey::from(&[1u8; 32])),
+                local_key_pubkey: None,
+                local_key_commitment_number: None,
                 remote_key: Privkey::from(&[2u8; 32]).pubkey(),
             }],
         };
@@ -2878,7 +3123,7 @@ mod tests {
             &settlement_data,
             false,
             CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
-            Privkey::from(&[3u8; 32]),
+            Privkey::from(&[3u8; 32]).pubkey(),
             Privkey::from(&[4u8; 32]).pubkey(),
         );
         let parsed = SettlementWitness::build_from_witness(
@@ -2902,7 +3147,8 @@ mod tests {
             NodeId::local(),
             [1u8; 32].into(),
             None,
-            Privkey::from(&[1u8; 32]),
+            Some(Privkey::from(&[1u8; 32])),
+            Privkey::from(&[1u8; 32]).pubkey(),
             Privkey::from(&[2u8; 32]).pubkey(),
             Privkey::from(&[3u8; 32]).pubkey(),
             Privkey::from(&[4u8; 32]).pubkey(),
@@ -3484,13 +3730,16 @@ mod tests {
             payment_amount: 1_000,
             payment_hash: [11u8; 32].into(),
             expiry: 60_000,
-            local_key: Privkey::from(&[3; 32]),
+            local_key: Some(Privkey::from(&[3; 32])),
+            local_key_pubkey: None,
+            local_key_commitment_number: None,
             remote_key: Privkey::from(&[4; 32]).pubkey(),
         });
         let channel_data = ChannelData {
             channel_id: [9u8; 32].into(),
             funding_udt_type_script: None,
-            local_settlement_key: Privkey::from(&[1; 32]),
+            local_settlement_key: Some(Privkey::from(&[1; 32])),
+            local_settlement_key_pubkey: None,
             remote_settlement_key: Privkey::from(&[2; 32]).pubkey(),
             local_funding_pubkey: Privkey::from(&[5; 32]).pubkey(),
             remote_funding_pubkey: Privkey::from(&[6; 32]).pubkey(),
@@ -3504,7 +3753,7 @@ mod tests {
             &preceding,
             true,
             CommitmentContractFeatures::LEGACY,
-            channel_data.local_settlement_key.clone(),
+            channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
         );
         let since = Since::new(
@@ -3522,6 +3771,15 @@ mod tests {
         args.extend_from_slice(&blake160(&witness).0);
         args.push(0);
         let commitment_lock = get_script_by_contract(Contract::CommitmentLock, &args);
+        assert_eq!(
+            crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+                &commitment_lock,
+                &channel_data,
+                true
+            ),
+            Some(Vec::new()),
+            "the initial commitment must use the preceding snapshot, not the pending first TLC"
+        );
         let commitment_cell = Cell {
             output: CellOutput::new_builder()
                 .capacity(200_000_000_000u64)
@@ -3573,3 +3831,7 @@ mod tests {
         assert_eq!(remaining_capacity, 100_000_000_000);
     }
 }
+
+#[cfg(all(test, feature = "watchtower"))]
+#[path = "external_signing_tests.rs"]
+mod external_signing_tests;

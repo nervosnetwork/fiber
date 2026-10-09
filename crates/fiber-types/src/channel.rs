@@ -1536,6 +1536,15 @@ impl CommitmentContractFeatures {
         }
     }
 
+    /// Decode the witness layout from a commitment-lock argument buffer.
+    pub fn from_lock_args(args: &[u8]) -> Result<Self, String> {
+        match args.len() {
+            57 => Ok(Self::LEGACY),
+            58 => Self::from_bits(args[57]),
+            _ => Err("invalid commitment lock argument length".into()),
+        }
+    }
+
     /// Return the byte stored with the channel and appended to upgraded args.
     pub fn bits(self) -> u8 {
         self.0
@@ -1588,6 +1597,13 @@ impl<'de> Deserialize<'de> for CommitmentContractFeatures {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorData {
     pub state: ChannelState,
+    /// Local per-commitment points published by an external channel signer.
+    #[serde(default)]
+    pub local_commitment_points: HashMap<u64, Pubkey>,
+    /// Local public nonces published by an external channel signer.
+    #[serde_as(as = "HashMap<_, PubNonceAsBytes>")]
+    #[serde(default)]
+    pub local_public_nonces: HashMap<crate::NonceSlot, PubNonce>,
     /// The data below are only relevant if the channel is public.
     pub public_channel_info: Option<PublicChannelInfo>,
 
@@ -1641,8 +1657,8 @@ pub struct ChannelActorData {
     /// if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate.
     pub funding_fee_rate: u64,
 
-    /// Signer is used to sign the commitment transactions.
-    pub signer: InMemorySigner,
+    /// Local signing material. External signers persist only public channel material.
+    pub signer: Option<InMemorySigner>,
 
     /// Cached channel public keys for easier of access.
     pub local_channel_public_keys: ChannelBasePublicKeys,
@@ -1720,6 +1736,10 @@ pub struct ChannelActorData {
     /// Persisted state for an in-progress external funding flow.
     #[serde(default)]
     pub external_funding: Option<ExternalFundingPersistState>,
+
+    /// Pending signature and last applied result; lifecycle remains in `state`.
+    #[serde(default)]
+    pub signing_context: crate::ChannelSigningContext,
 
     /// Commitment-lock features decided once at channel-open and never changed.
     #[serde(default)]

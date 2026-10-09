@@ -152,7 +152,7 @@ pub fn verify_and_select_settlement_data<'a>(
             settlement_data,
             parsed.for_remote,
             channel_data.commitment_contract_features,
-            channel_data.local_settlement_key.clone(),
+            channel_data.local_settlement_pubkey(),
             channel_data.remote_settlement_key,
         );
         if blake160(&settlement_witness).as_ref() == parsed.witness_hash {
@@ -749,4 +749,21 @@ pub(crate) fn can_reconcile_onchain_fulfillment(tlc: &TlcInfo) -> bool {
                 | InboundTlcStatus::Committed
         )
     }
+}
+
+#[cfg(test)]
+pub(crate) fn verified_tracked_settlement_tlcs(
+    lock: &Script,
+    channel: &ChannelData,
+    expected_remote: bool,
+) -> Option<Vec<TrackedSettlementTlc>> {
+    let (for_remote, _, snapshot) = verify_and_select_settlement_data(channel, lock)?;
+    if for_remote != expected_remote {
+        return None;
+    }
+    Some(tracked_settlement_tlcs(
+        snapshot,
+        for_remote,
+        channel.commitment_contract_features,
+    ))
 }

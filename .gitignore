@@ -11,6 +11,7 @@
 /tests/nodes/*.log
 /tests/deploy/udt-init/target
 tests/nodes/.ports
+tests/nodes/.extra-ports
 /coverage-report
 /*.info
 .vscode

@@ -1,0 +1,31 @@
+meta {
+  name: check active LSP status
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "lsp_get_status"
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.registered_tenants: eq "0x1"
+  res.body.result.active_tenants: eq "0x1"
+}

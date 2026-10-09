@@ -441,7 +441,12 @@ fn make_sttlement_context<S: ChannelActorStateStore>(
     let tlc_id = TLCId::Received(tlc_id);
     state
         .get_received_tlc(tlc_id)
-        .filter(|tlc_info| state.can_auto_fulfill_received_tlc(tlc_info))
+        // Hold settlement retries must still see TLCs already handed to the durable
+        // remove queue; omitting one part makes a fulfilled MPP set look incomplete.
+        .filter(|tlc_info| {
+            tlc_info.forwarding_tlc.is_none()
+                && !state.is_waiting_forward_result_for_received_tlc(tlc_info.tlc_id)
+        })
         .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
 }
 
