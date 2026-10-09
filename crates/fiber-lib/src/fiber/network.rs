@@ -1064,6 +1064,8 @@ pub enum FiberActorCommand {
     ActivateInProcessPeer(Pubkey, RpcReplyPort<Result<(), String>>),
     /// Remove a previously registered co-located Fiber endpoint.
     UnregisterInProcessPeer(Pubkey),
+    /// Disconnect the peer of a local channel whose external-signing buffer overflowed.
+    DisconnectPeerForChannelOverflow(Hash256),
     // Check hold tlcs that have expired and need to be removed.
     CheckChannels,
     // Timeout a hold tlc
@@ -3003,6 +3005,24 @@ where
             }
             FiberActorCommand::UnregisterInProcessPeer(pubkey) => {
                 state.disconnect_in_process_peer(pubkey);
+            }
+            FiberActorCommand::DisconnectPeerForChannelOverflow(channel_id) => {
+                let Some(channel) = state.store.get_channel_actor_state(&channel_id) else {
+                    return Ok(());
+                };
+                let pubkey = channel.get_remote_pubkey();
+                if !state.peer_channel_index.has_channel(&pubkey, &channel_id) {
+                    return Ok(());
+                }
+                if let Some(peer) = state.in_process_peers.get(&pubkey) {
+                    let _ = peer.actor.send_message(FiberActorMessage::new_command(
+                        FiberActorCommand::UnregisterInProcessPeer(state.get_public_key()),
+                    ));
+                    state.disconnect_in_process_peer(pubkey);
+                }
+                if let Some(peer) = state.p2p_peers.get(&pubkey) {
+                    peer.control.disconnect(peer.session_id).await?;
+                }
             }
             FiberActorCommand::CheckChannelsShutdown => {
                 for (_pubkey, channel_id, channel_state) in self.store.get_channel_states(None) {

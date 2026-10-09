@@ -159,6 +159,8 @@ pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 10 * 1000;
 pub const REESTABLISH_TIMEOUT: u64 = 5 * 60 * 1000;
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
+const MAX_PENDING_PEER_MESSAGES: usize = 512;
+const MAX_PENDING_PEER_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -522,6 +524,11 @@ where
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> ProcessingChannelResult {
+        // Messages already dispatched from an overflowing session must not
+        // refill the queue while its disconnect is being processed.
+        if state.pending_messages.disconnect_requested {
+            return Ok(());
+        }
         // When awaiting an external signature, the local commitment state is uncommitted
         // and cannot process peer messages directly. We must buffer them in FIFO order.
         if state.signing_context.is_awaiting_signature() {
@@ -534,7 +541,17 @@ where
                 // our own ReestablishChannel until the signature completes.
                 state.on_peer_reconnected();
             }
-            state.queue_pending_peer_message(message);
+            if let Err(error) = state.queue_pending_peer_message(message) {
+                warn!(channel_id = %state.get_id(), %error, "disconnecting peer after signing buffer overflow");
+                state.mark_reestablishing_offline();
+                state.pending_messages.disconnect_requested = true;
+                self.network
+                    .send_message(FiberActorMessage::new_command(
+                        FiberActorCommand::DisconnectPeerForChannelOverflow(state.get_id()),
+                    ))
+                    .map_err(|error| ProcessingChannelError::InvalidState(error.to_string()))?;
+                return Err(error);
+            }
             return Ok(());
         }
 
@@ -2113,7 +2130,10 @@ where
             }
         };
         self.store
-            .insert_channel_actor_state_with_pending_commit_diff(state.clone(), &commit_diff);
+            .insert_channel_actor_state_with_pending_commit_diff(
+                state.clone_for_store(),
+                &commit_diff,
+            );
 
         // Notify outside observers.
         self.network
@@ -2243,7 +2263,8 @@ where
         // Keep the request with the validated signature until its continuation
         // advances the durable protocol state. Restore can then resume even if
         // the phone never resubmits after this checkpoint.
-        self.store.insert_channel_actor_state(state.clone());
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
 
         Ok(Some((request, partial_signature)))
     }
@@ -2277,7 +2298,9 @@ where
             .continue_signer_notification_at(myself, state, notification, now)
             .await;
         match &result {
-            Ok(_) => self.store.insert_channel_actor_state(state.clone()),
+            Ok(_) => self
+                .store
+                .insert_channel_actor_state(state.clone_for_store()),
             Err(_) => {
                 // Do not let the actor's final save overwrite a recoverable
                 // checkpoint with an incomplete in-memory continuation.
@@ -3221,7 +3244,8 @@ where
                         // Persist before acking: on-chain relay callers treat this reply as
                         // proof that the upstream removal is durable. The handler-end persist
                         // would leave a crash window between reply and disk.
-                        self.store.insert_channel_actor_state(state.clone());
+                        self.store
+                            .insert_channel_actor_state(state.clone_for_store());
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
@@ -3236,7 +3260,8 @@ where
                             // `WaitingTlcAck` means the operation was accepted for retry. Persist
                             // the queue before replying so callers can safely hand ownership over
                             // and remove their own durable retry record.
-                            self.store.insert_channel_actor_state(state.clone());
+                            self.store
+                                .insert_channel_actor_state(state.clone_for_store());
                         }
                         let _ = reply.send(Err(err.clone()));
                         Err(err)
@@ -3361,7 +3386,8 @@ where
         state.signing_context.cancel_request();
         state.pending_messages = Default::default();
         state.deferred_peer_tlc_updates.clear();
-        self.store.insert_channel_actor_state(state.clone());
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
         Ok(())
     }
 
@@ -3690,7 +3716,8 @@ where
         }
 
         if !onchain_fulfilled_invoice_hashes.is_empty() {
-            self.store.insert_channel_actor_state(state.clone());
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
             for payment_hash in onchain_fulfilled_invoice_hashes {
                 self.network
                     .send_message(FiberActorMessage::new_command(
@@ -3787,7 +3814,8 @@ where
             })
             .collect();
         if !invoice_hashes.is_empty() {
-            self.store.insert_channel_actor_state(state.clone());
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
             for payment_hash in invoice_hashes {
                 self.network
                     .send_message(FiberActorMessage::new_command(
@@ -3887,14 +3915,16 @@ where
         flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
         // Persist the chain signal before asking NetworkActor to validate exclusion evidence.
         state.update_state(ChannelState::Closed(flags));
-        self.store.insert_channel_actor_state(state.clone());
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
         let now = now_timestamp_as_millis_u64();
         if self.reconcile_onchain_tlcs(state, now).await {
             flags.remove(
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
             state.update_state(ChannelState::Closed(flags));
-            self.store.insert_channel_actor_state(state.clone());
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
             // Recovery no longer needs this snapshot. Persist completion first so a crash
             // cannot leave a waiting channel without its snapshot.
             self.store
@@ -3903,7 +3933,8 @@ where
             myself.stop(Some("OnChainSettlementCompleted".to_string()));
         } else {
             state.update_state(ChannelState::Closed(flags));
-            self.store.insert_channel_actor_state(state.clone());
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
             info!(
                 "Channel {:?} on-chain settlement reconciliation incomplete; keeping ONCHAIN_SETTLEMENT_CONFIRMED",
                 state.get_id()
@@ -4094,7 +4125,8 @@ where
         state.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING,
         ));
-        self.store.insert_channel_actor_state(state.clone());
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
         self.schedule_external_funding_timeout_check(myself, state);
         Ok(())
     }
@@ -4817,7 +4849,8 @@ where
                 channel.ephemeral_config = args.ephemeral_config.clone();
                 channel.hydrate_external_funding_runtime();
                 channel.private_key = Some(args.private_key.clone());
-                self.store.insert_channel_actor_state(channel.clone());
+                self.store
+                    .insert_channel_actor_state(channel.clone_for_store());
 
                 if channel.state != ChannelState::Stale && !awaiting_signature {
                     let reestablish_channel = ReestablishChannel {
@@ -5089,11 +5122,9 @@ where
             ChannelActorMessage::TestGetPendingMessages(reply) => {
                 let _ = reply.send(TestPendingMessages {
                     pending_peer_message_count: state.pending_messages.peer_messages.len(),
-                    has_pending_peer_commitment: state
-                        .pending_messages
-                        .peer_messages
-                        .iter()
-                        .any(|message| matches!(message, FiberChannelMessage::CommitmentSigned(_))),
+                    has_pending_peer_commitment: state.pending_messages.peer_messages.iter().any(
+                        |(message, _)| matches!(message, FiberChannelMessage::CommitmentSigned(_)),
+                    ),
                 });
             }
         }
@@ -5110,7 +5141,8 @@ where
         if state.ephemeral_config.external_funding.enabled {
             state.persist_external_funding_state();
         }
-        self.store.insert_channel_actor_state(state.clone());
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
 
         if state.needs_backup {
             if let Some(ref store_actor) = self.store_actor {
@@ -5462,8 +5494,18 @@ pub struct ChannelActorState {
 /// Messages are buffered in FIFO order and processed sequentially once signing completes.
 #[derive(Clone, Default, Debug)]
 pub(crate) struct PendingMessages {
-    pub(crate) peer_messages: VecDeque<FiberChannelMessage>,
+    pub(crate) peer_messages: VecDeque<(FiberChannelMessage, usize)>,
+    peer_message_bytes: usize,
+    disconnect_requested: bool,
     pub(crate) pending_reestablish_send: bool,
+}
+
+impl PendingMessages {
+    fn clear_peer_messages(&mut self) {
+        self.peer_messages.clear();
+        self.peer_message_bytes = 0;
+        self.disconnect_requested = false;
+    }
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
@@ -6130,12 +6172,42 @@ impl ChannelActorState {
 
     /// Take a peer message buffered behind the current external signature.
     fn take_next_pending_peer_message(&mut self) -> Option<FiberChannelMessage> {
-        self.pending_messages.peer_messages.pop_front()
+        let (message, encoded_len) = self.pending_messages.peer_messages.pop_front()?;
+        self.pending_messages.peer_message_bytes -= encoded_len;
+        Some(message)
     }
 
     /// Buffer a peer message until the outstanding external signature completes.
-    fn queue_pending_peer_message(&mut self, message: FiberChannelMessage) {
-        self.pending_messages.peer_messages.push_back(message);
+    fn queue_pending_peer_message(
+        &mut self,
+        message: FiberChannelMessage,
+    ) -> ProcessingChannelResult {
+        let encoded_len = FiberMessage::ChannelNormalOperation(message.clone())
+            .to_molecule_bytes()
+            .len();
+        if self.pending_messages.peer_messages.len() >= MAX_PENDING_PEER_MESSAGES
+            || encoded_len
+                > MAX_PENDING_PEER_MESSAGE_BYTES
+                    .saturating_sub(self.pending_messages.peer_message_bytes)
+        {
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "Pending peer message buffer exceeded for channel {}: queued {} messages / {} bytes, incoming {} bytes",
+                self.get_id(), self.pending_messages.peer_messages.len(), self.pending_messages.peer_message_bytes, encoded_len,
+            )));
+        }
+        self.pending_messages
+            .peer_messages
+            .push_back((message, encoded_len));
+        self.pending_messages.peer_message_bytes += encoded_len;
+        Ok(())
+    }
+
+    /// Clone a persistence snapshot without copying the unpersisted peer buffer.
+    fn clone_for_store(&mut self) -> Self {
+        let pending = std::mem::take(&mut self.pending_messages);
+        let snapshot = self.clone();
+        self.pending_messages = pending;
+        snapshot
     }
 
     fn complete_received_commitment_tx(
@@ -6854,7 +6926,7 @@ impl ChannelActorState {
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.pending_messages.pending_reestablish_send = false;
-        self.pending_messages.peer_messages.clear();
+        self.pending_messages.clear_peer_messages();
         self.reestablishing = true;
         self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
         self.connectivity_state = ChannelConnectivityState::Offline;
@@ -6866,7 +6938,7 @@ impl ChannelActorState {
     pub(crate) fn mark_watching_chain_offline(&mut self) {
         self.clear_waiting_peer_response();
         self.pending_messages.pending_reestablish_send = false;
-        self.pending_messages.peer_messages.clear();
+        self.pending_messages.clear_peer_messages();
         self.reestablishing = false;
         self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Offline;
@@ -6895,7 +6967,7 @@ impl ChannelActorState {
     fn on_peer_reconnected(&mut self) {
         if self.reestablishing && self.connectivity_state == ChannelConnectivityState::Offline {
             self.connectivity_state = ChannelConnectivityState::Syncing;
-            self.pending_messages.peer_messages.clear();
+            self.pending_messages.clear_peer_messages();
             if !self.signing_context.is_awaiting_signature() {
                 self.send_reestablish_message();
             } else {
@@ -12768,6 +12840,85 @@ mod tests {
     }
 
     #[test]
+    fn test_pending_peer_messages_enforce_count_limit() {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        for _ in 0..512 {
+            state
+                .queue_pending_peer_message(FiberChannelMessage::TxAbort(TxAbort {
+                    channel_id: state.get_id(),
+                    message: vec![],
+                }))
+                .unwrap();
+        }
+        assert!(
+            state
+                .queue_pending_peer_message(FiberChannelMessage::TxAbort(TxAbort {
+                    channel_id: state.get_id(),
+                    message: vec![],
+                }))
+                .is_err(),
+            "a peer must not buffer more than 512 messages while signing is paused"
+        );
+        assert_eq!(state.pending_messages.peer_messages.len(), 512);
+    }
+
+    #[test]
+    fn test_pending_peer_messages_enforce_byte_limit() {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let message = FiberChannelMessage::TxAbort(TxAbort {
+            channel_id: state.get_id(),
+            message: vec![0; 128 * 1024],
+        });
+        let encoded_len = FiberMessage::ChannelNormalOperation(message.clone())
+            .to_molecule_bytes()
+            .len();
+        let capacity = (4 * 1024 * 1024) / encoded_len;
+        assert!(capacity < 512);
+        for _ in 0..capacity {
+            state.queue_pending_peer_message(message.clone()).unwrap();
+        }
+        assert!(
+            state.queue_pending_peer_message(message).is_err(),
+            "a peer must not buffer more than 4 MiB even below the message count limit"
+        );
+        assert_eq!(state.pending_messages.peer_messages.len(), capacity);
+    }
+
+    #[test]
+    fn test_pending_peer_message_budget_releases_and_snapshot_omits_buffer() {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let message = FiberChannelMessage::TxAbort(TxAbort {
+            channel_id: state.get_id(),
+            message: vec![1; 1024],
+        });
+        let encoded_len = FiberMessage::ChannelNormalOperation(message.clone())
+            .to_molecule_bytes()
+            .len();
+        state.queue_pending_peer_message(message.clone()).unwrap();
+        state.queue_pending_peer_message(message.clone()).unwrap();
+        assert_eq!(state.pending_messages.peer_message_bytes, 2 * encoded_len);
+        state.take_next_pending_peer_message().unwrap();
+        assert_eq!(state.pending_messages.peer_message_bytes, encoded_len);
+        state.pending_messages.pending_reestablish_send = true;
+        let snapshot = state.clone_for_store();
+        assert!(snapshot.pending_messages.peer_messages.is_empty());
+        assert_eq!(snapshot.pending_messages.peer_message_bytes, 0);
+        assert_eq!(state.pending_messages.peer_messages.len(), 1);
+        assert!(state.pending_messages.pending_reestablish_send);
+        assert_eq!(
+            bincode::serialize(&snapshot).unwrap(),
+            bincode::serialize(&state).unwrap()
+        );
+        state.mark_reestablishing_offline();
+        assert_eq!(state.pending_messages.peer_message_bytes, 0);
+        state.queue_pending_peer_message(message).unwrap();
+        assert_eq!(state.pending_messages.peer_message_bytes, encoded_len);
+    }
+
+    #[test]
     fn test_pending_messages_cleared_on_peer_disconnect() {
         let mut state =
             channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
@@ -12803,7 +12954,7 @@ mod tests {
             hash_algorithm: HashAlgorithm::CkbHash,
             onion_packet: None,
         });
-        state.queue_pending_peer_message(dummy_add_tlc);
+        state.queue_pending_peer_message(dummy_add_tlc).unwrap();
         assert_eq!(state.pending_messages.peer_messages.len(), 1);
 
         // Peer disconnects!
@@ -12827,7 +12978,7 @@ mod tests {
             hash_algorithm: HashAlgorithm::CkbHash,
             onion_packet: None,
         });
-        state.queue_pending_peer_message(dummy_add_tlc2);
+        state.queue_pending_peer_message(dummy_add_tlc2).unwrap();
         assert_eq!(state.pending_messages.peer_messages.len(), 1);
 
         state.on_peer_reconnected();

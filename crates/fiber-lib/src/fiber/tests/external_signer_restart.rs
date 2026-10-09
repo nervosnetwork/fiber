@@ -1931,6 +1931,85 @@ impl ractor::Actor for DeadlineChannelProbe {
 
 struct DeadlineNetworkProbe;
 
+#[tokio::test]
+async fn test_external_signer_buffer_overflow_disconnects_and_recovers() {
+    use crate::fiber::channel::ChannelActorMessage;
+    use crate::fiber::types::{FiberChannelMessage, TxAbort};
+    use crate::NetworkServiceEvent;
+
+    init_tracing();
+    let (_restartable, signer) = RestartableExternalSigner::create().await;
+    let ([mut tenant, mut public_node], channel_id) =
+        setup_restartable_external_channel(false, &signer).await;
+    let payment = tenant
+        .send_payment_keysend(&public_node, 10_000, false)
+        .await
+        .unwrap();
+    approve_fixture_keysend(&signer, &tenant, payment.payment_hash, 10_000, false).await;
+    wait_until_async_timeout(|| async {
+        matches!(
+            get_signing_status(&tenant, channel_id)
+                .await
+                .unwrap()
+                .status,
+            ChannelSigningStatus::SignatureRequired {
+                transition: ChannelSigningTransition::SendCommitmentSigned,
+                ..
+            }
+        )
+    })
+    .await;
+    let status = get_signing_status(&tenant, channel_id)
+        .await
+        .unwrap()
+        .status;
+    let submission = prepare_hosted_signature(&signer, channel_id, status).await;
+    let actor = tenant.get_channel_actor(channel_id).await.unwrap();
+    for _ in 0..514 {
+        actor
+            .send_message(ChannelActorMessage::PeerMessage(
+                FiberChannelMessage::TxAbort(TxAbort {
+                    channel_id,
+                    message: vec![],
+                }),
+            ))
+            .unwrap();
+    }
+    // This exercises the production Channel -> Fiber actor -> P2P disconnect path.
+    tenant
+        .expect_event(|event| {
+            matches!(event,
+                NetworkServiceEvent::PeerDisConnected(pubkey, _) if *pubkey == public_node.pubkey
+            )
+        })
+        .await;
+    let buffered = call!(actor, ChannelActorMessage::TestGetPendingMessages).unwrap();
+    assert_eq!(buffered.pending_peer_message_count, 0);
+    let persisted = tenant.get_channel_actor_state(channel_id);
+    assert!(persisted.reestablishing);
+    assert_eq!(
+        persisted.signing_context.awaiting_signature().unwrap().0 .0,
+        fiber_types::Hash256::from(submission.request_id)
+    );
+    // The request survives the disconnect, including its original request ID.
+    assert_eq!(
+        submit_signature(&tenant, submission).await.unwrap(),
+        SubmitChannelSignatureResult::Applied
+    );
+    tenant.connect_to(&mut public_node).await;
+    assert!(
+        wait_for_external_signer_recovery(
+            &tenant,
+            &public_node,
+            &signer,
+            channel_id,
+            &[(&tenant, payment.payment_hash)],
+        )
+        .await,
+        "overflow disconnect must allow signing and payment recovery after reconnect"
+    );
+}
+
 /// Crash after accepting a signature, before running its protocol continuation.
 #[tokio::test]
 async fn test_tenant_restart_after_accepting_revoke_signature() {
