@@ -1931,6 +1931,190 @@ impl ractor::Actor for DeadlineChannelProbe {
 
 struct DeadlineNetworkProbe;
 
+/// Crash after accepting a signature, before running its protocol continuation.
+#[tokio::test]
+async fn test_tenant_restart_after_accepting_revoke_signature() {
+    check_restart_after_accepting_signature(ChannelSigningTransition::SendRevokeAndAck).await;
+}
+
+#[tokio::test]
+async fn test_tenant_restart_after_accepting_commitment_signature() {
+    check_restart_after_accepting_signature(ChannelSigningTransition::SendCommitmentSigned).await;
+}
+
+#[tokio::test]
+async fn test_tenant_restart_after_accepting_received_commitment_signature() {
+    check_restart_after_accepting_signature(ChannelSigningTransition::CompleteReceivedCommitment)
+        .await;
+}
+
+#[tokio::test]
+async fn test_tenant_restart_after_accepting_received_revoke_signature() {
+    check_restart_after_accepting_signature(ChannelSigningTransition::CompleteReceivedRevokeAndAck)
+        .await;
+}
+
+async fn check_restart_after_accepting_signature(checkpoint: ChannelSigningTransition) {
+    use crate::fiber::channel::{ChannelActor, ChannelActorStateStore};
+    use crate::fiber::channel_signer::SignerNotification;
+    use crate::fiber::FiberActorRef;
+    use fiber_types::{NextChannelSignerMaterial, SignatureRequestId};
+    use ractor::Actor;
+
+    init_tracing();
+    let (_restartable, signer) = RestartableExternalSigner::create().await;
+    let ([mut tenant, mut public_node], channel_id) =
+        setup_restartable_external_channel(false, &signer).await;
+    let outbound = matches!(
+        checkpoint,
+        ChannelSigningTransition::SendCommitmentSigned
+            | ChannelSigningTransition::CompleteReceivedRevokeAndAck
+    );
+    let payer = if outbound { &tenant } else { &public_node };
+    let receiver = if outbound { &public_node } else { &tenant };
+    let payment = payer
+        .send_payment_keysend(receiver, 10_000, false)
+        .await
+        .unwrap();
+    approve_fixture_keysend(&signer, payer, payment.payment_hash, 10_000, !outbound).await;
+    wait_until_async_timeout(|| async {
+        let status = get_signing_status(&tenant, channel_id)
+            .await
+            .unwrap()
+            .status;
+        if let ChannelSigningStatus::SignatureRequired { transition, .. } = &status {
+            if *transition == checkpoint {
+                return true;
+            }
+            sign_and_submit(&tenant, &signer, channel_id, status).await;
+        }
+        false
+    })
+    .await;
+    let status = get_signing_status(&tenant, channel_id)
+        .await
+        .unwrap()
+        .status;
+    let submission = prepare_hosted_signature(&signer, channel_id, status).await;
+    tenant.stop().await;
+    let mut state = tenant.store.get_channel_actor_state(&channel_id).unwrap();
+    let previous_numbers = state.commitment_numbers;
+    let previous_ack = state.last_revoke_ack_msg.clone();
+    let (sender, _messages) = tokio::sync::mpsc::unbounded_channel();
+    let (network, network_task) = Actor::spawn(None, DeadlineNetworkProbe, sender)
+        .await
+        .unwrap();
+    let network_ref = FiberActorRef::from_network(&network);
+    state.network = Some(network_ref.clone());
+    let channel = ChannelActor::new(
+        tenant.pubkey,
+        public_node.pubkey,
+        network_ref,
+        tenant.store.clone(),
+        None,
+    );
+    let (myself, actor_task) = Actor::spawn(None, DeadlineChannelProbe, ()).await.unwrap();
+    let material = submission.next_material.clone().unwrap();
+    let request_id = SignatureRequestId(submission.request_id.into());
+    let notification = SignerNotification::ChannelSignatureReady {
+        channel_id,
+        request_id,
+        signature: Ok(musig2::PartialSignature::from_slice(&submission.partial_signature).unwrap()),
+        next_material: Some(NextChannelSignerMaterial {
+            next_commitment_point: material
+                .next_commitment_point
+                .map(|p| p.try_into().unwrap()),
+            next_commitment_nonce: material
+                .next_commitment_nonce
+                .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+            next_revocation_nonce: material
+                .next_revocation_nonce
+                .map(|n| musig2::PubNonce::from_bytes(&n).unwrap()),
+        }),
+        rpc_reply: None,
+    };
+    channel
+        .validate_and_checkpoint_signer_notification(
+            &myself,
+            &mut state,
+            notification,
+            crate::now_timestamp_as_millis_u64(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // Discard all runtime state at the exact persistence boundary.
+    let persisted = tenant.store.get_channel_actor_state(&channel_id).unwrap();
+    assert_eq!(persisted.commitment_numbers, previous_numbers);
+    assert_eq!(
+        bincode::serialize(&persisted.last_revoke_ack_msg).unwrap(),
+        bincode::serialize(&previous_ack).unwrap()
+    );
+    assert!(
+        persisted.signing_context.is_awaiting_signature(),
+        "accepted signature must retain its continuation until protocol state is durable"
+    );
+    assert_eq!(
+        persisted.signing_context.last_applied().unwrap().request_id,
+        request_id
+    );
+    drop(state);
+    myself.stop(None);
+    network.stop(None);
+    actor_task.await.unwrap();
+    network_task.await.unwrap();
+
+    tenant.start().await;
+    // Recovery must consume the saved signature without asking the phone to resubmit.
+    wait_until_async_timeout(|| async {
+        tenant
+            .store
+            .get_channel_actor_state(&channel_id)
+            .is_some_and(|state| {
+                state
+                    .signing_context
+                    .last_applied()
+                    .is_some_and(|receipt| receipt.request_id == request_id)
+                    && state
+                        .signing_context
+                        .pending_signature
+                        .as_ref()
+                        .is_none_or(|pending| pending.request_id != request_id)
+            })
+    })
+    .await;
+    assert_eq!(
+        submit_signature(&tenant, submission).await.unwrap(),
+        SubmitChannelSignatureResult::AlreadyApplied
+    );
+    let recovered = tenant.store.get_channel_actor_state(&channel_id).unwrap();
+    assert_eq!(
+        recovered.commitment_numbers.local,
+        previous_numbers.local
+            + u64::from(checkpoint == ChannelSigningTransition::CompleteReceivedRevokeAndAck)
+    );
+    assert_eq!(
+        recovered.commitment_numbers.remote,
+        previous_numbers.remote
+            + u64::from(checkpoint == ChannelSigningTransition::SendRevokeAndAck)
+    );
+    tenant.connect_to(&mut public_node).await;
+    assert!(
+        wait_for_external_signer_recovery(
+            &tenant,
+            &public_node,
+            &signer,
+            channel_id,
+            &[(
+                if outbound { &tenant } else { &public_node },
+                payment.payment_hash
+            )],
+        )
+        .await,
+        "accepted signature must recover and settle the payment"
+    );
+}
+
 #[async_trait::async_trait]
 impl ractor::Actor for DeadlineNetworkProbe {
     type Msg = NetworkActorMessage;

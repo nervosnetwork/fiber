@@ -2168,21 +2168,23 @@ where
         Ok(())
     }
 
-    async fn validate_and_apply_signer_notification(
+    /// Persist a validated signature with its still-pending protocol continuation.
+    /// The caller owns the RPC reply and must complete and save the continuation first.
+    pub(crate) async fn validate_and_checkpoint_signer_notification(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         notification: SignerNotification,
         now: u64,
     ) -> Result<Option<(ChannelSignatureRequest, PartialSignature)>, ProcessingChannelError> {
-        let (channel_id, request_id, signature, next_material, rpc_reply) = match notification {
+        let (channel_id, request_id, signature, next_material) = match notification {
             SignerNotification::ChannelSignatureReady {
                 channel_id,
                 request_id,
                 signature,
                 next_material,
-                rpc_reply,
-            } => (channel_id, request_id, signature, next_material, rpc_reply),
+                ..
+            } => (channel_id, request_id, signature, next_material),
         };
         if channel_id != state.get_id() {
             let err_msg = format!(
@@ -2190,9 +2192,6 @@ where
                 state.get_id(),
                 channel_id
             );
-            if let Some(reply) = rpc_reply {
-                let _ = reply.send(Err(err_msg.clone()));
-            }
             return Err(ProcessingChannelError::InvalidParameter(err_msg));
         }
         let partial_signature = match signature {
@@ -2202,9 +2201,6 @@ where
                     "channel signer failed to sign request {:?}: {}",
                     request_id, error
                 );
-                if let Some(reply) = rpc_reply {
-                    let _ = reply.send(Err(err_msg.clone()));
-                }
                 return Err(ProcessingChannelError::InvalidState(err_msg));
             }
         };
@@ -2217,15 +2213,9 @@ where
             Ok(opt) => opt,
             Err(err) => {
                 let err_msg = Self::signing_context_error(err).to_string();
-                if let Some(reply) = rpc_reply {
-                    let _ = reply.send(Err(err_msg.clone()));
-                }
                 return Err(ProcessingChannelError::InvalidState(err_msg));
             }
         }) else {
-            if let Some(reply) = rpc_reply {
-                let _ = reply.send(Ok(fiber_types::SubmitSignatureOutcome::AlreadyApplied));
-            }
             return Ok(None);
         };
 
@@ -2237,40 +2227,23 @@ where
                         .to_string(),
                 )
             });
-            if let Some(reply) = rpc_reply {
-                let _ = reply.send(Err(err.to_string()));
-            }
             return Err(err);
         }
 
-        if let Err(err) =
-            state.verify_external_musig2_signature(request.content(), partial_signature)
-        {
-            let err_msg = format!("signature is invalid: {err}");
-            if let Some(reply) = rpc_reply {
-                let _ = reply.send(Err(err_msg));
-            }
-            return Err(err);
-        }
-        if let Err(err) = state.apply_next_signer_material(&request, next_material.clone()) {
-            let err_msg = err.to_string();
-            if let Some(reply) = rpc_reply {
-                let _ = reply.send(Err(err_msg));
-            }
-            return Err(err);
-        }
+        state
+            .verify_external_musig2_signature(request.content(), partial_signature)
+            .map_err(|err| {
+                ProcessingChannelError::InvalidParameter(format!("signature is invalid: {err}"))
+            })?;
+        state.apply_next_signer_material(&request, next_material.clone())?;
         state
             .signing_context
-            .complete_request(receipt)
+            .accept_request(receipt)
             .map_err(Self::signing_context_error)?;
-        // Persist the idempotency receipt before any continuation can send a
-        // peer message. A crash after that send must not execute the same
-        // submitted signature twice; channel reestablishment owns wire replay.
+        // Keep the request with the validated signature until its continuation
+        // advances the durable protocol state. Restore can then resume even if
+        // the phone never resubmits after this checkpoint.
         self.store.insert_channel_actor_state(state.clone());
-
-        if let Some(reply) = rpc_reply {
-            let _ = reply.send(Ok(fiber_types::SubmitSignatureOutcome::Applied));
-        }
 
         Ok(Some((request, partial_signature)))
     }
@@ -2295,15 +2268,57 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        notification: SignerNotification,
+        mut notification: SignerNotification,
         now: u64,
     ) -> ProcessingChannelResult {
+        let SignerNotification::ChannelSignatureReady { rpc_reply, .. } = &mut notification;
+        let rpc_reply = rpc_reply.take();
+        let result = self
+            .continue_signer_notification_at(myself, state, notification, now)
+            .await;
+        match &result {
+            Ok(_) => self.store.insert_channel_actor_state(state.clone()),
+            Err(_) => {
+                // Do not let the actor's final save overwrite a recoverable
+                // checkpoint with an incomplete in-memory continuation.
+                if let Some(persisted) = self.store.get_channel_actor_state(&state.get_id()) {
+                    state.core = persisted.core;
+                }
+            }
+        }
+        if let Some(reply) = rpc_reply {
+            let _ = reply.send(result.as_ref().copied().map_err(ToString::to_string));
+        }
+        result.map(|_| ())
+    }
+
+    async fn continue_signer_notification_at(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        notification: SignerNotification,
+        now: u64,
+    ) -> Result<fiber_types::SubmitSignatureOutcome, ProcessingChannelError> {
         let Some((request, partial_signature)) = self
-            .validate_and_apply_signer_notification(myself, state, notification, now)
+            .validate_and_checkpoint_signer_notification(myself, state, notification, now)
             .await?
         else {
-            return Ok(());
+            return Ok(fiber_types::SubmitSignatureOutcome::AlreadyApplied);
         };
+
+        let receipt = state
+            .signing_context
+            .accepted_signature()
+            .cloned()
+            .ok_or_else(|| {
+                ProcessingChannelError::InvalidState(
+                    "validated signature has no recovery receipt".to_string(),
+                )
+            })?;
+        state
+            .signing_context
+            .complete_request(receipt)
+            .map_err(Self::signing_context_error)?;
 
         match request {
             ChannelSignatureRequest::SendCommitmentSigned {
@@ -2405,7 +2420,7 @@ where
         }
 
         self.drain_pending_messages(myself, state).await?;
-        Ok(())
+        Ok(fiber_types::SubmitSignatureOutcome::Applied)
     }
 
     async fn finish_send_revoke_and_ack(
@@ -4981,7 +4996,19 @@ where
         let external_funding_runtime = state.ephemeral_config.external_funding.clone();
         state.ephemeral_config = args.ephemeral_config;
         state.ephemeral_config.external_funding = external_funding_runtime;
-        if state.signing_context.is_awaiting_signature() {
+        if let Some(receipt) = state.signing_context.accepted_signature().cloned() {
+            _myself
+                .send_message(ChannelActorMessage::SignerNotification(
+                    SignerNotification::ChannelSignatureReady {
+                        channel_id: state.get_id(),
+                        request_id: receipt.request_id,
+                        signature: Ok(receipt.partial_signature),
+                        next_material: receipt.next_material,
+                        rpc_reply: None,
+                    },
+                ))
+                .map_err(|error| -> ActorProcessingErr { Box::new(error) })?;
+        } else if state.signing_context.is_awaiting_signature() {
             if let Some((request_id, request)) = state.signing_context.awaiting_signature() {
                 let outcome =
                     state

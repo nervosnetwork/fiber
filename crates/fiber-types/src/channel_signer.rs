@@ -408,14 +408,15 @@ pub struct PendingChannelSignature {
 }
 
 /// Signing context, separate from the channel lifecycle. Only `pending_signature`
-/// represents unfinished signing; the last applied result identifies submission retries.
+/// represents unfinished signing. A matching receipt retains its accepted signature
+/// for recovery; once the request is cleared, the receipt identifies completed retries.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ChannelSigningContext {
     pub pending_signature: Option<PendingChannelSignature>,
     last_applied: Option<LastAppliedChannelSignature>,
 }
 
-/// Receipt for one successfully applied external channel signature.
+/// Validated external channel signature, retained for recovery and submission retries.
 #[serde_as]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LastAppliedChannelSignature {
@@ -544,6 +545,11 @@ impl ChannelSigningContext {
     ) -> Result<Option<ChannelSignatureRequest>, ChannelSigningContextError> {
         if let Some(applied) = &self.last_applied {
             if applied == receipt {
+                if let Some(pending) = &self.pending_signature {
+                    if pending.request_id == receipt.request_id {
+                        return Ok(Some(pending.request.clone()));
+                    }
+                }
                 return Ok(None);
             }
             if applied.request_id == receipt.request_id {
@@ -551,6 +557,26 @@ impl ChannelSigningContext {
             }
         }
         self.pending_request(receipt.request_id).map(Some)
+    }
+
+    /// Retain a validated signature together with its unfinished continuation.
+    /// Persist this checkpoint before clearing the request or sending peer messages.
+    pub fn accept_request(
+        &mut self,
+        receipt: LastAppliedChannelSignature,
+    ) -> Result<(), ChannelSigningContextError> {
+        self.replay_or_pending(&receipt)?;
+        self.pending_request(receipt.request_id)?;
+        self.last_applied = Some(receipt);
+        Ok(())
+    }
+
+    /// A validated signature whose protocol continuation still needs recovery.
+    pub fn accepted_signature(&self) -> Option<&LastAppliedChannelSignature> {
+        let pending = self.pending_signature.as_ref()?;
+        self.last_applied
+            .as_ref()
+            .filter(|receipt| receipt.request_id == pending.request_id)
     }
 
     /// Clear the request and install its receipt with the caller's protocol update.
@@ -567,10 +593,20 @@ impl ChannelSigningContext {
 
     /// Clear the pending signature request (e.g. on channel force-close, expiry, or cancellation).
     pub fn cancel_request(&mut self) -> Option<PendingChannelSignature> {
-        self.pending_signature.take()
+        let pending = self.pending_signature.take();
+        if pending.as_ref().is_some_and(|pending| {
+            self.last_applied
+                .as_ref()
+                .is_some_and(|receipt| receipt.request_id == pending.request_id)
+        }) {
+            // An accepted but cancelled continuation must not acknowledge a retry
+            // as successfully applied (for example after its safety deadline).
+            self.last_applied = None;
+        }
+        pending
     }
 
-    /// Most recently committed signature response.
+    /// Most recently accepted signature response; a matching pending request is unfinished.
     pub fn last_applied(&self) -> Option<&LastAppliedChannelSignature> {
         self.last_applied.as_ref()
     }
@@ -722,6 +758,64 @@ mod tests {
         assert!(state.replay_or_pending(&applied).unwrap().is_some());
         state.complete_request(applied.clone()).unwrap();
         assert!(state.replay_or_pending(&applied).unwrap().is_none());
+    }
+
+    #[test]
+    fn accepted_signature_retains_continuation_across_serialization() {
+        let mut state = ChannelSigningContext::default();
+        let request_id = SignatureRequestId(Hash256::from([1; 32]));
+        let request = ChannelSignatureRequest::SendCommitmentSigned {
+            content: content(),
+            settlement_data: settlement_data(),
+        };
+        state.request_signature(request_id, request).unwrap();
+        let accepted = receipt(request_id, 1);
+        state.accept_request(accepted.clone()).unwrap();
+        let mut restored: ChannelSigningContext =
+            bincode::deserialize(&bincode::serialize(&state).unwrap()).unwrap();
+        assert_eq!(restored.accepted_signature(), Some(&accepted));
+        assert!(restored.replay_or_pending(&accepted).unwrap().is_some());
+        assert!(matches!(
+            restored.replay_or_pending(&receipt(request_id, 2)),
+            Err(ChannelSigningContextError::ResultMismatch)
+        ));
+        restored.complete_request(accepted.clone()).unwrap();
+        assert!(restored.accepted_signature().is_none());
+        assert!(restored.replay_or_pending(&accepted).unwrap().is_none());
+        restored
+            .request_signature(
+                SignatureRequestId(Hash256::from([2; 32])),
+                ChannelSignatureRequest::SendCommitmentSigned {
+                    content: content(),
+                    settlement_data: settlement_data(),
+                },
+            )
+            .unwrap();
+        assert!(restored.accepted_signature().is_none());
+        assert!(restored.replay_or_pending(&accepted).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancelling_an_accepted_signature_does_not_acknowledge_it_as_applied() {
+        let mut state = ChannelSigningContext::default();
+        let request_id = SignatureRequestId(Hash256::from([1; 32]));
+        state
+            .request_signature(
+                request_id,
+                ChannelSignatureRequest::SendCommitmentSigned {
+                    content: content(),
+                    settlement_data: settlement_data(),
+                },
+            )
+            .unwrap();
+        let accepted = receipt(request_id, 1);
+        state.accept_request(accepted.clone()).unwrap();
+        assert!(state.cancel_request().is_some());
+        assert!(state.last_applied().is_none());
+        assert!(matches!(
+            state.replay_or_pending(&accepted),
+            Err(ChannelSigningContextError::NoSignatureRequired)
+        ));
     }
 
     #[test]
