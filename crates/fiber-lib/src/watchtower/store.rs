@@ -92,6 +92,16 @@ pub trait WatchtowerStore {
         state: WatchtowerSignerState,
     );
 
+    /// Atomically read, modify and persist signer state under the watchtower write lock.
+    /// Failed updates must leave persisted state unchanged. The callback must not
+    /// perform blocking network I/O or call another watchtower write operation.
+    fn update_watchtower_signer<R, E>(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
+    ) -> Result<R, E>;
+
     /// Get a watch preimage owned by the given node.
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256>;
 

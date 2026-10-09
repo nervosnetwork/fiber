@@ -1050,6 +1050,140 @@ fn test_store_watchtower_signer_roundtrip() {
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_watchtower_atomic_update_preserves_concurrent_signature() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use fiber_types::watchtower::WatchtowerExternalSignerState;
+    use fiber_types::{
+        LastAppliedWatchtowerSignature, OnchainKeyPurpose, OnchainSigningContent,
+        WatchtowerSignerState,
+    };
+
+    let path = TempDir::new("watchtower-concurrent-signer-update");
+    let store = open_store(path).expect("open store");
+    let node_id = NodeId::local();
+    let channel_id = Hash256::from([1; 32]);
+    let signed_id = Hash256::from([2; 32]);
+    let new_id = Hash256::from([3; 32]);
+    let content = OnchainSigningContent {
+        key_purpose: OnchainKeyPurpose::Settlement,
+        transaction: Transaction::default(),
+    };
+    let signature = [42; 65];
+    let mut initial = WatchtowerExternalSignerState::default();
+    initial.pending_requests.insert(signed_id, content.clone());
+    store.put_watchtower_signer(
+        &node_id,
+        &channel_id,
+        WatchtowerSignerState::External(initial),
+    );
+
+    let (scan_entered_tx, scan_entered_rx) = mpsc::channel();
+    let (release_scan_tx, release_scan_rx) = mpsc::channel();
+    let (submit_entered_tx, submit_entered_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let store = &store;
+        let node_id = &node_id;
+        let content = &content;
+        let scan = scope.spawn(move || {
+            store
+                .update_watchtower_signer(node_id, &channel_id, |state| {
+                    scan_entered_tx.send(()).expect("scan entered");
+                    release_scan_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release scan");
+                    let WatchtowerSignerState::External(external) = state else {
+                        panic!("external signer");
+                    };
+                    external.pending_requests.insert(new_id, content.clone());
+                    Ok::<_, ()>(())
+                })
+                .expect("scan update");
+        });
+        scan_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("scan read state");
+        let submit = scope.spawn(move || {
+            store
+                .update_watchtower_signer(node_id, &channel_id, |state| {
+                    submit_entered_tx.send(()).expect("submit entered");
+                    let WatchtowerSignerState::External(external) = state else {
+                        panic!("external signer");
+                    };
+                    let pending = external
+                        .pending_requests
+                        .remove(&signed_id)
+                        .expect("pending signature");
+                    external
+                        .signed_signatures
+                        .insert(signed_id, (pending, signature));
+                    external.last_applied = Some(LastAppliedWatchtowerSignature {
+                        request_id: signed_id,
+                        signature,
+                    });
+                    Ok::<_, ()>(())
+                })
+                .expect("submit update");
+        });
+        // Without an atomic update the submitter can save its signature while
+        // the scan still holds the old snapshot. With the lock it waits here.
+        if submit_entered_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_ok()
+        {
+            submit.join().expect("submit thread");
+            release_scan_tx.send(()).expect("release scan");
+            scan.join().expect("scan thread");
+        } else {
+            release_scan_tx.send(()).expect("release scan");
+            scan.join().expect("scan thread");
+            submit.join().expect("submit thread");
+        }
+    });
+    let WatchtowerSignerState::External(state) = store.get_watchtower_signer(&node_id, &channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert_eq!(
+        state.signed_signatures.get(&signed_id),
+        Some(&(content.clone(), signature)),
+        "scan must not overwrite an accepted signature"
+    );
+    assert!(!state.pending_requests.contains_key(&signed_id));
+    assert_eq!(state.pending_requests.get(&new_id), Some(&content));
+    assert_eq!(
+        state.last_applied,
+        Some(LastAppliedWatchtowerSignature {
+            request_id: signed_id,
+            signature
+        })
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_watchtower_atomic_update_discards_failed_mutation() {
+    use fiber_types::watchtower::WatchtowerExternalSignerState;
+    use fiber_types::WatchtowerSignerState;
+
+    let path = TempDir::new("watchtower-failed-signer-update");
+    let store = open_store(path).expect("open store");
+    let node_id = NodeId::local();
+    let channel_id = Hash256::from([1; 32]);
+    let result = store.update_watchtower_signer(&node_id, &channel_id, |state| {
+        *state = WatchtowerSignerState::External(WatchtowerExternalSignerState::default());
+        Err::<(), _>("invalid signature")
+    });
+    assert_eq!(result, Err("invalid signature"));
+    assert_eq!(
+        store.get_watchtower_signer(&node_id, &channel_id),
+        WatchtowerSignerState::Internal
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn test_onchain_tlc_settlement_roundtrip() {
     let path = TempDir::new("test-onchain-tlc-settlement-roundtrip");
     let store = open_store(path).expect("created store failed");

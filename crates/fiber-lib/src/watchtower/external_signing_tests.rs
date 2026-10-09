@@ -596,6 +596,71 @@ fn external_tlc_signing_rejects_conflicting_public_keys_for_same_index() {
 }
 
 #[test]
+fn concurrent_watchtower_rpc_submissions_preserve_both_signatures() {
+    let fixture = Fixture::new(false, false, false, false);
+    assert!(fixture.build().expect("first request").is_none());
+    let (first_id, first_content) = fixture.pending();
+    let mut second = Fixture::new(false, false, false, false);
+    second.store = fixture.store.clone();
+    second.cell.out_point = OutPoint::new(Byte32::from([99; 32]), 1).into();
+    assert!(second.build().expect("second request").is_none());
+    let WatchtowerSignerState::External(state) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    let (second_id, second_content) = state
+        .pending_requests
+        .iter()
+        .find(|(id, _)| **id != first_id)
+        .map(|(id, content)| (*id, content.clone()))
+        .expect("second request");
+    let first_sig =
+        sign_onchain_request(&fixture.tlc_key, &first_content).expect("first signature");
+    let second_sig =
+        sign_onchain_request(&fixture.tlc_key, &second_content).expect("second signature");
+    let start = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let first_submit = scope.spawn(|| {
+            start.wait();
+            fixture.submit(first_id, first_sig)
+        });
+        let second_submit = scope.spawn(|| {
+            start.wait();
+            second.submit(second_id, second_sig)
+        });
+        for submit in [first_submit, second_submit] {
+            assert_eq!(
+                submit
+                    .join()
+                    .expect("submit thread")
+                    .expect("submit signature"),
+                SubmitWatchtowerSignatureResult::Applied
+            );
+        }
+    });
+    let first_tx = fixture
+        .build()
+        .expect("first scan")
+        .expect("first signed tx");
+    let second_tx = second
+        .build()
+        .expect("second scan")
+        .expect("second signed tx");
+    assert_applied_signature(&first_tx, &first_content, &fixture.tlc_key);
+    assert_applied_signature(&second_tx, &second_content, &fixture.tlc_key);
+    let WatchtowerSignerState::External(state) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(state.pending_requests.is_empty());
+    assert_eq!(state.signed_signatures.len(), 2);
+}
+
+#[test]
 fn test_watchtower_signature_request_overwrite_repro() {
     let fixture = Fixture::new(false, false, false, false);
 

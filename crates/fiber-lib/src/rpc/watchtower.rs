@@ -390,60 +390,61 @@ where
             .as_slice()
             .try_into()
             .map_err(|_| rpc_error("watchtower signature must be 65 bytes"))?;
-        let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
-            return Err(rpc_error("watched channel not found"));
-        };
-        let current = self.store.get_watchtower_signer(&node_id, &channel_id);
-        let WatchtowerSignerState::External(mut external) = current else {
-            return Err(rpc_error("watched channel does not use an external signer"));
-        };
-        if external
-            .last_applied
-            .as_ref()
-            .is_some_and(|applied| applied.request_id == request_id)
-        {
-            if external
-                .last_applied
-                .as_ref()
-                .is_some_and(|applied| applied.signature == signature)
-            {
-                return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
-            }
-            return Err(rpc_error(
-                "submitted signature does not match the previously applied result",
-            ));
-        }
-        if let Some((_, existing_sig)) = external.signed_signatures.get(&request_id) {
-            if existing_sig == &signature {
-                return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
-            }
-            return Err(rpc_error(
-                "submitted signature does not match the previously applied result",
-            ));
-        }
-        let Some(content) = external.pending_requests.remove(&request_id) else {
-            return Err(rpc_error(
-                "signature request id not found in pending requests",
-            ));
-        };
-        let expected_pubkey = channel
-            .expected_onchain_pubkey(&content.key_purpose)
-            .map_err(rpc_error)?;
-        crate::watchtower::WatchtowerSigner::apply_submitted(&expected_pubkey, &content, signature)
-            .map_err(rpc_error)?;
-        external.last_applied = Some(LastAppliedWatchtowerSignature {
-            request_id,
-            signature,
-        });
-        external
-            .signed_signatures
-            .insert(request_id, (content, signature));
-        self.store.put_watchtower_signer(
-            &node_id,
-            &channel_id,
-            WatchtowerSignerState::External(external),
-        );
-        Ok(SubmitWatchtowerSignatureResult::Applied)
+        self.store
+            .update_watchtower_signer(&node_id, &channel_id, |state| {
+                let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
+                    return Err(rpc_error("watched channel not found"));
+                };
+                let WatchtowerSignerState::External(external) = state else {
+                    return Err(rpc_error("watched channel does not use an external signer"));
+                };
+                if external
+                    .last_applied
+                    .as_ref()
+                    .is_some_and(|applied| applied.request_id == request_id)
+                {
+                    if external
+                        .last_applied
+                        .as_ref()
+                        .is_some_and(|applied| applied.signature == signature)
+                    {
+                        return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
+                    }
+                    return Err(rpc_error(
+                        "submitted signature does not match the previously applied result",
+                    ));
+                }
+                if let Some((_, existing_sig)) = external.signed_signatures.get(&request_id) {
+                    if existing_sig == &signature {
+                        return Ok(SubmitWatchtowerSignatureResult::AlreadyApplied);
+                    }
+                    return Err(rpc_error(
+                        "submitted signature does not match the previously applied result",
+                    ));
+                }
+                let Some(content) = external.pending_requests.remove(&request_id) else {
+                    return Err(rpc_error(
+                        "signature request id not found in pending requests",
+                    ));
+                };
+                let expected_pubkey = channel
+                    .expected_onchain_pubkey(&content.key_purpose)
+                    .map_err(rpc_error)?;
+                crate::watchtower::WatchtowerSigner::apply_submitted(
+                    &expected_pubkey,
+                    &content,
+                    signature,
+                )
+                .map_err(rpc_error)?;
+                external.last_applied = Some(LastAppliedWatchtowerSignature {
+                    request_id,
+                    signature,
+                });
+                external
+                    .signed_signatures
+                    .insert(request_id, (content, signature));
+                Ok(SubmitWatchtowerSignatureResult::Applied)
+            })
     }
 }
 

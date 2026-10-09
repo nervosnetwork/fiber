@@ -2079,6 +2079,32 @@ impl WatchtowerStore for Store {
         batch.commit();
     }
 
+    fn update_watchtower_signer<R, E>(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        let mut state = self.get_watchtower_signer(node_id, channel_id);
+        let original = state.clone();
+        let result = update(&mut state)?;
+        if state != original {
+            // Write directly: put_watchtower_signer would acquire this lock again.
+            let key = [
+                &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat();
+            let mut batch = self.batch();
+            batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
+            batch.commit();
+        }
+        Ok(result)
+    }
+
     fn insert_onchain_tlc_settlement(
         &self,
         node_id: &NodeId,

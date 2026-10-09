@@ -2022,78 +2022,62 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
             request_id,
             content: awaiting,
         } => {
-            let fiber_types::WatchtowerSignerState::External(mut external) =
-                store.get_watchtower_signer(node_id, &channel_id)
-            else {
-                warn!(
-                    channel_id = %channel_id,
-                    "watchtower settlement has no local key and no external signer state"
-                );
-                return Ok(None);
-            };
+            let signature = store.update_watchtower_signer(
+                node_id,
+                &channel_id,
+                |state| -> Result<Option<[u8; 65]>, std::convert::Infallible> {
+                    let fiber_types::WatchtowerSignerState::External(external) = state else {
+                        warn!(
+                            channel_id = %channel_id,
+                            "watchtower settlement has no local key and no external signer state"
+                        );
+                        return Ok(None);
+                    };
 
-            // 1. Check if signature for this request is already received and verified
-            if let Some((signed_content, signature)) = external.signed_signatures.get(&request_id) {
-                if signed_content == &awaiting {
-                    let signature = *signature;
+                    if let Some((signed_content, signature)) =
+                        external.signed_signatures.get(&request_id)
+                    {
+                        if signed_content == &awaiting {
+                            let signature = *signature;
+                            external.last_applied =
+                                Some(fiber_types::LastAppliedWatchtowerSignature {
+                                    request_id,
+                                    signature,
+                                });
+                            return Ok(Some(signature));
+                        }
+                        external.signed_signatures.remove(&request_id);
+                        if external
+                            .last_applied
+                            .as_ref()
+                            .is_some_and(|a| a.request_id == request_id)
+                        {
+                            external.last_applied = None;
+                        }
+                    }
+
+                    if external.pending_requests.get(&request_id) == Some(&awaiting) {
+                        return Ok(None);
+                    }
+
+                    external.pending_requests.insert(request_id, awaiting);
                     if external
                         .last_applied
                         .as_ref()
-                        .is_none_or(|a| a.request_id != request_id || a.signature != signature)
+                        .is_some_and(|a| a.request_id == request_id)
                     {
-                        external.last_applied = Some(fiber_types::LastAppliedWatchtowerSignature {
-                            request_id,
-                            signature,
-                        });
-                        store.put_watchtower_signer(
-                            node_id,
-                            &channel_id,
-                            fiber_types::WatchtowerSignerState::External(external),
-                        );
+                        external.last_applied = None;
                     }
-                    return Ok(Some(apply_settlement_signature(
-                        tx,
-                        change_signer,
-                        signature,
-                        with_preimage,
-                    )?));
-                }
-                // Stale signed signature: drop it
-                external.signed_signatures.remove(&request_id);
-                if external
-                    .last_applied
-                    .as_ref()
-                    .is_some_and(|a| a.request_id == request_id)
-                {
-                    external.last_applied = None;
-                }
-            }
-
-            // 2. Check if this request is already pending (peaceful wait, no overwrite)
-            if external.pending_requests.get(&request_id) == Some(&awaiting) {
-                store.put_watchtower_signer(
-                    node_id,
-                    &channel_id,
-                    fiber_types::WatchtowerSignerState::External(external),
-                );
-                return Ok(None);
-            }
-
-            // 3. New request: record non-destructively
-            external.pending_requests.insert(request_id, awaiting);
-            if external
-                .last_applied
-                .as_ref()
-                .is_some_and(|a| a.request_id == request_id)
-            {
-                external.last_applied = None;
-            }
-            store.put_watchtower_signer(
-                node_id,
-                &channel_id,
-                fiber_types::WatchtowerSignerState::External(external),
-            );
-            Ok(None)
+                    Ok(None)
+                },
+            )?;
+            // Only signer-state mutation holds the lock; transaction construction
+            // and broadcasting must not block other signer submissions.
+            signature
+                .map(|signature| {
+                    apply_settlement_signature(tx, change_signer, signature, with_preimage)
+                })
+                .transpose()
         }
     }
 }
@@ -2552,6 +2536,15 @@ mod tests {
             _channel_id: &Hash256,
             _state: fiber_types::WatchtowerSignerState,
         ) {
+        }
+
+        fn update_watchtower_signer<R, E>(
+            &self,
+            _node_id: &NodeId,
+            _channel_id: &Hash256,
+            update: impl FnOnce(&mut fiber_types::WatchtowerSignerState) -> Result<R, E>,
+        ) -> Result<R, E> {
+            update(&mut fiber_types::WatchtowerSignerState::Internal)
         }
 
         fn insert_onchain_tlc_settlement(
