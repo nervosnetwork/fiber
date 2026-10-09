@@ -3950,6 +3950,118 @@ async fn test_trampoline_failure_settlement_recovers_after_restart() {
 }
 
 #[tokio::test]
+async fn test_buffered_trampoline_failed_session_settles_upstream() {
+    init_tracing();
+
+    let channels = vec![(
+        (0, 1),
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )];
+    let (nodes, _) = create_n_nodes_network_with_params(&channels, 3, None).await;
+    let [node_a, node_t, node_b] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+    set_test_trampoline_settlement_paused(&node_t, true).await;
+
+    let (invoice, _) = node_b.gen_basic_invoice(10_000);
+    let payment_hash = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_fee_amount: Some(5_000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("start trampoline payment")
+        .payment_hash;
+
+    wait_until_async_timeout(|| async {
+        node_t
+            .store
+            .get_payment_session(payment_hash)
+            .is_some_and(|session| session.status == PaymentStatus::Failed)
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .expect("payer payment session")
+            .status,
+        PaymentStatus::Inflight
+    );
+
+    let session = node_t.store.get_payment_session(payment_hash).unwrap();
+    let data = &session.request;
+    let context = data.trampoline_context.as_ref().unwrap();
+    let request = TrampolineForwardingRequest {
+        payment_hash,
+        next_node_id: data.target_pubkey,
+        amount_to_forward: data.amount,
+        hash_algorithm: context.hash_algorithm,
+        build_max_fee_amount: data.max_fee_amount.unwrap_or_default(),
+        tlc_expiry_delta: data.final_tlc_expiry_delta,
+        tlc_expiry_limit: data.tlc_expiry_limit,
+        max_parts: data.max_parts,
+        udt_type_script: data.udt_type_script.clone(),
+        remaining_trampoline_onion: context.remaining_trampoline_onion.clone(),
+        previous_tlc: context.previous_tlcs[0],
+        max_outgoing_tlc_expiry: context.max_outgoing_tlc_expiry.unwrap(),
+    };
+
+    // A Failed session alone does not prove its upstream TLC was settled.
+    let mut invalid_session = session.clone();
+    invalid_session
+        .request
+        .trampoline_context
+        .as_mut()
+        .unwrap()
+        .previous_tlcs[0]
+        .shared_secret = None;
+    node_t.store.insert_payment_session(invalid_session);
+    let result = call!(node_t.network_actor, |reply| {
+        NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
+            request: request.clone(),
+            reason: "buffer deadline expired".to_string(),
+            error_code: TlcErrorCode::PermanentNodeFailure,
+            reply,
+        })
+    })
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "must propagate upstream settlement failure"
+    );
+    assert_eq!(
+        node_a
+            .store
+            .get_payment_session(payment_hash)
+            .unwrap()
+            .status,
+        PaymentStatus::Inflight
+    );
+    node_t.store.insert_payment_session(session);
+
+    for _ in 0..2 {
+        assert!(call!(node_t.network_actor, |reply| {
+            NetworkActorMessage::new_command(FiberActorCommand::FailBufferedTrampoline {
+                request: request.clone(),
+                reason: "buffer deadline expired".to_string(),
+                error_code: TlcErrorCode::PermanentNodeFailure,
+                reply,
+            })
+        })
+        .unwrap()
+        .unwrap());
+        node_a.wait_until_failed(payment_hash).await;
+    }
+}
+
+#[tokio::test]
 async fn test_trampoline_forward_invalid_onion_payload_missing_context() {
     init_tracing();
 

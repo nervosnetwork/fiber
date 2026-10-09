@@ -5242,13 +5242,15 @@ where
         error_code: TlcErrorCode,
     ) -> Result<bool, String> {
         if let Some(session) = state.store.get_payment_session(request.payment_hash) {
-            if matches!(
-                session.status,
-                PaymentStatus::Created | PaymentStatus::Inflight
-            ) {
+            if session.status != PaymentStatus::Failed {
                 return Ok(false);
             }
-            return Ok(session.status == PaymentStatus::Failed);
+            // A failed downstream session may still have pending upstream TLCs while
+            // hosted delivery waits for a retry. Complete the failure handoff first.
+            state
+                .settle_trampoline_payment(&session, None, None)
+                .await?;
+            return Ok(true);
         }
 
         let payment_hash = request.payment_hash;
