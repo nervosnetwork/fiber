@@ -57,8 +57,8 @@ use fiber_types::schema::WATCHTOWER_TLC_SETTLED_PREFIX;
 use fiber_types::CloseFlags;
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{
-    AddTlcCommand, AppliedFlags, CommitmentNumbers, OutboundTlcStatus, RetryableTlcOperation,
-    SettlementTlc, TLCId, TlcInfo, TlcStatus,
+    AddTlcCommand, AppliedFlags, CommitmentContractFeatures, CommitmentNumbers, OutboundTlcStatus,
+    RetryableTlcOperation, SettlementTlc, TLCId, TlcInfo, TlcStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{Attempt, AttemptStatus, HashAlgorithm, PaymentHopData, RouterHop, SessionRoute};
@@ -290,6 +290,46 @@ fn test_store_invoice() {
     let status = CkbInvoiceStatus::Paid;
     store.update_invoice_status(hash, status).unwrap();
     assert_eq!(store.get_invoice_status(hash), Some(status));
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_invoice_preimage_origin_is_persistent() {
+    let (store, dir) = generate_store();
+    let preimage = gen_rand_sha256_hash();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1000))
+        .payment_preimage(preimage)
+        .build()
+        .expect("build regular invoice");
+    let payment_hash = *invoice.payment_hash();
+    store
+        .insert_invoice(invoice, Some(preimage))
+        .expect("insert regular invoice");
+    assert!(store.has_invoice_preimage(&payment_hash));
+
+    let hold_preimage = gen_rand_sha256_hash();
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1000))
+        .payment_hash(ckb_hash::blake2b_256(hold_preimage).into())
+        .build()
+        .expect("build hold invoice");
+    let hold_hash = *hold_invoice.payment_hash();
+    store
+        .insert_invoice(hold_invoice, None)
+        .expect("insert hold invoice");
+    store.insert_preimage(hold_hash, hold_preimage);
+    assert!(!store.has_invoice_preimage(&hold_hash));
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        drop(store);
+        let reopened = open_store(dir.as_ref()).expect("reopen store");
+        assert!(reopened.has_invoice_preimage(&payment_hash));
+        assert!(!reopened.has_invoice_preimage(&hold_hash));
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = dir;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), test)]
@@ -565,6 +605,7 @@ fn test_store_watchtower() {
             local_settlement_data: settlement_data.clone(),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data.clone(),
+            commitment_contract_features: Default::default(),
         }]
     );
 
@@ -595,6 +636,7 @@ fn test_store_watchtower() {
             revocation_data: Some(revocation_data),
             pending_remote_settlement_data: settlement_data.clone(),
             remote_settlement_data: settlement_data,
+            commitment_contract_features: Default::default(),
         }]
     );
 
@@ -656,6 +698,44 @@ fn test_store_external_watch_channel_contains_no_private_keys() {
         )
     );
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_store_watchtower_v1_registration_round_trip() {
+    let path = TempDir::new("test-watchtower-v1-store");
+    let store = open_store(path).expect("created store failed");
+    let node_id = NodeId::from_bytes(PeerId::random().into_bytes());
+    let channel_id = gen_rand_sha256_hash();
+    let settlement_data = SettlementData {
+        local_amount: 100,
+        remote_amount: 200,
+        tlcs: vec![],
+    };
+
+    store.insert_watch_channel_with_features(
+        node_id,
+        channel_id,
+        None,
+        Some(Privkey::from(&[1; 32])),
+        Privkey::from(&[1; 32]).pubkey(),
+        Privkey::from(&[2; 32]).pubkey(),
+        Privkey::from(&[3; 32]).pubkey(),
+        Privkey::from(&[4; 32]).pubkey(),
+        settlement_data,
+        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+    );
+
+    assert_eq!(
+        store
+            .get_watch_channels()
+            .into_iter()
+            .find(|channel| channel.channel_id == channel_id)
+            .expect("stored channel")
+            .commitment_contract_features,
+        CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -1653,6 +1733,7 @@ fn test_store_watchtower_with_wrong_node_id() {
         local_settlement_data: settlement_data.clone(),
         pending_remote_settlement_data: settlement_data.clone(),
         remote_settlement_data: settlement_data.clone(),
+        commitment_contract_features: Default::default(),
     }];
     assert_eq!(store.get_watch_channels(), expected_value);
 
@@ -1792,6 +1873,7 @@ fn test_channel_actor_state_store() {
             })],
             last_was_revoke: true,
             external_funding: None,
+            commitment_contract_features: Default::default(),
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
@@ -1935,6 +2017,7 @@ fn sample_channel_actor_state(
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
+            commitment_contract_features: Default::default(),
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,

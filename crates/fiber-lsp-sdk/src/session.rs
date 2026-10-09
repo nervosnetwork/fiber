@@ -412,6 +412,7 @@ impl<S: SignerStore> HostedSession<S> {
         remote_settlement_key: fiber_types::Pubkey,
         funding_udt_type_script: Option<ckb_jsonrpc_types::Script>,
         settlement_data: fiber_json_types::SettlementData,
+        commitment_contract_features: fiber_types::CommitmentContractFeatures,
     ) -> Result<CreateWatchChannelParams, SessionError> {
         let key_id = self
             .state
@@ -430,6 +431,7 @@ impl<S: SignerStore> HostedSession<S> {
             local_funding_pubkey: keys.funding_pubkey.into(),
             remote_funding_pubkey: remote_funding_pubkey.into(),
             settlement_data,
+            commitment_contract_features: commitment_contract_features.into(),
         })
     }
 
@@ -990,6 +992,7 @@ mod tests {
                     remote_amount: 1,
                     tlcs: Vec::new(),
                 },
+                fiber_types::CommitmentContractFeatures::LEGACY,
             )
             .await
             .expect("watch params");

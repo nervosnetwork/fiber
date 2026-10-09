@@ -103,8 +103,8 @@ fn reserve(
     asset: Option<Script>,
     network: &OpeningNetwork,
 ) -> Result<u64, SignerError> {
-    let lock = if script.args().len() < 57 {
-        Script::new_builder().args([0u8; 57].pack()).build()
+    let lock = if script.args().len() < 58 {
+        Script::new_builder().args([0u8; 58].pack()).build()
     } else {
         script
     };
@@ -197,7 +197,7 @@ pub(crate) fn validate_opening(
                 .commitment_lock
                 .clone()
                 .as_builder()
-                .args([0u8; 57].pack())
+                .args([0u8; 58].pack())
                 .build(),
         )
         .type_(asset.clone().pack())

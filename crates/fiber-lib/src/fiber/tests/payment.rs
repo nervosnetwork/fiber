@@ -710,6 +710,82 @@ async fn test_send_payment_custom_records_with_limit_error() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_router_custom_records() {
+    let (nodes, _channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 2), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        3,
+    )
+    .await;
+    let [node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let router = node_0
+        .build_router(BuildRouterCommand {
+            amount: Some(60000000),
+            hops_info: vec![
+                HopRequire {
+                    pubkey: node_1.pubkey,
+                    channel_outpoint: None,
+                },
+                HopRequire {
+                    pubkey: node_2.pubkey,
+                    channel_outpoint: None,
+                },
+            ],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .expect("build router")
+        .router_hops;
+
+    let data: HashMap<_, _> = vec![
+        (1, "hello".to_string().into_bytes()),
+        (2, "world".to_string().into_bytes()),
+    ]
+    .into_iter()
+    .collect();
+    let custom_records = PaymentCustomRecords { data };
+    let payment_hash = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router: router.clone(),
+            keysend: Some(true),
+            custom_records: Some(custom_records.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment with router")
+        .payment_hash;
+    node_0.wait_until_success(payment_hash).await;
+
+    // The records must reach the final hop, not just be accepted by the command.
+    let got_custom_records = node_2
+        .get_payment_custom_records(&payment_hash)
+        .expect("custom records should be delivered to the final hop");
+    assert_eq!(got_custom_records, custom_records);
+
+    // Router payments are subject to the same size limit as `send_payment`.
+    let long_value = "a".repeat(MAX_CUSTOM_RECORDS_SIZE + 1);
+    let data: HashMap<_, _> = vec![(1, long_value.into_bytes())].into_iter().collect();
+    let err = node_0
+        .send_payment_with_router(SendPaymentWithRouterCommand {
+            router,
+            keysend: Some(true),
+            custom_records: Some(PaymentCustomRecords { data }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("oversized custom records should be rejected");
+    assert!(
+        err.contains("custom_records encoded size"),
+        "unexpected error: {err}"
+    );
+    assert_eq!(node_0.get_inflight_payment_count().await, 0);
+}
+
+#[tokio::test]
 async fn test_receive_payment_rejects_oversized_custom_records() {
     init_tracing();
 
@@ -5096,6 +5172,17 @@ async fn test_closed_channel_upstream_settlement_does_not_depend_on_check_channe
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_closed_channel_upstream_fulfillment_from_onchain_preimage() {
+    assert_closed_channel_upstream_fulfillment(false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_closed_channel_upstream_fulfillment_after_uncommitted_peer_fulfill() {
+    assert_closed_channel_upstream_fulfillment(true).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_closed_channel_upstream_fulfillment(uncommitted_peer_fulfill: bool) {
     init_tracing();
 
     let (nodes, channels) = create_n_nodes_network(
@@ -5171,6 +5258,32 @@ async fn test_closed_channel_upstream_fulfillment_from_onchain_preimage() {
         )
     })
     .await;
+
+    if uncommitted_peer_fulfill {
+        // Restore the state left by a peer fulfill received before the close confirmed,
+        // without relying on the mock chain's immediate confirmation timing.
+        let mut state = node_1.get_channel_actor_state(channels[1]);
+        state.tlc_state.set_offered_tlc_removed(
+            downstream_tlc.id(),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                payment_preimage: hold_preimage,
+            }),
+        );
+        assert!(state
+            .tlc_state
+            .get(&downstream_tlc.tlc_id)
+            .unwrap()
+            .removed_confirmed_at
+            .is_none());
+        node_1
+            .update_channel_actor_state(
+                state,
+                Some(ReloadParams {
+                    notify_changes: false,
+                }),
+            )
+            .await;
+    }
 
     // Simulate watchtower on-chain preimage discovery: only the preimage is stored, NOT the
     // `WithoutPreimage` (no-preimage) marker. The two are mutually exclusive; writing the settled
@@ -7293,6 +7406,23 @@ async fn test_check_channels_fallback_does_not_mutate_live_downstream_actor_stat
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_actor_stops() {
+    assert_payer_settlement_completion(false, false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payer_peer_fail_then_onchain_fulfill_live() {
+    assert_payer_settlement_completion(true, false).await;
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn test_payer_peer_fail_then_onchain_fulfill_offline() {
+    assert_payer_settlement_completion(true, true).await;
+}
+
+#[cfg(feature = "watchtower")]
+async fn assert_payer_settlement_completion(peer_failed: bool, offline: bool) {
     init_tracing();
 
     let (nodes, channels) =
@@ -7351,6 +7481,72 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
         },
     );
 
+    let payer_tlc_id = closed_state
+        .tlc_state
+        .offered_tlcs
+        .tlcs
+        .iter()
+        .find(|tlc| tlc.payment_hash == payment_hash)
+        .unwrap()
+        .tlc_id;
+    if peer_failed {
+        let mut state = closed_state;
+        let tlc = state.tlc_state.get_mut(&payer_tlc_id).unwrap();
+        tlc.status =
+            fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::RemoteRemoved);
+        tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+            TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+            &tlc.shared_secret,
+        )));
+        assert!(tlc.removed_confirmed_at.is_none());
+        node_0
+            .update_channel_actor_state(
+                state,
+                Some(ReloadParams {
+                    notify_changes: false,
+                }),
+            )
+            .await;
+    }
+    let actor = node_0.get_channel_actor(channels[0]).await.unwrap();
+    if offline {
+        actor
+            .send_message(ChannelActorMessage::Event(ChannelEvent::Stop(
+                StopReason::Closed,
+            )))
+            .unwrap();
+        wait_until(|| actor.get_status() == ractor::ActorStatus::Stopped).await;
+        node_0.node_info().await;
+        assert!(node_0.get_channel_actor(channels[0]).await.is_none());
+    }
+    if peer_failed {
+        // Closing confirmation without TLC evidence must not discard the failed payer attempt.
+        node_0
+            .network_actor
+            .send_message(NetworkActorMessage::new_event(
+                FiberActorEvent::ChannelSettlementCompleted(channels[0]),
+            ))
+            .unwrap();
+        node_0.node_info().await;
+        if !offline {
+            let _ = ractor::call!(actor, |reply| ChannelActorMessage::Command(
+                ChannelCommand::TestBarrier(reply)
+            ));
+        }
+        let waiting = node_0.get_channel_actor_state(channels[0]);
+        assert!(
+            waiting.is_waiting_onchain_settlement(),
+            "unknown payer outcome must retain recovery state"
+        );
+        assert!(node_0
+            .store
+            .get_shutdown_settlement_record(&channels[0])
+            .is_some());
+        assert_eq!(
+            node_0.get_payment_status(payment_hash).await,
+            PaymentStatus::Inflight
+        );
+    }
     node_0.node_info().await;
     insert_onchain_preimage(&node_0.store, &channels[0], payment_hash, hold_preimage);
     node_0
@@ -7373,6 +7569,32 @@ async fn test_settlement_completed_reconciles_payer_onchain_preimage_before_acto
         node_0.get_payment_status(payment_hash).await,
         PaymentStatus::Success,
         "settlement completion must reconcile the observed on-chain preimage before stopping the channel actor"
+    );
+    let finished = node_0.get_channel_actor_state(channels[0]);
+    let tlc = finished.tlc_state.get(&payer_tlc_id).unwrap();
+    assert_eq!(
+        tlc.removed_reason,
+        Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+            payment_preimage: hold_preimage
+        }))
+    );
+    assert!(node_0
+        .store
+        .get_shutdown_settlement_record(&channels[0])
+        .is_none());
+    if peer_failed {
+        assert!(tlc
+            .applied_flags
+            .contains(fiber_types::AppliedFlags::REMOVE));
+    }
+    // Recovery must persist the ordinary preimage, not depend on the watchtower fallback.
+    let record = crate::store::store_impl::KeyValue::Preimage(payment_hash, hold_preimage);
+    assert_eq!(
+        fiber_store::backend::StorageBackend::get(
+            &node_0.store,
+            crate::store::store_impl::StoreKeyValue::key(&record)
+        ),
+        Some(crate::store::store_impl::StoreKeyValue::value(&record)),
     );
 }
 

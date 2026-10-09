@@ -35,6 +35,8 @@ use fiber_store::migration::{
     MigrateConfirmFn, MigrateProgressFn, INIT_DB_VERSION, MIGRATION_VERSION_KEY,
 };
 use fiber_types::schema::*;
+#[cfg(feature = "watchtower")]
+use fiber_types::CommitmentContractFeatures;
 use fiber_types::{
     Attempt, AttemptStatus, BroadcastMessage, BroadcastMessageID, ChannelData, ChannelOpenRecord,
     ChannelState, Cursor, Direction, Hash256, PaymentCustomRecords, PaymentSession, PaymentStatus,
@@ -389,6 +391,9 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
                     "CKB_INVOICE_STATUS_PREFIX",
                     &mut errors,
                 );
+            }
+            INVOICE_PREIMAGE_PREFIX => {
+                check_deserialization::<()>(&value, "INVOICE_PREIMAGE_PREFIX", &mut errors);
             }
             PUBKEY_CHANNEL_ID_PREFIX => {}
             CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX => {
@@ -1440,6 +1445,10 @@ impl InvoiceStore for Store {
         if let Some(preimage) = preimage {
             let kv = KeyValue::Preimage(payment_hash, preimage);
             batch.put(kv.key(), kv.value());
+            batch.put(
+                [&[INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat(),
+                serialize_to_vec(&(), "invoice preimage marker"),
+            );
         }
         batch.commit();
         self.notify(StoreChange::PutCkbInvoiceStatus {
@@ -1476,6 +1485,11 @@ impl InvoiceStore for Store {
         let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
+    }
+
+    fn has_invoice_preimage(&self, id: &Hash256) -> bool {
+        let key = [&[INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
+        self.get(key).is_some()
     }
 }
 
@@ -1514,6 +1528,7 @@ impl PreimageStore for Store {
     fn remove_preimage(&self, payment_hash: &Hash256) {
         let mut batch = self.batch();
         batch.delete([&[PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
+        batch.delete([&[INVOICE_PREIMAGE_PREFIX], payment_hash.as_ref()].concat());
         batch.commit();
     }
 
@@ -1836,6 +1851,33 @@ impl WatchtowerStore for Store {
         remote_funding_pubkey: Pubkey,
         settlement_data: SettlementData,
     ) {
+        self.insert_watch_channel_with_features(
+            node_id,
+            channel_id,
+            funding_udt_type_script,
+            local_settlement_key,
+            local_settlement_key_pubkey,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
+            CommitmentContractFeatures::LEGACY,
+        );
+    }
+
+    fn insert_watch_channel_with_features(
+        &self,
+        node_id: NodeId,
+        channel_id: Hash256,
+        funding_udt_type_script: Option<Script>,
+        local_settlement_key: Option<Privkey>,
+        local_settlement_key_pubkey: Pubkey,
+        remote_settlement_key: Pubkey,
+        local_funding_pubkey: Pubkey,
+        remote_funding_pubkey: Pubkey,
+        settlement_data: SettlementData,
+        commitment_contract_features: CommitmentContractFeatures,
+    ) {
         let lock = self.watchtower_write_lock(&node_id);
         let _guard = lock.lock();
         let key = [
@@ -1858,6 +1900,7 @@ impl WatchtowerStore for Store {
                 remote_settlement_data: settlement_data.clone(),
                 local_settlement_data: settlement_data.clone(),
                 revocation_data: None,
+                commitment_contract_features,
             },
             "ChannelData",
         );

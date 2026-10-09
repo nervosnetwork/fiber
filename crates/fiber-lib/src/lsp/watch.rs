@@ -25,7 +25,7 @@ pub fn ensure_hosted_watch_channel(
     let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant.tenant_id.as_str()));
     if let Some(state) = tenant_store.get_channel_actor_state(&channel_id) {
         let params = state.hosted_watch_channel_params()?;
-        store.insert_watch_channel(
+        store.insert_watch_channel_with_features(
             node_id,
             channel_id,
             params.funding_udt_type_script,
@@ -35,6 +35,7 @@ pub fn ensure_hosted_watch_channel(
             params.local_funding_pubkey,
             params.remote_funding_pubkey,
             params.settlement_data,
+            params.commitment_contract_features,
         );
         return Ok(());
     }
@@ -56,7 +57,7 @@ pub fn ensure_hosted_watch_channel(
         );
         return Ok(());
     }
-    store.insert_watch_channel(
+    store.insert_watch_channel_with_features(
         node_id,
         channel_id,
         params.funding_udt_type_script,
@@ -66,6 +67,7 @@ pub fn ensure_hosted_watch_channel(
         params.remote_funding_pubkey,
         params.local_funding_pubkey,
         invert_empty_settlement(params.settlement_data),
+        params.commitment_contract_features,
     );
     Ok(())
 }

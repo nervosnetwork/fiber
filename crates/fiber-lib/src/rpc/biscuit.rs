@@ -139,7 +139,7 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
     b.rule("get_invoice", r#"allow if read("invoices");"#);
     b.rule("cancel_invoice", r#"allow if write("invoices");"#);
     b.rule("settle_invoice", r#"allow if write("invoices");"#);
-    b.rule("backup_now", r#"allow if write("node");"#);
+    b.rule("backup", r#"allow if write("node");"#);
 
     // hosted LSP
     b.rule("lsp_get_status", r#"allow if read("lsp");"#);
@@ -573,6 +573,32 @@ mod tests {
 
         // if not match any rule, it should be denied
         assert!(auth.check_permission("unknown", &token).is_err());
+    }
+
+    #[test]
+    fn test_biscuit_auth_backup_requires_node_write() {
+        let root = KeyPair::new();
+        let auth = BiscuitAuth::from_pubkey(root.public().to_string()).unwrap();
+
+        let write_token = biscuit!(r#"write("node");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let read_token = biscuit!(r#"read("node");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+        let unrelated_token = biscuit!(r#"write("payments");"#)
+            .build(&root)
+            .unwrap()
+            .to_base64()
+            .unwrap();
+
+        assert!(auth.check_permission("backup", &write_token).is_ok());
+        assert!(auth.check_permission("backup", &read_token).is_err());
+        assert!(auth.check_permission("backup", &unrelated_token).is_err());
     }
 
     #[test]

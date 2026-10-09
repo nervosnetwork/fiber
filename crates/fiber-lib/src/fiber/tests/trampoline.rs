@@ -24,7 +24,7 @@ use fiber_types::Hash256;
 use fiber_types::{
     AddTlcCommand, AppliedFlags, CommitmentNumbers, CurrentPaymentHopData, HashAlgorithm,
     InboundTlcStatus, PaymentHopData, PeeledPaymentOnionPacket, PrevTlcInfo, RetryableTlcOperation,
-    TLCId, TlcErrorCode, TlcInfo, TlcStatus,
+    TLCId, TlcErr, TlcErrorCode, TlcInfo, TlcStatus,
 };
 use ractor::{call, RpcReplyPort};
 use rand::Rng;
@@ -2507,6 +2507,176 @@ async fn test_trampoline_forwarding_rejects_outgoing_expiry_beyond_upstream_budg
         Err(tlc_err) => assert_eq!(tlc_err.error_code, TlcErrorCode::IncorrectTlcExpiry),
         Ok(_) => panic!("Should have failed with IncorrectTlcExpiry"),
     }
+}
+
+/// Drives B's trampoline forwarding boundary with an inbound A-B TLC bound to
+/// `upstream_hash_algorithm` and an inner trampoline `Forward` payload that selects
+/// `inner_hash_algorithm` for the outgoing B-C payment. Returns the network actor reply.
+async fn send_manual_trampoline_forward(
+    node_b: &NetworkNode,
+    node_c: &NetworkNode,
+    channel_ab: Hash256,
+    upstream_hash_algorithm: HashAlgorithm,
+    inner_hash_algorithm: HashAlgorithm,
+    upstream_expiry: u64,
+) -> Result<(), TlcErr> {
+    let payment_hash = gen_rand_sha256_hash();
+    let amount_to_forward = 1000u128;
+    let forwarding_fee = 100u128;
+    let incoming_amount = amount_to_forward + forwarding_fee;
+
+    let mut node_b_state = node_b.get_channel_actor_state(channel_ab);
+    node_b_state.tlc_state.add_received_tlc(TlcInfo {
+        status: TlcStatus::Inbound(InboundTlcStatus::Committed),
+        tlc_id: TLCId::Received(1),
+        amount: incoming_amount,
+        payment_hash,
+        total_amount: None,
+        payment_secret: None,
+        attempt_id: None,
+        expiry: upstream_expiry,
+        hash_algorithm: upstream_hash_algorithm,
+        onion_packet: None,
+        shared_secret: [0u8; 32],
+        is_trampoline_hop: false,
+        created_at: CommitmentNumbers::new(),
+        removed_reason: None,
+        forwarding_tlc: None,
+        removed_confirmed_at: None,
+        applied_flags: AppliedFlags::empty(),
+    });
+    node_b.update_channel_actor_state(node_b_state, None).await;
+
+    let trampoline_onion_bytes = TrampolineOnionPacket::create(
+        Privkey::from_slice(&[2u8; 32]),
+        vec![node_b.pubkey, node_c.pubkey],
+        vec![
+            TrampolineHopPayload::Forward {
+                next_node_id: node_c.pubkey,
+                amount_to_forward,
+                build_max_fee_amount: forwarding_fee,
+                tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                tlc_expiry_limit: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                max_parts: None,
+                hash_algorithm: inner_hash_algorithm,
+            },
+            TrampolineHopPayload::Final {
+                final_amount: amount_to_forward,
+                final_tlc_expiry_delta: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                payment_preimage: None,
+                custom_records: None,
+            },
+        ],
+        Some(payment_hash.as_ref().to_vec()),
+        SECP256K1,
+    )
+    .expect("create onion")
+    .into_bytes();
+
+    let mut current_hop_data = CurrentPaymentHopData {
+        amount: incoming_amount,
+        expiry: upstream_expiry,
+        payment_preimage: None,
+        hash_algorithm: upstream_hash_algorithm,
+        funding_tx_hash: Default::default(),
+        custom_records: None,
+    };
+    current_hop_data.set_trampoline_onion(trampoline_onion_bytes);
+
+    let (sender, receiver) = oneshot::channel();
+    let command = FiberActorCommand::SendPaymentOnionPacket(
+        SendOnionPacketCommand {
+            peeled_onion_packet: PeeledPaymentOnionPacket {
+                current: current_hop_data,
+                shared_secret: [0u8; 32],
+                next: None,
+            },
+            previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
+                channel_ab,
+                1,
+                forwarding_fee,
+                [0u8; 32],
+            )),
+            payment_hash,
+            attempt_id: None,
+        },
+        RpcReplyPort::from(sender),
+    );
+
+    node_b
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(command))
+        .expect("send command");
+
+    receiver.await.expect("recv result")
+}
+
+#[tokio::test]
+async fn test_trampoline_forwarding_rejects_hash_algorithm_mismatch() {
+    init_tracing();
+
+    // A -- B -- C. The inbound A-B TLC is bound to CkbHash, while the inner trampoline
+    // `Forward` payload asks B to pay C under Sha256 for the same payment hash. B must
+    // reject the mismatch before starting the downstream payment, otherwise C could
+    // fulfill a preimage that the upstream A-B TLC cannot claim. The upstream expiry is
+    // valid for forwarding, so the hash-algorithm guard is the only reason to reject.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let [_node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let channel_ab = channels[0];
+
+    let res = send_manual_trampoline_forward(
+        &node_b,
+        &node_c,
+        channel_ab,
+        HashAlgorithm::CkbHash,
+        HashAlgorithm::Sha256,
+        now_timestamp_as_millis_u64()
+            + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+            + 2 * DEFAULT_TLC_EXPIRY_DELTA,
+    )
+    .await;
+
+    let tlc_err = res.expect_err("hash algorithm mismatch must be rejected");
+    assert_eq!(tlc_err.error_code, TlcErrorCode::InvalidOnionPayload);
+
+    // ===============================================================================
+    // A -- B -- C. Both the inbound A-B TLC and the inner trampoline payload use
+    // CkbHash, so the trampoline hash-algorithm boundary must accept the forward and
+    // start the downstream B-C payment.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+        ],
+        3,
+    )
+    .await;
+    let [_node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let channel_ab = channels[0];
+
+    let res = send_manual_trampoline_forward(
+        &node_b,
+        &node_c,
+        channel_ab,
+        HashAlgorithm::CkbHash,
+        HashAlgorithm::CkbHash,
+        now_timestamp_as_millis_u64()
+            + DEFAULT_FINAL_TLC_EXPIRY_DELTA
+            + 2 * DEFAULT_TLC_EXPIRY_DELTA,
+    )
+    .await;
+
+    assert!(
+        res.is_ok(),
+        "matching hash algorithms must be accepted: {res:?}"
+    );
 }
 
 #[tokio::test]

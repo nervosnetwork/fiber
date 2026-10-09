@@ -603,7 +603,7 @@ impl CommitmentState {
         let expected = &self.parameters.commitment_lock;
         if lock.code_hash() != expected.code_hash()
             || lock.hash_type() != expected.hash_type()
-            || args.len() != 57
+            || fiber_types::CommitmentContractFeatures::from_lock_args(&args).is_err()
             || args[56] != 0
         {
             return Err(invalid(

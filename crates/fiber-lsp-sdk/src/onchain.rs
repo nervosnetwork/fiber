@@ -3,7 +3,7 @@ use ckb_types::{
     packed::{CellDep, CellInput, CellOutput, OutPoint, Script},
     prelude::*,
 };
-use fiber_types::{settlement_data_to_witness, Hash256};
+use fiber_types::{settlement_data_to_witness, CommitmentContractFeatures, Hash256};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
@@ -97,8 +97,11 @@ pub(crate) async fn validate<C: ChainVerifier>(
     let source_lock = source.output.lock();
     let args = source_lock.args().raw_data();
     let original_args = original.lock().args().raw_data();
-    if args.len() != 57
-        || original_args.len() != 57
+    let features =
+        CommitmentContractFeatures::from_lock_args(&original_args).map_err(|e| invalid(&e))?;
+    let tlc_len = 65 + features.payment_hash_len();
+    if args.len() != original_args.len()
+        || args[57..] != original_args[57..]
         || args[..36] != original_args[..36]
         || source_lock.code_hash() != original.lock().code_hash()
         || source_lock.hash_type() != original.lock().hash_type()
@@ -117,7 +120,7 @@ pub(crate) async fn validate<C: ChainVerifier>(
         return Err(invalid("expected exactly one settlement unlock"));
     }
     let count = usize::from(witness[17]);
-    let body_len = 1 + count * 85 + 72;
+    let body_len = 1 + count * tlc_len + 72;
     let body = witness
         .get(17..17 + body_len)
         .ok_or_else(|| invalid("truncated settlement witness"))?;
@@ -127,21 +130,22 @@ pub(crate) async fn validate<C: ChainVerifier>(
     let initial = settlement_data_to_witness(
         &record.settlement.data,
         record.reference.for_remote,
+        features,
         record.settlement.local_settlement_key,
         record.settlement.remote_settlement_key,
     );
     // Every remaining TLC must be an unchanged member of the original signed snapshot.
-    let original_tlcs: Vec<_> = initial[1..1 + usize::from(initial[0]) * 85]
-        .chunks_exact(85)
+    let original_tlcs: Vec<_> = initial[1..1 + usize::from(initial[0]) * tlc_len]
+        .chunks_exact(tlc_len)
         .collect();
-    let remaining: Vec<_> = body[1..1 + count * 85].chunks_exact(85).collect();
+    let remaining: Vec<_> = body[1..1 + count * tlc_len].chunks_exact(tlc_len).collect();
     for (i, entry) in remaining.iter().enumerate() {
         if !original_tlcs.contains(entry) || remaining[..i].contains(entry) {
             return Err(invalid("unexpected or duplicate remaining TLC"));
         }
     }
-    let balances = &body[1 + count * 85..];
-    let initial_balances = &initial[1 + usize::from(initial[0]) * 85..];
+    let balances = &body[1 + count * tlc_len..];
+    let initial_balances = &initial[1 + usize::from(initial[0]) * tlc_len..];
     for offset in [0, 36] {
         if balances[offset..offset + 36] != initial_balances[offset..offset + 36]
             && balances[offset..offset + 36] != [0; 36]
@@ -175,7 +179,8 @@ pub(crate) async fn validate<C: ChainVerifier>(
             return Err(invalid("settlement unlock does not belong to signer"));
         }
         if remaining.iter().any(|t| {
-            let expiry = u64::from_le_bytes(t[77..85].try_into().unwrap()) & 0x00ff_ffff_ffff_ffff;
+            let expiry = u64::from_le_bytes(t[tlc_len - 8..tlc_len].try_into().unwrap())
+                & 0x00ff_ffff_ffff_ffff;
             now / 1000 <= expiry
         }) {
             return Err(invalid("settlement attempted with unexpired TLCs"));
@@ -185,7 +190,7 @@ pub(crate) async fn validate<C: ChainVerifier>(
                 .try_into()
                 .unwrap(),
         );
-        next[1 + count * 85 + local_offset..1 + count * 85 + local_offset + 36].fill(0);
+        next[1 + count * tlc_len + local_offset..1 + count * tlc_len + local_offset + 36].fill(0);
         (amount, 3u128)
     } else {
         let index = usize::from(unlock[0]);
@@ -218,11 +223,11 @@ pub(crate) async fn validate<C: ChainVerifier>(
             return Err(invalid("TLC timeout has not matured"));
         } else if !inputs.iter().any(|input| {
             let since: u64 = input.since().unpack();
-            since >> 56 == 0x40 && (since & 0x00ff_ffff_ffff_ffff) > tlc.expiry / 1000
+            since >> 56 == 0x40 && (since & 0x00ff_ffff_ffff_ffff) >= tlc.expiry / 1000
         }) {
             return Err(invalid("TLC timeout requires an absolute timestamp input"));
         }
-        next.drain(1 + index * 85..1 + (index + 1) * 85);
+        next.drain(1 + index * tlc_len..1 + (index + 1) * tlc_len);
         next[0] -= 1;
         (tlc.payment_amount, if inbound { 1u128 } else { 2u128 })
     };
@@ -287,6 +292,7 @@ pub(crate) async fn validate<C: ChainVerifier>(
     let mut next_args = args[..36].to_vec();
     next_args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&next, &[])[..20]);
     next_args.push(1);
+    next_args.extend_from_slice(&args[57..]);
     expected_remaining = expected_remaining
         .as_builder()
         .lock(source_lock.as_builder().args(next_args.pack()).build())

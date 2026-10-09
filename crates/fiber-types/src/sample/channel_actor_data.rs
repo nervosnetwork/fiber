@@ -3,9 +3,9 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::channel::{
     AddTlcCommand, ChannelActorData, ChannelBasePublicKeys, ChannelConnectivityState,
-    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentNumbers, InMemorySigner,
-    PendingTlcs, RemoveTlcFulfill, RemoveTlcReason, RetryableTlcOperation, RevokeAndAck,
-    ShutdownInfo, TLCId, TlcInfo, TlcState, TlcStatus,
+    ChannelConstraints, ChannelState, ChannelTlcInfo, CommitmentContractFeatures,
+    CommitmentNumbers, InMemorySigner, PendingTlcs, RemoveTlcFulfill, RemoveTlcReason,
+    RetryableTlcOperation, RevokeAndAck, ShutdownInfo, TLCId, TlcInfo, TlcState, TlcStatus,
 };
 use crate::channel::{InboundTlcStatus, OutboundTlcStatus};
 use crate::crate_time::SystemTime;
@@ -125,6 +125,7 @@ fn sample_minimal(seed: u64) -> ChannelActorData {
         pending_replay_updates: vec![],
         last_was_revoke: false,
         external_funding: None,
+        commitment_contract_features: Default::default(),
         created_at: SystemTime::UNIX_EPOCH,
         signing_context: Default::default(),
     }
@@ -354,6 +355,7 @@ fn sample_full(seed: u64) -> ChannelActorData {
         pending_replay_updates: vec![],
         last_was_revoke: true,
         external_funding: None,
+        commitment_contract_features: CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
         created_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_704_067_200_000),
         signing_context: Default::default(),
     }

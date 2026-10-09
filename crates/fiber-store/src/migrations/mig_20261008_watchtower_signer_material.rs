@@ -4,14 +4,14 @@ use crate::migration::{Migration, MigrationStore};
 
 use super::decode_as_new;
 
-const MIGRATION_DB_VERSION: &str = "20260812130000";
+const MIGRATION_DB_VERSION: &str = "20261008130000";
 const WATCHTOWER_CHANNEL_PREFIX: &[u8] = &[224];
 
-pub use fiber_types_090::ChannelData as OldChannelData;
+pub use fiber_types_0100::ChannelData as OldChannelData;
 pub use fiber_types_current::ChannelData as NewChannelData;
 
 fn convert_settlement_tlc(
-    old: fiber_types_090::SettlementTlc,
+    old: fiber_types_0100::SettlementTlc,
 ) -> Result<fiber_types_current::SettlementTlc, String> {
     let local_key: fiber_types_current::Privkey = decode_as_new(old.local_key)?;
     Ok(fiber_types_current::SettlementTlc {
@@ -28,7 +28,7 @@ fn convert_settlement_tlc(
 }
 
 fn convert_settlement_data(
-    old: fiber_types_090::SettlementData,
+    old: fiber_types_0100::SettlementData,
 ) -> Result<fiber_types_current::SettlementData, String> {
     Ok(fiber_types_current::SettlementData {
         local_amount: old.local_amount,
@@ -58,6 +58,7 @@ fn convert_channel_data(old: OldChannelData) -> Result<NewChannelData, String> {
         )?,
         local_settlement_data: convert_settlement_data(old.local_settlement_data)?,
         revocation_data: old.revocation_data.map(decode_as_new).transpose()?,
+        commitment_contract_features: decode_as_new(old.commitment_contract_features)?,
     })
 }
 
@@ -120,7 +121,7 @@ impl Migration for MigrationObj {
 
 #[cfg(test)]
 mod tests {
-    use fiber_types_090::sample::StoreSample;
+    use fiber_types_0100::sample::StoreSample;
 
     use crate::backend::StorageBackend;
 

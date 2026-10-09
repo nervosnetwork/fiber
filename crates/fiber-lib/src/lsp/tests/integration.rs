@@ -248,7 +248,7 @@ async fn register_in_process_endpoint(
         |reply| NetworkActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
             pubkey: remote_pubkey,
             actor: endpoint,
-            features: crate::fiber_types::FeatureVector::default(),
+            features: crate::fiber::config::FiberConfig::default().gen_node_features(),
             reply,
         },),
         5_000
@@ -1360,7 +1360,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         |reply| NetworkActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
             pubkey: expected_tenant.tenant_pubkey,
             actor: crate::fiber::FiberActorRef::from_network(&impostor),
-            features: crate::fiber_types::FeatureVector::default(),
+            features: crate::fiber::config::FiberConfig::default().gen_node_features(),
             reply,
         },),
         5_000
@@ -1793,7 +1793,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         |reply| NetworkActorMessage::new_command(FiberActorCommand::RegisterInProcessPeer {
             pubkey: tenant.pubkey,
             actor: crate::fiber::FiberActorRef::from_network(&payer.network_actor),
-            features: crate::fiber_types::FeatureVector::default(),
+            features: crate::fiber::config::FiberConfig::default().gen_node_features(),
             reply,
         },),
         5_000

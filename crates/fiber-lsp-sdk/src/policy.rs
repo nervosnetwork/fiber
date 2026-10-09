@@ -256,7 +256,13 @@ mod tests {
         for_remote: bool,
     ) -> ckb_types::packed::Transaction {
         let (local, remote) = settlement_keys();
-        let hash = settlement_witness_hash(settlement, for_remote, local, remote);
+        let hash = settlement_witness_hash(
+            settlement,
+            for_remote,
+            fiber_types::CommitmentContractFeatures::LEGACY,
+            local,
+            remote,
+        );
         let mut args = vec![0u8; 36];
         args.extend_from_slice(&hash);
         args.push(0x00);

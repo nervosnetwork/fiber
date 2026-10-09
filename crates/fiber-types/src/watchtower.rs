@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::channel::TLCId;
+use crate::channel::{CommitmentContractFeatures, TLCId};
 use crate::channel_signer::OnchainSigningContent;
 use crate::invoice::HashAlgorithm;
 use crate::serde_utils::{CompactSignatureAsBytes, EntityHex, SliceHex};
@@ -120,6 +120,9 @@ pub struct ChannelData {
     pub local_settlement_data: SettlementData,
     /// Data needed to revoke an outdated commitment transaction
     pub revocation_data: Option<RevocationData>,
+    /// The commitment-lock features used by this channel.
+    #[serde(default)]
+    pub commitment_contract_features: CommitmentContractFeatures,
 }
 
 /// Persistable watchtower signer sub-state for one watched channel.
@@ -234,12 +237,18 @@ pub fn settlement_timestamp_since(expiry_ms: u64) -> u64 {
 }
 
 /// Build the witness bytes for a single TLC in a settlement transaction.
-pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u8> {
+pub fn settlement_tlc_to_witness(
+    tlc: &SettlementTlc,
+    for_remote: bool,
+    commitment_contract_features: CommitmentContractFeatures,
+) -> Vec<u8> {
     let mut vec = Vec::new();
     let offered_flag = if tlc.tlc_id.is_offered() { 0u8 } else { 1u8 };
     vec.push(((tlc.hash_algorithm as u8) << 1) + offered_flag);
     vec.extend_from_slice(&tlc.payment_amount.to_le_bytes());
-    vec.extend_from_slice(&tlc.payment_hash.as_ref()[0..20]);
+    vec.extend_from_slice(
+        &tlc.payment_hash.as_ref()[..commitment_contract_features.payment_hash_len()],
+    );
     if for_remote {
         vec.extend_from_slice(&blake160(&tlc.remote_key.serialize()));
         vec.extend_from_slice(&blake160(&tlc.local_pubkey().serialize()));
@@ -255,6 +264,7 @@ pub fn settlement_tlc_to_witness(tlc: &SettlementTlc, for_remote: bool) -> Vec<u
 pub fn settlement_data_to_witness(
     data: &SettlementData,
     for_remote: bool,
+    commitment_contract_features: CommitmentContractFeatures,
     local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
 ) -> Vec<u8> {
@@ -263,7 +273,11 @@ pub fn settlement_data_to_witness(
         u8::try_from(data.tlcs.len()).expect("TLC count exceeds witness encoding limit (max 255)");
     vec.push(len);
     for tlc in &data.tlcs {
-        vec.extend_from_slice(&settlement_tlc_to_witness(tlc, for_remote));
+        vec.extend_from_slice(&settlement_tlc_to_witness(
+            tlc,
+            for_remote,
+            commitment_contract_features,
+        ));
     }
     if for_remote {
         vec.extend_from_slice(&blake160(&remote_settlement_key.serialize()));
@@ -283,12 +297,14 @@ pub fn settlement_data_to_witness(
 pub fn settlement_witness_hash(
     data: &SettlementData,
     for_remote: bool,
+    commitment_contract_features: CommitmentContractFeatures,
     local_settlement_key: Pubkey,
     remote_settlement_key: Pubkey,
 ) -> [u8; 20] {
     blake160(&settlement_data_to_witness(
         data,
         for_remote,
+        commitment_contract_features,
         local_settlement_key,
         remote_settlement_key,
     ))
@@ -324,10 +340,19 @@ pub fn settlement_matches_commitment_lock_args(
     let Some(committed) = commitment_lock_settlement_hash(lock_args) else {
         return false;
     };
+    let commitment_contract_features = match lock_args.len() {
+        57 => CommitmentContractFeatures::LEGACY,
+        58 => match CommitmentContractFeatures::from_bits(lock_args[57]) {
+            Ok(features) => features,
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
     let matches_orientation = |flag| {
         settlement_witness_hash(
             settlement,
             flag,
+            commitment_contract_features,
             local_settlement_key,
             remote_settlement_key,
         ) == committed
@@ -394,7 +419,13 @@ mod tests {
 
     fn commitment_tx(data: &SettlementData, for_remote: bool) -> Transaction {
         let (local, remote) = keys();
-        let hash = settlement_witness_hash(data, for_remote, local, remote);
+        let hash = settlement_witness_hash(
+            data,
+            for_remote,
+            CommitmentContractFeatures::LEGACY,
+            local,
+            remote,
+        );
         let mut args = vec![0u8; 36];
         args.extend_from_slice(&hash);
         args.push(0x00);

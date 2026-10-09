@@ -4,11 +4,11 @@ use crate::migration::{Migration, MigrationStore};
 
 use super::decode_as_new;
 
-const MIGRATION_DB_VERSION: &str = "20260812120000";
+const MIGRATION_DB_VERSION: &str = "20261008120000";
 
 const CHANNEL_ACTOR_STATE_PREFIX: &[u8] = &[0x00];
 
-pub use fiber_types_090::channel::ChannelActorData as OldChannelActorData;
+pub use fiber_types_0100::channel::ChannelActorData as OldChannelActorData;
 pub use fiber_types_current::channel::ChannelActorData as NewChannelActorData;
 
 fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActorData, String> {
@@ -71,6 +71,7 @@ fn convert_channel_actor_data(old: OldChannelActorData) -> Result<NewChannelActo
         // The pre-LSP format signs synchronously; there is no external-signing continuation
         // to recover. An absent pending signature does not clear waiting_ack or TLCs.
         signing_context: Default::default(),
+        commitment_contract_features: decode_as_new(old.commitment_contract_features)?,
     })
 }
 
@@ -134,7 +135,7 @@ impl Migration for MigrationObj {
 
 #[cfg(test)]
 mod tests {
-    use fiber_types_090::sample::StoreSample;
+    use fiber_types_0100::sample::StoreSample;
 
     use crate::backend::StorageBackend;
 

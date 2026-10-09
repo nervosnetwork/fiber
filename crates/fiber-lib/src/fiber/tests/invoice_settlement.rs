@@ -1,6 +1,8 @@
 use crate::ckb::tests::test_utils::{MockChainActorMiddleware, MockChainActorState};
 use crate::ckb::CkbChainMessage;
-use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::{
+    ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelEvent,
+};
 use crate::fiber::payment::SendPaymentCommand;
 use crate::fiber::{FiberActorCommand, FiberActorEvent, NetworkActorMessage};
 use crate::gen_rand_sha256_hash;
@@ -164,6 +166,185 @@ fn insert_watch_channel_with_pending_tlc(
         remote_funding_pubkey,
         settlement_data,
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_forwarded_payment_does_not_settle_local_invoice() {
+    init_tracing();
+    let amount = 100_000_000;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [payer, router, recipient] = nodes.try_into().expect("3 nodes");
+
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::default().hash(preimage.as_ref()).into();
+    let local_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .payee_pub_key(router.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &router.private_key.0))
+        .expect("build local invoice");
+    router.insert_invoice(local_invoice.clone(), Some(preimage));
+
+    let hold_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(recipient.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &recipient.private_key.0))
+        .expect("build hold invoice");
+    recipient.insert_invoice(hold_invoice.clone(), None);
+
+    let payment = payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(hold_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment");
+    assert_eq!(payment.payment_hash, payment_hash);
+    payer.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        recipient.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+            && router
+                .get_channel_actor_state(channels[0])
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .iter()
+                .any(|tlc| tlc.payment_hash == payment_hash && tlc.forwarding_tlc.is_some())
+    })
+    .await;
+
+    router
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            FiberActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: channels[0],
+                command: ChannelCommand::NotifyEvent(ChannelEvent::MaintainChannelTlcs),
+            }),
+        ))
+        .expect("network actor alive");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        router.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    assert!(router
+        .get_channel_actor_state(channels[0])
+        .tlc_state
+        .received_tlcs
+        .tlcs
+        .iter()
+        .any(|tlc| tlc.payment_hash == payment_hash && tlc.removed_reason.is_none()));
+
+    recipient
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .expect("settle hold invoice");
+    payer.wait_until_success(payment_hash).await;
+    assert_eq!(
+        recipient.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid)
+    );
+    assert_eq!(
+        router.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    wait_until_timeout(10_000, || {
+        channels.iter().all(|channel_id| {
+            !router
+                .get_channel_actor_state(*channel_id)
+                .tlc_state
+                .all_tlcs()
+                .any(|tlc| tlc.payment_hash == payment_hash)
+        })
+    })
+    .await;
+    assert_eq!(router.store.get_preimage(&payment_hash), Some(preimage));
+
+    let local_payment = recipient
+        .send_payment(SendPaymentCommand {
+            invoice: Some(local_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send payment to local invoice");
+    assert_eq!(local_payment.payment_hash, payment_hash);
+    recipient.wait_until_success(payment_hash).await;
+    assert_eq!(
+        router.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Paid)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_forwarded_preimage_does_not_turn_hold_invoice_into_regular_invoice() {
+    init_tracing();
+    let amount = 100_000_000;
+    let (nodes, channels) = create_n_nodes_network(
+        &[
+            ((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+            ((1, 2), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT)),
+        ],
+        3,
+    )
+    .await;
+    let [payer, router, recipient] = nodes.try_into().expect("3 nodes");
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = HashAlgorithm::default().hash(preimage.as_ref()).into();
+    let router_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(router.pubkey.into())
+        .build()
+        .expect("build local hold invoice");
+    router.insert_invoice(router_invoice, None);
+
+    let recipient_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(payment_hash)
+        .payee_pub_key(recipient.pubkey.into())
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &recipient.private_key.0))
+        .expect("build recipient hold invoice");
+    recipient.insert_invoice(recipient_invoice.clone(), None);
+    payer
+        .send_payment(SendPaymentCommand {
+            invoice: Some(recipient_invoice.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("send forwarded payment");
+    payer.wait_until_inflight(payment_hash).await;
+    wait_until_timeout(30_000, || {
+        recipient.get_invoice_status(&payment_hash) == Some(CkbInvoiceStatus::Received)
+    })
+    .await;
+    recipient
+        .settle_invoice(&payment_hash, preimage)
+        .await
+        .expect("settle recipient invoice");
+    payer.wait_until_success(payment_hash).await;
+    wait_until_timeout(10_000, || {
+        channels.iter().all(|channel_id| {
+            !router
+                .get_channel_actor_state(*channel_id)
+                .tlc_state
+                .all_tlcs()
+                .any(|tlc| tlc.payment_hash == payment_hash)
+        })
+    })
+    .await;
+    assert_eq!(
+        router.get_invoice_status(&payment_hash),
+        Some(CkbInvoiceStatus::Open)
+    );
+    assert_eq!(router.store.get_preimage(&payment_hash), None);
 }
 
 #[tokio::test]

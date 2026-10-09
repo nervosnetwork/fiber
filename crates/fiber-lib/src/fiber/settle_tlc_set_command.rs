@@ -406,12 +406,17 @@ fn collect_onchain_fulfilled_received_tlcs(
         .filter_map(|(_, channel_id, _)| store.get_channel_actor_state(&channel_id))
         .flat_map(|state| {
             let channel_id = state.get_id();
+            let waiting_forward_tlc_tasks = state.core.waiting_forward_tlc_tasks;
             state
+                .core
                 .tlc_state
                 .received_tlcs
                 .tlcs
-                .clone()
                 .into_iter()
+                .filter(move |tlc| {
+                    tlc.forwarding_tlc.is_none()
+                        && !waiting_forward_tlc_tasks.contains_key(&tlc.tlc_id)
+                })
                 .map(move |tlc| (channel_id, tlc))
         })
         .filter_map(|(channel_id, tlc)| {
@@ -436,6 +441,12 @@ fn make_sttlement_context<S: ChannelActorStateStore>(
     let tlc_id = TLCId::Received(tlc_id);
     state
         .get_received_tlc(tlc_id)
+        // Hold settlement retries must still see TLCs already handed to the durable
+        // remove queue; omitting one part makes a fulfilled MPP set look incomplete.
+        .filter(|tlc_info| {
+            tlc_info.forwarding_tlc.is_none()
+                && !state.is_waiting_forward_result_for_received_tlc(tlc_info.tlc_id)
+        })
         .map(|tlc_info| TlcSettlementContext::new(tlc_info, channel_id))
 }
 

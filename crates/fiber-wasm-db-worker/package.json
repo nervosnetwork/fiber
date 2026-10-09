@@ -1,5 +1,6 @@
 {
     "name": "fiber-wasm-db-worker",
+    "license": "MIT",
     "scripts": {
         "build-debug": "webpack --mode=development",
         "build": "webpack --mode=production",

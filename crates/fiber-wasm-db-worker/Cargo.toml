@@ -2,6 +2,7 @@
 name = "fiber-wasm-db-worker"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 web-sys = "0.3.72"

@@ -265,6 +265,7 @@ pub(crate) async fn approve_fixture_opening(
                 commitment_fee: crate::fiber::fee::checked_calculate_commitment_tx_fee(
                     state.commitment_fee_rate,
                     &state.funding_udt_type_script,
+                    state.commitment_contract_features,
                 )
                 .unwrap(),
                 local_amount: local_amount + if ckb { u128::from(local_reserved) } else { 0 },

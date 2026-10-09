@@ -42,13 +42,20 @@ use crate::payment::{
     SessionRouteNode as JsonSessionRouteNode,
 };
 use crate::serde_utils::{Hash256 as JsonHash256, Privkey as JsonPrivkey, Pubkey as JsonPubkey};
+use crate::watchtower::CommitmentContractFeatures as JsonCommitmentContractFeatures;
 
 use ckb_types::prelude::Entity;
 use fiber_types::{
-    ChannelState as InternalChannelState, CloseFlags, Hash256,
+    ChannelState as InternalChannelState, CloseFlags, CommitmentContractFeatures, Hash256,
     InboundTlcStatus as InternalInboundTlcStatus, OutboundTlcStatus as InternalOutboundTlcStatus,
     Pubkey, TlcStatus as InternalTlcStatus,
 };
+
+impl From<CommitmentContractFeatures> for JsonCommitmentContractFeatures {
+    fn from(features: CommitmentContractFeatures) -> Self {
+        Self(features.bits())
+    }
+}
 
 // ─── Primitive Converters ───────────────────────────────────────────────────
 

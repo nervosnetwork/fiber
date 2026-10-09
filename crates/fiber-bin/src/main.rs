@@ -687,6 +687,7 @@ fn forward_event_to_actor(
             local_funding_pubkey,
             remote_funding_pubkey,
             remote_settlement_data,
+            commitment_contract_features,
         ) => {
             watchtower_actor
                 .send_message(WatchtowerMessage::CreateChannel(
@@ -698,6 +699,7 @@ fn forward_event_to_actor(
                     local_funding_pubkey,
                     remote_funding_pubkey,
                     remote_settlement_data,
+                    commitment_contract_features,
                 ))
                 .expect(ASSUME_WATCHTOWER_ACTOR_ALIVE);
         }

@@ -44,7 +44,13 @@ jobs:
       if: env.SHOULD_PUBLISH == 'true'
       run: |
         cd fiber-js
-        npm publish --access public
+        PACKAGE_VERSION=$(node -p "require('./package.json').version")
+
+        if [[ "$PACKAGE_VERSION" == *-* ]]; then
+          npm publish --access public --tag next
+        else
+          npm publish --access public
+        fi
   release:
     name: Build & Release
     runs-on: ${{ matrix.os }}

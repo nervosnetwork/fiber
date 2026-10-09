@@ -462,6 +462,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     let channel_id = Hash256::from([0x77; 32]);
     let key = Privkey::from([10; 32]);
     let mut params = CreateWatchChannelParams {
+        commitment_contract_features: fiber_types::CommitmentContractFeatures::LEGACY.into(),
         channel_id: channel_id.into(),
         funding_udt_type_script: None,
         local_settlement_key: Some(key.clone().into()),

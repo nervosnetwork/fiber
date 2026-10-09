@@ -68,6 +68,22 @@ struct Fixture {
 
 impl Fixture {
     fn new(for_remote: bool, subsequent: bool, with_preimage: bool, local_keys: bool) -> Self {
+        Self::with_features(
+            for_remote,
+            subsequent,
+            with_preimage,
+            local_keys,
+            CommitmentContractFeatures::LEGACY,
+        )
+    }
+
+    fn with_features(
+        for_remote: bool,
+        subsequent: bool,
+        with_preimage: bool,
+        local_keys: bool,
+        features: CommitmentContractFeatures,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = open_store(dir.path()).expect("open store");
         let node_id = NodeId::local();
@@ -109,7 +125,7 @@ impl Fixture {
             tlcs: vec![earlier, tlc],
         };
         let channel_id = Hash256::from([9; 32]);
-        store.insert_watch_channel(
+        store.insert_watch_channel_with_features(
             node_id.clone(),
             channel_id,
             None,
@@ -119,6 +135,7 @@ impl Fixture {
             Privkey::from([11; 32]).pubkey(),
             Privkey::from([12; 32]).pubkey(),
             settlement,
+            features,
         );
         store.insert_watch_preimage(
             node_id.clone(),
@@ -132,6 +149,7 @@ impl Fixture {
         let witness_bytes = settlement_data_to_witness(
             snapshot,
             for_remote,
+            features,
             base_key.pubkey(),
             channel.remote_settlement_key,
         );
@@ -148,13 +166,21 @@ impl Fixture {
         args.extend_from_slice(&since.to_le_bytes());
         args.extend_from_slice(&10u64.to_be_bytes());
         args.extend_from_slice(blake160(&witness_bytes).as_ref());
+        args.push(0);
+        if features.has_full_payment_hash() {
+            args.push(features.bits());
+        }
         let mut lock = get_script_by_contract(Contract::CommitmentLock, &args);
-        let mut tracked =
-            tracked_settlement_tlcs(&lock, &channel, for_remote).expect("verified TLC identities");
+        let mut tracked = crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+            &lock, &channel, for_remote,
+        )
+        .expect("verified TLC identities");
         let witness = subsequent.then(|| {
-            let mut witness =
-                SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
-                    .expect("witness");
+            let mut witness = SettlementWitness::build_from_witness(
+                &[&[0], witness_bytes.as_slice()].concat(),
+                features,
+            )
+            .expect("witness");
             // The first TLC was already unlocked: the remaining TLC has witness
             // index 0, snapshot index 1, derivation index 7, closing number 10.
             witness.unlocks.push(Unlock {
@@ -172,6 +198,9 @@ impl Fixture {
             let mut args = lock.args().raw_data()[..36].to_vec();
             args.extend_from_slice(blake160(&remaining.to_witness()).as_ref());
             args.push(1);
+            if features.has_full_payment_hash() {
+                args.push(features.bits());
+            }
             lock = lock.as_builder().args(args.pack()).build();
         }
         let cell = Cell {
@@ -276,8 +305,22 @@ fn assert_applied_signature(tx: &TransactionView, content: &OnchainSigningConten
         .get(0)
         .expect("settlement witness")
         .raw_data();
-    let witness = SettlementWitness::build_from_witness(&bytes[XUDT_COMPATIBLE_WITNESS.len()..])
-        .expect("signed settlement witness");
+    let witness = SettlementWitness::build_from_witness(
+        &bytes[XUDT_COMPATIBLE_WITNESS.len()..],
+        CommitmentContractFeatures::from_lock_args(
+            &content
+                .transaction
+                .raw()
+                .outputs()
+                .get(0)
+                .unwrap()
+                .lock()
+                .args()
+                .raw_data(),
+        )
+        .unwrap(),
+    )
+    .expect("signed settlement witness");
     let unlock = witness.unlocks.last().expect("unlock");
     verify_onchain_signature(&key.pubkey(), content, &unlock.signature)
         .expect("correct unlock signature");
@@ -502,6 +545,7 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
             let witness_bytes = settlement_data_to_witness(
                 snapshot,
                 for_remote,
+                fiber_types::CommitmentContractFeatures::LEGACY,
                 fixture.base_key.pubkey(),
                 fixture.channel.remote_settlement_key,
             );
@@ -509,12 +553,20 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
             let mut args = output.lock().args().raw_data()[..36].to_vec();
             args.extend_from_slice(blake160(&witness_bytes).as_ref());
             let lock = output.lock().as_builder().args(args.pack()).build();
-            fixture.tracked = tracked_settlement_tlcs(&lock, &fixture.channel, for_remote)
+            fixture.tracked =
+                crate::fiber::onchain_tlc_reconcile::verified_tracked_settlement_tlcs(
+                    &lock,
+                    &fixture.channel,
+                    for_remote,
+                )
                 .expect("empty snapshot is verified");
             fixture.cell.output = output.as_builder().lock(lock).build().into();
             fixture.witness = subsequent.then(|| {
-                SettlementWitness::build_from_witness(&[&[0], witness_bytes.as_slice()].concat())
-                    .expect("settlement witness")
+                SettlementWitness::build_from_witness(
+                    &[&[0], witness_bytes.as_slice()].concat(),
+                    fiber_types::CommitmentContractFeatures::LEGACY,
+                )
+                .expect("settlement witness")
             });
             assert!(fixture.build().expect("queue settlement").is_none());
             let (request_id, content) = fixture.pending();
@@ -748,4 +800,33 @@ fn test_watchtower_signature_request_overwrite_repro() {
         .expect("build signed tx 1 again")
         .expect("tx 1 still signed");
     assert_applied_signature(&tx_1_second, &content_1, &fixture.tlc_key);
+}
+
+#[test]
+fn external_full_hash_tlc_signature_survives_later_scan() {
+    for for_remote in [false, true] {
+        for subsequent in [false, true] {
+            for with_preimage in [false, true] {
+                let fixture = Fixture::with_features(
+                    for_remote,
+                    subsequent,
+                    with_preimage,
+                    false,
+                    CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+                );
+                assert!(fixture.build_at(200_000).unwrap().is_none());
+                let (id, content) = fixture.pending();
+                let signature = sign_onchain_request(&fixture.tlc_key, &content).unwrap();
+                assert_eq!(
+                    fixture.submit(id, signature).unwrap(),
+                    SubmitWatchtowerSignatureResult::Applied
+                );
+                let tx = fixture
+                    .build_at(260_000)
+                    .unwrap()
+                    .expect("signed transaction");
+                assert_applied_signature(&tx, &content, &fixture.tlc_key);
+            }
+        }
+    }
 }

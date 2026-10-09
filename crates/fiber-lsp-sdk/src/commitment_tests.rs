@@ -151,6 +151,22 @@ impl Fixture {
         version: u64,
         data: SettlementData,
     ) -> (ChannelSigningContent, CommitmentContext) {
+        self.request_with_features(
+            for_remote,
+            version,
+            data,
+            fiber_types::CommitmentContractFeatures::LEGACY,
+        )
+        .await
+    }
+
+    pub async fn request_with_features(
+        &self,
+        for_remote: bool,
+        version: u64,
+        data: SettlementData,
+        features: fiber_types::CommitmentContractFeatures,
+    ) -> (ChannelSigningContent, CommitmentContext) {
         // The first real commitment follows funding collaboration and has version one.
         let version = version + 1;
         let keys = self.signer.public_material().base_public_keys;
@@ -171,10 +187,14 @@ impl Fixture {
         args.extend_from_slice(&settlement_witness_hash(
             &data,
             for_remote,
+            features,
             keys.tlc_base_key,
             self.remote.tlc_base_key.pubkey(),
         ));
         args.push(0);
+        if features.has_full_payment_hash() {
+            args.push(features.bits());
+        }
         let lock = self
             .parameters
             .commitment_lock
@@ -251,7 +271,25 @@ impl Fixture {
     }
 
     pub async fn sign(&self, for_remote: bool, version: u64, data: SettlementData) {
-        let (content, context) = self.request(for_remote, version, data).await;
+        self.sign_with_features(
+            for_remote,
+            version,
+            data,
+            fiber_types::CommitmentContractFeatures::LEGACY,
+        )
+        .await;
+    }
+
+    pub async fn sign_with_features(
+        &self,
+        for_remote: bool,
+        version: u64,
+        data: SettlementData,
+        features: fiber_types::CommitmentContractFeatures,
+    ) {
+        let (content, context) = self
+            .request_with_features(for_remote, version, data, features)
+            .await;
         let prepared = self
             .signer
             .prepare_commitment(content, context, 100)
@@ -1443,6 +1481,7 @@ async fn onchain_claim_checks_live_input_witness_destination_fee_and_maturity() 
     let body = fiber_types::settlement_data_to_witness(
         &record.settlement.data,
         false,
+        fiber_types::CommitmentContractFeatures::LEGACY,
         record.settlement.local_settlement_key,
         record.settlement.remote_settlement_key,
     );
@@ -1849,6 +1888,7 @@ async fn onchain_inbound_tlc_requires_exact_preimage_key_and_residual_state() {
         let body = fiber_types::settlement_data_to_witness(
             &record.settlement.data,
             false,
+            fiber_types::CommitmentContractFeatures::LEGACY,
             record.settlement.local_settlement_key,
             record.settlement.remote_settlement_key,
         );
@@ -2218,218 +2258,228 @@ impl ChainVerifier for DescendantChain {
 
 #[tokio::test]
 async fn timeout_then_descendant_settlement_rechecks_time_lineage_and_residual() {
-    let f = Fixture::new(false).await;
-    f.signer.authorize_payment(f.terms(false)).await.unwrap();
-    f.sign(false, 0, f.opening()).await;
-    f.sign(
-        false,
-        1,
-        SettlementData {
-            local_amount: 350,
-            remote_amount: 600,
-            tlcs: vec![f.tlc(false, false)],
-        },
-    )
-    .await;
-    let record = f.signer.recovery_records().await.unwrap().pop().unwrap();
-    let source = record.transaction.raw().outputs().get(0).unwrap();
-    let point = OutPoint::new(record.transaction.calc_tx_hash(), 0);
-    let destination = Script::new_builder().args([42u8].pack()).build();
-    let auxiliary = OutPoint::new([88u8; 32].pack(), 0);
-    let mut chain = DescendantChain {
-        ancestor: record.reference.tx_hash,
-        valid_lineage: true,
-        chain: TestChain {
-            outpoint: point.clone(),
-            cell: VerifiedCell {
-                output: source.clone(),
-                data: vec![],
+    for features in [
+        fiber_types::CommitmentContractFeatures::LEGACY,
+        fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+    ] {
+        let f = Fixture::new(false).await;
+        f.signer.authorize_payment(f.terms(false)).await.unwrap();
+        f.sign_with_features(false, 0, f.opening(), features).await;
+        f.sign_with_features(
+            false,
+            1,
+            SettlementData {
+                local_amount: 350,
+                remote_amount: 600,
+                tlcs: vec![f.tlc(false, false)],
             },
-            now: 21_000,
-            mature: true,
-            extras: vec![(
-                auxiliary.clone(),
-                VerifiedCell {
-                    output: CellOutput::new_builder()
-                        .capacity(100u64)
-                        .lock(destination.clone())
-                        .build(),
+            features,
+        )
+        .await;
+        let record = f.signer.recovery_records().await.unwrap().pop().unwrap();
+        let source = record.transaction.raw().outputs().get(0).unwrap();
+        let point = OutPoint::new(record.transaction.calc_tx_hash(), 0);
+        let destination = Script::new_builder().args([42u8].pack()).build();
+        let auxiliary = OutPoint::new([88u8; 32].pack(), 0);
+        let mut chain = DescendantChain {
+            ancestor: record.reference.tx_hash,
+            valid_lineage: true,
+            chain: TestChain {
+                outpoint: point.clone(),
+                cell: VerifiedCell {
+                    output: source.clone(),
                     data: vec![],
                 },
-            )],
-        },
-    };
-    let body = fiber_types::settlement_data_to_witness(
-        &record.settlement.data,
-        false,
-        record.settlement.local_settlement_key,
-        record.settlement.remote_settlement_key,
-    );
-    let mut next = body.clone();
-    next.drain(1..86);
-    next[0] = 0;
-    let residual = |body: &[u8], capacity: u64| {
-        let mut args = source.lock().args().raw_data()[..36].to_vec();
-        args.extend_from_slice(&blake2b_hash_with_salt(body, &[])[..20]);
-        args.push(1);
-        source
-            .clone()
-            .as_builder()
-            .capacity(capacity)
-            .lock(source.lock().as_builder().args(args.pack()).build())
-            .build()
-    };
-    let witness_for = |body: &[u8], marker: u8| {
-        let mut witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
-        witness.extend_from_slice(body);
-        witness.extend_from_slice(&[marker, 0]);
-        witness.extend_from_slice(&[0; 65]);
-        witness
-    };
-    let tx = TransactionBuilder::default()
-        .input(CellInput::new(
-            point,
-            u64::from_le_bytes(f.parameters.delay_epoch),
-        ))
-        .input(CellInput::new(auxiliary.clone(), (0x40u64 << 56) | 21))
-        .output(residual(&next, 940))
-        .output_data(ckb_types::packed::Bytes::default())
-        .output(
-            CellOutput::new_builder()
-                .capacity(145u64)
-                .lock(destination.clone())
-                .build(),
-        )
-        .output_data(ckb_types::packed::Bytes::default())
-        .witness(witness_for(&body, 0).pack())
-        .build()
-        .data();
-    let content = OnchainSigningContent {
-        key_purpose: OnchainKeyPurpose::Tlc {
-            commitment_number: 1,
-        },
-        transaction: tx.clone(),
-    };
-    let mut terms = OnchainSpendAuthorization {
-        source: record.reference,
-        destination: destination.clone(),
-        fee: 5,
-        additional_inputs: vec![auxiliary],
-        cell_deps: vec![],
-    };
-    for attack in 0..5 {
-        let mut changed = content.clone();
-        match attack {
-            0 => chain.chain.now = 20_999,
-            1 | 2 => {
-                let mut inputs: Vec<_> = tx.raw().inputs().into_iter().collect();
-                inputs[1] = inputs[1]
-                    .clone()
-                    .as_builder()
-                    .since(if attack == 1 { 0 } else { (0x40u64 << 56) | 20 })
-                    .build();
-                changed.transaction = tx
-                    .clone()
-                    .into_view()
-                    .as_advanced_builder()
-                    .set_inputs(inputs)
-                    .build()
-                    .data();
+                now: 21_000,
+                mature: true,
+                extras: vec![(
+                    auxiliary.clone(),
+                    VerifiedCell {
+                        output: CellOutput::new_builder()
+                            .capacity(100u64)
+                            .lock(destination.clone())
+                            .build(),
+                        data: vec![],
+                    },
+                )],
+            },
+        };
+        let body = fiber_types::settlement_data_to_witness(
+            &record.settlement.data,
+            false,
+            features,
+            record.settlement.local_settlement_key,
+            record.settlement.remote_settlement_key,
+        );
+        let mut next = body.clone();
+        next.drain(1..1 + 65 + features.payment_hash_len());
+        next[0] = 0;
+        let residual = |body: &[u8], capacity: u64| {
+            let mut args = source.lock().args().raw_data()[..36].to_vec();
+            args.extend_from_slice(&blake2b_hash_with_salt(body, &[])[..20]);
+            args.push(1);
+            if features.has_full_payment_hash() {
+                args.push(features.bits());
             }
-            3 => chain.valid_lineage = false,
-            _ => chain.chain.mature = false,
+            source
+                .clone()
+                .as_builder()
+                .capacity(capacity)
+                .lock(source.lock().as_builder().args(args.pack()).build())
+                .build()
+        };
+        let witness_for = |body: &[u8], marker: u8| {
+            let mut witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
+            witness.extend_from_slice(body);
+            witness.extend_from_slice(&[marker, 0]);
+            witness.extend_from_slice(&[0; 65]);
+            witness
+        };
+        let tx = TransactionBuilder::default()
+            .input(CellInput::new(
+                point,
+                u64::from_le_bytes(f.parameters.delay_epoch),
+            ))
+            .input(CellInput::new(auxiliary.clone(), (0x40u64 << 56) | 20))
+            .output(residual(&next, 940))
+            .output_data(ckb_types::packed::Bytes::default())
+            .output(
+                CellOutput::new_builder()
+                    .capacity(145u64)
+                    .lock(destination.clone())
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .witness(witness_for(&body, 0).pack())
+            .build()
+            .data();
+        let content = OnchainSigningContent {
+            key_purpose: OnchainKeyPurpose::Tlc {
+                commitment_number: 1,
+            },
+            transaction: tx.clone(),
+        };
+        let mut terms = OnchainSpendAuthorization {
+            source: record.reference,
+            destination: destination.clone(),
+            fee: 5,
+            additional_inputs: vec![auxiliary],
+            cell_deps: vec![],
+        };
+        for attack in 0..5 {
+            let mut changed = content.clone();
+            match attack {
+                0 => chain.chain.now = 20_999,
+                1 | 2 => {
+                    let mut inputs: Vec<_> = tx.raw().inputs().into_iter().collect();
+                    inputs[1] = inputs[1]
+                        .clone()
+                        .as_builder()
+                        .since(if attack == 1 { 0 } else { (0x40u64 << 56) | 19 })
+                        .build();
+                    changed.transaction = tx
+                        .clone()
+                        .into_view()
+                        .as_advanced_builder()
+                        .set_inputs(inputs)
+                        .build()
+                        .data();
+                }
+                3 => chain.valid_lineage = false,
+                _ => chain.chain.mature = false,
+            }
+            let before = f.store.snapshot().unwrap();
+            assert!(
+                f.signer
+                    .prepare_onchain(changed, terms.clone(), &chain)
+                    .await
+                    .is_err(),
+                "attack {attack}"
+            );
+            assert_eq!(f.store.snapshot().unwrap(), before);
+            chain.chain.now = 21_000;
+            chain.chain.mature = true;
+            chain.valid_lineage = true;
         }
-        let before = f.store.snapshot().unwrap();
-        assert!(
-            f.signer
+        let prepared = f
+            .signer
+            .prepare_onchain(content, terms.clone(), &chain)
+            .await
+            .unwrap();
+        f.signer.sign_onchain(prepared, &chain).await.unwrap();
+        // The timeout transaction is mined; settle the local balance from its residual cell.
+        chain.chain.outpoint = OutPoint::new(tx.calc_tx_hash(), 0);
+        chain.chain.cell.output = tx.raw().outputs().get(0).unwrap();
+        chain.chain.extras.clear();
+        terms.additional_inputs.clear();
+        let mut final_body = next.clone();
+        final_body[1..37].fill(0);
+        let descendant = TransactionBuilder::default()
+            .input(CellInput::new(chain.chain.outpoint.clone(), 0))
+            .output(residual(&final_body, 590))
+            .output_data(ckb_types::packed::Bytes::default())
+            .output(
+                CellOutput::new_builder()
+                    .capacity(345u64)
+                    .lock(destination)
+                    .build(),
+            )
+            .output_data(ckb_types::packed::Bytes::default())
+            .witness(witness_for(&next, 0xfe).pack())
+            .build()
+            .data();
+        let content = OnchainSigningContent {
+            key_purpose: OnchainKeyPurpose::Settlement,
+            transaction: descendant.clone(),
+        };
+        for attack in 0..3 {
+            let mut changed = content.clone();
+            match attack {
+                0 => chain.valid_lineage = false,
+                1 => {
+                    changed.transaction = descendant
+                        .clone()
+                        .into_view()
+                        .as_advanced_builder()
+                        .set_inputs(vec![CellInput::new(chain.chain.outpoint.clone(), 1)])
+                        .build()
+                        .data()
+                }
+                _ => {
+                    changed.transaction = descendant
+                        .clone()
+                        .into_view()
+                        .as_advanced_builder()
+                        .set_witnesses(vec![witness_for(&body, 0xfe).pack()])
+                        .build()
+                        .data()
+                }
+            }
+            let before = f.store.snapshot().unwrap();
+            assert!(f
+                .signer
                 .prepare_onchain(changed, terms.clone(), &chain)
                 .await
-                .is_err(),
-            "attack {attack}"
-        );
-        assert_eq!(f.store.snapshot().unwrap(), before);
-        chain.chain.now = 21_000;
-        chain.chain.mature = true;
-        chain.valid_lineage = true;
-    }
-    let prepared = f
-        .signer
-        .prepare_onchain(content, terms.clone(), &chain)
-        .await
-        .unwrap();
-    f.signer.sign_onchain(prepared, &chain).await.unwrap();
-    // The timeout transaction is mined; settle the local balance from its residual cell.
-    chain.chain.outpoint = OutPoint::new(tx.calc_tx_hash(), 0);
-    chain.chain.cell.output = tx.raw().outputs().get(0).unwrap();
-    chain.chain.extras.clear();
-    terms.additional_inputs.clear();
-    let mut final_body = next.clone();
-    final_body[1..37].fill(0);
-    let descendant = TransactionBuilder::default()
-        .input(CellInput::new(chain.chain.outpoint.clone(), 0))
-        .output(residual(&final_body, 590))
-        .output_data(ckb_types::packed::Bytes::default())
-        .output(
-            CellOutput::new_builder()
-                .capacity(345u64)
-                .lock(destination)
-                .build(),
-        )
-        .output_data(ckb_types::packed::Bytes::default())
-        .witness(witness_for(&next, 0xfe).pack())
-        .build()
-        .data();
-    let content = OnchainSigningContent {
-        key_purpose: OnchainKeyPurpose::Settlement,
-        transaction: descendant.clone(),
-    };
-    for attack in 0..3 {
-        let mut changed = content.clone();
-        match attack {
-            0 => chain.valid_lineage = false,
-            1 => {
-                changed.transaction = descendant
-                    .clone()
-                    .into_view()
-                    .as_advanced_builder()
-                    .set_inputs(vec![CellInput::new(chain.chain.outpoint.clone(), 1)])
-                    .build()
-                    .data()
-            }
-            _ => {
-                changed.transaction = descendant
-                    .clone()
-                    .into_view()
-                    .as_advanced_builder()
-                    .set_witnesses(vec![witness_for(&body, 0xfe).pack()])
-                    .build()
-                    .data()
-            }
+                .is_err());
+            assert_eq!(f.store.snapshot().unwrap(), before);
+            chain.valid_lineage = true;
         }
+        let prepared = f
+            .signer
+            .prepare_onchain(content, terms, &chain)
+            .await
+            .unwrap();
+        chain.valid_lineage = false;
         let before = f.store.snapshot().unwrap();
         assert!(f
             .signer
-            .prepare_onchain(changed, terms.clone(), &chain)
+            .sign_onchain(prepared.clone(), &chain)
             .await
             .is_err());
         assert_eq!(f.store.snapshot().unwrap(), before);
         chain.valid_lineage = true;
+        f.signer.sign_onchain(prepared, &chain).await.unwrap();
     }
-    let prepared = f
-        .signer
-        .prepare_onchain(content, terms, &chain)
-        .await
-        .unwrap();
-    chain.valid_lineage = false;
-    let before = f.store.snapshot().unwrap();
-    assert!(f
-        .signer
-        .sign_onchain(prepared.clone(), &chain)
-        .await
-        .is_err());
-    assert_eq!(f.store.snapshot().unwrap(), before);
-    chain.valid_lineage = true;
-    f.signer.sign_onchain(prepared, &chain).await.unwrap();
 }
 
 #[cfg(feature = "json")]
@@ -2523,4 +2573,25 @@ async fn prepared_validation_rejects_wrong_signing_routes_without_mutation() {
     assert!(f.signer.sign(prepared.clone()).await.is_err());
     assert_eq!(f.store.snapshot().unwrap(), before);
     f.signer.sign_revocation(prepared, 100).await.unwrap();
+}
+
+#[tokio::test]
+async fn signs_full_payment_hash_commitment_after_independent_validation() {
+    for for_remote in [false, true] {
+        let fixture = Fixture::new(false).await;
+        let (content, context) = fixture
+            .request_with_features(
+                for_remote,
+                0,
+                fixture.opening(),
+                fiber_types::CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH,
+            )
+            .await;
+        let prepared = fixture
+            .signer
+            .prepare_commitment(content, context, 100)
+            .await
+            .unwrap();
+        fixture.signer.sign_commitment(prepared, 100).await.unwrap();
+    }
 }

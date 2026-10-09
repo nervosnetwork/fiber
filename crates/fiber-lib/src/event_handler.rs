@@ -48,6 +48,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
+            commitment_contract_features,
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
@@ -60,6 +61,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     local_funding_pubkey: local_funding_pubkey.into(),
                     remote_funding_pubkey: remote_funding_pubkey.into(),
                     settlement_data: settlement_data.into(),
+                    commitment_contract_features: commitment_contract_features.into(),
                 })
                 .await
                 .map_err(|e| format!("Failed to create watch channel: {e}"))?;
@@ -168,7 +170,8 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
-        ) => store.insert_watch_channel(
+            commitment_contract_features,
+        ) => store.insert_watch_channel_with_features(
             node_id,
             channel_id,
             funding_udt_type_script,
@@ -178,6 +181,7 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
+            commitment_contract_features,
         ),
         // remove_watch_channel: stop scanning a closed or aborted channel.
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
@@ -253,6 +257,7 @@ mod tests {
                     remote_amount: 1,
                     tlcs: Vec::new(),
                 },
+                fiber_types::CommitmentContractFeatures::LEGACY,
             ),
             &store,
             node_id.clone(),

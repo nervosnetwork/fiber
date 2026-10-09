@@ -3,6 +3,7 @@ name = "fnn-migrate"
 version = "0.9.0-rc1"
 edition = "2021"
 build = "build.rs"
+license = "MIT"
 
 [dependencies]
 
