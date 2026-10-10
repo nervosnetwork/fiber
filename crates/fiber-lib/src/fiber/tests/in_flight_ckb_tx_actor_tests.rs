@@ -31,6 +31,7 @@ fn permanent_send_tx_error() -> RpcError {
 
 struct MockChainClient {
     tx_status: TxStatus,
+    is_live_cell: bool,
 }
 
 #[async_trait::async_trait]
@@ -39,6 +40,32 @@ impl CkbChainClient for MockChainClient {
         Ok(GetTxResponse {
             transaction: None,
             tx_status: self.tx_status.clone(),
+        })
+    }
+
+    async fn get_live_cell(
+        &self,
+        _out_point: ckb_jsonrpc_types::OutPoint,
+        _with_data: bool,
+    ) -> Result<ckb_jsonrpc_types::CellWithStatus, anyhow::Error> {
+        Ok(ckb_jsonrpc_types::CellWithStatus {
+            cell: self.is_live_cell.then(|| ckb_jsonrpc_types::CellInfo {
+                output: ckb_jsonrpc_types::CellOutput {
+                    capacity: 0u64.into(),
+                    lock: ckb_jsonrpc_types::Script {
+                        code_hash: Default::default(),
+                        hash_type: ckb_jsonrpc_types::ScriptHashType::Data,
+                        args: JsonBytes::default(),
+                    },
+                    type_: None,
+                },
+                data: None,
+            }),
+            status: if self.is_live_cell {
+                "live".to_owned()
+            } else {
+                "dead".to_owned()
+            },
         })
     }
 
@@ -209,6 +236,7 @@ async fn spawn_test_actors(
             chain_actor,
             chain_client: MockChainClient {
                 tx_status: tx_status.clone(),
+                is_live_cell: true,
             },
             network_actor,
             tx_hash,
