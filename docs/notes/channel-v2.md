@@ -25,18 +25,21 @@ reactivating commitment or revocation nonces. Conflicting advertisements and
 signatures are rejected. Force close supersedes cooperative publication and uses
 the latest actual usable commitment transaction.
 
-The closing session also retains the original peer-wait start time. Missing
+The closing session also retains the peer-wait start time. Missing
 remote ShutdownV2 and missing ClosingSignedV2 after local signing are outstanding
 peer obligations with a bounded watchdog, including after reconciliation finishes.
 Duplicate messages and reconnects do not extend that deadline. Local TLC draining
 and on-chain confirmation after both signatures are distinct from peer waits.
 
-Outgoing CS intents retain their original ACK wait start too. A genuine outstanding
+Outgoing CS intents retain their ACK wait start too. A genuine outstanding
 RAA remains a peer obligation during shutdown draining even after both shutdown
 advertisements arrive. The watchdog uses the earliest outstanding CS-ACK/close
-deadline. Actor startup rearms it before any reconnect or handshake, and periodic
-maintenance also checks it while the peer stays offline. Restart, duplicate traffic,
-and reconciliation do not replace these durable timestamps. Quarantined V2 Stale,
+deadline. Restoring an actor from the database resets outstanding peer-wait start
+times to the current time and persists them, granting a full response window so
+local downtime does not cause an immediate force close. Actor startup rearms the
+watchdog before any reconnect or handshake, and periodic maintenance also checks
+it while the peer stays offline. Duplicate traffic, live-actor reconnects, and
+reconciliation do not replace these durable timestamps. Quarantined V2 Stale,
 local-only signing/draining, and both-signature on-chain waits do not authorize a
 peer-timeout publication.
 
