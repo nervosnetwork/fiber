@@ -4669,6 +4669,10 @@ where
                 match restore_mode {
                     OfflineChannelRestoreMode::ReestablishPeer => {
                         channel.mark_reestablishing_offline();
+                        // Local downtime must not consume the peer's response
+                        // window. Only actor restoration resets it; reconnects
+                        // on a live actor retain the existing deadline.
+                        channel.reset_peer_response_wait_v2();
                     }
                     OfflineChannelRestoreMode::WatchChain => channel.mark_watching_chain_offline(),
                 }
