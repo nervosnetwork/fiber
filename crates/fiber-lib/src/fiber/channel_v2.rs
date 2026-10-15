@@ -32,6 +32,24 @@ fn invalid(message: impl Into<String>) -> ProcessingChannelError {
 }
 
 impl ChannelActorState {
+    pub(super) fn reset_peer_response_wait_v2(&mut self) {
+        let ack_pending = self.ack_peer_wait_v2().is_some();
+        let close_pending = self.close_peer_wait_v2().is_some();
+        let now = crate::now_timestamp_as_millis_u64();
+        if let Some(session) = self.session_v2.as_mut() {
+            if ack_pending {
+                if let Some(outgoing) = session.outgoing.as_mut() {
+                    outgoing.peer_wait_started_at = now;
+                }
+            }
+            if close_pending {
+                if let Some(closing) = session.closing.as_mut() {
+                    closing.peer_wait_started_at = now;
+                }
+            }
+        }
+    }
+
     pub(super) fn ack_peer_wait_v2(&self) -> Option<u64> {
         // Draining TLCs can still owe a real peer RAA. Only terminal local
         // publication/on-chain waits end this obligation, not shutdown ads.
@@ -2101,6 +2119,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_v2_restart_resets_ack_and_close_peer_waits() {
+        for (waiting_ack, closing) in [(true, false), (false, true), (true, true)] {
+            let (mut a, mut b, id) =
+                create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+            let mut state = a.get_channel_actor_state(id);
+            let myself = a.get_channel_actor(id).await.unwrap();
+            a.stop().await;
+            b.stop().await;
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let (network, task) = Actor::spawn(None, CaptureNetwork, captured).await.unwrap();
+            let actor =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+            state.network = Some(network.clone());
+            if waiting_ack {
+                state.prepare_outgoing_v2(false).unwrap();
+                state.tlc_state.waiting_ack = true;
+                state
+                    .session_v2
+                    .as_mut()
+                    .unwrap()
+                    .outgoing
+                    .as_mut()
+                    .unwrap()
+                    .peer_wait_started_at = 0;
+            }
+            if closing {
+                actor
+                    .shutdown_v2(
+                        &mut state,
+                        super::super::ShutdownCommand {
+                            force: false,
+                            close_script: None,
+                            fee_rate: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                state
+                    .session_v2
+                    .as_mut()
+                    .unwrap()
+                    .closing
+                    .as_mut()
+                    .unwrap()
+                    .peer_wait_started_at = 0;
+            }
+            assert!(state.peer_does_not_reply_ack_in_time());
+            a.store.insert_channel_actor_state(state);
+
+            let started = crate::now_timestamp_as_millis_u64();
+            let mut restored = actor
+                .pre_start(
+                    myself,
+                    super::super::ChannelInitializationParameter {
+                        operation:
+                            super::super::ChannelInitializationOperation::RestoreOfflineChannel(id),
+                        ephemeral_config: Default::default(),
+                        private_key: a.private_key.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            if waiting_ack {
+                assert!(restored.ack_peer_wait_v2().unwrap() >= started);
+            }
+            if closing {
+                assert!(restored.close_peer_wait_v2().unwrap() >= started);
+            }
+            assert!(!restored.peer_does_not_reply_ack_in_time());
+            let persisted = a.store.get_channel_actor_state(&id).unwrap();
+            assert_eq!(
+                persisted.peer_response_wait_v2(),
+                restored.peer_response_wait_v2()
+            );
+
+            // In-process disconnect/reconnect must not grant another timeout.
+            let deadline = restored.peer_response_wait_v2();
+            restored.mark_reestablishing_offline();
+            assert_eq!(restored.peer_response_wait_v2(), deadline);
+            if waiting_ack {
+                restored
+                    .session_v2
+                    .as_mut()
+                    .unwrap()
+                    .outgoing
+                    .as_mut()
+                    .unwrap()
+                    .peer_wait_started_at = 0;
+            } else {
+                restored
+                    .session_v2
+                    .as_mut()
+                    .unwrap()
+                    .closing
+                    .as_mut()
+                    .unwrap()
+                    .peer_wait_started_at = 0;
+            }
+            assert!(restored.peer_does_not_reply_ack_in_time());
+            network.stop(None);
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn test_v2_close_peer_obligations_timeout_normal_and_reconnect() {
         for closing in [false, true] {
             for reconnect in [false, true] {
@@ -2398,10 +2522,25 @@ mod tests {
         // Store the original intent after stopping so handler-end persistence
         // cannot overwrite the expired durable deadline. No old actor/timer survives.
         a.store.insert_channel_actor_state(retained);
+        let restarted_at = crate::now_timestamp_as_millis_u64();
         a.start().await;
         if matches!(expectation, RestartCloseExpectation::Publish) {
-            assert_timer_publishes_usable(&mut a, id, &usable, std::time::Duration::from_secs(5))
-                .await;
+            let restored = a.get_channel_actor_state(id);
+            assert!(restored.close_peer_wait_v2().unwrap() >= restarted_at);
+            assert!(!restored.peer_does_not_reply_ack_in_time());
+            assert!(a
+                .get_transaction_view_from_hash(usable.hash().into())
+                .await
+                .is_none());
+            assert_timer_publishes_usable(
+                &mut a,
+                id,
+                &usable,
+                std::time::Duration::from_millis(
+                    super::super::PEER_CHANNEL_RESPONSE_TIMEOUT + 5000,
+                ),
+            )
+            .await;
         } else {
             tokio::time::sleep(
                 crate::fiber::network::CHECK_CHANNELS_INTERVAL
@@ -2426,6 +2565,10 @@ mod tests {
             matches!(expectation, RestartCloseExpectation::Publish)
         );
         after.superseded_by_force_close = false;
+        if matches!(expectation, RestartCloseExpectation::Publish) {
+            // Only the watchdog timestamp may change; signing intent stays exact.
+            after.peer_wait_started_at = 0;
+        }
         assert_eq!(bincode::serialize(&Some(after)).unwrap(), intent);
         if matches!(expectation, RestartCloseExpectation::Quarantined) {
             assert_eq!(a.get_channel_actor_state(id).state, ChannelState::Stale);
@@ -2538,12 +2681,17 @@ mod tests {
             .unwrap(),
             outgoing
         );
+        let original_wait_started_at = retained.ack_peer_wait_v2().unwrap();
         if restart {
             b.stop().await;
             a.stop().await;
             retained.reestablishing = true;
             a.store.insert_channel_actor_state(retained);
+            let restarted_at = crate::now_timestamp_as_millis_u64();
             a.start().await;
+            let restored = a.get_channel_actor_state(id);
+            assert!(restored.ack_peer_wait_v2().unwrap() >= restarted_at);
+            assert!(!restored.peer_does_not_reply_ack_in_time());
         }
         assert_timer_publishes_usable(
             &mut a,
@@ -2552,17 +2700,17 @@ mod tests {
             std::time::Duration::from_millis(super::super::PEER_CHANNEL_RESPONSE_TIMEOUT + 5000),
         )
         .await;
-        assert_eq!(
-            bincode::serialize(
-                &a.get_channel_actor_state(id)
-                    .session_v2
-                    .as_ref()
-                    .unwrap()
-                    .outgoing
-            )
-            .unwrap(),
-            outgoing
-        );
+        let mut after = a
+            .get_channel_actor_state(id)
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .clone()
+            .unwrap();
+        // Restart resets only the response timer, never the signing intent.
+        after.peer_wait_started_at = original_wait_started_at;
+        assert_eq!(bincode::serialize(&Some(after)).unwrap(), outgoing);
     }
 
     #[tokio::test]
