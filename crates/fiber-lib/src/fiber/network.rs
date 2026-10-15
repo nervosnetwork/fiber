@@ -396,6 +396,72 @@ fn should_reconcile_closed_channel_without_live_actor(channel_state: ChannelStat
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn get_payment_stored_preimage_respects_status_and_namespace() {
+        use crate::{
+            fiber::payment::SendPaymentDataBuilder, fiber_types::HashAlgorithm,
+            store::NodeNamespace, tests::NetworkNode,
+        };
+
+        let node = NetworkNode::new_with_node_name("get-payment-preimage").await;
+        let store = node.store.namespaced(NodeNamespace::hosted_tenant("payer"));
+        let other_store = node.store.namespaced(NodeNamespace::hosted_tenant("other"));
+        let core = FiberActorCore::new(
+            mpsc::channel(1).0,
+            node.chain_actor.clone(),
+            store.clone(),
+            None,
+            node.network_graph.clone(),
+            node.chain_client.clone(),
+        );
+        let preimage = Hash256::from([42; 32]);
+        let payment_hash = HashAlgorithm::CkbHash.hash(preimage.as_ref()).into();
+        let request = SendPaymentDataBuilder::new(node.pubkey, 1_000, payment_hash)
+            .max_fee_amount(Some(0))
+            .build()
+            .unwrap();
+        let mut session = PaymentSession::new_session(&store, request, 1);
+        session.set_inflight_status();
+
+        other_store.insert_preimage(payment_hash, preimage);
+        store.insert_preimage(payment_hash, preimage);
+        assert!(core.on_get_payment(&payment_hash).is_err());
+        store.remove_preimage(&payment_hash);
+        store.insert_payment_session(session.clone());
+        let response = core.on_get_payment(&payment_hash).unwrap();
+        assert_eq!(response.status, PaymentStatus::Inflight);
+        assert_eq!(response.payment_preimage, None);
+
+        store.insert_preimage(payment_hash, preimage);
+        let response = core.on_get_payment(&payment_hash).unwrap();
+        assert_eq!(response.status, PaymentStatus::Inflight);
+        assert_eq!(response.payment_preimage, Some(preimage));
+        assert_eq!(response.last_updated_at, session.last_updated_at);
+        assert_eq!(
+            store.get_payment_session(payment_hash).unwrap().status,
+            PaymentStatus::Inflight
+        );
+
+        session.set_failed_status("payment failed");
+        store.insert_payment_session(session.clone());
+        let response = core.on_get_payment(&payment_hash).unwrap();
+        assert_eq!(response.status, PaymentStatus::Failed);
+        assert_eq!(response.payment_preimage, None);
+
+        // Completed attempts retain their preimage after channel storage is cleaned up.
+        let mut attempt = session.new_attempt(1, node.pubkey, node.pubkey, Vec::new());
+        attempt.set_success_status();
+        attempt.preimage = Some(preimage);
+        store.insert_attempt(attempt);
+        session.set_success_status();
+        store.insert_payment_session(session);
+        store.remove_preimage(&payment_hash);
+        let response = core.on_get_payment(&payment_hash).unwrap();
+        assert_eq!(response.status, PaymentStatus::Success);
+        assert_eq!(response.payment_preimage, Some(preimage));
+    }
+
     fn expect_admitted(admission: InboundFiberAdmission) -> FiberIngressPermit {
         match admission {
             InboundFiberAdmission::Admitted(permit) => permit,
@@ -5454,7 +5520,15 @@ where
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
         match self.store.get_payment_session(*payment_hash) {
-            Some(session_state) => Ok(session_state.into()),
+            Some(session_state) => {
+                let mut response: SendPaymentResponse = session_state.into();
+                // External signers need the preimage to authorize TLC removal before
+                // the attempt can settle. Learning it does not change payment status.
+                if response.payment_preimage.is_none() && response.status != PaymentStatus::Failed {
+                    response.payment_preimage = self.store.get_preimage(payment_hash);
+                }
+                Ok(response)
+            }
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
                 payment_hash

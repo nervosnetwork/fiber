@@ -1,3 +1,5 @@
+mod payment_preimage;
+
 use std::{sync::Arc, time::Duration};
 
 use biscuit_auth::{macros::biscuit, KeyPair};
