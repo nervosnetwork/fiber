@@ -15,6 +15,33 @@ After that, `fiber-js` will be ready to use in npm.
 
 `fiber-js` provide the same API as Fiber RPC, see `fiber-js/src/index.ts` for details. For documentation, please refer to the docs of Fiber RPC.
 
+### Stopping and exporting IndexedDB
+
+`await fiber.stop()` waits for previously accepted API calls, actor shutdown writes,
+background database work, and IndexedDB transactions to finish, then closes the
+database connection and terminates both workers. After it resolves, exporting the
+database needs no additional flush or synchronization for this instance. Other
+instances using the same database must also be stopped before exporting.
+
+Calls made after stopping begins are rejected. Repeated calls to `stop()` share
+the same result. If startup, shutdown, a worker, or a database operation fails,
+`stop()` rejects and releases the workers; that failure must not be treated as a
+successful shutdown for backup purposes. Restarting requires a new `Fiber` instance.
+
+The entire stop operation has a 30-second timeout, including waiting for startup
+and previously accepted calls. On timeout, both workers are forcibly terminated
+and pending calls are rejected. A panic detected by Rust's state check also
+rejects `stop()` and triggers the same worker cleanup; it does not leave the
+workers running. Neither case guarantees preservation of uncommitted writes.
+
+The shutdown unit tests run with `npm test --workspace @nervosnetwork/fiber-js`.
+For the browser regression, install the root npm dependencies and those in
+`.github/wasm-test-runner`, then run `make wasm-stop-test`. This also requires
+`wasm-bindgen-cli` matching the workspace's locked `wasm-bindgen` version and
+Chrome (set `CHROME_BIN` to use an existing installation). The browser test covers
+stopping with a pending invoice write, restarting the actual WASM node to read
+that invoice, and releasing database connections, without peers or external CKB services.
+
 ### Default configuration
 
 Use `fiber.getDefaultConfig(network, ckbRpcUrl)` to get the bundled configuration for `Fiber.start`:

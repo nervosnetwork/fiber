@@ -7911,7 +7911,7 @@ where
             debug!("Tentacle service stopped");
         });
         #[cfg(target_arch = "wasm32")]
-        ractor::concurrency::spawn(async move {
+        crate::tasks::spawn(async move {
             service.run().await;
             debug!("Tentacle service stopped");
         });
