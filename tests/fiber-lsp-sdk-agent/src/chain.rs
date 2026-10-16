@@ -6,7 +6,7 @@ use ckb_types::{
     prelude::*,
 };
 use fiber_lsp_sdk::{ChainVerifier, SignerError, VerifiedCell};
-use fiber_types::Hash256;
+use fiber_types::{CommitmentContractFeatures, Hash256};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -171,12 +171,13 @@ impl DevChain {
                 .context("missing ancestor output")?;
             let args = output.lock.args.as_bytes();
             let previous_args = previous.lock.args.as_bytes();
+            CommitmentContractFeatures::from_lock_args(args).map_err(anyhow::Error::msg)?;
             ensure!(
                 output.lock.code_hash == previous.lock.code_hash
                     && output.lock.hash_type == previous.lock.hash_type
                     && output.type_ == previous.type_
-                    && args.len() == 57
-                    && previous_args.len() == 57
+                    && args.len() == previous_args.len()
+                    && args[57..] == previous_args[57..]
                     && args[..36] == previous_args[..36]
                     && args[56] == 1,
                 "not a commitment descendant"
@@ -363,11 +364,19 @@ mod tests {
         assert!(!matches_commitment(source, &altered, Some(&deps)));
     }
 
-    async fn mock_chain() -> (DevChain, tokio::task::JoinHandle<()>) {
+    async fn mock_chain(
+        transactions: Vec<ckb_types::packed::Transaction>,
+    ) -> (DevChain, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let chain = DevChain::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move {
+            let header = ckb_jsonrpc_types::HeaderView::from(
+                ckb_types::core::HeaderBuilder::default()
+                    .number(10u64)
+                    .epoch(EpochNumberWithFraction::new(2, 1, 2).full_value())
+                    .build(),
+            );
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut data = Vec::new();
@@ -389,13 +398,14 @@ mod tests {
                 let result = match request["method"].as_str().unwrap() {
                     "get_live_cell" => json!({"status":"dead", "cell":null}),
                     "get_block_median_time" => json!("0x2710"),
-                    "get_tip_header" => {
-                        let header = ckb_types::core::HeaderBuilder::default()
-                            .number(10u64)
-                            .epoch(EpochNumberWithFraction::new(2, 1, 2).full_value())
-                            .build();
-                        serde_json::to_value(ckb_jsonrpc_types::HeaderView::from(header)).unwrap()
-                    }
+                    "get_tip_header" | "get_header" | "get_header_by_number" => json!(header),
+                    "get_transaction" => transactions.iter().find_map(|tx| {
+                        let hash: ckb_types::H256 = tx.calc_tx_hash().unpack();
+                        (json!(hash) == request["params"][0]).then(|| json!({
+                            "transaction": ckb_jsonrpc_types::TransactionView::from(tx.clone().into_view()),
+                            "tx_status": {"status": "committed", "block_hash": header.hash},
+                        }))
+                    }).unwrap_or(serde_json::Value::Null),
                     _ => serde_json::Value::Null,
                 };
                 let body = json!({"jsonrpc":"2.0", "id":1, "result":result}).to_string();
@@ -407,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn independent_rpc_rejects_spent_and_immature_inputs() {
-        let (chain, server) = mock_chain().await;
+        let (chain, server) = mock_chain(Vec::new()).await;
         assert!(chain.live_cell(&OutPoint::default()).await.is_err());
         assert!(chain
             .verify_commitment_lineage(
@@ -438,5 +448,58 @@ mod tests {
             .await
             .is_err());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn independent_rpc_accepts_new_commitment_descendants_and_rejects_feature_downgrades() {
+        use ckb_types::{
+            core::TransactionBuilder,
+            packed::{CellOutput, Script},
+        };
+
+        let mut original_args = vec![0; 58];
+        original_args[57] = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH.bits();
+        let output = CellOutput::new_builder()
+            .lock(
+                Script::new_builder()
+                    .args(original_args.clone().pack())
+                    .build(),
+            )
+            .build();
+        let original = TransactionBuilder::default()
+            .output(output.clone())
+            .output_data(ckb_types::packed::Bytes::default())
+            .build()
+            .data();
+        for feature in [Some(1), Some(0), None] {
+            let mut args = original_args[..57].to_vec();
+            args[56] = 1;
+            if let Some(feature) = feature {
+                args.push(feature);
+            }
+            let descendant = TransactionBuilder::default()
+                .input(CellInput::new(OutPoint::new(original.calc_tx_hash(), 0), 0))
+                .output(
+                    output
+                        .clone()
+                        .as_builder()
+                        .lock(output.lock().as_builder().args(args.pack()).build())
+                        .build(),
+                )
+                .output_data(ckb_types::packed::Bytes::default())
+                .build()
+                .data();
+            let point = OutPoint::new(descendant.calc_tx_hash(), 0);
+            let (chain, server) = mock_chain(vec![original.clone(), descendant]).await;
+            let result = chain
+                .verify_commitment_lineage(original.calc_tx_hash().into(), &point)
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                feature == Some(1),
+                "feature: {feature:?}, result: {result:?}"
+            );
+            server.abort();
+        }
     }
 }

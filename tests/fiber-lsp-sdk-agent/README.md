@@ -4,7 +4,27 @@ The agent exercises the production SDK validation path. It uses Manual policy,
 then explicitly confirms a successfully prepared request. It never infers payment
 approval or opening terms from an LSP signing response.
 
-Before polling a channel, the local fixture driver must:
+The agent consumes `GET /lsp/events` with its existing tenant Bearer token.
+Channel and watchtower requests pass through the same SDK verification and
+confirmation path, then the existing JSON-RPC signature submission methods.
+There is no periodic signing-status poll in the running agent. `--once` processes
+one initial pending snapshot and exits.
+
+The reader reconnects after EOF, transport errors, or failed event processing,
+using exponential backoff (500 ms to 30 s) with jitter and `Retry-After` support.
+Creating a reader takes over the tenant's signer stream. The server returns an
+`X-Lsp-Session-Id`, which the reader reuses on all reconnects, including the
+five-minute connection expiry. Another reader for the same tenant replaces that
+session; the old reader stops on HTTP 409 rather than taking it back. Rejected
+credentials (401/403) also stop retries. Sessions are local to the RPC listener
+and are re-established after server restart; they do not revoke signature
+submission permissions.
+A connection must stay healthy for 30 s before backoff resets. Every reconnect
+receives persisted pending requests again; the SDK retains nonce/signature safety
+state. Unknown event types are ignored. A 60 s read timeout detects stalled
+streams, and dropping the reader cancels both the connection and retries.
+
+Before servicing a channel, the local fixture driver must:
 
 1. Send the original `OpenChannelWithExternalFundingParams` to `POST /open-channel` as
    `{ "params": ... }`, setting `pubkey` to the LSP public node, `public: false`,

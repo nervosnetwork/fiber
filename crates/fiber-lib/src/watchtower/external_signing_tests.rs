@@ -21,6 +21,44 @@ use super::*;
 #[derive(Clone)]
 struct FeeCells;
 
+struct SigningObserver;
+
+#[async_trait::async_trait]
+impl Actor for SigningObserver {
+    type Msg = NetworkActorMessage;
+    type State = (Store, Hash256, tokio::sync::mpsc::Sender<NodeId>);
+    type Arguments = Self::State;
+
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(args)
+    }
+
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let NetworkActorMessage::Fiber(crate::fiber::network::FiberActorMessage::Notification(
+            NetworkServiceEvent::SigningStateChanged(node),
+        )) = message
+        {
+            let WatchtowerSignerState::External(signer) =
+                state.0.get_watchtower_signer(&node, &state.1)
+            else {
+                panic!("external signing state committed before notification")
+            };
+            assert!(!signer.pending_requests.is_empty());
+            state.2.send(node).await.unwrap();
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl CellCollector for FeeCells {
     async fn collect_live_cells_async(
@@ -240,6 +278,14 @@ impl Fixture {
         &self,
         current_time: u64,
     ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
+        self.build_at_with_notifications(current_time, None)
+    }
+
+    fn build_at_with_notifications(
+        &self,
+        current_time: u64,
+        event_target: Option<&ActorRef<NetworkActorMessage>>,
+    ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
         let signer =
             LocalSigner::new(secp256k1::SecretKey::from_slice(&[21; 32]).expect("fee key"));
         // Keep the original commitment's snapshot even after a successor cell
@@ -263,6 +309,7 @@ impl Fixture {
             &signer,
             &mut FeeCells,
             &self.store,
+            event_target,
         )
     }
 
@@ -329,10 +376,22 @@ fn assert_applied_signature(tx: &TransactionView, content: &OnchainSigningConten
 
 #[test]
 fn external_timeout_signing_waits_for_tlc_expiry() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
     for for_remote in [false, true] {
         for subsequent in [false, true] {
             let fixture = Fixture::new(for_remote, subsequent, false, false);
-            assert!(fixture.build_at(99_999).expect("before expiry").is_none());
+            let (sender, mut notifications) = tokio::sync::mpsc::channel(4);
+            let (observer, _) = runtime
+                .block_on(Actor::spawn(
+                    None,
+                    SigningObserver,
+                    (fixture.store.clone(), fixture.channel.channel_id, sender),
+                ))
+                .unwrap();
+            assert!(fixture
+                .build_at_with_notifications(99_999, Some(&observer))
+                .expect("before expiry")
+                .is_none());
             let WatchtowerSignerState::External(state) = fixture
                 .store
                 .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
@@ -340,7 +399,29 @@ fn external_timeout_signing_waits_for_tlc_expiry() {
                 panic!("expected external signer state");
             };
             assert!(state.pending_requests.is_empty());
-            assert!(fixture.build_at(100_001).expect("after expiry").is_none());
+            assert!(fixture
+                .build_at_with_notifications(100_001, Some(&observer))
+                .expect("after expiry")
+                .is_none());
+            let node = runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(1), notifications.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            });
+            assert_eq!(node, fixture.node_id);
+            assert!(fixture
+                .build_at_with_notifications(100_001, Some(&observer))
+                .unwrap()
+                .is_none());
+            assert!(
+                runtime.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_millis(10), notifications.recv())
+                        .await
+                        .is_err()
+                }),
+                "an existing pending request does not emit another notification"
+            );
             let (_, content) = fixture.pending();
             let fee_since: u64 = content
                 .transaction
@@ -354,6 +435,7 @@ fn external_timeout_signing_waits_for_tlc_expiry() {
                 fee_since,
                 fiber_types::watchtower::settlement_timestamp_since(100_000)
             );
+            observer.stop(None);
         }
     }
 }

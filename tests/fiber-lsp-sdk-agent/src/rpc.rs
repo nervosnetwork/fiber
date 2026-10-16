@@ -80,6 +80,11 @@ pub struct HttpFiberRpc {
 }
 
 impl HttpFiberRpc {
+    /// Subscribe using the same tenant token as signing RPCs.
+    pub fn subscribe_events(&self, tenant_token: String) -> Result<crate::EventStream> {
+        crate::EventStream::connect(&self.url, tenant_token)
+    }
+
     pub fn new(url: &str, operator_token: String) -> Result<Self> {
         let url = if url.starts_with("http://") || url.starts_with("https://") {
             url.to_string()

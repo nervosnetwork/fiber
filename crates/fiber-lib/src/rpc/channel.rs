@@ -865,7 +865,7 @@ where
     }
 }
 
-fn to_rpc_channel_signing_status(
+pub(crate) fn to_rpc_channel_signing_status(
     state: &crate::fiber::channel::ChannelActorState,
 ) -> Result<ChannelSigningStatus, String> {
     Ok(match state.channel_signing_status() {

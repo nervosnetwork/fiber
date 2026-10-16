@@ -46,11 +46,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8114")]
     ckb_rpc: String,
 
-    /// Polling interval in milliseconds.
-    #[arg(long, default_value_t = 200, env = "FIBER_LSP_SDK_AGENT_INTERVAL_MS")]
-    interval_ms: u64,
-
-    /// Run one poll cycle and exit.
+    /// Process the initial SSE pending snapshot and exit.
     #[arg(long)]
     once: bool,
 }
@@ -80,7 +76,7 @@ async fn main() -> Result<()> {
     let rpc = HttpFiberRpc::new(&args.rpc, args.operator_token)?;
     let status_file = args.status_file.clone();
     let mut agent = Agent::open(
-        rpc,
+        rpc.clone(),
         AgentConfig {
             store_dir: args.store,
             status_file: args.status_file,
@@ -94,8 +90,17 @@ async fn main() -> Result<()> {
         agent
             .configure_chain(&args.ckb_rpc, &args.contracts_dir)
             .await?;
-        agent.poll_once().await?;
-        return Ok(());
+        let mut events = rpc.subscribe_events(agent.tenant_token()?)?;
+        while let Some(delivery) = events.next().await {
+            let complete = matches!(delivery.event, fiber_json_types::LspEvent::SnapshotComplete);
+            let result = agent.handle_event(delivery.event).await;
+            let _ = delivery.processed.send(result.is_ok());
+            result?;
+            if complete {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("tenant event stream stopped before snapshot completion");
     }
 
     // Bind the test control server before initialize so wait.sh / Bruno can
@@ -128,7 +133,7 @@ async fn main() -> Result<()> {
         .configure_chain(&args.ckb_rpc, &args.contracts_dir)
         .await?;
     info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
-    let interval = Duration::from_millis(args.interval_ms);
+    let mut events = rpc.subscribe_events(agent.tenant_token()?)?;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
@@ -141,9 +146,12 @@ async fn main() -> Result<()> {
                 };
                 let _ = reply.send(result);
             }
-            _ = tokio::time::sleep(interval) => {
-                if let Err(error) = agent.poll_once().await {
-                    tracing::warn!("SDK agent poll failed: {error}");
+            delivery = events.next() => {
+                let Some(delivery) = delivery else { anyhow::bail!("tenant event reader stopped") };
+                let result = agent.handle_event(delivery.event).await;
+                let _ = delivery.processed.send(result.is_ok());
+                if let Err(error) = result {
+                    tracing::warn!("SDK agent event failed; pending work will replay: {error:#}");
                 }
             }
         }

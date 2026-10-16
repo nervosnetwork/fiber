@@ -356,7 +356,8 @@ async fn run_node(
             } else {
                 let watchtower_actor = Actor::spawn_linked(
                     Some("watchtower".to_string()),
-                    WatchtowerActor::new(store.clone()),
+                    WatchtowerActor::new(store.clone())
+                        .with_signing_notifications(network_actor.clone()),
                     ckb_config,
                     root_actor.get_cell(),
                 )

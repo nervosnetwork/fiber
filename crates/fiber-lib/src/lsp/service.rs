@@ -14,12 +14,12 @@ use crate::invoice::CkbInvoice;
 use crate::store::{NodeNamespace, Store};
 
 use super::{
-    is_permanent_hosted_payment_failure, tenant_watchtower_node_id, BiscuitTokenIssuer,
-    HostedTenantRpcContext, HostedTenantStatus, LspConfig, LspInvoiceRegistration,
-    LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryKey, LspPaymentDeliveryLimits,
-    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspPaymentDispatchError,
-    LspPaymentOutcomeDecision, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
-    TenantSupervisor, TrampolineForwardingRequest,
+    events::TenantEvents, is_permanent_hosted_payment_failure, tenant_watchtower_node_id,
+    BiscuitTokenIssuer, HostedTenantRpcContext, HostedTenantStatus, LspConfig,
+    LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryKey,
+    LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus,
+    LspPaymentDispatchError, LspPaymentOutcomeDecision, TenantId, TenantRegistry,
+    TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor, TrampolineForwardingRequest,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -54,6 +54,18 @@ pub struct HostedTenantRegistration {
     pub access_token: String,
 }
 
+/// Cold, read-only stores for an authenticated tenant event stream.
+#[derive(Clone, Debug)]
+pub struct TenantEventContext {
+    pub(crate) events: Arc<TenantEvents>,
+    /// Channel state in the tenant's namespace.
+    pub store: Store,
+    /// Root store containing tenant-scoped watchtower state.
+    pub watchtower_store: Store,
+    /// Watchtower owner derived from the registered tenant identity.
+    pub node_id: fiber_types::NodeId,
+}
+
 /// Result of consulting the hosted invoice registry for an incoming trampoline TLC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LspDeliveryDecision {
@@ -84,6 +96,10 @@ pub enum LspServiceMessage {
         channel_id: Hash256,
         reply: RpcReplyPort<Result<ChannelActorState, String>>,
     },
+    /// Resolves event stores without hydrating a tenant runtime.
+    GetTenantEventContext(TenantId, RpcReplyPort<Result<TenantEventContext, String>>),
+    /// Wake the tenant's subscribers after a business actor persists signing state.
+    SigningStateChanged(fiber_types::NodeId),
     RegisterInvoice {
         tenant_id: TenantId,
         invoice: CkbInvoice,
@@ -122,6 +138,7 @@ pub struct LspService;
 /// State owned by the LSP service. Tenant components are added behind this
 /// boundary rather than sharing Public T's network actor or unscoped keyspace.
 pub struct LspServiceState {
+    events: Arc<TenantEvents>,
     pub config: LspConfig,
     pub public_node_id: Pubkey,
     pub public_network_actor: ActorRef<NetworkActorMessage>,
@@ -314,6 +331,7 @@ impl Actor for LspService {
             LspServiceState::schedule_delivery_deadline(&myself, key, delivery.buffer_deadline);
         }
         Ok(LspServiceState {
+            events: Arc::default(),
             config: args.config,
             public_node_id: args.public_node_id,
             public_network_actor: args.public_network_actor,
@@ -336,6 +354,22 @@ impl Actor for LspService {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            LspServiceMessage::SigningStateChanged(node) => state.events.notify(&node),
+            LspServiceMessage::GetTenantEventContext(tenant_id, reply) => {
+                let result = state.registry.get(&tenant_id).and_then(|record| {
+                    let record =
+                        record.ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
+                    Ok(TenantEventContext {
+                        events: state.events.clone(),
+                        store: state
+                            .store
+                            .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str())),
+                        watchtower_store: state.watchtower_store.clone(),
+                        node_id: tenant_watchtower_node_id(&record.tenant_pubkey),
+                    })
+                });
+                let _ = reply.send(result);
+            }
             LspServiceMessage::GetStatus(reply) => {
                 let registered_tenants = state.registry.list().map_or(0, |tenants| tenants.len());
                 let _ = reply.send(LspServiceStatus {

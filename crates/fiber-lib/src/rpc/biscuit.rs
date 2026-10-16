@@ -302,7 +302,8 @@ pub fn extract_node_id(token: &Biscuit) -> Result<NodeId> {
     extract_optional_node_id(token)?.ok_or_else(|| anyhow!("token is missing a node fact"))
 }
 
-fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
+/// Read an optional node identity from authority facts, preserving query failures.
+pub(crate) fn extract_optional_node_id(token: &Biscuit) -> Result<Option<NodeId>> {
     const QUERY: &str = "data($id) <- node($id)";
     let mut authorizer = build_authorizer(token)?;
     let nodes: Vec<(String,)> = authorizer.query(QUERY)?;

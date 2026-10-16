@@ -36,6 +36,7 @@ use crate::{
     },
     fiber::{
         channel::{settlement_data_to_witness, settlement_tlc_to_witness, XUDT_COMPATIBLE_WITNESS},
+        network::{NetworkActorMessage, NetworkServiceEvent},
         onchain_tlc_reconcile::{
             tracked_settlement_tlcs, verify_and_select_settlement_data, OnChainTlcSettlement,
             TrackedSettlementTlc,
@@ -66,6 +67,7 @@ pub struct WatchtowerActor<S> {
     store: S,
     // a node_id represent the watchtower itself
     node_id: NodeId,
+    event_target: Option<ActorRef<NetworkActorMessage>>,
 }
 
 const ACTOR_HANDLE_WARN_THRESHOLD_MS: u64 = 15_000;
@@ -98,7 +100,17 @@ pub(crate) fn build_settlement_transaction(
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
         let node_id = NodeId::local();
-        Self { store, node_id }
+        Self {
+            store,
+            node_id,
+            event_target: None,
+        }
+    }
+
+    /// Forward persisted external signing requests to the host's tenant event service.
+    pub fn with_signing_notifications(mut self, network: ActorRef<NetworkActorMessage>) -> Self {
+        self.event_target = Some(network);
+        self
     }
 }
 
@@ -243,12 +255,13 @@ where
                 let rpc_url = state.config.rpc_url.clone();
                 let periodic_check_running = state.periodic_check_running.clone();
                 let signer = state.signer.clone();
+                let event_target = self.event_target.clone();
                 tokio::task::spawn_blocking(move || {
                     // Use RAII guard to ensure flag is reset even on panic
                     let _guard = PeriodicCheckGuard(periodic_check_running);
                     info!("PeriodicCheck started");
                     let start = now_timestamp_as_millis_u64();
-                    run_periodic_check(store, node_id, signer, rpc_url);
+                    run_periodic_check(store, node_id, signer, rpc_url, event_target.as_ref());
                     let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
                     info!("PeriodicCheck finished elapsed: {}ms", elapsed);
                 });
@@ -267,8 +280,13 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
-where
+fn run_periodic_check<S>(
+    store: S,
+    _node_id: NodeId,
+    signer: LocalSigner,
+    rpc_url: String,
+    event_target: Option<&ActorRef<NetworkActorMessage>>,
+) where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
@@ -404,6 +422,7 @@ where
                                                 &store,
                                                 channel_node_id.clone(),
                                                 first_commitment_block_number,
+                                                event_target,
                                             );
                                         }
                                     }
@@ -419,6 +438,7 @@ where
                                         &store,
                                         channel_node_id.clone(),
                                         first_commitment_block_number,
+                                        event_target,
                                     );
                                 }
                             } else {
@@ -566,6 +586,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
+    event_target: Option<&ActorRef<NetworkActorMessage>>,
 ) {
     // Keep the snapshot verified against the original commitment lock throughout
     // settlement. Successor cells have different witness hashes after each unlock.
@@ -774,6 +795,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         signer,
                         cell_collector,
                         store,
+                        event_target,
                     ) {
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
@@ -1261,6 +1283,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
     signer: &LocalSigner,
     cell_collector: &mut dyn CellCollector,
     store: &S,
+    event_target: Option<&ActorRef<NetworkActorMessage>>,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     let cell_output: CellOutput = commitment_cell.output.clone().into();
     let lock_script_args = cell_output.lock().args().raw_data();
@@ -1833,6 +1856,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock.with_preimage,
                     unlock_key,
                     signer,
+                    event_target,
                 );
             }
         }
@@ -2070,6 +2094,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     unlock.with_preimage,
                     unlock_key,
                     signer,
+                    event_target,
                 );
             }
         }
@@ -2088,6 +2113,7 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
     with_preimage: bool,
     unlock_key: Option<Privkey>,
     change_signer: &LocalSigner,
+    event_target: Option<&ActorRef<NetworkActorMessage>>,
 ) -> Result<Option<TransactionView>, Box<dyn std::error::Error>> {
     use fiber_types::OnchainSigningContent;
 
@@ -2114,6 +2140,7 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
             request_id,
             content: awaiting,
         } => {
+            let mut requested = false;
             let signature = store.update_watchtower_signer(
                 node_id,
                 &channel_id,
@@ -2153,6 +2180,7 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                     }
 
                     external.pending_requests.insert(request_id, awaiting);
+                    requested = true;
                     if external
                         .last_applied
                         .as_ref()
@@ -2163,6 +2191,15 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                     Ok(None)
                 },
             )?;
+            // The request is committed and the signer-state write lock released
+            // before any subscriber is allowed to read it.
+            if requested {
+                if let Some(network) = event_target {
+                    let _ = network.send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::SigningStateChanged(node_id.clone()),
+                    ));
+                }
+            }
             // Only signer-state mutation holds the lock; transaction construction
             // and broadcasting must not block other signer submissions.
             signature
@@ -3040,6 +3077,7 @@ mod tests {
             &signer,
             &mut cell_collector,
             &store,
+            None,
         );
 
         assert!(
@@ -3821,6 +3859,7 @@ mod tests {
             &signer,
             &mut collector,
             &TestWatchtowerStore::default(),
+            None,
         )
         .expect("build settlement")
         .expect("mature pre-TLC commitment must settle");

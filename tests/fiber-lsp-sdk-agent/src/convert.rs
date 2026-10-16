@@ -11,7 +11,7 @@ pub(crate) mod tests {
         ChannelSigner, CommitmentCounter, CommitmentParameters, Musig2SignableContent,
         Musig2SigningContent, NoncePurpose, NonceSlot, SignerStore,
     };
-    use fiber_types::{InMemorySigner, SettlementData};
+    use fiber_types::{CommitmentContractFeatures, InMemorySigner, SettlementData};
     use musig2::{AggNonce, KeyAggContext, SecNonce};
 
     fn remote() -> InMemorySigner {
@@ -35,8 +35,8 @@ pub(crate) mod tests {
             commitment_fee: 0,
             local_amount: 40_000_000_000,
             remote_amount: 60_000_000_000,
-            local_reserved_ckb_amount: 9_900_000_000,
-            remote_reserved_ckb_amount: 9_900_000_000,
+            local_reserved_ckb_amount: 10_000_000_000,
+            remote_reserved_ckb_amount: 10_000_000_000,
         }
     }
     pub(crate) fn remote_binding_pubkey() -> fiber_types::Pubkey {
@@ -71,6 +71,7 @@ pub(crate) mod tests {
             remote_amount: 60_000_000_000,
             tlcs: vec![],
         };
+        let features = CommitmentContractFeatures::ONCHAIN_FULL_PAYMENT_HASH;
         let mut args =
             fiber_types::blake2b_hash_with_salt(&point.serialize_xonly(), &[])[..20].to_vec();
         args.extend_from_slice(&parameters().delay_epoch);
@@ -78,10 +79,12 @@ pub(crate) mod tests {
         args.extend_from_slice(&fiber_types::settlement_witness_hash(
             &data,
             for_remote,
+            features,
             keys.tlc_base_key,
             remote.tlc_base_key.pubkey(),
         ));
         args.push(0);
+        args.push(features.bits());
         let tx = TransactionBuilder::default()
             .input(CellInput::new(OutPoint::new(funding.calc_tx_hash(), 0), 0))
             .output(
@@ -207,6 +210,10 @@ pub(crate) mod tests {
         let body = fiber_types::settlement_data_to_witness(
             &record.settlement.data,
             false,
+            fiber_types::CommitmentContractFeatures::from_lock_args(
+                &source.lock().args().raw_data(),
+            )
+            .unwrap(),
             record.settlement.local_settlement_key,
             record.settlement.remote_settlement_key,
         );
@@ -215,6 +222,7 @@ pub(crate) mod tests {
         let mut args = source.lock().args().raw_data()[..36].to_vec();
         args.extend_from_slice(&fiber_types::blake2b_hash_with_salt(&next, &[])[..20]);
         args.push(1);
+        args.extend_from_slice(&source.lock().args().raw_data()[57..]);
         let destination = Script::new_builder().args([42u8].pack()).build();
         let mut witness = vec![16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 1];
         witness.extend_from_slice(&body);

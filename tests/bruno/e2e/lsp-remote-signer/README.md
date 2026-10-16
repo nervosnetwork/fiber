@@ -1,8 +1,8 @@
 # Hosted LSP remote signer E2E
 
 This workflow starts `fiber-lsp-sdk-agent` as a separate process and exercises the real
-`fiber-lsp-sdk` over JSON-RPC. The agent owns its RootKey and channel keys, registers a
-RootSigner-derived tenant, opens a private hosted channel with external funding, polls
+`fiber-lsp-sdk` over tenant SSE and JSON-RPC. The agent owns its RootKey and channel keys, registers a
+RootSigner-derived tenant, opens a private hosted channel with external funding, receives
 and answers node signing requests with `prepare` + the test-only `Always`
 policy, and persists its SDK snapshot. Production clients use the same
 `prepare` with `Auto`/`Manual`.
