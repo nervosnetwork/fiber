@@ -2,8 +2,8 @@ use std::{cell::RefCell, str::FromStr};
 
 use db::{STORE_NAME, handle_db_command, open_database};
 use fiber_wasm_db_common::{
-    InputCommand, KV, OutputCommand, load_command, read_command_payload, store_command,
-    write_command_with_payload,
+    DbCommandRequest, InputCommand, KV, OutputCommand, load_command, read_command_payload,
+    store_command, write_command_with_payload,
 };
 use idb::Database;
 use log::info;
@@ -44,7 +44,9 @@ pub fn set_shared_array(input: JsValue, output: JsValue) {
 #[wasm_bindgen]
 /// Enter the main loop of db worker. Once entered, db worker will read commands from input buffer (previously set by set_shared_array), handle it, and write response to output buffer.
 /// log_level - Level of logs, such as `debug`, `info`.
-pub async fn main_loop(log_level: &str) {
+/// On shutdown, wait for transactions and close the database before resolving.
+/// Reject if a database request or the shutdown transaction failed.
+pub async fn main_loop(log_level: &str) -> Result<(), JsValue> {
     wasm_logger::init(wasm_logger::Config::new(
         log::Level::from_str(log_level).expect("Invalid log level"),
     ));
@@ -61,6 +63,7 @@ pub async fn main_loop(log_level: &str) {
     });
 
     let mut db: Option<Database> = None;
+    let mut failure = None;
     log::debug!("Entered main loop of db worker");
     loop {
         let cmd = wait_for_command(&input_i32_arr, InputCommand::Waiting)
@@ -85,6 +88,7 @@ pub async fn main_loop(log_level: &str) {
                         .unwrap();
                     }
                     Err(err) => {
+                        failure = Some(format!("Failed to open database: {err:?}"));
                         log::error!("Failed to open database: {:?}", err);
                         write_command_with_payload(
                             OutputCommand::Error as i32,
@@ -137,13 +141,16 @@ pub async fn main_loop(log_level: &str) {
                         &output_u8_arr,
                     )
                     .unwrap(),
-                    Err(e) => write_command_with_payload(
-                        OutputCommand::Error as i32,
-                        format!("{:?}", e),
-                        &output_i32_arr,
-                        &output_u8_arr,
-                    )
-                    .unwrap(),
+                    Err(e) => {
+                        failure = Some(format!("Database request failed: {e:?}"));
+                        write_command_with_payload(
+                            OutputCommand::Error as i32,
+                            format!("{e:?}"),
+                            &output_i32_arr,
+                            &output_u8_arr,
+                        )
+                        .unwrap();
+                    }
                 };
             }
             InputCommand::Shutdown => break,
@@ -153,5 +160,24 @@ pub async fn main_loop(log_level: &str) {
             }
         }
     }
+    if let Some(db) = db {
+        // An earlier failed request may have returned before its transaction
+        // finished. A transaction on the same store waits for those writes too.
+        let result = handle_db_command(
+            &db,
+            STORE_NAME,
+            DbCommandRequest::Read { keys: vec![] },
+            |_| true,
+        )
+        .await;
+        db.close();
+        if let Err(err) = result {
+            failure = Some(format!("Failed to finish database transactions: {err:?}"));
+        }
+    }
     info!("Db worker main loop exited");
+    match failure {
+        Some(err) => Err(JsValue::from_str(&err)),
+        None => Ok(()),
+    }
 }

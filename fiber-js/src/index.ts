@@ -12,6 +12,7 @@ import { BuildPaymentRouterResult, BuildRouterParams, GetPaymentCommandParams, G
 import { ConnectPeerParams, DisconnectPeerParams, ListPeerResult } from "./types/peer.ts";
 
 const DEFAULT_BUFFER_SIZE = 50 * (1 << 20);
+const STOP_TIMEOUT_MS = 30_000;
 /**
  * A Fiber Wasm instance
  */
@@ -21,6 +22,10 @@ class Fiber {
     private inputBuffer: SharedArrayBuffer
     private outputBuffer: SharedArrayBuffer
     private commandInvokeLock: Mutex;
+    private startPromise?: Promise<void>;
+    private stopPromise?: Promise<void>;
+    private workerFailure?: Error;
+    private readonly workerAbort = new AbortController();
     /**
      * Construct a Fiber Wasm instance.
      * inputBuffer and outputBuffer are buffers used for transporting data between database and fiber wasm. Set them to appropriate sizes.
@@ -33,6 +38,19 @@ class Fiber {
         this.inputBuffer = new SharedArrayBuffer(inputBufferSize);
         this.outputBuffer = new SharedArrayBuffer(outputBufferSize);
         this.commandInvokeLock = new Mutex();
+        for (const worker of [this.dbWorker, this.fiberWorker]) {
+            worker.addEventListener("message", (event: MessageEvent) => {
+                if (event.data?.type === "error") {
+                    this.workerFailure = new Error(event.data.error);
+                }
+            });
+            worker.addEventListener("error", (event: ErrorEvent) => {
+                this.workerFailure = new Error(event.message || "Fiber worker failed");
+            });
+            worker.addEventListener("messageerror", () => {
+                this.workerFailure = new Error("Unable to deserialize Fiber worker response");
+            });
+        }
     }
 
     /**
@@ -45,36 +63,40 @@ class Fiber {
      * @param databasePrefix Name prefix of IndexedDB store. Defaults to `/wasm`
      * 
      */
-    async start(
+    start(
         config: string,
         fiberKeyPair: Uint8Array,
         ckbSecretKey?: Uint8Array,
         chainSpec?: string,
         logLevel: "trace" | "debug" | "info" | "error" = "info",
-        databasePrefix?: string) {
-        this.dbWorker.postMessage({
-            inputBuffer: this.inputBuffer,
-            outputBuffer: this.outputBuffer,
-            logLevel: logLevel
-        } as DbWorkerInitializationOptions);
-        this.fiberWorker.postMessage({
-            inputBuffer: this.inputBuffer,
-            outputBuffer: this.outputBuffer,
-            ckbSecretKey,
-            config,
-            fiberKeyPair,
-            logLevel,
-            chainSpec,
-            databasePrefix
-        } as FiberWorkerInitializationOptions);
-        await new Promise<void>((res, rej) => {
-            this.dbWorker.onmessage = () => res();
-            this.dbWorker.onerror = (evt) => rej(evt);
-        });
-        await new Promise<void>((res, rej) => {
-            this.fiberWorker.onmessage = () => res();
-            this.fiberWorker.onerror = (evt) => rej(evt);
-        });
+        databasePrefix?: string): Promise<void> {
+        if (this.startPromise || this.stopPromise) {
+            return Promise.reject(new Error("Fiber has already been started or stopped"));
+        }
+        this.startPromise = (async () => {
+            // Register both listeners before either worker can reply.
+            const ready = Promise.all([
+                this.waitForMessage(this.dbWorker, (data) => data?.type === "ready"),
+                this.waitForMessage(this.fiberWorker, (data) => data?.type === "ready")
+            ]);
+            this.dbWorker.postMessage({
+                inputBuffer: this.inputBuffer,
+                outputBuffer: this.outputBuffer,
+                logLevel
+            } as DbWorkerInitializationOptions);
+            this.fiberWorker.postMessage({
+                inputBuffer: this.inputBuffer,
+                outputBuffer: this.outputBuffer,
+                ckbSecretKey,
+                config,
+                fiberKeyPair,
+                logLevel,
+                chainSpec,
+                databasePrefix
+            } as FiberWorkerInitializationOptions);
+            await ready;
+        })();
+        return this.startPromise;
     }
 
     /**
@@ -87,44 +109,123 @@ class Fiber {
     }
 
     invokeCommand(name: string, args?: any[]): Promise<any> {
+        if (this.stopPromise) {
+            return Promise.reject(new Error("Fiber is stopping or stopped"));
+        }
+        if (!this.startPromise) {
+            return Promise.reject(new Error("Fiber not started"));
+        }
         // Why use lock here?
         // fiber-wasm provided async APIs. Use lock here to avoid mixture of different calls
         return this.commandInvokeLock.runExclusive(async () => {
-            this.fiberWorker.postMessage({
-                name,
-                args: args || []
-            } as FiberInvokeRequest);
-            return await new Promise((resolve, reject) => {
-                const clean = () => {
-                    this.fiberWorker.removeEventListener("message", resolveFn);
-                    this.fiberWorker.removeEventListener("error", errorFn);
-                }
-                const resolveFn = (evt: MessageEvent<FiberInvokeResponse>) => {
-                    if (evt.data.ok === true) {
-                        resolve(evt.data.data);
-                    } else {
-                        reject(evt.data.error);
-                    }
-                    clean();
-
-                };
-                const errorFn = (evt: ErrorEvent) => {
-                    reject(evt);
-                    clean();
-
-                };
-                this.fiberWorker.addEventListener("message", resolveFn);
-                this.fiberWorker.addEventListener("error", errorFn);
-            })
+            await this.startPromise;
+            return this.invokeWorker(name, args);
         })
 
     }
     /**
-     * Stop the fiber instance.
+     * Stop the Fiber instance after actors, background writes, and IndexedDB
+     * transactions finish. Once resolved, its database can be safely exported.
+     * Rejects if shutdown or a database operation failed. After 30 seconds,
+     * forcefully terminate both workers and reject without a safe-backup guarantee.
      */
-    async stop() {
-        this.dbWorker.terminate();
-        this.fiberWorker.terminate();
+    stop(): Promise<void> {
+        if (!this.stopPromise) {
+            let timer: ReturnType<typeof setTimeout>;
+            // Start the deadline before acquiring the command lock: a stuck API
+            // call or startup must not prevent the forced-shutdown fallback.
+            const timeout = new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error(
+                    "Fiber stop timed out after 30 seconds; workers terminated, safe backup is not guaranteed"
+                )), STOP_TIMEOUT_MS);
+            });
+            const shutdown = this.commandInvokeLock.runExclusive(async () => {
+                if (this.workerAbort.signal.aborted) {
+                    throw this.workerAbort.signal.reason;
+                }
+                if (this.startPromise) {
+                    await this.startPromise;
+                    const databaseStopped = this.waitForMessage<
+                        { type: "stopped"; ok: true } | { type: "stopped"; ok: false; error: string }
+                    >(this.dbWorker, (data) => data?.type === "stopped").then((response) => {
+                        if (!response.ok) {
+                            throw new Error(response.error);
+                        }
+                    });
+                    // Keep the DB worker alive for actor shutdown writes. Both
+                    // replies are required, regardless of which arrives first.
+                    await Promise.all([this.invokeWorker("stop"), databaseStopped]);
+                }
+            });
+            this.stopPromise = Promise.race([shutdown, timeout]).catch((error) => {
+                this.workerFailure = error instanceof Error ? error : new Error(String(error));
+                throw this.workerFailure;
+            }).finally(() => {
+                clearTimeout(timer);
+                // Reject in-flight commands and startup too, releasing the lock.
+                // Queued commands will see workerFailure before posting anything.
+                this.workerAbort.abort(this.workerFailure || new Error("Fiber stopped"));
+                this.fiberWorker.terminate();
+                this.dbWorker.terminate();
+            });
+        }
+        return this.stopPromise;
+    }
+
+    private async invokeWorker(name: string, args: any[] = []): Promise<any> {
+        if (this.workerFailure) {
+            throw this.workerFailure;
+        }
+        const response = this.waitForMessage<FiberInvokeResponse>(
+            this.fiberWorker, (data) => typeof data?.ok === "boolean"
+        );
+        this.fiberWorker.postMessage({ name, args } as FiberInvokeRequest);
+        const result = await response;
+        if (!result.ok) {
+            throw new Error(result.error);
+        }
+        return result.data;
+    }
+
+    private waitForMessage<T>(worker: Worker, accepts: (data: any) => boolean): Promise<T> {
+        return new Promise((resolve, reject) => {
+            const signal = this.workerAbort.signal;
+            const clean = () => {
+                worker.removeEventListener("message", onMessage);
+                signal.removeEventListener("abort", onError);
+                for (const source of [this.dbWorker, this.fiberWorker]) {
+                    source.removeEventListener("message", onWorkerMessage);
+                    source.removeEventListener("error", onError);
+                    source.removeEventListener("messageerror", onError);
+                }
+            };
+            const onMessage = (event: MessageEvent) => {
+                if (accepts(event.data)) {
+                    clean();
+                    resolve(event.data);
+                }
+            };
+            const onError = () => {
+                clean();
+                reject(this.workerFailure || signal.reason || new Error("Fiber worker failed"));
+            };
+            const onWorkerMessage = (event: MessageEvent) => {
+                if (event.data?.type === "error") {
+                    onError();
+                }
+            };
+            if (this.workerFailure || signal.aborted) {
+                onError();
+                return;
+            }
+            worker.addEventListener("message", onMessage);
+            signal.addEventListener("abort", onError);
+            for (const source of [this.dbWorker, this.fiberWorker]) {
+                source.addEventListener("message", onWorkerMessage);
+                source.addEventListener("error", onError);
+                source.addEventListener("messageerror", onError);
+            }
+        });
     }
     async openChannel(params: OpenChannelParams): Promise<OpenChannelResult> {
         return await this.invokeCommand("open_channel", [params]);

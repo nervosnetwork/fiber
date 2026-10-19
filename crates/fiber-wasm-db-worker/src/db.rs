@@ -213,7 +213,12 @@ where
             DbCommandResponse::Iterator { kvs }
         }
     };
-    assert_eq!(TransactionResult::Committed, tran.await.unwrap());
+    let outcome = tran
+        .await
+        .map_err(|e| anyhow!("Failed to complete transaction: {e:?}"))?;
+    if outcome != TransactionResult::Committed {
+        bail!("Database transaction aborted");
+    }
     Ok(result)
 }
 

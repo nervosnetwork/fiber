@@ -120,6 +120,13 @@ benchmark-test:
 wasm-test:
 	export WORKING_DIR=$(shell pwd) && cd ./.github/wasm-test-runner && npm install && node ./index.js
 
+.PHONY: wasm-stop-test
+wasm-stop-test:
+	cargo build --target-dir "$(CARGO_TARGET_DIR)" -p fiber-wasm -p fiber-wasm-db-worker --target wasm32-unknown-unknown
+	wasm-bindgen --target web --out-dir "$(CARGO_TARGET_DIR)/wasm-stop-test/db" "$(CARGO_TARGET_DIR)/wasm32-unknown-unknown/debug/fiber_wasm_db_worker.wasm"
+	wasm-bindgen --target web --out-dir "$(CARGO_TARGET_DIR)/wasm-stop-test/fiber" "$(CARGO_TARGET_DIR)/wasm32-unknown-unknown/debug/fiber_wasm.wasm"
+	FIBER_DB_WASM_DIR="$(abspath $(CARGO_TARGET_DIR))/wasm-stop-test/db" FIBER_WASM_DIR="$(abspath $(CARGO_TARGET_DIR))/wasm-stop-test/fiber" node .github/wasm-test-runner/stop.js
+
 FUZZ_DURATION ?= 30
 .PHONY: fuzz
 fuzz:

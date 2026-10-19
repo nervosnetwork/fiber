@@ -61,6 +61,8 @@ impl Store {
         Ok(Self { chan })
     }
 
+    /// Request shutdown after all database clients have stopped issuing commands.
+    /// The JS worker wrapper acknowledges completion when its main loop exits.
     pub fn shutdown(self) {
         info!("Shutting down database Store..");
         let CommunicationChannel {
