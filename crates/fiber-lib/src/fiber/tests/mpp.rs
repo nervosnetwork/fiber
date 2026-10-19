@@ -7,7 +7,6 @@ use crate::{
     fiber::{
         channel::{
             ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
-            ReloadParams,
         },
         config::{
             CKB_SHANNONS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -3980,16 +3979,32 @@ async fn test_mpp_waiting_ack_settlement_hands_off_to_durable_retry_queue() {
     // Deterministically exercise the durable handoff midpoint: neither fulfill can be applied
     // until the outstanding commitment is acknowledged, so both must enter the channel retry
     // queue.
-    let mut payee_channel_state = node_2.get_channel_actor_state(payee_channel_id);
-    payee_channel_state.tlc_state.set_waiting_ack(true);
-    node_2
-        .update_channel_actor_state(
-            payee_channel_state,
-            Some(ReloadParams {
-                notify_changes: false,
-            }),
+    node_1
+        .hold_next_fiber_messages(
+            node_2.pubkey,
+            payee_channel_id,
+            crate::fiber::network::TestFiberMessageKind::RevokeAndAck,
+            1,
         )
         .await;
+    node_2
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id: payee_channel_id,
+                command: ChannelCommand::CommitmentSigned(None),
+            }),
+        ))
+        .expect("network actor alive");
+    node_1.wait_for_held_fiber_messages(1).await;
+    let payee_channel_state = node_2.get_channel_actor_state(payee_channel_id);
+    assert!(payee_channel_state.tlc_state.waiting_ack);
+    assert!(payee_channel_state
+        .session_v2
+        .as_ref()
+        .unwrap()
+        .outgoing
+        .is_some());
     let payee_channel_actor = node_2
         .get_channel_actor(payee_channel_id)
         .await

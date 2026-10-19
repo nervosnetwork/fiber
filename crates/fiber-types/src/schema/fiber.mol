@@ -200,6 +200,92 @@ table UdtArgInfo {
 
 vector UdtCfgInfos <UdtArgInfo>;
 
+// V2 messages have independent commitment, revocation and closing sessions.
+table OpenChannelV2 {
+    chain_hash: Byte32,
+    channel_id: Byte32,
+    funding_udt_type_script: ScriptOpt,
+    funding_amount: Uint128,
+    shutdown_script: Script,
+    reserved_ckb_amount: Uint64,
+    funding_fee_rate: Uint64,
+    commitment_fee_rate: Uint64,
+    max_tlc_value_in_flight: Uint128,
+    max_tlc_number_in_flight: Uint64,
+    commitment_delay_epoch: Uint64,
+    funding_pubkey: Pubkey,
+    tlc_basepoint: Pubkey,
+    first_per_commitment_point: Pubkey,
+    second_per_commitment_point: Pubkey,
+    channel_announcement_nonce: PubNonceOpt,
+    initial_commitment_nonce: PubNonce,
+    channel_flags: byte,
+    channel_features: byte,
+}
+
+table AcceptChannelV2 {
+    channel_id: Byte32,
+    funding_amount: Uint128,
+    shutdown_script: Script,
+    reserved_ckb_amount: Uint64,
+    max_tlc_value_in_flight: Uint128,
+    max_tlc_number_in_flight: Uint64,
+    funding_pubkey: Pubkey,
+    tlc_basepoint: Pubkey,
+    first_per_commitment_point: Pubkey,
+    second_per_commitment_point: Pubkey,
+    channel_announcement_nonce: PubNonceOpt,
+    initial_commitment_nonce: PubNonce,
+    channel_features: byte,
+}
+
+table CommitmentSignedV2 {
+    channel_id: Byte32,
+    commitment_number: Uint64,
+    funding_tx_partial_signature: Byte32,
+    funding_nonce: PubNonce,
+    revocation_nonce: PubNonceOpt,
+}
+
+struct RevokeAndAckV2 {
+    channel_id: Byte32,
+    commitment_number: Uint64,
+    revocation_partial_signature: Byte32,
+    revocation_nonce: PubNonce,
+    next_per_commitment_point: Pubkey,
+    next_commitment_nonce: PubNonce,
+}
+
+struct ChannelReadyV2 {
+    channel_id: Byte32,
+    next_commitment_number: Uint64,
+    next_commitment_nonce: PubNonce,
+}
+
+struct ReestablishChannelV2 {
+    channel_id: Byte32,
+    next_commitment_number: Uint64,
+    next_ack_number: Uint64,
+    next_local_commitment_nonce: PubNonce,
+}
+
+table ShutdownV2 {
+    channel_id: Byte32,
+    fee_rate: Uint64,
+    close_script: Script,
+    closing_nonce: PubNonce,
+}
+
+struct ClosingSignedV2 {
+    channel_id: Byte32,
+    partial_signature: Byte32,
+}
+
+struct TxCompleteV2 {
+    channel_id: Byte32,
+    initial_commitment_nonce: PubNonce,
+}
+
 union FiberMessage {
     Init,
     OpenChannel,
@@ -220,6 +306,15 @@ union FiberMessage {
     ClosingSigned,
     ReestablishChannel,
     AnnouncementSignatures,
+    OpenChannelV2,
+    AcceptChannelV2,
+    CommitmentSignedV2,
+    RevokeAndAckV2,
+    ChannelReadyV2,
+    ReestablishChannelV2,
+    ShutdownV2,
+    ClosingSignedV2,
+    TxCompleteV2,
 }
 
 option PaymentPreimageOpt (Byte32);

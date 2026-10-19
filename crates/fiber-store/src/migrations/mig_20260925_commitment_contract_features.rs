@@ -1,12 +1,24 @@
-use super::decode_as_new;
-use crate::migration::{Migration, MigrationStore};
+use bincode::Options;
 use tracing::info;
+
+use crate::migration::{Migration, MigrationStore, MIGRATION_VERSION_KEY};
+
+use super::decode_as_new;
 
 const MIGRATION_DB_VERSION: &str = "20260925120000";
 
 const CHANNEL_ACTOR_STATE_PREFIX: &[u8] = &[0x00];
 const CHANNEL_OPEN_RECORD_PREFIX: &[u8] = &[201];
 const WATCHTOWER_CHANNEL_PREFIX: &[u8] = &[224];
+
+// Schema detection must consume the entire record, not ignore a future suffix.
+fn decode_exact<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .map_err(|e| e.to_string())
+}
 
 // Old (0.9.1) types, serialized without the `commitment_contract_features` field.
 pub use fiber_types_090::channel::ChannelActorData as OldChannelActorData;
@@ -174,7 +186,67 @@ impl MigrationObj {
 }
 
 impl Migration for MigrationObj {
+    fn preflight(&self, store: &dyn MigrationStore) -> Result<(), String> {
+        let current = store.get(MIGRATION_VERSION_KEY).is_some_and(|version| {
+            version.as_slice() >= MIGRATION_DB_VERSION.as_bytes()
+        });
+        let mut affected = Vec::new();
+        // Include closed history in bounded backend pages. This hook runs even
+        // at the latest epoch, before earlier migrations or any version write.
+        for (_key, value) in store.iter_prefix(CHANNEL_ACTOR_STATE_PREFIX) {
+            let decoded = fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data(&value);
+            if current {
+                decoded.map_err(|e| format!("Invalid current channel schema; database preserved: {e}"))?;
+                continue;
+            }
+            if decoded.is_ok() {
+                continue;
+            }
+            if let Ok(channel) = decode_exact::<NewChannelActorData>(&value) {
+                if channel.commitment_contract_features.bits() != 0 {
+                    affected.push(channel.id.to_string());
+                } else {
+                    return Err("Invalid published legacy channel; database preserved".to_owned());
+                }
+            } else if let Ok(old) = decode_exact::<OldChannelActorData>(&value) {
+                let new = convert_channel_actor_data(old)?;
+                let bytes = bincode::serialize(&new).map_err(|e| e.to_string())?;
+                fiber_types::channel_v2_validation::decode_and_validate_channel_actor_data(&bytes)?;
+            } else if decode_exact::<fiber_types_081::ChannelActorData>(&value).is_err() {
+                return Err(format!("Unrecognized pre-V2 channel record; database preserved: {}", decoded.err().unwrap_or_default()));
+            }
+        }
+        if !affected.is_empty() {
+            affected.sort();
+            return Err(format!(
+                "Cannot upgrade unpublished full-hash V1 channels to V2; recover with the original binary. Affected channel IDs: {}. Database records and version preserved.",
+                affected.join(", ")
+            ));
+        }
+        // Validate conversion of all three prefixes before the first write.
+        for (_key, value) in store.iter_prefix(CHANNEL_OPEN_RECORD_PREFIX) {
+            if decode_exact::<NewChannelOpenRecord>(&value).is_ok() {
+                continue;
+            }
+            if current {
+                return Err("Invalid current channel open record; database preserved".to_owned());
+            }
+            convert_channel_open_record(decode_exact::<OldChannelOpenRecord>(&value)?)?;
+        }
+        for (_key, value) in store.iter_prefix(WATCHTOWER_CHANNEL_PREFIX) {
+            if decode_exact::<NewChannelData>(&value).is_ok() {
+                continue;
+            }
+            if current {
+                return Err("Invalid current watchtower channel; database preserved".to_owned());
+            }
+            convert_channel_data(decode_exact::<OldChannelData>(&value)?)?;
+        }
+        Ok(())
+    }
+
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String> {
+        self.preflight(store)?;
         info!(
             "Migrating to {}: adding commitment_contract_features ...",
             MIGRATION_DB_VERSION
@@ -199,12 +271,12 @@ fn migrate_channel_actor_data(store: &dyn MigrationStore) -> Result<(), String> 
     let mut skipped = 0u64;
 
     for (key, value) in entries {
-        if bincode::deserialize::<NewChannelActorData>(&value).is_ok() {
+        if fiber_types::channel_v2_validation::decode_channel_actor_data(&value).is_ok() {
             skipped += 1;
             continue;
         }
 
-        let old: OldChannelActorData = bincode::deserialize(&value)
+        let old: OldChannelActorData = decode_exact(&value)
             .map_err(|e| format!("Failed to deserialize old ChannelActorData: {e}"))?;
         let new = convert_channel_actor_data(old)?;
         let new_bytes = bincode::serialize(&new)
@@ -227,12 +299,12 @@ fn migrate_channel_open_record(store: &dyn MigrationStore) -> Result<(), String>
     let mut skipped = 0u64;
 
     for (key, value) in entries {
-        if bincode::deserialize::<NewChannelOpenRecord>(&value).is_ok() {
+        if decode_exact::<NewChannelOpenRecord>(&value).is_ok() {
             skipped += 1;
             continue;
         }
 
-        let old: OldChannelOpenRecord = bincode::deserialize(&value)
+        let old: OldChannelOpenRecord = decode_exact(&value)
             .map_err(|e| format!("Failed to deserialize old ChannelOpenRecord: {e}"))?;
         let new = convert_channel_open_record(old)?;
         let new_bytes = bincode::serialize(&new)
@@ -255,12 +327,12 @@ fn migrate_watchtower_channel_data(store: &dyn MigrationStore) -> Result<(), Str
     let mut skipped = 0u64;
 
     for (key, value) in entries {
-        if bincode::deserialize::<NewChannelData>(&value).is_ok() {
+        if decode_exact::<NewChannelData>(&value).is_ok() {
             skipped += 1;
             continue;
         }
 
-        let old: OldChannelData = bincode::deserialize(&value)
+        let old: OldChannelData = decode_exact(&value)
             .map_err(|e| format!("Failed to deserialize old watchtower ChannelData: {e}"))?;
         let new = convert_channel_data(old)?;
         let new_bytes = bincode::serialize(&new)

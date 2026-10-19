@@ -19,16 +19,16 @@ use ckb_types::{
     packed::{CellInput, CellOutput},
     prelude::Pack,
 };
-use fiber_types::CommitmentContractFeatures;
+use fiber_types::ChannelFeatures;
 use molecule::prelude::Entity;
 
 const FEE_RATE_WEIGHT_SCALE: u128 = 1000;
 
 fn commitment_tx_size(
     udt_type_script: &Option<Script>,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> usize {
-    let commitment_lock_args_len = commitment_contract_features.lock_args_len();
+    let commitment_lock_args_len = channel_features.lock_args_len();
     let commitment_lock_script = get_script_by_contract(
         Contract::CommitmentLock,
         &vec![0u8; commitment_lock_args_len],
@@ -112,10 +112,10 @@ pub(crate) fn shutdown_tx_size(
 pub(crate) fn checked_calculate_commitment_tx_fee(
     fee_rate: u64,
     udt_type_script: &Option<Script>,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> Result<u64, ProcessingChannelError> {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
-    let tx_size = commitment_tx_size(udt_type_script, commitment_contract_features) as u64;
+    let tx_size = commitment_tx_size(udt_type_script, channel_features) as u64;
     checked_fee_from_rate(fee_rate, tx_size, "Commitment")
 }
 
@@ -185,13 +185,13 @@ pub(crate) fn calculate_tlc_forward_fee(
 pub(crate) fn check_commitment_reserved_fee(
     commitment_fee_rate: u64,
     udt_type_script: &Option<Script>,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
     reserved_fee: u64,
 ) -> ProcessingChannelResult {
     let commitment_fee = checked_calculate_commitment_tx_fee(
         commitment_fee_rate,
         udt_type_script,
-        commitment_contract_features,
+        channel_features,
     )?;
     let required_reserved_fee = commitment_fee.checked_mul(2).ok_or_else(|| {
         ProcessingChannelError::InvalidParameter(format!(
@@ -211,14 +211,10 @@ pub(crate) fn check_commitment_reserved_fee(
 
 fn minimum_acceptor_reserved_ckb_amount(
     udt_type_script: &Option<Script>,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> Result<u64, ProcessingChannelError> {
-    let occupied_capacity = occupied_capacity(
-        &Script::default(),
-        udt_type_script,
-        commitment_contract_features,
-    )?
-    .as_u64();
+    let occupied_capacity =
+        occupied_capacity(&Script::default(), udt_type_script, channel_features)?.as_u64();
     occupied_capacity
         .checked_add(DEFAULT_MIN_SHUTDOWN_FEE)
         .ok_or_else(|| {
@@ -235,7 +231,7 @@ pub(crate) fn check_open_channel_parameters(
     reserved_ckb_amount: u64,
     funding_fee_rate: u64,
     commitment_fee_rate: u64,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
     commitment_delay_epoch: u64,
     max_tlc_number_in_flight: u64,
 ) -> ProcessingChannelResult {
@@ -249,12 +245,8 @@ pub(crate) fn check_open_channel_parameters(
     }
 
     // reserved_ckb_amount
-    let occupied_capacity = occupied_capacity(
-        shutdown_script,
-        udt_type_script,
-        commitment_contract_features,
-    )?
-    .as_u64();
+    let occupied_capacity =
+        occupied_capacity(shutdown_script, udt_type_script, channel_features)?.as_u64();
     if reserved_ckb_amount < occupied_capacity {
         return Err(ProcessingChannelError::InvalidParameter(format!(
             "Reserved CKB amount {} is less than {}",
@@ -262,7 +254,7 @@ pub(crate) fn check_open_channel_parameters(
         )));
     }
     let minimum_local_reserved_ckb_amount =
-        minimum_acceptor_reserved_ckb_amount(udt_type_script, commitment_contract_features)?;
+        minimum_acceptor_reserved_ckb_amount(udt_type_script, channel_features)?;
     if reserved_ckb_amount
         .checked_add(minimum_local_reserved_ckb_amount)
         .is_none()
@@ -299,7 +291,7 @@ pub(crate) fn check_open_channel_parameters(
     check_commitment_reserved_fee(
         commitment_fee_rate,
         udt_type_script,
-        commitment_contract_features,
+        channel_features,
         reserved_fee,
     )?;
 

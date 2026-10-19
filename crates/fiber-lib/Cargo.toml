@@ -129,6 +129,8 @@ pprof = ["dep:pprof"]
 ciborium = "0.2.2"
 ckb-testtool = "1"
 fiber-types = { path = "../fiber-types", features = ["sample"] }
+fiber-types-0100 = { package = "fiber-types", version = "0.10.0-rc1", features = ["sample", "watchtower"] }
+fiber-types-090 = { package = "fiber-types", version = "0.9.1", features = ["sample", "watchtower"] }
 futures = "0.3.31"
 tempfile = "3.10.1"
 

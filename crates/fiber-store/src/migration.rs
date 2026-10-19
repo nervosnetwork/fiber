@@ -15,9 +15,15 @@ pub trait MigrationStore {
 
     /// Collect all key-value pairs whose keys start with the given prefix.
     fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
+
+    /// Read a prefix in bounded backend pages, without retaining all record payloads.
+    fn iter_prefix(&self, prefix: &[u8]) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_>;
 }
 
 impl<T: StorageBackend + ?Sized> MigrationStore for T {
+    fn iter_prefix(&self, prefix: &[u8]) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + '_> {
+        Box::new(self.prefix_iterator(prefix.to_vec()))
+    }
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         StorageBackend::get(self, key)
     }
@@ -136,6 +142,11 @@ pub trait Migration: Send + Sync {
     /// Execute migration using a storage backend.
     fn migrate(&self, store: &dyn MigrationStore) -> Result<(), String>;
 
+    /// Validate the database without writes, before any migration is executed.
+    fn preflight(&self, _store: &dyn MigrationStore) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Whether this migration is a breaking change requiring user action.
     fn is_break_change(&self) -> bool {
         false
@@ -218,6 +229,18 @@ impl Migrations {
         progress_fn: MigrateProgressFn,
     ) -> Result<(), MigrateError> {
         let latest_version = self.effective_latest_version();
+
+        // Run every preflight before stamping unversioned databases or applying
+        // earlier migrations. Validation while migrating can corrupt a mixed DB
+        // before an incompatible record is discovered.
+        for migration in self.migrations.values() {
+            migration
+                .preflight(store)
+                .map_err(|error| MigrateError::MigrationFailed {
+                    version: migration.version().to_string(),
+                    error,
+                })?;
+        }
 
         let db_version = match self.get_db_version(store) {
             None => {
