@@ -12911,3 +12911,91 @@ fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
         &tlc.payment_amount.to_le_bytes()
     );
 }
+
+/// While deferring peer TLC updates, as a dual-owed replay leaves a node, an update that reaches
+/// it is queued, and the queue is flushed when the CommitmentSigned behind the update arrives.
+/// If the connection drops in between, the peer replays the update together with that
+/// CommitmentSigned after the reconnect. The queue must not outlive the connection: with the old
+/// copy still queued, `flush_deferred_peer_tlc_updates` meets the same update twice, and its
+/// error drops the CommitmentSigned, so the peer never gets the RevokeAndAck for it.
+#[tokio::test]
+async fn test_deferred_peer_tlc_updates_do_not_outlive_the_connection() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 50_000_000_000, true).await;
+    for node in [&node_a, &node_b] {
+        node.add_unexpected_events(vec!["is not the expected next id".to_string()])
+            .await;
+    }
+
+    // A defers what its peer sends.
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::SetDeferPeerTlcUpdates(true),
+            }),
+        ))
+        .expect("enable deferred peer TLC updates");
+
+    // B pays A: the AddTlc reaches A and is queued, B's CommitmentSigned is lost with the connection.
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    let payment = node_b
+        .send_payment_keysend(&node_a, 100_000_000, false)
+        .await
+        .expect("B pays A");
+    node_b.wait_for_held_fiber_messages(1).await;
+    // Let the AddTlc get through to A before the connection goes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    disconnect_peers_and_wait_for_channel_offline(
+        &mut node_a,
+        &mut node_b,
+        channel_id,
+        "disconnect with the CommitmentSigned lost",
+    )
+    .await;
+    let lost_messages = take_held_fiber_messages_bounded(&node_b, "lost CommitmentSigned").await;
+    assert_eq!(lost_messages.len(), 1);
+
+    // After the reconnect B replays the AddTlc and the CommitmentSigned, and the payment goes through.
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        node_b.wait_until_success(payment.payment_hash),
+    )
+    .await
+    .expect("the replayed CommitmentSigned must be acknowledged, so the payment completes");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let settled = [&node_a, &node_b].iter().all(|node| {
+            let state = node.get_channel_actor_state(channel_id);
+            !state.tlc_state.waiting_ack
+                && state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_some()
+                && state.get_local_commitment_number() == state.get_remote_commitment_number()
+        });
+        if settled {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the channel did not settle after the replay"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    for node in [&node_a, &node_b] {
+        assert_eq!(
+            node.get_channel_actor_state(channel_id).state,
+            ChannelState::ChannelReady
+        );
+        assert!(node.get_triggered_unexpected_events().await.is_empty());
+    }
+}

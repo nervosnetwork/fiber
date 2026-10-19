@@ -5539,6 +5539,22 @@ impl ChannelActorState {
         }
     }
 
+    /// Forgets the peer updates that were deferred on the connection that just dropped. The
+    /// peer replays every update it has not had acknowledged once we reconnect, so keeping the
+    /// queue would hold the same update twice, and `flush_deferred_peer_tlc_updates` would fail
+    /// on the second copy and drop the `CommitmentSigned` it was flushed for.
+    fn drop_deferred_peer_tlc_updates(&mut self) {
+        if !self.deferred_peer_tlc_updates.is_empty() {
+            debug!(
+                "Drop {} deferred peer TLC updates of channel {} on disconnect",
+                self.deferred_peer_tlc_updates.len(),
+                self.get_id()
+            );
+        }
+        self.defer_peer_tlc_updates = false;
+        self.deferred_peer_tlc_updates.clear();
+    }
+
     fn max_deferred_peer_tlc_updates(&self) -> usize {
         self.local_constraints
             .max_tlc_number_in_flight
@@ -5863,6 +5879,7 @@ impl ChannelActorState {
     }
 
     fn on_peer_disconnected(&mut self) {
+        self.drop_deferred_peer_tlc_updates();
         match self.offline_restore_mode() {
             Some(OfflineChannelRestoreMode::WatchChain) => self.mark_watching_chain_offline(),
             _ => self.mark_reestablishing_offline(),
