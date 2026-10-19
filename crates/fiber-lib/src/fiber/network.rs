@@ -110,8 +110,8 @@ use crate::fiber::{
     SettleTlcSetCommand,
 };
 use crate::invoice::{
-    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
-    SettleInvoiceError,
+    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceError, InvoiceStore,
+    PreimageStore, SettleInvoiceError,
 };
 use crate::utils::actor::ActorHandleLogGuard;
 use crate::{now_timestamp_as_millis_u64, Error};
@@ -3232,7 +3232,8 @@ where
                 }
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
-                let payment_request = match payment_request.build_send_payment_data() {
+                let payment_request = match payment_request.build_send_payment_data(state.currency)
+                {
                     Ok(payment) => payment,
                     Err(err) => {
                         error!("Failed to build payment from command: {:?}", err);
@@ -3252,14 +3253,15 @@ where
             }
             NetworkActorCommand::SendPaymentWithRouter(payment_request, reply) => {
                 let source = self.network_graph.read().await.get_source_pubkey();
-                let payment_request = match payment_request.build_send_payment_data(source) {
-                    Ok(payment) => payment,
-                    Err(err) => {
-                        error!("Failed to build payment from command: {:?}", err);
-                        let _ = reply.send(Err(err.to_string()));
-                        return Ok(());
-                    }
-                };
+                let payment_request =
+                    match payment_request.build_send_payment_data(source, state.currency) {
+                        Ok(payment) => payment,
+                        Err(err) => {
+                            error!("Failed to build payment from command: {:?}", err);
+                            let _ = reply.send(Err(err.to_string()));
+                            return Ok(());
+                        }
+                    };
                 let _ = self
                     .start_payment_actor(
                         myself,
@@ -5418,6 +5420,8 @@ where
 
 pub struct NetworkActorState<S, C> {
     store: S,
+    // Keep the configured network available when validating outgoing invoices.
+    currency: Currency,
     state_to_be_persisted: PersistentNetworkActorState,
     store_actor: Option<ActorRef<StoreActorMessage>>,
     // The name of the node to be announced to the network, may be empty.
@@ -7925,6 +7929,7 @@ where
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
+            currency: config.currency(),
             state_to_be_persisted,
             store_actor: self.store_actor.clone(),
             node_name: config.announced_node_name,
