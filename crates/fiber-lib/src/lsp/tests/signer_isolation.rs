@@ -7,6 +7,9 @@ use ckb_types::{
     packed::{Script, Transaction},
     prelude::*,
 };
+use fiber_json_types::{
+    ChannelSigningStatus, ChannelSigningTransition, InvoiceResult, OpenChannelResult,
+};
 use fiber_lsp_sdk::{ChannelSigner, MemoryStore, RootSigner};
 use hyper::{
     header::{HeaderValue, AUTHORIZATION},
@@ -24,8 +27,15 @@ use tempfile::{tempdir, TempDir};
 
 use super::lsp_config;
 use crate::{
-    fiber::{network::NetworkActorMessage, payment::SendPaymentCommand},
-    fiber_types::{ChannelState, Hash256, Privkey},
+    fiber::{
+        channel::{ChannelActorStateStore, ChannelOpenRecordStore, PEER_CHANNEL_RESPONSE_TIMEOUT},
+        network::{
+            AcceptChannelCommand, FiberActorCommand, FiberActorMessage, NetworkActorMessage,
+            OpenChannelCommand, OpenChannelWithExternalFundingCommand,
+        },
+        payment::SendPaymentCommand,
+    },
+    fiber_types::{ChannelOpeningStatus, ChannelState, CloseFlags, Hash256, Privkey},
     lsp::{
         BiscuitTokenIssuer, FiberTenantRuntimeFactory, LspService, LspServiceArgs,
         LspServiceMessage, TenantId,
@@ -51,8 +61,9 @@ use crate::{
     },
     store::NodeNamespace,
     tests::{
-        gen_rpc_config, get_test_root_actor, init_tracing, wait_until_async_timeout,
-        wait_until_node_supports_trampoline_routing, NetworkNode, HUGE_CKB_AMOUNT,
+        establish_channel_between_nodes, gen_rpc_config, get_test_root_actor, init_tracing,
+        wait_until_async_timeout, wait_until_node_supports_trampoline_routing, ChannelParameters,
+        NetworkNode, HUGE_CKB_AMOUNT,
     },
 };
 
@@ -742,9 +753,180 @@ async fn tenant_rpc_allowlist_rejects_control_methods_but_reaches_payment_valida
 }
 
 #[tokio::test]
+async fn hosted_tenant_core_rejects_local_channel_creation() {
+    let fixture = TestLspFixture::new("tenant-reject-local-channel").await;
+    let (tenant_id, _, _, _) = fixture.register_tenant(1).await;
+    let context = ractor::call!(fixture._lsp_actor, |reply| {
+        crate::lsp::LspServiceMessage::GetTenantRpcContext(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .unwrap();
+    let tenant_store = fixture
+        .public_t
+        .store
+        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+
+    let rejected = ractor::call!(context.fiber_actor, |reply| {
+        FiberActorMessage::new_command(FiberActorCommand::OpenChannel(
+            OpenChannelCommand {
+                pubkey: fixture.public_t.pubkey,
+                funding_amount: 100_000_000_000,
+                public: false,
+                one_way: false,
+                shutdown_script: None,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+            },
+            reply,
+        ))
+    })
+    .unwrap();
+    assert!(rejected.unwrap_err().contains("external signer material"));
+
+    let rejected = ractor::call!(context.fiber_actor, |reply| {
+        FiberActorMessage::new_command(FiberActorCommand::OpenChannelWithExternalFunding(
+            OpenChannelWithExternalFundingCommand {
+                pubkey: fixture.public_t.pubkey,
+                funding_amount: 100_000_000_000,
+                public: false,
+                shutdown_script: Default::default(),
+                funding_lock_script: Default::default(),
+                funding_lock_script_cell_deps: vec![],
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_value_in_flight: None,
+                max_tlc_number_in_flight: None,
+                external_channel_signer: None,
+            },
+            reply,
+        ))
+    })
+    .unwrap();
+    assert!(rejected.unwrap_err().contains("external signer material"));
+
+    // Internal AcceptChannel calls must fail even without an incoming offer.
+    let rejected = ractor::call!(context.fiber_actor, |reply| {
+        FiberActorMessage::new_command(FiberActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: Hash256::from([0xff; 32]),
+                funding_amount: 100_000_000_000,
+                shutdown_script: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+                min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
+            },
+            reply,
+        ))
+    })
+    .unwrap();
+    assert!(rejected
+        .unwrap_err()
+        .contains("do not accept inbound channels"));
+    assert!(tenant_store.get_all_channel_states().is_empty());
+    assert!(tenant_store.get_channel_open_records().is_empty());
+}
+
+#[tokio::test]
+async fn hosted_tenant_rejects_inbound_before_and_after_its_own_channel() {
+    let fixture = TestLspFixture::new("tenant-reject-inbound").await;
+    let (tenant_id, tenant_pubkey, _, client) = fixture.register_tenant(1).await;
+    let context = ractor::call!(fixture._lsp_actor, |reply| {
+        crate::lsp::LspServiceMessage::GetTenantRpcContext(tenant_id.clone(), reply)
+    })
+    .unwrap()
+    .unwrap();
+    let tenant_store = fixture
+        .public_t
+        .store
+        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+    let mut existing_channel = None;
+
+    for expected_count in [0, 1] {
+        if expected_count == 1 {
+            let (id, signer) = open_hosted_external_channel(&fixture, &client).await;
+            signer.finish_opening(&fixture.public_t, id).await;
+            wait_until_async_timeout(|| async {
+                tenant_store
+                    .get_channel_actor_state(&id)
+                    .is_some_and(|channel| channel.state == ChannelState::ChannelReady)
+            })
+            .await;
+            existing_channel = Some(id);
+        }
+        let records_before = tenant_store.get_channel_open_records().len();
+        let opened: OpenChannelResult = fixture
+            .admin_client
+            .request(
+                "open_channel",
+                rpc_params![serde_json::json!({
+                    "pubkey": tenant_pubkey,
+                    "funding_amount": "0x174876e800",
+                    "public": false,
+                })],
+            )
+            .await
+            .unwrap();
+        let rejected_id: Hash256 = opened.temporary_channel_id.into();
+        wait_until_async_timeout(|| async {
+            fixture
+                .public_t
+                .store
+                .get_channel_open_record(&rejected_id)
+                .is_some_and(|record| record.status == ChannelOpeningStatus::Failed)
+                && fixture
+                    .public_t
+                    .get_channel_actor_state_unchecked(rejected_id)
+                    .is_none()
+        })
+        .await;
+        let failed = fixture
+            .public_t
+            .store
+            .get_channel_open_record(&rejected_id)
+            .unwrap();
+        assert!(failed
+            .failure_detail
+            .unwrap()
+            .contains("hosted tenants do not accept inbound channels"));
+        assert_eq!(tenant_store.get_all_channel_states().len(), expected_count);
+        assert_eq!(
+            tenant_store.get_channel_open_records().len(),
+            records_before
+        );
+        let pending = ractor::call!(context.fiber_actor, |reply| {
+            FiberActorMessage::new_command(FiberActorCommand::GetPendingAcceptChannels(reply))
+        })
+        .unwrap()
+        .unwrap();
+        assert!(pending.is_empty());
+        if let Some(id) = existing_channel {
+            let channel = tenant_store.get_channel_actor_state(&id).unwrap();
+            assert_eq!(channel.state, ChannelState::ChannelReady);
+            assert_eq!(channel.get_remote_pubkey(), fixture.public_t.pubkey);
+            assert!(channel.signer.is_none());
+            assert!(!channel.channel_signer.is_local());
+        }
+    }
+}
+
+#[tokio::test]
 async fn pending_signature_survives_cold_queries_and_resumes_after_eviction() {
     let fixture = TestLspFixture::new("hosted-external-evict").await;
-    let (tenant_id, _, _, client) = fixture.register_tenant(1).await;
+    let (tenant_id, tenant_pubkey, _, client) = fixture.register_tenant(1).await;
     let (channel_id, sdk) = open_hosted_external_channel(&fixture, &client).await;
     let before = sdk.pending_status(channel_id).await;
     assert!(!fixture
@@ -765,6 +947,23 @@ async fn pending_signature_survives_cold_queries_and_resumes_after_eviction() {
         evicted.runtime_status,
         LspTenantRuntimeStatus::Cold
     ));
+    // Internal-channel ownership survives eviction and is scoped to Public T.
+    assert!(fixture
+        .public_t
+        .store
+        .is_internal_channel(&tenant_pubkey)
+        .unwrap());
+    assert!(!fixture
+        .public_t
+        .store
+        .is_internal_channel(&fixture.public_t.pubkey)
+        .unwrap());
+    assert!(!fixture
+        .public_t
+        .store
+        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()))
+        .is_internal_channel(&tenant_pubkey)
+        .unwrap());
     let status: LspServiceStatus = fixture
         .admin_client
         .request("lsp_get_status", rpc_params![])
@@ -947,94 +1146,205 @@ async fn channel_signature_submission_rejects_invalid_input_and_is_idempotent() 
 }
 
 #[tokio::test]
-async fn hosted_external_signer_inbound_payment_requires_signing_during_commitment() {
-    let mut fixture = TestLspFixture::new("hosted-inbound-external-pay").await;
-    let (_tenant_id, _u1_pubkey, _u1_token, u1_client) = fixture.register_tenant(1).await;
-
-    let mut payer = NetworkNode::new_with_node_name("lsp-external-payer").await;
-    payer.connect_to(&mut fixture.public_t).await;
-
-    crate::tests::establish_channel_between_nodes(
+async fn host_force_closes_non_hosted_peer_missing_ack() {
+    let mut fixture = TestLspFixture::new("host-normal-peer-ack").await;
+    let mut peer = NetworkNode::new_with_node_name("host-normal-peer").await;
+    peer.connect_to(&mut fixture.public_t).await;
+    let (channel_id, _) = establish_channel_between_nodes(
         &mut fixture.public_t,
-        &mut payer,
-        crate::tests::ChannelParameters {
-            public: true,
-            node_a_funding_amount: 100_000_000_000,
+        &mut peer,
+        ChannelParameters {
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
             node_b_funding_amount: HUGE_CKB_AMOUNT,
             ..Default::default()
         },
     )
     .await;
+    // Hold the sender's CommitmentSigned, so the peer never produces an ACK
+    // or advances nonces. Holding only its ACK would reorder later messages.
+    fixture
+        .public_t
+        .hold_next_fiber_messages(
+            peer.pubkey,
+            channel_id,
+            crate::fiber::network::TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    fixture
+        .public_t
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(peer.pubkey),
+            amount: Some(1_000),
+            keysend: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    fixture.public_t.wait_for_held_fiber_messages(1).await;
+    let started = std::time::Instant::now();
+    assert!(fixture
+        .public_t
+        .get_channel_actor_state(channel_id)
+        .is_waiting_tlc_ack());
+    tokio::time::timeout(
+        Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT) + Duration::from_secs(10),
+        async {
+            loop {
+                if matches!(
+                    fixture.public_t.get_channel_actor_state(channel_id).state,
+                    ChannelState::Closed(flags)
+                        if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        },
+    )
+    .await
+    .expect("ordinary peers retain the ACK timeout even when Public T runs an LSP");
+    assert!(started.elapsed() >= Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT - 500));
+}
 
-    crate::tests::test_utils::wait_for_network_graph_update(&payer, 1).await;
+#[tokio::test]
+async fn hosted_external_signer_inbound_payment_requires_signing_during_commitment() {
+    let mut fixture = TestLspFixture::new("hosted-inbound-offline-signer").await;
+    let mut payer = NetworkNode::new_with_node_name("hosted-inbound-payer").await;
+    payer.connect_to(&mut fixture.public_t).await;
+    // T initiates so its auto-accept configuration cannot race manual acceptance.
+    establish_channel_between_nodes(
+        &mut fixture.public_t,
+        &mut payer,
+        ChannelParameters {
+            public: true,
+            node_a_funding_amount: HUGE_CKB_AMOUNT,
+            node_b_funding_amount: HUGE_CKB_AMOUNT,
+            ..Default::default()
+        },
+    )
+    .await;
     wait_until_node_supports_trampoline_routing(&payer, &fixture.public_t).await;
 
-    let (channel_id, sdk) = open_hosted_external_channel(&fixture, &u1_client).await;
+    let (tenant_id, _, _, client) = fixture.register_tenant(1).await;
+    let (channel_id, signer) = open_hosted_external_channel(&fixture, &client).await;
+    signer.finish_opening(&fixture.public_t, channel_id).await;
+    let tenant_store = fixture
+        .public_t
+        .store
+        .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str()));
+    // Do not process signing requests until after the host ACK timeout has elapsed.
 
-    sdk.finish_opening(&fixture.public_t, channel_id).await;
-
-    // Create hosted invoice for tenant
     let payment_preimage = Hash256::from([0xab; 32]);
-    let invoice: fiber_json_types::InvoiceResult = u1_client
+    let invoice: InvoiceResult = client
         .request(
             "new_invoice",
-            rpc_params![fiber_json_types::NewInvoiceParams {
-                amount: 1_000,
-                description: Some("inbound to external signer hosted channel".to_string()),
-                currency: fiber_json_types::Currency::Fibd,
-                payment_preimage: Some(payment_preimage.into()),
-                payment_hash: None,
-                expiry: Some(60 * 60),
-                fallback_address: None,
-                final_expiry_delta: None,
-                udt_type_script: None,
-                hash_algorithm: None,
-                allow_mpp: None,
-                allow_trampoline_routing: Some(true),
-            }],
+            rpc_params![serde_json::json!({
+                "amount": "0x3e8",
+                "currency": "Fibd",
+                "payment_preimage": payment_preimage,
+                "expiry": "0xe10",
+            })],
         )
         .await
-        .expect("create hosted invoice");
+        .expect("create tenant invoice");
     let payment_hash: Hash256 = invoice.invoice.data.payment_hash.into();
     crate::fiber::tests::external_signer_restart::approve_fixture_payment(
-        &sdk.signer,
+        &signer.signer,
         payment_hash,
         payment_preimage,
         1_000,
         true,
     )
     .await;
-
-    let payment_response = payer
+    let payment = payer
         .send_payment(SendPaymentCommand {
             invoice: Some(invoice.invoice_address),
             max_fee_amount: Some(500),
             ..Default::default()
         })
         .await
-        .expect("send payment to hosted tenant");
-    assert_eq!(payment_response.payment_hash, payment_hash);
-
-    // Sign incoming commitment and TLC removal until invoice is marked Paid
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            sdk.try_sign_pending(channel_id).await;
-            let res: Result<fiber_json_types::GetInvoiceResult, _> = u1_client
-                .request(
-                    "get_invoice",
-                    rpc_params![fiber_json_types::InvoiceParams {
-                        payment_hash: payment_hash.into(),
-                    }],
-                )
-                .await;
-            if let Ok(inv) = res {
-                if inv.status == fiber_json_types::CkbInvoiceStatus::Paid {
-                    break;
-                }
+        .expect("payer starts payment without the external signer");
+    assert_eq!(payment.payment_hash, payment_hash);
+    wait_until_async_timeout(|| async {
+        let status: fiber_json_types::GetChannelSigningStatusResult = client
+            .request(
+                "get_channel_signing_status",
+                rpc_params![serde_json::json!({ "channel_id": channel_id })],
+            )
+            .await
+            .expect("query pending signature without signing");
+        matches!(
+            status.status,
+            ChannelSigningStatus::SignatureRequired {
+                transition: ChannelSigningTransition::CompleteReceivedCommitment,
+                ..
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        )
+    })
+    .await;
+    let pending = tenant_store
+        .get_channel_actor_state(&channel_id)
+        .unwrap()
+        .signing_context
+        .pending_signature
+        .clone()
+        .unwrap();
+    let before = fixture.public_t.get_channel_actor_state(channel_id);
+    assert!(before.is_waiting_tlc_ack());
+    // Cross a real ACK timeout without changing actor state.
+    tokio::time::sleep(Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT + 500)).await;
+    let after = fixture.public_t.get_channel_actor_state(channel_id);
+    assert_eq!(after.state, ChannelState::ChannelReady);
+    assert!(after.is_waiting_tlc_ack());
+    assert_eq!(after.commitment_numbers, before.commitment_numbers);
+    assert_eq!(
+        tenant_store
+            .get_channel_actor_state(&channel_id)
+            .unwrap()
+            .signing_context
+            .pending_signature
+            .as_ref()
+            .unwrap()
+            .request_id,
+        pending.request_id,
+        "waiting must preserve the immutable signing request"
+    );
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            signer.try_sign_pending(channel_id).await;
+            if payer.get_payment_status(payment_hash).await
+                == crate::fiber_types::PaymentStatus::Success
+                && !fixture
+                    .public_t
+                    .get_channel_actor_state(channel_id)
+                    .is_waiting_tlc_ack()
+                && !tenant_store
+                    .get_channel_actor_state(&channel_id)
+                    .unwrap()
+                    .signing_context
+                    .is_awaiting_signature()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("payer payment should succeed after external signer completes signing");
+    .expect("payment completes when the external signer returns");
+    assert_eq!(
+        fixture.public_t.get_channel_actor_state(channel_id).state,
+        ChannelState::ChannelReady
+    );
+    let invoice: fiber_json_types::GetInvoiceResult = client
+        .request(
+            "get_invoice",
+            rpc_params![fiber_json_types::InvoiceParams {
+                payment_hash: payment_hash.into(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(invoice.status, fiber_json_types::CkbInvoiceStatus::Paid);
 }

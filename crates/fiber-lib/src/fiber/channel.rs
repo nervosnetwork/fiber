@@ -446,6 +446,9 @@ pub struct ChannelEphemeralConfig {
     pub funding_timeout_seconds: u64,
     // Timeout to abort an external funding channel while waiting for signed tx submission
     pub external_funding_timeout_seconds: u64,
+    /// Whether this is Public T's internal channel to a registered hosted tenant.
+    /// Resolved at actor startup or restore, independently of runtime or signer availability.
+    pub is_internal_channel: bool,
     // Runtime state for external funding flow; this is intentionally not persisted.
     pub external_funding: ExternalFundingRuntime,
 }
@@ -456,6 +459,7 @@ impl Default for ChannelEphemeralConfig {
             funding_timeout_seconds: DEFAULT_FUNDING_TIMEOUT_SECONDS,
             external_funding_timeout_seconds: DEFAULT_EXTERNAL_FUNDING_TIMEOUT_SECONDS,
             external_funding: Default::default(),
+            is_internal_channel: false,
         }
     }
 }
@@ -3385,7 +3389,7 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
-        warn!(channel_id = %state.get_id(), "Pending signature reached TLC on-chain safety deadline");
+        warn!(channel_id = %state.get_id(), "Channel reached TLC on-chain safety deadline");
         // Do not discard the request until a usable commitment has been obtained
         // and shutdown has succeeded. No self-message may interleave this transition.
         self.handle_shutdown_command(
@@ -4283,21 +4287,9 @@ where
                 }
             }
             ChannelEvent::CheckActiveChannel => {
-                if state.peer_does_not_reply_ack_in_time() && !state.is_closed() {
+                if state.channel_activity_timed_out() {
                     error!(
-                        "Channel {} from peer {:?} is inactive for a time, shutting down it forcefully",
-                        state.get_id(),
-                        state.get_remote_pubkey(),
-                    );
-                    self.notify_network_actor_shutdown_me(state);
-                } else if state.reestablishing
-                    && !state.is_closed()
-                    && state.reestablish_started_at.is_some_and(|started| {
-                        now_timestamp_as_millis_u64().saturating_sub(started) > REESTABLISH_TIMEOUT
-                    })
-                {
-                    error!(
-                        "Channel {} from peer {:?} has been reestablishing too long, shutting down it forcefully",
+                        "Channel {} from peer {:?} is inactive or reestablishing too long, shutting down it forcefully",
                         state.get_id(),
                         state.get_remote_pubkey(),
                     );
@@ -4539,6 +4531,10 @@ where
         _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let is_internal_channel = self
+            .store
+            .is_internal_channel(&self.remote_pubkey)
+            .map_err(ProcessingChannelError::InvalidState)?;
         // startup the event processing
         let mut state = match args.operation {
             ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
@@ -5072,6 +5068,7 @@ where
         let external_funding_runtime = state.ephemeral_config.external_funding.clone();
         state.ephemeral_config = args.ephemeral_config;
         state.ephemeral_config.external_funding = external_funding_runtime;
+        state.ephemeral_config.is_internal_channel = is_internal_channel;
         if let Some(receipt) = state.signing_context.accepted_signature().cloned() {
             _myself
                 .send_message(ChannelActorMessage::SignerNotification(
@@ -6562,7 +6559,7 @@ impl ChannelActorState {
     }
 
     pub(crate) fn signature_tlc_deadline_reached(&self, now: u64) -> bool {
-        self.signing_context.is_awaiting_signature()
+        (self.signing_context.is_awaiting_signature() || self.ephemeral_config.is_internal_channel)
             && matches!(
                 self.state,
                 ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
@@ -6652,6 +6649,18 @@ impl ChannelActorState {
         } else {
             false
         }
+    }
+
+    fn channel_activity_timed_out(&self) -> bool {
+        // Hosted peers can wait for user signatures indefinitely, bounded by TLC safety
+        // deadlines rather than ACK or reestablishment activity timers.
+        !self.ephemeral_config.is_internal_channel
+            && !self.is_closed()
+            && (self.peer_does_not_reply_ack_in_time()
+                || (self.reestablishing
+                    && self.reestablish_started_at.is_some_and(|started| {
+                        now_timestamp_as_millis_u64().saturating_sub(started) > REESTABLISH_TIMEOUT
+                    })))
     }
 
     pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
@@ -11854,6 +11863,11 @@ where
 }
 
 pub trait ChannelActorStateStore {
+    /// Whether a channel to this peer is internal to Public T and a registered hosted tenant.
+    /// Resolved from the persistent registry, even when the tenant runtime is stopped.
+    fn is_internal_channel(&self, _peer: &Pubkey) -> Result<bool, String> {
+        Ok(false)
+    }
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
     fn insert_channel_actor_state_with_pending_commit_diff(
@@ -12315,6 +12329,33 @@ mod tests {
         offered.expiry = reserve - 1;
         state.tlc_state.offered_tlcs.tlcs.push(offered);
         assert_eq!(state.pending_tlc_signature_deadline(), Some(0));
+    }
+
+    #[test]
+    fn internal_channel_skips_activity_timeout_but_keeps_unsigned_tlc_deadline() {
+        let mut state =
+            channel_state_with_limits(ChannelConstraints::default(), ChannelConstraints::default());
+        let mut offered = committed_tlc(TLCId::Offered(0), 10);
+        offered.status = TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced);
+        offered.expiry = 0;
+        state.tlc_state.offered_tlcs.tlcs.push(offered);
+        assert!(!state.signing_context.is_awaiting_signature());
+        assert!(!state.signature_tlc_deadline_reached(1));
+        state.waiting_peer_response =
+            Some(now_timestamp_as_millis_u64().saturating_sub(PEER_CHANNEL_RESPONSE_TIMEOUT + 1));
+        assert!(state.channel_activity_timed_out());
+        state.ephemeral_config.is_internal_channel = true;
+        assert!(!state.channel_activity_timed_out());
+        assert!(state.signature_tlc_deadline_reached(1));
+
+        // A cold tenant must not be force closed by the reestablishment timer either.
+        state.waiting_peer_response = None;
+        state.reestablishing = true;
+        state.reestablish_started_at =
+            Some(now_timestamp_as_millis_u64().saturating_sub(REESTABLISH_TIMEOUT + 1));
+        assert!(!state.channel_activity_timed_out());
+        state.ephemeral_config.is_internal_channel = false;
+        assert!(state.channel_activity_timed_out());
     }
 
     #[test]

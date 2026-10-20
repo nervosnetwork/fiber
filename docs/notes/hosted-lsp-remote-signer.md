@@ -105,6 +105,20 @@ and the SDK agent E2E. It does not yet provide a durable push mailbox,
 long-lived signer sessions with fencing, or an explicit signer-readiness gate
 for buffered delivery. The current agent consumes pending requests over tenant-authenticated SSE.
 
+### Waiting for hosted channel signatures
+
+Public T exempts channels to its registered hosted tenants from ACK and
+reestablishment activity timeouts. Channel actors resolve peer ownership once
+from the local tenant registry on creation or restore, independently of tenant
+runtime activity and signer availability. Ordinary peers retain their existing
+activity timeout policy.
+
+Waiting preserves the pending commitment, ACK state, and signing material. No
+signing-state query, signer availability probe, runtime activation, or new peer
+protocol message is required. Normal protocol messages advance the channel when
+the tenant resumes. TLC safety deadlines remain enforced on T, including unsigned
+updates, and can still force close the channel if signing never completes.
+
 ### Tenant event transport
 
 `GET /lsp/events` returns `text/event-stream`, authenticated with the existing

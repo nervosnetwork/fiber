@@ -1989,6 +1989,7 @@ where
                 funding_timeout_seconds: config.funding_timeout_seconds,
                 external_funding_timeout_seconds: config.external_funding_timeout_seconds,
                 external_funding: Default::default(),
+                is_internal_channel: false,
             },
             inflight_payments: Default::default(),
             pending_trampoline_settlements,
@@ -2259,6 +2260,23 @@ where
                     }
                     Err(err) => {
                         error!("Failed to process OpenChannel message: {}", err);
+                        if state.network.public_network.is_none() {
+                            // End the initiator's opening using the existing protocol. Do
+                            // not leave T waiting on an offer the tenant will never accept.
+                            state
+                                .send_fiber_message(
+                                    &peer_pubkey,
+                                    FiberMessage::ChannelNormalOperation(
+                                        FiberChannelMessage::TxAbort(TxAbort {
+                                            channel_id: temp_channel_id,
+                                            message:
+                                                b"hosted tenants do not accept inbound channels"
+                                                    .to_vec(),
+                                        }),
+                                    ),
+                                )
+                                .await?;
+                        }
                     }
                 }
             }
@@ -7369,6 +7387,13 @@ where
         open_channel: OpenChannelCommand,
         network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
+        // Enforce the signing boundary here as internal actor calls bypass the RPC allowlist.
+        if self.network.public_network.is_none() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "hosted tenant outbound channels require user-owned external signer material"
+                    .into(),
+            ));
+        }
         let store = self.store.clone();
         let network = self.network.clone();
         let OpenChannelCommand {
@@ -7506,6 +7531,12 @@ where
         &mut self,
         command: OpenChannelWithExternalFundingCommand,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
+        if self.network.public_network.is_none() && command.external_channel_signer.is_none() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "hosted tenant outbound channels require user-owned external signer material"
+                    .into(),
+            ));
+        }
         let store = self.store.clone();
         let network = self.network.clone();
         let OpenChannelWithExternalFundingCommand {
@@ -7637,6 +7668,11 @@ where
         &mut self,
         accept_channel: AcceptChannelCommand,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256, Hash256), ProcessingChannelError> {
+        if self.network.public_network.is_none() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "hosted tenants do not accept inbound channels".into(),
+            ));
+        }
         let store = self.store.clone();
         let AcceptChannelCommand {
             temp_channel_id,
@@ -8502,6 +8538,11 @@ where
         peer_pubkey: Pubkey,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
+        if self.network.public_network.is_none() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "hosted tenants do not accept inbound channels".into(),
+            ));
+        }
         let id = open_channel.channel_id;
         let remote_funding_amount = open_channel.funding_amount;
 

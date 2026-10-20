@@ -1057,6 +1057,18 @@ impl NetworkActorStateStore for Store {
 }
 
 impl ChannelActorStateStore for Store {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_internal_channel(&self, peer: &Pubkey) -> Result<bool, String> {
+        // Only Public T owns hosted peers. Tenant stores must retain their own
+        // timeout policy and must not resolve peers through the host's registry.
+        if self.namespace.is_some() {
+            return Ok(false);
+        }
+        crate::lsp::TenantRegistry::new(self.namespaced(NodeNamespace::lsp_metadata()))
+            .find_by_tenant_pubkey(peer)
+            .map(|tenant| tenant.is_some())
+    }
+
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
         self.get(key)
