@@ -3,6 +3,9 @@ import { FiberInvokeRequest, FiberWorkerInitializationOptions } from "./types/ge
 onerror = (err) => {
     console.error(err)
 }
+self.addEventListener("unhandledrejection", (event) => {
+    self.postMessage({ type: "error", error: `${event.reason}` });
+});
 
 let fiber: any;
 onmessage = async (evt) => {
@@ -17,18 +20,21 @@ onmessage = async (evt) => {
             ", hasChainSpec=",
             !!(data.chainSpec),
         );
-        fiber = await import("fiber-wasm");
-        fiber.default.set_shared_array(data.inputBuffer, data.outputBuffer
-        );
-        await fiber.default.fiber(
-            data.config,
-            data.logLevel,
-            data.chainSpec,
-            data.fiberKeyPair,
-            data.ckbSecretKey,
-            data.databasePrefix);
-        console.debug("Fiber started..")
-        self.postMessage({})
+        try {
+            fiber = await import("fiber-wasm");
+            fiber.default.set_shared_array(data.inputBuffer, data.outputBuffer);
+            await fiber.default.fiber(
+                data.config,
+                data.logLevel,
+                data.chainSpec,
+                data.fiberKeyPair,
+                data.ckbSecretKey,
+                data.databasePrefix);
+            console.debug("Fiber started..");
+            self.postMessage({ type: "ready" });
+        } catch (error) {
+            self.postMessage({ type: "error", error: `${error}` });
+        }
         return;
     } else {
         const data = evt.data as FiberInvokeRequest;

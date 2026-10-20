@@ -750,6 +750,28 @@ async fn tenant_rpc_allowlist_rejects_control_methods_but_reaches_payment_valida
         err.to_string().contains("amount must be greater than 0"),
         "{err}"
     );
+
+    // Hosted payment validation must use the tenant's configured network too.
+    let invoice = crate::invoice::InvoiceBuilder::new(crate::invoice::Currency::Fibb)
+        .amount(Some(1_000))
+        .payment_preimage(Hash256::from([0x42; 32]))
+        .payee_pub_key(fixture.public_t.pubkey.into())
+        .build_with_sign(|hash| {
+            SECP256K1.sign_ecdsa_recoverable(hash, &fixture.public_t.private_key.0)
+        })
+        .unwrap();
+    let err = client
+        .request::<serde_json::Value, _>(
+            "send_payment",
+            rpc_params![serde_json::json!({ "invoice": invoice.to_string() })],
+        )
+        .await
+        .expect_err("hosted tenant rejects an invoice for a different network");
+    assert!(
+        err.to_string()
+            .contains("invoice currency fibb does not match node currency fibd"),
+        "{err}"
+    );
 }
 
 #[tokio::test]

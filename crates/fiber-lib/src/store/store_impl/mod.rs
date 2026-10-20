@@ -137,6 +137,12 @@ impl Store {
         physical_key
     }
 
+    /// Shut down the browser database after all actors and background writes stop.
+    #[cfg(target_arch = "wasm32")]
+    pub fn shutdown(self) {
+        self.inner.shutdown();
+    }
+
     /// Set a watcher callback that will be invoked on relevant store changes.
     pub fn set_watcher(&mut self, watcher: Arc<dyn Fn(StoreChange) + Send + Sync>) {
         self.watcher = Some(watcher);

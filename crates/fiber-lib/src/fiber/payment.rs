@@ -21,7 +21,7 @@ use crate::fiber::{
     FiberActorCommand, FiberActorEvent, FiberActorMessage, FiberActorRef, KeyPair,
     PublicNetworkCommand, ASSUME_NETWORK_ACTOR_ALIVE,
 };
-use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore, PreimageStore};
+use crate::invoice::{CkbInvoice, Currency, InvoiceError, InvoiceStore, PreimageStore};
 use crate::Error;
 use crate::{debug_event, now_timestamp_as_millis_u64};
 use ckb_hash::blake2b_256;
@@ -372,14 +372,15 @@ impl SendPaymentDataBuilder {
 }
 
 pub trait SendPaymentDataExt {
-    fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String>;
+    /// Validates a payment command against the payer node's configured currency.
+    fn new(command: SendPaymentCommand, currency: Currency) -> Result<SendPaymentData, String>;
     fn trampoline_hops(&self) -> Option<&[Pubkey]>;
     fn payment_invoice(&self) -> Option<CkbInvoice>;
     fn hash_algorithm(&self) -> HashAlgorithm;
 }
 
 impl SendPaymentDataExt for SendPaymentData {
-    fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+    fn new(command: SendPaymentCommand, currency: Currency) -> Result<SendPaymentData, String> {
         // `from_str` requires the invoice to carry a valid signature, so parsing
         // here also guarantees the invoice is signed.
         let invoice = command
@@ -392,7 +393,13 @@ impl SendPaymentDataExt for SendPaymentData {
                 _ => "invoice is invalid".to_string(),
             })?;
 
-        if let Some(invoice) = invoice.clone() {
+        if let Some(invoice) = invoice.as_ref() {
+            if invoice.currency != currency {
+                return Err(format!(
+                    "invoice currency {} does not match node currency {}",
+                    invoice.currency, currency
+                ));
+            }
             if invoice.is_expired() {
                 return Err("invoice is expired".to_string());
             }
@@ -722,8 +729,9 @@ pub struct SendPaymentCommand {
 }
 
 impl SendPaymentCommand {
-    pub fn build_send_payment_data(self) -> Result<SendPaymentData, Error> {
-        SendPaymentData::new(self).map_err(|e| {
+    /// Builds payment data after validating it against the payer node's currency.
+    pub fn build_send_payment_data(self, currency: Currency) -> Result<SendPaymentData, Error> {
+        SendPaymentData::new(self, currency).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })
@@ -769,7 +777,12 @@ pub struct SendPaymentWithRouterCommand {
 }
 
 impl SendPaymentWithRouterCommand {
-    pub fn build_send_payment_data(self, source: Pubkey) -> Result<SendPaymentData, Error> {
+    /// Builds explicit-route payment data using the payer node's currency.
+    pub fn build_send_payment_data(
+        self,
+        source: Pubkey,
+        currency: Currency,
+    ) -> Result<SendPaymentData, Error> {
         // Only proceed if we have at least one hop requirement
         let Some(last_edge) = self.router.last() else {
             return Err(Error::InvalidParameter(
@@ -794,7 +807,7 @@ impl SendPaymentWithRouterCommand {
             ..Default::default()
         };
 
-        let mut payment_data = SendPaymentData::new(payment_command).map_err(|e| {
+        let mut payment_data = SendPaymentData::new(payment_command, currency).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;

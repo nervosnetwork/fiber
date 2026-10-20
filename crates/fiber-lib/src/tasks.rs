@@ -70,5 +70,9 @@ pub fn spawn<F>(fut: F)
 where
     F: Future<Output = ()> + 'static,
 {
-    wasm_spawn_local(fut);
+    wasm_spawn_local(
+        TOKIO_TASK_TRACKER_WITH_CANCELLATION
+            .tracker
+            .track_future(fut),
+    );
 }

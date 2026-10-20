@@ -1651,11 +1651,14 @@ fn test_send_payment_rejects_hop_hints_when_invoice_disallows() {
         tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
     };
 
-    let err = SendPaymentData::new(SendPaymentCommand {
-        invoice: Some(invoice.to_string()),
-        hop_hints: Some(vec![hop_hint]),
-        ..Default::default()
-    })
+    let err = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            hop_hints: Some(vec![hop_hint]),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .unwrap_err();
 
     assert!(
@@ -1674,16 +1677,165 @@ fn test_send_payment_rejects_unsigned_invoice_by_default() {
         .build()
         .expect("build unsigned invoice");
 
-    let err = SendPaymentData::new(SendPaymentCommand {
-        invoice: Some(invoice.to_string()),
-        ..Default::default()
-    })
+    let err = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .unwrap_err();
 
     assert!(
         err.contains("invoice is not signed"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn test_payment_builders_check_invoice_network() {
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
+    for expected_currency in [Currency::Fibb, Currency::Fibt, Currency::Fibd] {
+        for invoice_currency in [Currency::Fibb, Currency::Fibt, Currency::Fibd] {
+            let invoice = InvoiceBuilder::new(invoice_currency)
+                .amount(Some(1000))
+                .payment_preimage(gen_rand_sha256_hash())
+                .payee_pub_key(public_key)
+                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &private_key))
+                .expect("build signed invoice");
+            let command = SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                ..Default::default()
+            };
+            let router_command = SendPaymentWithRouterCommand {
+                invoice: Some(invoice.to_string()),
+                router: vec![RouterHop {
+                    target: public_key.into(),
+                    channel_outpoint: gen_rand_channel_outpoint(),
+                    amount_received: 1000,
+                    incoming_tlc_expiry: DEFAULT_FINAL_TLC_EXPIRY_DELTA,
+                }],
+                ..Default::default()
+            };
+            for result in [
+                command.build_send_payment_data(expected_currency),
+                router_command
+                    .build_send_payment_data(gen_rand_fiber_public_key(), expected_currency),
+            ] {
+                if invoice_currency == expected_currency {
+                    assert!(result.is_ok(), "matching currency rejected: {result:?}");
+                } else {
+                    let crate::Error::InvalidParameter(err) =
+                        result.expect_err("foreign-network invoice must be rejected")
+                    else {
+                        panic!("expected invalid parameter error");
+                    };
+                    assert!(err.contains("invoice currency"), "unexpected error: {err}");
+                    assert!(err.contains(&expected_currency.to_string()), "{err}");
+                    assert!(err.contains(&invoice_currency.to_string()), "{err}");
+                }
+            }
+        }
+    }
+}
+
+async fn check_invoice_network_at_payment_entrypoint(with_router: bool) {
+    init_tracing();
+    let (nodes, channels) =
+        create_n_nodes_network(&[((0, 1), (HUGE_CKB_AMOUNT, HUGE_CKB_AMOUNT))], 2).await;
+    let [payer, payee] = nodes.try_into().expect("2 nodes");
+    assert_eq!(payer.fiber_config.currency(), Currency::Fibd);
+    let amount = 100_000_000;
+    let router = payer
+        .build_router(BuildRouterCommand {
+            amount: Some(amount),
+            hops_info: vec![HopRequire {
+                pubkey: payee.pubkey,
+                channel_outpoint: None,
+            }],
+            udt_type_script: None,
+            final_tlc_expiry_delta: None,
+        })
+        .await
+        .expect("build router")
+        .router_hops;
+
+    for currency in [Currency::Fibt, Currency::Fibb, Currency::Fibd] {
+        for dry_run in [false, true] {
+            let preimage = gen_rand_sha256_hash();
+            let invoice = InvoiceBuilder::new(currency)
+                .amount(Some(amount))
+                .payment_preimage(preimage)
+                .payee_pub_key(payee.pubkey.into())
+                .build_with_sign(|hash| {
+                    SECP256K1.sign_ecdsa_recoverable(hash, &payee.get_private_key().0)
+                })
+                .expect("build signed invoice");
+            // A valid signature for the foreign network is essential to reproduce #1691.
+            assert!(invoice.to_string().parse::<CkbInvoice>().is_ok());
+            let payment_hash = *invoice.payment_hash();
+            payee.insert_invoice(invoice.clone(), Some(preimage));
+            let payer_balance = payer.get_local_balance_from_channel(channels[0]);
+            let payee_balance = payee.get_local_balance_from_channel(channels[0]);
+
+            let result = if with_router {
+                payer
+                    .send_payment_with_router(SendPaymentWithRouterCommand {
+                        invoice: Some(invoice.to_string()),
+                        router: router.clone(),
+                        dry_run,
+                        ..Default::default()
+                    })
+                    .await
+            } else {
+                payer
+                    .send_payment(SendPaymentCommand {
+                        invoice: Some(invoice.to_string()),
+                        dry_run,
+                        ..Default::default()
+                    })
+                    .await
+            };
+
+            if currency != Currency::Fibd {
+                let err = result.expect_err("foreign-network invoice must be rejected");
+                assert!(err.contains("invoice currency"), "unexpected error: {err}");
+                assert!(err.contains("fibd"), "missing expected currency: {err}");
+                assert!(
+                    err.contains(&currency.to_string()),
+                    "missing currency: {err}"
+                );
+            } else {
+                let response = result.expect("matching-network invoice must be accepted");
+                assert_eq!(response.payment_hash, payment_hash);
+                if !dry_run {
+                    payer.wait_until_success(payment_hash).await;
+                    continue;
+                }
+            }
+
+            assert!(payer.get_payment_session(payment_hash).is_none());
+            assert_eq!(payer.get_inflight_payment_count().await, 0);
+            assert_eq!(
+                payer.get_local_balance_from_channel(channels[0]),
+                payer_balance
+            );
+            assert_eq!(
+                payee.get_local_balance_from_channel(channels[0]),
+                payee_balance
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_send_payment_checks_invoice_network() {
+    check_invoice_network_at_payment_entrypoint(false).await;
+}
+
+#[tokio::test]
+async fn test_send_payment_with_router_checks_invoice_network() {
+    check_invoice_network_at_payment_entrypoint(true).await;
 }
 
 #[test]
@@ -1707,7 +1859,7 @@ fn test_send_payment_with_router_rejects_unsigned_invoice() {
         router,
         ..Default::default()
     }
-    .build_send_payment_data(gen_rand_fiber_public_key())
+    .build_send_payment_data(gen_rand_fiber_public_key(), Currency::Fibd)
     .unwrap_err();
 
     let crate::Error::InvalidParameter(message) = err else {
@@ -11037,36 +11189,45 @@ async fn test_tlc_removed_while_waiting_for_forwarding_result() {
 
 #[tokio::test]
 async fn test_send_payment_max_fee_rate_limit() {
-    let payment_data = SendPaymentData::new(SendPaymentCommand {
-        target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: Some(1000),
-        keysend: Some(true),
-        ..Default::default()
-    })
+    let payment_data = SendPaymentData::new(
+        SendPaymentCommand {
+            target_pubkey: Some(gen_rand_fiber_public_key()),
+            amount: Some(1000),
+            keysend: Some(true),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .expect("payment data ok");
 
     assert_eq!(payment_data.max_fee_amount, Some(5));
 
-    let payment_data = SendPaymentData::new(SendPaymentCommand {
-        target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: Some(1000),
-        keysend: Some(true),
-        max_fee_rate: Some(10),
-        max_fee_amount: Some(6),
-        ..Default::default()
-    })
+    let payment_data = SendPaymentData::new(
+        SendPaymentCommand {
+            target_pubkey: Some(gen_rand_fiber_public_key()),
+            amount: Some(1000),
+            keysend: Some(true),
+            max_fee_rate: Some(10),
+            max_fee_amount: Some(6),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .expect("payment data ok");
 
     assert_eq!(payment_data.max_fee_amount, Some(6));
 
-    let payment_data = SendPaymentData::new(SendPaymentCommand {
-        target_pubkey: Some(gen_rand_fiber_public_key()),
-        amount: Some(1000),
-        keysend: Some(true),
-        max_fee_rate: Some(10),
-        max_fee_amount: Some(20),
-        ..Default::default()
-    })
+    let payment_data = SendPaymentData::new(
+        SendPaymentCommand {
+            target_pubkey: Some(gen_rand_fiber_public_key()),
+            amount: Some(1000),
+            keysend: Some(true),
+            max_fee_rate: Some(10),
+            max_fee_amount: Some(20),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .expect("payment data ok");
 
     assert_eq!(payment_data.max_fee_amount, Some(10));
@@ -11084,19 +11245,25 @@ fn test_send_payment_uses_invoice_trampoline_route_hint() {
         .build_with_sign(|message| SECP256K1.sign_ecdsa_recoverable(message, &payee_private_key))
         .expect("build invoice with trampoline route hint");
 
-    let payment = SendPaymentData::new(SendPaymentCommand {
-        invoice: Some(invoice.to_string()),
-        ..Default::default()
-    })
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .expect("build trampoline payment from invoice hint");
     assert_eq!(payment.trampoline_hops, Some(vec![trampoline]));
 
     let explicit_trampoline = gen_rand_fiber_public_key();
-    let payment = SendPaymentData::new(SendPaymentCommand {
-        invoice: Some(invoice.to_string()),
-        trampoline_hops: Some(vec![explicit_trampoline]),
-        ..Default::default()
-    })
+    let payment = SendPaymentData::new(
+        SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            trampoline_hops: Some(vec![explicit_trampoline]),
+            ..Default::default()
+        },
+        Currency::Fibd,
+    )
     .expect("explicit trampoline hop overrides invoice hint");
     assert_eq!(payment.trampoline_hops, Some(vec![explicit_trampoline]));
 }
@@ -11124,7 +11291,7 @@ fn test_send_payment_malicious_invoice_does_not_crash_node_entrypoint() {
     // invoice parser errors were propagated, this malformed invoice payload
     // could panic there and take down the actor.
     let result = panic::catch_unwind(panic::AssertUnwindSafe(move || {
-        command.build_send_payment_data()
+        command.build_send_payment_data(Currency::Fibd)
     }));
     let err = result
         .expect("malicious invoice must be rejected without panicking")

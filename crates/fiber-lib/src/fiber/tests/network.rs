@@ -32,7 +32,7 @@ use crate::{
         PublicNetworkCommand, PublicNetworkEvent, SendPaymentData,
     },
     gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_sha256_hash,
-    invoice::InvoiceBuilder,
+    invoice::{Currency, InvoiceBuilder},
     now_timestamp_as_millis_u64, ChannelTestContext, NetworkServiceEvent,
 };
 use crate::{
@@ -746,10 +746,13 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     };
 
     // Provided but empty.
-    let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![]),
-        ..base.clone()
-    })
+    let err = SendPaymentData::new(
+        SendPaymentCommand {
+            trampoline_hops: Some(vec![]),
+            ..base.clone()
+        },
+        Currency::Fibd,
+    )
     .unwrap_err();
     assert!(err.contains("trampoline_hops must be non-empty"), "{err}");
 
@@ -758,27 +761,36 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
     let too_many = (0..6)
         .map(|_| gen_rand_fiber_public_key())
         .collect::<Vec<_>>();
-    let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(too_many),
-        ..base.clone()
-    })
+    let err = SendPaymentData::new(
+        SendPaymentCommand {
+            trampoline_hops: Some(too_many),
+            ..base.clone()
+        },
+        Currency::Fibd,
+    )
     .unwrap_err();
     assert!(err.contains("too many trampoline_hops"), "{err}");
 
     // Must not contain target.
-    let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![target]),
-        ..base.clone()
-    })
+    let err = SendPaymentData::new(
+        SendPaymentCommand {
+            trampoline_hops: Some(vec![target]),
+            ..base.clone()
+        },
+        Currency::Fibd,
+    )
     .unwrap_err();
     assert!(err.contains("must not contain target_pubkey"), "{err}");
 
     // No duplicates.
     let hop = gen_rand_fiber_public_key();
-    let err = SendPaymentData::new(SendPaymentCommand {
-        trampoline_hops: Some(vec![hop, hop]),
-        ..base
-    })
+    let err = SendPaymentData::new(
+        SendPaymentCommand {
+            trampoline_hops: Some(vec![hop, hop]),
+            ..base
+        },
+        Currency::Fibd,
+    )
     .unwrap_err();
     assert!(err.contains("must not contain duplicates"), "{err}");
 }
@@ -2570,7 +2582,7 @@ fn test_send_payment_validate_payment_hash() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibd);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("payment_hash is missing"));
 }
@@ -2583,7 +2595,7 @@ fn test_send_payment_validate_amount() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibd);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("amount is missing"));
 }
@@ -2592,7 +2604,6 @@ fn test_send_payment_validate_amount() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn test_send_payment_validate_invoice() {
     use crate::invoice::Attribute;
-    use crate::invoice::Currency;
     use secp256k1::Secp256k1;
 
     let gen_payment_hash = gen_rand_sha256_hash();
@@ -2615,7 +2626,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -2628,7 +2639,7 @@ fn test_send_payment_validate_invoice() {
     };
 
     // keysend is set with invoice, should be error
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -2640,7 +2651,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_err());
 
     // normal invoice send payment
@@ -2649,7 +2660,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_ok());
 
     // normal keysend send payment
@@ -2660,7 +2671,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_ok());
 
     // When the invoice does not specify a final TLC delta, an explicit command
@@ -2672,7 +2683,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let err = SendPaymentData::new(send_command).unwrap_err();
+    let err = SendPaymentData::new(send_command, Currency::Fibb).unwrap_err();
     assert!(err.contains("final_tlc_expiry_delta is below the invoice minimum"));
 
     // Callers may still request a longer final-hop delta.
@@ -2683,7 +2694,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let payment_data = SendPaymentData::new(send_command).unwrap();
+    let payment_data = SendPaymentData::new(send_command, Currency::Fibb).unwrap();
     assert_eq!(payment_data.final_tlc_expiry_delta, longer_delta);
 
     // invoice with invalid final_tlc_expiry_delta
@@ -2703,7 +2714,7 @@ fn test_send_payment_validate_invoice() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -2721,7 +2732,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         ..Default::default()
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, Currency::Fibb);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

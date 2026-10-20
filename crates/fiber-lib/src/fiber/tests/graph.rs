@@ -17,6 +17,7 @@ use crate::fiber::{
     Hash256, HopHint, HopRequire, NodeAnnouncement, Privkey, Pubkey, RouterHop, SendPaymentData,
     SessionRoute,
 };
+use crate::invoice::Currency;
 use crate::store::Store;
 use ckb_types::{
     packed::{OutPoint, Script},
@@ -2258,7 +2259,7 @@ fn test_graph_payment_self_default_is_false() {
         keysend: Some(false),
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
 
     let payment_state: SendPaymentState = payment_data.unwrap().into();
@@ -2291,7 +2292,7 @@ fn test_graph_payment_pay_single_path() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
     let payment_state: SendPaymentState = payment_data.unwrap().into();
 
@@ -2319,7 +2320,7 @@ fn test_graph_payment_pay_self_with_one_node() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
     let payment_state: SendPaymentState = payment_data.unwrap().into();
 
@@ -2351,7 +2352,7 @@ fn test_graph_payment_pay_self_with_one_node_fee_rate() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
     let payment_state: SendPaymentState = payment_data.unwrap().into();
 
@@ -2406,7 +2407,9 @@ fn test_graph_build_route_with_double_edge_node() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
+    let payment_state: SendPaymentState = SendPaymentData::new(command, Currency::Fibd)
+        .unwrap()
+        .into();
     let route = network
         .graph
         .build_route(payment_state.amount, None, None, &payment_state);
@@ -2457,7 +2460,9 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
+    let payment_state: SendPaymentState = SendPaymentData::new(command, Currency::Fibd)
+        .unwrap()
+        .into();
     let route = network
         .graph
         .build_route(payment_state.amount, None, None, &payment_state);
@@ -2488,7 +2493,7 @@ fn test_graph_payment_pay_self_will_ok() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
     let payment_state: SendPaymentState = payment_data.unwrap().into();
 
@@ -2548,7 +2553,9 @@ fn test_graph_build_route_with_path_limits() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
+    let payment_state: SendPaymentState = SendPaymentData::new(command, Currency::Fibd)
+        .unwrap()
+        .into();
     let route = network
         .graph
         .build_route(payment_state.amount, None, None, &payment_state);
@@ -2596,7 +2603,9 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         allow_self_payment: true,
         ..Default::default()
     };
-    let payment_state: SendPaymentState = SendPaymentData::new(command).unwrap().into();
+    let payment_state: SendPaymentState = SendPaymentData::new(command, Currency::Fibd)
+        .unwrap()
+        .into();
     let route = network
         .graph
         .build_route(payment_state.amount, None, None, &payment_state);
@@ -2622,7 +2631,7 @@ fn test_graph_payment_expiry_is_in_right_order() {
         keysend: Some(false),
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();
@@ -2650,7 +2659,7 @@ fn test_graph_payment_expiry_is_in_right_order() {
         keysend: Some(false),
         ..Default::default()
     };
-    let payment_data = SendPaymentData::new(command);
+    let payment_data = SendPaymentData::new(command, Currency::Fibd);
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();

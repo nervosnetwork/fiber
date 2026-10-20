@@ -114,8 +114,8 @@ use crate::fiber::{
     SettleTlcSetCommand,
 };
 use crate::invoice::{
-    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore, PreimageStore,
-    SettleInvoiceError,
+    CancelInvoiceError, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceError, InvoiceStore,
+    PreimageStore, SettleInvoiceError,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::lsp::{LspDeliveryDecision, LspPaymentOutcomeDecision, LspServiceMessage};
@@ -1959,6 +1959,7 @@ where
 
         FiberActorState {
             store: self.store.clone(),
+            currency: config.currency(),
             store_actor: self.store_actor.clone(),
             private_key,
             entropy,
@@ -3563,7 +3564,8 @@ where
                 }
             }
             FiberActorCommand::SendPayment(payment_request, reply) => {
-                let payment_request = match payment_request.build_send_payment_data() {
+                let payment_request = match payment_request.build_send_payment_data(state.currency)
+                {
                     Ok(payment) => payment,
                     Err(err) => {
                         error!("Failed to build payment from command: {:?}", err);
@@ -3583,14 +3585,15 @@ where
             }
             FiberActorCommand::SendPaymentWithRouter(payment_request, reply) => {
                 let source = self.network_graph.read().await.get_source_pubkey();
-                let payment_request = match payment_request.build_send_payment_data(source) {
-                    Ok(payment) => payment,
-                    Err(err) => {
-                        error!("Failed to build payment from command: {:?}", err);
-                        let _ = reply.send(Err(err.to_string()));
-                        return Ok(());
-                    }
-                };
+                let payment_request =
+                    match payment_request.build_send_payment_data(source, state.currency) {
+                        Ok(payment) => payment,
+                        Err(err) => {
+                            error!("Failed to build payment from command: {:?}", err);
+                            let _ = reply.send(Err(err.to_string()));
+                            return Ok(());
+                        }
+                    };
                 let _ = self
                     .start_payment_actor(
                         myself,
@@ -6486,6 +6489,8 @@ where
 
 pub struct FiberActorState<S, C> {
     store: S,
+    // Keep the configured network available for both public and hosted payment validation.
+    currency: Currency,
     store_actor: Option<ActorRef<StoreActorMessage>>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
@@ -9449,7 +9454,7 @@ where
             debug!("Tentacle service stopped");
         });
         #[cfg(target_arch = "wasm32")]
-        ractor::concurrency::spawn(async move {
+        crate::tasks::spawn(async move {
             service.run().await;
             debug!("Tentacle service stopped");
         });

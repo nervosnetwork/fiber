@@ -24,8 +24,10 @@ use fnn::{
         invoice::InvoiceRpcServerImpl, payment::PaymentRpcServerImpl, peer::PeerRpcServerImpl,
     },
     start_network,
-    store::open_store_with_migration,
-    tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
+    store::{Store, open_store_with_migration},
+    tasks::{
+        cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
+    },
 };
 use jsonrpsee::wasm_client::WasmClientBuilder;
 use ractor::{Actor, ActorRef};
@@ -52,6 +54,8 @@ fn js_err(msg: String) -> Result<(), JsValue> {
 const FIBER_STATE_BEFORE_STARTING: u8 = 0;
 const FIBER_STATE_STARTED: u8 = 1;
 const FIBER_STATE_PANICKED: u8 = 2;
+const FIBER_STATE_STOPPING: u8 = 3;
+const FIBER_STATE_STOPPED: u8 = 4;
 
 fn wasm_confirm(plan: MigrationPlan) -> bool {
     tracing::info!("{}", plan.message);
@@ -71,11 +75,15 @@ fn wasm_progress(progress: MigrationProgress) {
 
 static FIBER_STATE: AtomicU8 = AtomicU8::new(FIBER_STATE_BEFORE_STARTING);
 static ROOT_ACTOR: OnceLock<ActorRef<String>> = OnceLock::new();
+static STORE: OnceLock<Store> = OnceLock::new();
 pub(crate) fn check_state() -> Result<(), JsValue> {
     match FIBER_STATE.load(std::sync::atomic::Ordering::SeqCst) {
         FIBER_STATE_BEFORE_STARTING => js_err("Fiber not started!".to_string()),
         FIBER_STATE_STARTED => Ok(()),
         FIBER_STATE_PANICKED => js_err("Fiber panicked, please refresh page".to_string()),
+        FIBER_STATE_STOPPING | FIBER_STATE_STOPPED => {
+            js_err("Fiber is stopping or stopped".to_string())
+        }
         s => js_err(format!("Invalid FIBER_STATE: {}", s)),
     }
 }
@@ -144,6 +152,7 @@ pub async fn fiber(
         open_store_with_migration(store_path, Box::new(wasm_confirm), Box::new(wasm_progress))
             .map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
     debug!("Store initialized");
+    STORE.set(store.clone()).expect("Store already initialized");
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
@@ -261,7 +270,7 @@ pub async fn fiber(
                 None
             };
 
-            ractor::concurrency::spawn(async move {
+            fnn::tasks::spawn(async move {
                 let token = new_tokio_cancellation_token();
                 loop {
                     select! {
@@ -327,5 +336,38 @@ pub async fn fiber(
         debug!("WrappedFiberWasm set");
     }
     FIBER_STATE.store(FIBER_STATE_STARTED, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// Stop actors and background writes before asking the database worker to close.
+/// The JS wrapper also waits for the database worker's completion acknowledgement.
+#[wasm_bindgen]
+pub async fn stop() -> Result<(), JsValue> {
+    // A panicked WASM instance cannot guarantee a clean shutdown. On this error,
+    // the JS wrapper still terminates both workers and rejects pending commands.
+    check_state()?;
+    FIBER_STATE.store(FIBER_STATE_STOPPING, std::sync::atomic::Ordering::SeqCst);
+    ROOT_ACTOR
+        .get()
+        .ok_or_else(|| JsValue::from_str("Root actor not initialized"))?
+        .stop_and_wait(Some("Fiber stopped".to_string()), None)
+        .await
+        .map_err(|err| JsValue::from_str(&format!("Failed to stop Fiber actors: {err}")))?;
+    cancel_tasks_and_wait_for_completion().await;
+    STORE
+        .get()
+        .ok_or_else(|| JsValue::from_str("Store not initialized"))?
+        .clone()
+        .shutdown();
+    // A panic in an actor or a background task must not turn into a successful
+    // stop merely because the task tracker has finished waiting for it.
+    FIBER_STATE
+        .compare_exchange(
+            FIBER_STATE_STOPPING,
+            FIBER_STATE_STOPPED,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .map_err(|_| JsValue::from_str("Fiber panicked during shutdown"))?;
     Ok(())
 }
