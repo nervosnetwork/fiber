@@ -508,10 +508,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
 
     let owner_ws = authenticated_subscription_client(fixture.rpc_addr, &owner_token).await;
     let other_ws = authenticated_subscription_client(fixture.rpc_addr, &other_token).await;
-    let options = SubscriptionOptions {
-        include_snapshot: true,
-        ..Default::default()
-    };
+    let options = SubscriptionOptions::default();
     let mut owner_events = owner_ws
         .subscribe::<SubscriptionEvent, _>(
             "subscribe",
@@ -528,12 +525,6 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         )
         .await
         .unwrap();
-    for stream in [&mut owner_events, &mut other_events] {
-        assert!(matches!(
-            stream.next().await.unwrap().unwrap(),
-            SubscriptionEvent::SnapshotComplete
-        ));
-    }
 
     // This test checks authenticated routing only; the watchtower actor tests
     // cover generating and applying requests from real settlement transactions.
@@ -570,10 +561,11 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         recovered.next().await.unwrap().unwrap(),
         SubscriptionEvent::WatchtowerSigning(_)
     ));
-    assert!(matches!(
-        recovered.next().await.unwrap().unwrap(),
-        SubscriptionEvent::SnapshotComplete
-    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), recovered.next())
+            .await
+            .is_err()
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(100), other_events.next())
             .await
@@ -1326,17 +1318,7 @@ async fn subscribe_signing(
 ) -> jsonrpsee::core::client::Subscription<fiber_json_types::SubscriptionEvent> {
     use jsonrpsee::core::client::SubscriptionClientT;
     client
-        .subscribe(
-            "subscribe",
-            rpc_params![
-                "channel_signing",
-                fiber_json_types::SubscriptionOptions {
-                    include_snapshot: true,
-                    ..Default::default()
-                }
-            ],
-            "unsubscribe",
-        )
+        .subscribe("subscribe", rpc_params!["channel_signing"], "unsubscribe")
         .await
         .unwrap()
 }
@@ -1372,10 +1354,6 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
     let client = authenticated_subscription_client(fixture.rpc_addr, &token).await;
     let other_client = authenticated_subscription_client(fixture.rpc_addr, &other_token).await;
     let mut other = subscribe_signing(&other_client).await;
-    assert!(matches!(
-        other.next().await.unwrap().unwrap(),
-        SubscriptionEvent::SnapshotComplete
-    ));
     let status = ractor::call!(fixture._lsp_actor, LspServiceMessage::GetStatus).unwrap();
     assert_eq!(
         status.active_tenants, 0,
@@ -1403,15 +1381,14 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
         serde_json::to_value(&pending).unwrap()
     );
     let status = ractor::call!(fixture._lsp_actor, LspServiceMessage::GetStatus).unwrap();
-    assert_eq!(status.active_tenants, 0, "pending snapshot stays cold");
+    assert_eq!(status.active_tenants, 0, "pending replay stays cold");
     let denied = other_client
         .subscribe::<SubscriptionEvent, _>(
             "subscribe",
             rpc_params![
                 "channel_signing",
                 fiber_json_types::SubscriptionOptions {
-                    channel_ids: Some(vec![channel_id.into()]),
-                    include_snapshot: true
+                    channel_ids: Some(vec![channel_id.into()])
                 }
             ],
             "unsubscribe",

@@ -197,7 +197,7 @@ async fn send(
             return Ok(());
         }
         if sink.is_closed() || tokio::time::Instant::now() >= deadline {
-            bail!("subscription queue full or closed; reconnect and request a snapshot");
+            bail!("subscription queue full or closed; reconnect to recover pending requests");
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -226,17 +226,9 @@ async fn run<S: RpcServerStore>(
     }
     let mut previous = source.current(topic, &options)?;
     let mut sink = pending.accept().await?;
-    if options.include_snapshot {
-        for event in previous.values().filter(|event| is_pending(event)) {
-            send(&mut sink, &authorization, topic, event).await?;
-        }
-        send(
-            &mut sink,
-            &authorization,
-            topic,
-            &SubscriptionEvent::SnapshotComplete,
-        )
-        .await?;
+    // Signing topics always resend outstanding work using ordinary updates.
+    for event in previous.values().filter(|event| is_pending(event)) {
+        send(&mut sink, &authorization, topic, event).await?;
     }
     let mut recheck = tokio::time::interval(AUTH_INTERVAL);
     loop {

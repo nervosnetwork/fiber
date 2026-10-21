@@ -589,8 +589,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
                 self.handle_watchtower_status(result.channel_id.into(), result.status)
                     .await?;
             }
-            fiber_json_types::SubscriptionEvent::SnapshotComplete
-            | fiber_json_types::SubscriptionEvent::Removed { .. } => {}
+            fiber_json_types::SubscriptionEvent::Removed { .. } => {}
         }
         let receipts = self.config.store_dir.join("watchtower-submissions.json");
         if receipts.exists() {
@@ -600,7 +599,6 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
     }
 
     /// Service outstanding signing requests for already-bound channels.
-    #[cfg(test)]
     pub async fn poll_once(&mut self) -> Result<()> {
         let token = self
             .session
@@ -619,7 +617,6 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         self.write_status().await
     }
 
-    #[cfg(test)]
     async fn poll_channel(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
         let status = self
             .rpc
@@ -673,7 +670,6 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         }
     }
 
-    #[cfg(test)]
     async fn poll_watchtower(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
         let status = match self
             .rpc

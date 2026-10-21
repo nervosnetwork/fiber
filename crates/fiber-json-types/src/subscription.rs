@@ -23,12 +23,9 @@ pub enum SubscriptionTopic {
 pub struct SubscriptionOptions {
     /// Restrict updates to these channels. Omission selects all authorized channels.
     pub channel_ids: Option<Vec<Hash256>>,
-    /// Send current pending requests followed by `snapshot_complete` before live updates.
-    #[serde(default)]
-    pub include_snapshot: bool,
 }
 
-/// A typed state update. Reconnect and request a new snapshot to recover pending work.
+/// A typed state update. Signing subscriptions also resend current pending requests on connect.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SubscriptionEvent {
@@ -37,8 +34,6 @@ pub enum SubscriptionEvent {
     /// Watchtower status, identical to `get_watchtower_signing_status`.
     #[cfg(feature = "watchtower")]
     WatchtowerSigning(Box<GetWatchtowerSigningStatusResult>),
-    /// All currently pending requests in the initial snapshot have been sent.
-    SnapshotComplete,
     /// A previously visible channel was removed from this topic.
     Removed {
         /// Identifier of the removed channel.

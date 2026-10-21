@@ -41,7 +41,7 @@ the subscription. Data already sent to the connection cannot be recalled.
 ## Wire format
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing",{"include_snapshot":true}]}
+{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing"]}
 ```
 
 ```json
@@ -56,11 +56,7 @@ Updates use the existing query result types:
 ```
 
 `watchtower_signing` uses the same envelope with type `watchtower_signing` and
-`GetWatchtowerSigningStatusResult` as data. The initial snapshot ends with:
-
-```json
-{"jsonrpc":"2.0","method":"subscribe","params":{"subscription":"0xabc","result":{"type":"snapshot_complete"}}}
-```
+`GetWatchtowerSigningStatusResult` as data.
 
 A channel removed from the subscribed scope produces
 `{"type":"removed","data":{"channel_id":"0x..."}}`.
@@ -73,18 +69,19 @@ Cancellation returns a boolean. IDs belong to their creating connection; another
 connection cannot cancel them. Cancellation remains available after token expiry.
 Multiple subscribers for the same tenant are independent.
 
-## Filters and snapshots
+## Filters and pending signing requests
 
 `options` is optional. `channel_ids` restricts the subscription to at most 256
 channels. Omitting it selects all authorized channels; an empty list selects none.
 Unknown options, including `tenant_id` and `node_id`, are rejected. A channel
 outside the authorized scope and a missing channel both produce `channel not found`.
 
-`include_snapshot` defaults to false. With true, the server sends currently
-pending signing requests followed by `snapshot_complete`. It then sends changes
-to signing status, including transitions to no pending request. Unchanged states
-are deduplicated. Intermediate transitions may be coalesced: this is a current-state
-subscription, not an event journal.
+Signing topics always send their currently pending requests when a subscription
+is established, followed by changes to signing status, including transitions to
+no pending request. Initial pending requests use exactly the same update format
+as live requests; there is no snapshot option or completion marker. Unchanged
+states are deduplicated within the connection. Intermediate transitions may be
+coalesced: this is a current-state subscription, not an event journal.
 
 ```text
 persist channel/watchtower state
@@ -99,20 +96,22 @@ subscription reloads authorized state
 query projection -> bounded connection queue -> WebSocket
 ```
 
-The listener is registered before reading the initial state. Changes during the
-snapshot remain pending and cause another state read afterwards. This avoids a
-snapshot/listen gap but does not create a globally atomic snapshot across resources.
+The listener is registered before reading pending requests. Changes during this
+initial read remain pending and cause another state read afterwards. Initial
+requests are not a globally atomic view across resources.
 
 Subscriptions end on disconnect, unsubscribe, authorization failure, or shutdown.
-Reconnect and subscribe with `include_snapshot: true` to recover pending work.
+Reconnect and subscribe normally to receive pending signing requests again.
 Deduplicate signing requests by request ID and submit signatures using the
 existing RPCs, whose authorization and verification remain authoritative. There
 is no historical cursor, durable event log, or exactly-once guarantee.
 
-The signing agent combines the two topic snapshots into one local
-`snapshot_complete`, retries failures with jittered backoff, and reloads pending
-work when processing fails. It stops after credentials are rejected. The SDK's
-persisted verification, nonce handling, and signing policy remain in force.
+The signing agent handles initial pending requests and live requests identically,
+retries failures with jittered backoff, and receives pending work again after
+processing fails. It stops after credentials are rejected. The SDK's persisted
+verification, nonce handling, and signing policy remain in force. The agent's
+`--once` mode uses the existing signing-status query RPCs for a single processing
+pass; it does not require a subscription completion message or a new RPC.
 
 ## Resource bounds
 

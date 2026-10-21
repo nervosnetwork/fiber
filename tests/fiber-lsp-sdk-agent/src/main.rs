@@ -46,7 +46,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8114")]
     ckb_rpc: String,
 
-    /// Process the initial WebSocket subscription pending snapshot and exit.
+    /// Query and process current pending requests once, then exit.
     #[arg(long)]
     once: bool,
 }
@@ -90,20 +90,8 @@ async fn main() -> Result<()> {
         agent
             .configure_chain(&args.ckb_rpc, &args.contracts_dir)
             .await?;
-        let mut events = rpc.subscribe_events(agent.tenant_token()?)?;
-        while let Some(delivery) = events.next().await {
-            let complete = matches!(
-                delivery.event,
-                fiber_json_types::SubscriptionEvent::SnapshotComplete
-            );
-            let result = agent.handle_event(delivery.event).await;
-            let _ = delivery.processed.send(result.is_ok());
-            result?;
-            if complete {
-                return Ok(());
-            }
-        }
-        anyhow::bail!("tenant event stream stopped before snapshot completion");
+        agent.poll_once().await?;
+        return Ok(());
     }
 
     // Bind the test control server before initialize so wait.sh / Bruno can

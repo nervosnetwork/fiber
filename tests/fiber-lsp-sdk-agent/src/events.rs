@@ -3,7 +3,7 @@
 use std::{future::pending, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
-use fiber_json_types::{SubscriptionEvent, SubscriptionOptions, SubscriptionTopic};
+use fiber_json_types::{SubscriptionEvent, SubscriptionTopic};
 use jsonrpsee::{
     core::client::{Subscription, SubscriptionClientT},
     rpc_params,
@@ -26,7 +26,7 @@ pub struct EventStream {
 }
 
 impl EventStream {
-    /// Subscribe to both signing topics using the existing tenant credential.
+    /// Subscribe to both signing topics; the node automatically resends pending requests.
     pub fn connect(rpc_url: &str, token: String) -> Result<Self> {
         let mut url = reqwest::Url::parse(rpc_url)?;
         let scheme = match url.scheme() {
@@ -104,21 +104,17 @@ async fn receive(
         .request_timeout(Duration::from_secs(10))
         .build(url)
         .await?;
-    let options = SubscriptionOptions {
-        include_snapshot: true,
-        ..Default::default()
-    };
     let mut channel: Subscription<SubscriptionEvent> = client
         .subscribe(
             "subscribe",
-            rpc_params![SubscriptionTopic::ChannelSigning, &options],
+            rpc_params![SubscriptionTopic::ChannelSigning],
             "unsubscribe",
         )
         .await?;
     let mut watchtower: Option<Subscription<SubscriptionEvent>> = match client
         .subscribe(
             "subscribe",
-            rpc_params![SubscriptionTopic::WatchtowerSigning, &options],
+            rpc_params![SubscriptionTopic::WatchtowerSigning],
             "unsubscribe",
         )
         .await
@@ -131,28 +127,12 @@ async fn receive(
         }
         Err(error) => return Err(error.into()),
     };
-    let mut channel_snapshot = false;
-    let mut watchtower_snapshot = watchtower.is_none();
-    let mut snapshot_sent = false;
     loop {
-        let (is_channel, event) = tokio::select! {
-            event = channel.next() => (true, event),
-            event = async { match watchtower.as_mut() { Some(subscription) => subscription.next().await, None => pending().await } } => (false, event),
+        let event = tokio::select! {
+            event = channel.next() => event,
+            event = async { match watchtower.as_mut() { Some(subscription) => subscription.next().await, None => pending().await } } => event,
         };
-        let event = event.context("signer subscription closed")??;
-        if matches!(event, SubscriptionEvent::SnapshotComplete) {
-            if is_channel {
-                channel_snapshot = true;
-            } else {
-                watchtower_snapshot = true;
-            }
-            if channel_snapshot && watchtower_snapshot && !snapshot_sent {
-                deliver(sender, SubscriptionEvent::SnapshotComplete).await?;
-                snapshot_sent = true;
-            }
-        } else {
-            deliver(sender, event).await?;
-        }
+        deliver(sender, event.context("signer subscription closed")??).await?;
     }
 }
 
@@ -169,7 +149,7 @@ mod tests {
         RpcModule,
     };
 
-    use super::{EventStream, SubscriptionEvent, SubscriptionOptions, SubscriptionTopic};
+    use super::{EventStream, SubscriptionEvent, SubscriptionTopic};
 
     struct Active(Arc<AtomicUsize>);
     impl Drop for Active {
@@ -199,9 +179,7 @@ mod tests {
                     let active = observed_active.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        let (topic, options): (SubscriptionTopic, SubscriptionOptions) =
-                            params.parse().unwrap();
-                        assert!(options.include_snapshot);
+                        let (topic,): (SubscriptionTopic,) = params.parse().unwrap();
                         if deny || (!watchtower && topic == SubscriptionTopic::WatchtowerSigning) {
                             let reason = if deny {
                                 "Unauthorized"
@@ -219,8 +197,10 @@ mod tests {
                         let _active = Active(active);
                         let sink = pending.accept().await?;
                         sink.send(
-                            serde_json::value::to_raw_value(&SubscriptionEvent::SnapshotComplete)
-                                .unwrap(),
+                            serde_json::value::to_raw_value(&SubscriptionEvent::Removed {
+                                channel_id: fiber_json_types::Hash256([42; 32]),
+                            })
+                            .unwrap(),
                         )
                         .await?;
                         sink.closed().await;
@@ -242,7 +222,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(matches!(event.event, SubscriptionEvent::SnapshotComplete));
+            assert!(matches!(event.event, SubscriptionEvent::Removed { .. }));
             event.processed.send(success).unwrap();
         }
         assert!(calls.load(Ordering::SeqCst) >= 4);
@@ -266,7 +246,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(event.event, SubscriptionEvent::SnapshotComplete));
+        assert!(matches!(event.event, SubscriptionEvent::Removed { .. }));
         event.processed.send(true).unwrap();
         drop(reader);
         handle.stop().unwrap();
