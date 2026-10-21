@@ -3816,10 +3816,11 @@ where
                     self.notify_network_actor_shutdown_me(state);
                 }
             }
-            ChannelEvent::CheckRevocationNonceLedger(armed_at) => {
-                if state.is_revocation_nonce_ledger_stalled(armed_at) {
+            ChannelEvent::MaintainChannelTlcs => {
+                let now = now_timestamp_as_millis_u64();
+                if state.is_revocation_nonce_ledger_stalled(now) {
                     error!(
-                        "Channel {} from peer {:?} cannot add or remove TLCs: its revocation nonce ledger has been unbalanced for {} ms (send_present={}, verify_present={}) with no CommitmentSigned or RevokeAndAck from the peer, shutting down it forcefully",
+                        "Channel {} from peer {:?} cannot add or remove TLCs: its revocation nonce ledger has been unbalanced for over {} ms (send_present={}, verify_present={}) with no CommitmentSigned or RevokeAndAck from the peer, shutting down it forcefully",
                         state.get_id(),
                         state.get_remote_pubkey(),
                         PEER_CHANNEL_RESPONSE_TIMEOUT,
@@ -3827,12 +3828,7 @@ where
                         state.remote_revocation_nonce_for_verify.is_some(),
                     );
                     self.notify_network_actor_shutdown_me(state);
-                    // Re-arm on the next refresh, so a shutdown that doesn't go through is retried.
-                    state.revocation_nonce_unbalanced_since = None;
                 }
-            }
-            ChannelEvent::MaintainChannelTlcs => {
-                let now = now_timestamp_as_millis_u64();
                 if state.is_ready() {
                     self.maintain_ready_channel_tlcs(myself, state).await;
                 } else {
@@ -4656,7 +4652,7 @@ where
         // take the pending settlement tlc set
         let pending_notify_tlcs = std::mem::take(&mut state.pending_notify_settle_tlcs);
 
-        state.refresh_revocation_nonce_watchdog(&myself);
+        state.refresh_revocation_nonce_watchdog();
 
         if state.ephemeral_config.external_funding.enabled {
             state.persist_external_funding_state();
@@ -5173,8 +5169,6 @@ pub enum ChannelEvent {
     ForwardTlcResult(ForwardTlcResult),
     RunRetryTask,
     CheckActiveChannel,
-    /// Scheduled when the revocation nonce ledger becomes unbalanced, with the time it did.
-    CheckRevocationNonceLedger(u64),
     MaintainChannelTlcs,
     OnChainSettlementCompleted,
     /// The network actor confirmed that the upstream RemoveTlc for this on-chain-resolved
@@ -5540,33 +5534,28 @@ impl ChannelActorState {
                 || self.remote_revocation_nonce_for_verify.is_none())
     }
 
-    /// Called after every handled message. Arms the watchdog when the ledger becomes
-    /// unbalanced, scheduling a `CheckRevocationNonceLedger`, and disarms it once the ledger is
-    /// balanced again. Going offline disarms it too, so a reconnect gets a fresh timeout.
-    pub fn refresh_revocation_nonce_watchdog(&mut self, myself: &ActorRef<ChannelActorMessage>) {
+    /// Called after every handled message. Records when the ledger becomes unbalanced and
+    /// clears the record once it is balanced again. Going offline clears it too, so a reconnect
+    /// gets a fresh timeout.
+    pub fn refresh_revocation_nonce_watchdog(&mut self) {
         if !self.is_revocation_nonce_ledger_unbalanced() {
             self.revocation_nonce_unbalanced_since = None;
         } else if self.revocation_nonce_unbalanced_since.is_none() {
-            let armed_at = now_timestamp_as_millis_u64();
-            self.revocation_nonce_unbalanced_since = Some(armed_at);
+            self.revocation_nonce_unbalanced_since = Some(now_timestamp_as_millis_u64());
             self.log_ack_state("[ack] revocation nonce ledger unbalanced, watchdog armed");
-            myself.send_after(
-                Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT),
-                move || {
-                    ChannelActorMessage::Event(ChannelEvent::CheckRevocationNonceLedger(armed_at))
-                },
-            );
         }
     }
 
-    /// True if the watchdog armed at `armed_at` has not been disarmed since, i.e. the ledger
-    /// has stayed unbalanced for the whole peer response timeout: the peer message that would
-    /// rebalance it is not coming, so the channel can never add or remove TLCs again (#1561).
-    /// This compares armings rather than elapsed time: the timer runs on the monotonic clock
-    /// and can fire a moment before the wall clock shows the full timeout.
-    pub fn is_revocation_nonce_ledger_stalled(&self, armed_at: u64) -> bool {
-        self.revocation_nonce_unbalanced_since == Some(armed_at)
-            && self.is_revocation_nonce_ledger_unbalanced()
+    /// True if the ledger has stayed unbalanced for longer than the peer response timeout: the
+    /// peer message that would rebalance it is not coming, so the channel can never add or
+    /// remove TLCs again (#1561). Checked on each `MaintainChannelTlcs` tick, so the channel is
+    /// force-closed within one `CHECK_CHANNELS_INTERVAL` after the timeout.
+    pub fn is_revocation_nonce_ledger_stalled(&self, now: u64) -> bool {
+        self.is_revocation_nonce_ledger_unbalanced()
+            && self.revocation_nonce_unbalanced_since.is_some_and(|since| {
+                // saturating_sub, as in `peer_does_not_reply_ack_in_time`: the wall clock may step back
+                now.saturating_sub(since) > PEER_CHANNEL_RESPONSE_TIMEOUT
+            })
     }
 
     pub fn set_waiting_ack(&mut self, myself: &ActorRef<ChannelActorMessage>, waiting_ack: bool) {
