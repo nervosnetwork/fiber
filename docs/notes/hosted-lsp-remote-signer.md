@@ -104,7 +104,7 @@ namespaces, external funding workflow, ChannelActor continuation, watchtower,
 and the SDK agent E2E. It does not yet provide a durable push mailbox,
 long-lived signer sessions with fencing, or an explicit signer-readiness gate
 for buffered delivery. The current agent uses the general WebSocket signing subscriptions with
-pending-state recovery. See [RPC subscriptions](rpc-subscriptions.md).
+pending-state recovery. See [RPC subscriptions](../../crates/fiber-lib/src/rpc/README.md#subscription).
 
 ### Waiting for hosted channel signatures
 

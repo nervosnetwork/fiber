@@ -119,7 +119,6 @@ For the v0.7.x to v0.8.0 legacy migration flow, see
 * [Light Paper](./docs/light-paper.md)
 * [Glossary](./docs/glossary.md)
 * [RPC Documentation](./crates/fiber-lib/src/rpc/README.md)
-* [WebSocket RPC Subscriptions](./docs/notes/rpc-subscriptions.md)
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)
 

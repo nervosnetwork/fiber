@@ -63,4 +63,4 @@ spent input produce no submission and leave the persisted snapshot unchanged.
 The agent uses the general WebSocket `channel_signing` and `watchtower_signing`
 subscriptions with its tenant token. The server automatically resends pending
 requests on reconnect, using the same updates as live requests. `--once` uses
-the existing signing-status query RPCs for one processing pass and exits. See [RPC subscriptions](../../docs/notes/rpc-subscriptions.md).
+the existing signing-status query RPCs for one processing pass and exits. See [RPC subscriptions](../../crates/fiber-lib/src/rpc/README.md#subscription).
