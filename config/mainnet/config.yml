@@ -105,6 +105,8 @@ rpc:
   #   - dev         # debug builds only
   #   - prof        # requires the pprof feature
   listening_addr: "127.0.0.1:8227"
+  # Optional dedicated WebSocket address for general signing subscriptions.
+  # ws_listening_addr: "127.0.0.1:8229"
 
 # Hosted LSP service configuration. This section is inert unless `lsp` is added
 # to `services`. Tenant state and signing keys are isolated below $BASE_DIR/lsp.

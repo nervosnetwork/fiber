@@ -135,6 +135,23 @@ pub mod server {
     {
     }
 
+    /// Running RPC listeners, sharing one shutdown handle.
+    pub struct RpcServer {
+        /// Stops both listeners and their active connections.
+        pub handle: ServerHandle,
+        /// Bound address of the original HTTP/WS listener.
+        pub http_address: SocketAddr,
+        /// Bound address of the optional dedicated WebSocket listener.
+        pub ws_address: Option<SocketAddr>,
+    }
+
+    struct ListenerConfig {
+        ws_only: bool,
+        cors_enabled: bool,
+        cors_allowed_origins: Vec<String>,
+    }
+
+    #[cfg(test)]
     pub(super) async fn start_server(
         addr: &str,
         auth: Option<BiscuitAuth>,
@@ -143,8 +160,32 @@ pub mod server {
         cors_allowed_origins: Vec<String>,
     ) -> Result<(ServerHandle, SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
-        let listen_addr = listener.local_addr().expect("get local address");
+        let listen_addr = listener.local_addr()?;
+        let (stop_handle, handle) = stop_channel();
+        let enable_auth = auth.is_some();
+        spawn_listener(
+            listener,
+            Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey)),
+            enable_auth,
+            methods.into(),
+            stop_handle,
+            ListenerConfig {
+                ws_only: false,
+                cors_enabled,
+                cors_allowed_origins,
+            },
+        );
+        Ok((handle, listen_addr))
+    }
 
+    fn spawn_listener(
+        listener: TcpListener,
+        auth: Arc<BiscuitAuth>,
+        enable_auth: bool,
+        methods: Methods,
+        stop_handle: StopHandle,
+        config: ListenerConfig,
+    ) {
         // From this example
         // https://github.com/paritytech/jsonrpsee/blob/d3d9fa8553756751ad913830e7d0d0faca614cb5/examples/examples/jsonrpsee_as_service.rs
 
@@ -166,23 +207,23 @@ pub mod server {
         //
         // To keep the server running the `server_handle`
         // must be kept and it can also be used to stop the server.
-        let (stop_handle, server_handle) = stop_channel();
 
+        let mut server_config = jsonrpsee::server::ServerConfig::builder()
+            .max_subscriptions_per_connection(32)
+            .set_message_buffer_capacity(64)
+            .enable_ws_ping(jsonrpsee::server::PingConfig::default());
+        if config.ws_only {
+            server_config = server_config.ws_only();
+        }
+        let cors_enabled = config.cors_enabled;
+        let cors_allowed_origins = config.cors_allowed_origins;
         let per_conn = PerConnection {
-            methods: methods.into(),
+            methods,
             stop_handle: stop_handle.clone(),
             svc_builder: jsonrpsee::server::Server::builder()
-                .set_config(
-                    jsonrpsee::server::ServerConfig::builder()
-                        .max_subscriptions_per_connection(32)
-                        .set_message_buffer_capacity(64)
-                        .enable_ws_ping(jsonrpsee::server::PingConfig::default())
-                        .build(),
-                )
+                .set_config(server_config.build())
                 .to_service_builder(),
         };
-        let enable_auth = auth.is_some();
-        let auth = Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey));
 
         tokio::spawn(async move {
             loop {
@@ -263,8 +304,6 @@ pub mod server {
                 ));
             }
         });
-
-        Ok((server_handle, listen_addr))
     }
 
     fn is_public_addr(addr: &str) -> Result<bool> {
@@ -304,10 +343,12 @@ pub mod server {
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
         >,
-    ) -> Result<(ServerHandle, SocketAddr)> {
+    ) -> Result<RpcServer> {
         let listening_addr = config.listening_addr.as_deref().unwrap_or("[::1]:0");
-        if config.biscuit_public_key.is_none() && is_public_addr(listening_addr)? {
-            bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
+        for address in std::iter::once(listening_addr).chain(config.ws_listening_addr.as_deref()) {
+            if config.biscuit_public_key.is_none() && is_public_addr(address)? {
+                bail!("Cannot listen on a public address without a biscuit public key set in the config. Please set rpc.biscuit_public_key or listen on a private interface.");
+            }
         }
 
         if config.biscuit_private_key_path.is_some() {
@@ -329,13 +370,6 @@ pub mod server {
         };
 
         let mut modules = RpcModule::new(());
-        super::subscription::register_subscriptions(
-            &mut modules,
-            store.clone(),
-            lsp_actor.clone(),
-            config.is_module_enabled("channel"),
-            config.is_module_enabled("watchtower"),
-        )?;
         if config.is_module_enabled("invoice") {
             modules
                 .merge(
@@ -440,7 +474,7 @@ pub mod server {
                     .unwrap();
             }
         }
-        if let Some(lsp_actor) = lsp_actor {
+        if let Some(lsp_actor) = lsp_actor.clone() {
             if config.is_module_enabled("lsp") {
                 modules
                     .merge(LspRpcServerImpl::new(lsp_actor).into_rpc())
@@ -458,16 +492,69 @@ pub mod server {
             }
         }
 
-        let (handle, addr) = start_server(
-            listening_addr,
-            auth,
-            modules,
-            config.cors_enabled,
-            config.cors_allowed_origins.clone(),
-        )
-        .await?;
-        debug!("started listen to RPC addr {:?}", &listening_addr);
-        Ok((handle, addr))
+        // Bind all configured addresses before spawning either listener. A failed
+        // second bind drops the first listener instead of leaving a partial service.
+        let http_listener = TcpListener::bind(listening_addr).await?;
+        let http_address = http_listener.local_addr()?;
+        let ws_listener = match config.ws_listening_addr.as_deref() {
+            Some(address) => Some(TcpListener::bind(address).await?),
+            None => None,
+        };
+        let ws_address = ws_listener
+            .as_ref()
+            .map(TcpListener::local_addr)
+            .transpose()?;
+        let ws_methods = if ws_listener.is_some() {
+            use super::subscription::{SubscriptionRpcServer, SubscriptionRpcServerImpl};
+            let mut ws_modules = modules.clone();
+            ws_modules.merge(
+                SubscriptionRpcServerImpl::new(
+                    store,
+                    lsp_actor,
+                    config.is_module_enabled("channel"),
+                    config.is_module_enabled("watchtower"),
+                )
+                .into_rpc(),
+            )?;
+            Some(ws_modules.into())
+        } else {
+            None
+        };
+        let enable_auth = auth.is_some();
+        let auth = Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey));
+        let (stop_handle, handle) = stop_channel();
+        spawn_listener(
+            http_listener,
+            auth.clone(),
+            enable_auth,
+            modules.into(),
+            stop_handle.clone(),
+            ListenerConfig {
+                ws_only: false,
+                cors_enabled: config.cors_enabled,
+                cors_allowed_origins: config.cors_allowed_origins.clone(),
+            },
+        );
+        if let (Some(listener), Some(methods)) = (ws_listener, ws_methods) {
+            spawn_listener(
+                listener,
+                auth,
+                enable_auth,
+                methods,
+                stop_handle,
+                ListenerConfig {
+                    ws_only: true,
+                    cors_enabled: config.cors_enabled,
+                    cors_allowed_origins: config.cors_allowed_origins,
+                },
+            );
+        }
+        debug!(%http_address, ?ws_address, "started RPC listeners");
+        Ok(RpcServer {
+            handle,
+            http_address,
+            ws_address,
+        })
     }
 
     #[test]
@@ -476,5 +563,176 @@ pub mod server {
         assert!(!is_public_addr("[::1]:0").unwrap());
         assert!(is_public_addr("0.0.0.0:0").unwrap());
         assert!(!is_public_addr("127.0.0.1:0").unwrap());
+    }
+
+    #[cfg(test)]
+    mod listener_tests {
+        use std::time::Duration;
+
+        use fiber_json_types::SubscriptionEvent;
+        use jsonrpsee::{
+            core::client::{ClientT, SubscriptionClientT},
+            http_client::HttpClientBuilder,
+            rpc_params,
+            ws_client::WsClientBuilder,
+        };
+
+        use crate::{
+            fiber::channel::{ChannelActorState, ChannelActorStateStore},
+            store::{open_store, sample::StoreSample, Store},
+            tests::test_utils::{gen_rpc_config, get_test_root_actor},
+        };
+
+        use super::{start_rpc, RpcConfig, RpcServer};
+
+        async fn start(config: RpcConfig, store: Store) -> anyhow::Result<RpcServer> {
+            start_rpc(
+                config,
+                None,
+                None,
+                None,
+                None,
+                None,
+                store,
+                None,
+                None,
+                get_test_root_actor().await.get_cell(),
+                None,
+                #[cfg(debug_assertions)]
+                None,
+                #[cfg(debug_assertions)]
+                None,
+            )
+            .await
+        }
+
+        #[tokio::test]
+        async fn dedicated_ws_isolates_subscriptions_and_shares_rpc_and_shutdown() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path()).unwrap();
+            let mut config = gen_rpc_config();
+            config.listening_addr = Some("127.0.0.1:0".into());
+            config.ws_listening_addr = Some("127.0.0.1:0".into());
+            let server = start(config, store.clone()).await.unwrap();
+            let ws_address = server.ws_address.unwrap();
+            let original = WsClientBuilder::default()
+                .build(format!("ws://{}", server.http_address))
+                .await
+                .unwrap();
+            let dedicated = WsClientBuilder::default()
+                .build(format!("ws://{ws_address}"))
+                .await
+                .unwrap();
+
+            let http = HttpClientBuilder::default()
+                .build(format!("http://{}", server.http_address))
+                .unwrap();
+            let error = http
+                .request::<serde_json::Value, _>(
+                    "parse_invoice",
+                    rpc_params![serde_json::json!({"invoice": "invalid"})],
+                )
+                .await
+                .unwrap_err();
+            let jsonrpsee::core::ClientError::Call(expected) = error else {
+                panic!("expected RPC error: {error}");
+            };
+            assert_ne!(expected.code(), -32601);
+            for client in [&original, &dedicated] {
+                let error = client
+                    .request::<serde_json::Value, _>(
+                        "parse_invoice",
+                        rpc_params![serde_json::json!({"invoice": "invalid"})],
+                    )
+                    .await
+                    .unwrap_err();
+                let jsonrpsee::core::ClientError::Call(error) = error else {
+                    panic!("expected RPC error: {error}");
+                };
+                assert_eq!(error, expected);
+            }
+            let error = original
+                .subscribe::<SubscriptionEvent, _>(
+                    "subscribe",
+                    rpc_params!["channel_signing"],
+                    "unsubscribe",
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32601)
+            );
+            let mut subscription = dedicated
+                .subscribe::<SubscriptionEvent, _>(
+                    "subscribe",
+                    rpc_params!["channel_signing"],
+                    "unsubscribe",
+                )
+                .await
+                .unwrap();
+            let state = ChannelActorState::samples(42).remove(0);
+            let channel_id = state.get_id();
+            store.insert_channel_actor_state(state);
+            let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(event, SubscriptionEvent::ChannelSigning(result) if result.channel_id == channel_id.into())
+            );
+            let http_on_ws = HttpClientBuilder::default()
+                .build(format!("http://{ws_address}"))
+                .unwrap();
+            let error = http_on_ws
+                .request::<serde_json::Value, _>(
+                    "parse_invoice",
+                    rpc_params![serde_json::json!({"invoice": "invalid"})],
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, jsonrpsee::core::ClientError::Transport(_)));
+
+            server.handle.stop().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(original.on_disconnect(), dedicated.on_disconnect());
+                server.handle.stopped().await;
+            })
+            .await
+            .unwrap();
+        }
+
+        #[tokio::test]
+        async fn dedicated_ws_is_optional_and_requires_auth_on_public_interfaces() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path()).unwrap();
+            let config = gen_rpc_config();
+            let server = start(config.clone(), store.clone()).await.unwrap();
+            assert!(server.ws_address.is_none());
+            server.handle.stop().unwrap();
+            server.handle.stopped().await;
+
+            let mut config = config;
+            config.ws_listening_addr = Some("0.0.0.0:0".into());
+            let error = start(config, store).await.err().unwrap();
+            assert!(error.to_string().contains("biscuit public key"));
+        }
+
+        #[tokio::test]
+        async fn failed_ws_bind_does_not_leave_primary_listener_running() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path()).unwrap();
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let primary_address = primary.local_addr().unwrap();
+            let mut config = gen_rpc_config();
+            config.listening_addr = Some(primary_address.to_string());
+            config.ws_listening_addr = Some(occupied.local_addr().unwrap().to_string());
+            drop(primary);
+            assert!(start(config, store).await.is_err());
+            let _available = tokio::net::TcpListener::bind(primary_address)
+                .await
+                .unwrap();
+        }
     }
 }

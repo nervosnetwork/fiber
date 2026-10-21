@@ -661,11 +661,12 @@ async fn run_node(
     };
 
     signal_listener().await;
-    if let Some((handle, _)) = rpc_server_handle {
-        handle
+    if let Some(server) = rpc_server_handle {
+        server
+            .handle
             .stop()
             .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
-        handle.stopped().await;
+        server.handle.stopped().await;
     }
     cancel_tasks_and_wait_for_completion().await;
 

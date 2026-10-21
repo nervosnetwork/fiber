@@ -129,6 +129,7 @@ fn mock_sign_external_funding_tx(unsigned_tx: &Transaction) -> Transaction {
 struct TestLspFixture {
     public_t: NetworkNode,
     rpc_addr: std::net::SocketAddr,
+    ws_addr: std::net::SocketAddr,
     admin_client: HttpClient,
     _rpc_handle: ServerHandle,
     _lsp_actor: ractor::ActorRef<LspServiceMessage>,
@@ -214,6 +215,7 @@ impl TestLspFixture {
         .unwrap();
 
         let mut rpc_config = gen_rpc_config();
+        rpc_config.ws_listening_addr = Some("127.0.0.1:0".into());
         rpc_config.biscuit_public_key = Some(biscuit_root.public().to_string());
         let biscuit_private_key_path = root.path().join("biscuit-private-key");
         std::fs::write(
@@ -229,7 +231,11 @@ impl TestLspFixture {
             "payment".to_string(),
             "watchtower".to_string(),
         ];
-        let (rpc_handle, rpc_addr) = start_rpc(
+        let crate::rpc::server::RpcServer {
+            handle: rpc_handle,
+            http_address: rpc_addr,
+            ws_address,
+        } = start_rpc(
             rpc_config,
             None,
             Some(public_t.fiber_config.clone()),
@@ -253,6 +259,7 @@ impl TestLspFixture {
         Self {
             public_t,
             rpc_addr,
+            ws_addr: ws_address.unwrap(),
             admin_client,
             _rpc_handle: rpc_handle,
             _lsp_actor: lsp_actor,
@@ -506,8 +513,8 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         .await
         .expect("public-key registration");
 
-    let owner_ws = authenticated_subscription_client(fixture.rpc_addr, &owner_token).await;
-    let other_ws = authenticated_subscription_client(fixture.rpc_addr, &other_token).await;
+    let owner_ws = authenticated_subscription_client(fixture.ws_addr, &owner_token).await;
+    let other_ws = authenticated_subscription_client(fixture.ws_addr, &other_token).await;
     let mut owner_events = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
     let mut other_events = subscribe_signing(&other_ws, SubscriptionTopic::WatchtowerSigning).await;
 
@@ -1326,8 +1333,8 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
     let fixture = TestLspFixture::new("signing-subscription").await;
     let (tenant_id, _, token, owner) = fixture.register_tenant(1).await;
     let (_, _, other_token, _) = fixture.register_tenant(2).await;
-    let client = authenticated_subscription_client(fixture.rpc_addr, &token).await;
-    let other_client = authenticated_subscription_client(fixture.rpc_addr, &other_token).await;
+    let client = authenticated_subscription_client(fixture.ws_addr, &token).await;
+    let other_client = authenticated_subscription_client(fixture.ws_addr, &other_token).await;
     let mut other = subscribe_signing(&other_client, SubscriptionTopic::ChannelSigning).await;
     let status = ractor::call!(fixture._lsp_actor, LspServiceMessage::GetStatus).unwrap();
     assert_eq!(

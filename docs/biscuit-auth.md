@@ -134,8 +134,10 @@ rule(
 ```
 
 Subscriptions also check the selected topic's read permission before accepting the
-subscription and while delivering updates. The subscription capability does not
-grant access to channel or watchtower data by itself. See the
+subscription and fix its tenant/node scope for its lifetime. Updates do not recheck
+credentials; token expiry does not terminate an established subscription. New
+subscribe/unsubscribe requests still require valid credentials. The subscription
+capability does not grant access to channel or watchtower data by itself. See the
 [RPC subscription reference](../crates/fiber-lib/src/rpc/README.md#subscription).
 
 ## 3. How to Configure Biscuit Auth in Fiber

@@ -1036,7 +1036,11 @@ async fn create_lsp_test_network_inner(
             "lsp".to_string(),
             "payment".to_string(),
         ];
-        let (rpc_handle, rpc_addr) = start_rpc(
+        let crate::rpc::server::RpcServer {
+            handle: rpc_handle,
+            http_address: rpc_addr,
+            ..
+        } = start_rpc(
             rpc_config,
             None,
             Some(nodes[lsp_node_index].fiber_config.clone()),
@@ -1246,7 +1250,11 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
 
     let mut rpc_config = gen_rpc_config();
     rpc_config.enabled_modules = vec!["lsp".to_string()];
-    let (rpc_handle, rpc_addr) = start_rpc(
+    let crate::rpc::server::RpcServer {
+        handle: rpc_handle,
+        http_address: rpc_addr,
+        ..
+    } = start_rpc(
         rpc_config,
         None,
         None,
@@ -1508,7 +1516,11 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         "lsp".to_string(),
         "payment".to_string(),
     ];
-    let (rpc_handle, rpc_addr) = start_rpc(
+    let crate::rpc::server::RpcServer {
+        handle: rpc_handle,
+        http_address: rpc_addr,
+        ..
+    } = start_rpc(
         rpc_config,
         None,
         Some(public_t.fiber_config.clone()),
@@ -1857,7 +1869,11 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
 
     let mut rpc_config = gen_rpc_config();
     rpc_config.enabled_modules = vec!["lsp".to_string()];
-    let (rpc_handle, rpc_addr) = start_rpc(
+    let crate::rpc::server::RpcServer {
+        handle: rpc_handle,
+        http_address: rpc_addr,
+        ..
+    } = start_rpc(
         rpc_config,
         None,
         None,

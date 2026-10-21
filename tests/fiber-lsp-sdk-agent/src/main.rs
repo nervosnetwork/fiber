@@ -3,7 +3,7 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use ckb_types::prelude::*;
 use clap::Parser;
-use fiber_lsp_sdk_agent::{Agent, AgentConfig, HttpFiberRpc};
+use fiber_lsp_sdk_agent::{Agent, AgentConfig, EventStream, HttpFiberRpc};
 use serde::Deserialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -21,6 +21,14 @@ struct Args {
     /// Hosted LSP JSON-RPC URL.
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_RPC")]
     rpc: String,
+
+    /// Dedicated WebSocket RPC URL for signing subscriptions.
+    #[arg(
+        long,
+        env = "FIBER_LSP_SDK_AGENT_WS_RPC",
+        required_unless_present = "once"
+    )]
+    ws_rpc: Option<String>,
 
     /// Directory for the RootKey, SDK store, tenant token, and channel bindings.
     #[arg(long, env = "FIBER_LSP_SDK_AGENT_STORE")]
@@ -124,7 +132,12 @@ async fn main() -> Result<()> {
         .configure_chain(&args.ckb_rpc, &args.contracts_dir)
         .await?;
     info!(tenant_id = %agent.tenant_id(), "hosted LSP SDK agent ready");
-    let mut events = rpc.subscribe_events(agent.tenant_token()?)?;
+    let mut events = EventStream::connect(
+        args.ws_rpc
+            .as_deref()
+            .context("--ws-rpc is required for subscriptions")?,
+        agent.tenant_token()?,
+    )?;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,

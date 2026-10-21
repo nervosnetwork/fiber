@@ -61,6 +61,10 @@ verified input/witness/output data. It also checks that missing evidence and a
 spent input produce no submission and leave the persisted snapshot unchanged.
 
 The agent uses the general WebSocket `channel_signing` and `watchtower_signing`
-subscriptions with its tenant token. The server automatically resends pending
+subscriptions with its tenant token. Configure the node's `rpc.ws_listening_addr`
+and pass that dedicated endpoint to the agent with `--ws-rpc ws://127.0.0.1:8229`
+(or `FIBER_LSP_SDK_AGENT_WS_RPC`). `--rpc` remains the HTTP endpoint for ordinary
+calls. The server automatically resends pending
 requests on reconnect, using the same updates as live requests. `--once` uses
-the existing signing-status query RPCs for one processing pass and exits. See [RPC subscriptions](../../crates/fiber-lib/src/rpc/README.md#subscription).
+the existing signing-status query RPCs for one processing pass and exits; it does
+not require `--ws-rpc`. See [RPC subscriptions](../../crates/fiber-lib/src/rpc/README.md#subscription).

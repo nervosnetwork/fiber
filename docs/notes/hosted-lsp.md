@@ -255,8 +255,9 @@ tokens that call any method outside that allowlist:
   `shutdown_channel`, `check_channel_shutdown`, and `update_channel`
 - signing: `get_channel_signing_status`, `submit_channel_signature`,
   `get_watchtower_signing_status`, and `submit_watchtower_signature`
-- subscriptions: `subscribe` and `unsubscribe`, with topic read permissions checked
-  when subscribing and delivering updates
+- subscriptions: `subscribe` and `unsubscribe` on the dedicated
+  `rpc.ws_listening_addr` listener, with topic read permissions and tenant/node scope
+  checked when subscribing; updates retain that scope without rechecking credentials
 - watchtower preimages and watches: `create_preimage`, `remove_preimage`,
   `create_watch_channel`, and `remove_watch_channel`
 - tenant invoice and payment data plane: `new_invoice`, `get_invoice`,

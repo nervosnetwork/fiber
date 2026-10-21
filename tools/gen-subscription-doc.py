@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Include manually registered subscription RPCs in fiber-rpc-gen's output."""
+"""Include streaming subscription RPCs in fiber-rpc-gen's output."""
 
 from pathlib import Path
 import re
@@ -8,10 +8,10 @@ import re
 def generate(rpc_dir):
     source = (rpc_dir / "subscription.rs").read_text(encoding="utf-8")
     match = re.search(
-        r"(?m)^((?:///.*\n)+)pub\(crate\) fn register_subscriptions\b", source
+        r"(?m)^((?:///.*\n)+)#\[rpc\(server\)\]\npub\(crate\) trait SubscriptionRpc\b", source
     )
     if match is None:
-        raise ValueError("register_subscriptions must have a Rustdoc API reference")
+        raise ValueError("SubscriptionRpc must have a Rustdoc API reference")
     docs = "\n".join(
         line[4:] if line.startswith("/// ") else line[3:]
         for line in match[1].splitlines()

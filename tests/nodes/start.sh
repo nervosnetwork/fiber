@@ -13,6 +13,7 @@ start_node_ids=()
 enable_fiber_metrics="${ENABLE_FIBER_METRICS:-}"
 fiber_build_features="${FIBER_BUILD_FEATURES:-}"
 lsp_sdk_agent_control_addr="${LSP_SDK_AGENT_CONTROL_ADDR:-127.0.0.1:21917}"
+lsp_sdk_agent_ws_addr="${LSP_SDK_AGENT_WS_ADDR:-127.0.0.1:21918}"
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::trackers::lnd_trackers=off,fnn::fiber::gossip=off,fnn::fiber::graph=off,fnn::utils::actor=off
 
 is_lsp_e2e() {
@@ -43,7 +44,7 @@ yaml_map_value() {
 # SDK agent control port immediately so wait.sh does not race node RPC readiness.
 rm -f "$nodes_dir/.extra-ports"
 if is_lsp_e2e; then
-    printf '%s\n' "${lsp_sdk_agent_control_addr##*:}" >"$nodes_dir/.extra-ports"
+    printf '%s\n' "${lsp_sdk_agent_control_addr##*:}" "${lsp_sdk_agent_ws_addr##*:}" >"$nodes_dir/.extra-ports"
 fi
 
 append_fiber_build_feature() {
@@ -208,6 +209,7 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
     if is_lsp_e2e; then
         node2_args+=(
             -s fiber,rpc,ckb,lsp
+            --rpc-ws-listening-addr "$lsp_sdk_agent_ws_addr"
             --fiber-auto-accept-channel-ckb-funding-amount 50000000000
             --rpc-biscuit-public-key ed25519/17b172749be74276f0ed35a5d0685752684a3c5722114bba447a2f301136db79
             --rpc-biscuit-private-key-path "${script_dir}/biscuit-test-private-key"
@@ -237,6 +239,7 @@ if [ "${#start_node_ids[@]}" = 0 ]; then
             while true; do
                 if ! ../../target/"${test_env}"/fiber-lsp-sdk-agent \
                         --rpc "$node2_rpc_url" \
+                        --ws-rpc "ws://${lsp_sdk_agent_ws_addr}" \
                         --store "$agent_store" \
                         --status-file "$agent_status" \
                         --control-addr "$lsp_sdk_agent_control_addr" \

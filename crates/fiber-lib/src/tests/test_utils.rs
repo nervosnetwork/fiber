@@ -190,6 +190,7 @@ pub fn init_tracing() {
 pub fn gen_rpc_config() -> RpcConfig {
     RpcConfig {
         listening_addr: None,
+        ws_listening_addr: None,
         biscuit_public_key: None,
         biscuit_private_key_path: None,
         enabled_modules: vec![
@@ -1780,6 +1781,7 @@ impl NetworkNode {
                     None,
                 )
                 .await
+                .map(|server| (server.handle, server.http_address))
                 .unwrap(),
             )
         } else {

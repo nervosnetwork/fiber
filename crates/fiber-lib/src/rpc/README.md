@@ -1442,8 +1442,10 @@ Collects a temporary CPU profile and writes a flamegraph SVG to disk.
 <a id="subscription"></a>
 ### Module `Subscription`
 
-Subscribe to signing status over WebSocket on the existing RPC listener.
-Ordinary RPC calls can use the same connection. HTTP does not support subscriptions.
+Subscribe to signing status over WebSocket on the dedicated `rpc.ws_listening_addr` listener.
+Ordinary RPC calls can use the same connection. The original `rpc.listening_addr`
+listener retains its existing RPCs and CCH subscriptions, but does not expose
+these general signing subscriptions. Omit `ws_listening_addr` to disable them.
 
 Authenticate the WebSocket upgrade with the ordinary
 `Authorization: Bearer <Biscuit>` header. Tokens in URL parameters are not supported.
@@ -1551,7 +1553,7 @@ are not an atomic view across channels.
 Unchanged states are deduplicated per subscription, and intermediate states may
 be coalesced. This API reports current state, with no historical cursor or
 exactly-once guarantee. Subscriptions end on disconnect, cancellation,
-authorization failure, or server shutdown. Reconnect and subscribe again to
+delivery failure, or server shutdown. Reconnect and subscribe again to
 receive pending requests. Deduplicate signing work by request ID and submit
 signatures through the existing signature-submission RPCs.
 
@@ -1562,10 +1564,10 @@ WebSocket connection. The connection output buffer holds 64 messages. A queue
 that remains full for five seconds terminates the affected subscription;
 reconnect and subscribe again to recover pending requests.
 
-Subscription and topic permissions are checked on creation, when signing state
-changes, and before enqueueing each notification. An update that finds expired
-or invalid credentials terminates the subscription without sending it. Token
-expiry alone does not proactively close an idle subscription.
+Subscription and topic permissions are checked when establishing the subscription.
+The resulting tenant/node scope is fixed for its lifetime. Updates do not
+revalidate the token; token expiry does not terminate an established subscription.
+New `subscribe` and `unsubscribe` requests still require valid credentials.
 
 Invalid topics or options, disabled topics, excessive filters, and exhausted
 subscription capacity reject the request. A missing channel and a channel

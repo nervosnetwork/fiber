@@ -2,7 +2,7 @@
 
 use std::{future::pending, time::Duration};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use fiber_json_types::{SubscriptionEvent, SubscriptionTopic};
 use jsonrpsee::{
     core::client::{Subscription, SubscriptionClientT},
@@ -28,14 +28,10 @@ pub struct EventStream {
 impl EventStream {
     /// Subscribe to both signing topics; the node automatically resends pending requests.
     pub fn connect(rpc_url: &str, token: String) -> Result<Self> {
-        let mut url = reqwest::Url::parse(rpc_url)?;
-        let scheme = match url.scheme() {
-            "http" | "ws" => "ws",
-            "https" | "wss" => "wss",
-            _ => anyhow::bail!("expected HTTP or WebSocket RPC URL"),
-        };
-        url.set_scheme(scheme)
-            .map_err(|_| anyhow!("invalid RPC URL"))?;
+        let url = reqwest::Url::parse(rpc_url)?;
+        if !matches!(url.scheme(), "ws" | "wss") {
+            anyhow::bail!("expected dedicated ws:// or wss:// RPC URL");
+        }
         let mut headers = HeaderMap::new();
         headers.insert(
             "authorization",
@@ -163,7 +159,7 @@ mod tests {
         deny: bool,
     ) -> (String, ServerHandle, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let server = ServerBuilder::default().build("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", server.local_addr().unwrap());
+        let url = format!("ws://{}", server.local_addr().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let observed_calls = calls.clone();

@@ -1,264 +1,34 @@
-//! Scoped JSON-RPC subscriptions over WebSocket.
+//! Scoped JSON-RPC subscriptions over a dedicated WebSocket listener.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+mod service;
+mod transport;
 
 use anyhow::{anyhow, bail, Result};
-use fiber_json_types::{
-    GetChannelSigningStatusResult, SubscriptionEvent, SubscriptionOptions, SubscriptionTopic,
-};
-use fiber_types::{Hash256, NodeId};
+use fiber_json_types::{SubscriptionOptions, SubscriptionTopic};
+use fiber_types::NodeId;
 use jsonrpsee::{
-    core::SubscriptionError, types::ErrorObjectOwned, Extensions, PendingSubscriptionSink,
-    RpcModule, SubscriptionSink,
+    core::SubscriptionResult, proc_macros::rpc, types::ErrorObjectOwned, Extensions,
+    PendingSubscriptionSink,
 };
-use tokio::sync::Semaphore;
 
 use crate::{
-    lsp::{LspServiceMessage, TenantId},
+    lsp::LspServiceMessage,
     rpc::{
         biscuit::{extract_tenant_id, scoped_rpc_node_id},
         middleware::RpcAuthorization,
         server::RpcServerStore,
     },
-    store::notifications::SigningChanges,
 };
 
-const MAX_SUBSCRIPTIONS: usize = 16_384;
-const MAX_FILTER_CHANNELS: usize = 256;
-
-fn read_method(topic: SubscriptionTopic) -> &'static str {
-    match topic {
-        SubscriptionTopic::ChannelSigning => "get_channel_signing_status",
-        SubscriptionTopic::WatchtowerSigning => "get_watchtower_signing_status",
-    }
-}
-
-fn authorize_topic(
-    authorization: &RpcAuthorization,
-    topic: SubscriptionTopic,
-) -> Result<(Option<TenantId>, NodeId)> {
-    authorization
-        .authorize("subscribe")
-        .map_err(|_| anyhow!("Unauthorized"))?;
-    let Some((biscuit, _)) = authorization
-        .authorize(read_method(topic))
-        .map_err(|_| anyhow!("Unauthorized"))?
-    else {
-        return Ok((None, NodeId::local()));
-    };
-    let tenant = extract_tenant_id(&biscuit)?;
-    let node = if topic == SubscriptionTopic::WatchtowerSigning {
-        scoped_rpc_node_id(&biscuit)?
-    } else {
-        NodeId::local()
-    };
-    Ok((tenant, node))
-}
-
-struct Source<S> {
-    channels: S,
-    watchtower: S,
-    node: NodeId,
-}
-
-impl<S: RpcServerStore> Source<S> {
-    fn listen(&self, topic: SubscriptionTopic) -> SigningChanges {
-        match topic {
-            SubscriptionTopic::ChannelSigning => self.channels.subscribe_channel_signing(),
-            SubscriptionTopic::WatchtowerSigning => {
-                self.watchtower.subscribe_watchtower_signing(&self.node)
-            }
-        }
-    }
-
-    fn exists(&self, topic: SubscriptionTopic, channel: &Hash256) -> bool {
-        match topic {
-            SubscriptionTopic::ChannelSigning => {
-                self.channels.get_channel_actor_state(channel).is_some()
-            }
-            SubscriptionTopic::WatchtowerSigning => {
-                #[cfg(feature = "watchtower")]
-                {
-                    self.watchtower
-                        .get_watch_channel(&self.node, channel)
-                        .is_some()
-                }
-                #[cfg(not(feature = "watchtower"))]
-                {
-                    false
-                }
-            }
-        }
-    }
-
-    fn current(
-        &self,
-        topic: SubscriptionTopic,
-        options: &SubscriptionOptions,
-    ) -> Result<HashMap<Hash256, SubscriptionEvent>> {
-        let ids: Vec<Hash256> = match &options.channel_ids {
-            Some(ids) => ids.iter().map(|id| (*id).into()).collect(),
-            None => match topic {
-                SubscriptionTopic::ChannelSigning => self
-                    .channels
-                    .get_channel_states(None)
-                    .into_iter()
-                    .map(|(_, id, _)| id)
-                    .collect(),
-                SubscriptionTopic::WatchtowerSigning => {
-                    #[cfg(feature = "watchtower")]
-                    {
-                        self.watchtower
-                            .get_watch_channels_for_node(&self.node)
-                            .into_iter()
-                            .map(|channel| channel.channel_id)
-                            .collect()
-                    }
-                    #[cfg(not(feature = "watchtower"))]
-                    {
-                        Vec::new()
-                    }
-                }
-            },
-        };
-        let mut current = HashMap::new();
-        for id in ids {
-            let event = match topic {
-                SubscriptionTopic::ChannelSigning => {
-                    let Some(state) = self.channels.get_channel_actor_state(&id) else {
-                        continue;
-                    };
-                    let status = super::channel::to_rpc_channel_signing_status(&state)
-                        .map_err(|error| anyhow!(error))?;
-                    SubscriptionEvent::ChannelSigning(Box::new(GetChannelSigningStatusResult {
-                        channel_id: id.into(),
-                        status,
-                    }))
-                }
-                SubscriptionTopic::WatchtowerSigning => {
-                    #[cfg(feature = "watchtower")]
-                    {
-                        if self.watchtower.get_watch_channel(&self.node, &id).is_none() {
-                            continue;
-                        }
-                        SubscriptionEvent::WatchtowerSigning(Box::new(
-                            fiber_json_types::GetWatchtowerSigningStatusResult {
-                                channel_id: id.into(),
-                                status: super::watchtower::to_rpc_watchtower_signing_status(
-                                    self.watchtower.get_watchtower_signer(&self.node, &id),
-                                ),
-                            },
-                        ))
-                    }
-                    #[cfg(not(feature = "watchtower"))]
-                    {
-                        continue;
-                    }
-                }
-            };
-            current.insert(id, event);
-        }
-        Ok(current)
-    }
-}
-
-fn is_pending(event: &SubscriptionEvent) -> bool {
-    match event {
-        SubscriptionEvent::ChannelSigning(result) => matches!(
-            result.status,
-            fiber_json_types::ChannelSigningStatus::SignatureRequired { .. }
-        ),
-        #[cfg(feature = "watchtower")]
-        SubscriptionEvent::WatchtowerSigning(result) => matches!(
-            result.status,
-            fiber_json_types::WatchtowerSigningStatus::SignatureRequired { .. }
-        ),
-        _ => false,
-    }
-}
-
-async fn send(
-    sink: &mut SubscriptionSink,
-    authorization: &RpcAuthorization,
-    topic: SubscriptionTopic,
-    event: &SubscriptionEvent,
-) -> Result<()> {
-    let message = serde_json::value::to_raw_value(event)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        authorize_topic(authorization, topic)?;
-        if sink.try_send(message.clone()).is_ok() {
-            return Ok(());
-        }
-        if sink.is_closed() || tokio::time::Instant::now() >= deadline {
-            bail!("subscription queue full or closed; reconnect to recover pending requests");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-async fn run<S: RpcServerStore>(
-    source: Source<S>,
-    topic: SubscriptionTopic,
-    options: SubscriptionOptions,
-    authorization: RpcAuthorization,
-    pending: PendingSubscriptionSink,
-) -> Result<()> {
-    // Register first: changes during the initial read remain pending in this listener.
-    let mut changes = source.listen(topic);
-    if let Some(ids) = &options.channel_ids {
-        if ids.iter().any(|id| !source.exists(topic, &(*id).into())) {
-            pending
-                .reject(ErrorObjectOwned::owned(
-                    -32001,
-                    "channel not found",
-                    None::<()>,
-                ))
-                .await;
-            return Ok(());
-        }
-    }
-    let mut previous = source.current(topic, &options)?;
-    let mut sink = pending.accept().await?;
-    // Signing topics always resend outstanding work using ordinary updates.
-    for event in previous.values().filter(|event| is_pending(event)) {
-        send(&mut sink, &authorization, topic, event).await?;
-    }
-    loop {
-        tokio::select! {
-            biased;
-            _ = sink.closed() => return Ok(()),
-            _ = changes.changed() => {}
-        }
-        authorize_topic(&authorization, topic)?;
-        let current = source.current(topic, &options)?;
-        for (id, event) in &current {
-            if previous.get(id).map(serde_json::to_value).transpose()?
-                != Some(serde_json::to_value(event)?)
-            {
-                send(&mut sink, &authorization, topic, event).await?;
-            }
-        }
-        for id in previous.keys().filter(|id| !current.contains_key(id)) {
-            send(
-                &mut sink,
-                &authorization,
-                topic,
-                &SubscriptionEvent::Removed {
-                    channel_id: (*id).into(),
-                },
-            )
-            .await?;
-        }
-        previous = current;
-    }
-}
+use service::{EventStream, Source, SubscriptionService};
 
 /// <a id="subscription"></a>
 /// ### Module `Subscription`
 ///
-/// Subscribe to signing status over WebSocket on the existing RPC listener.
-/// Ordinary RPC calls can use the same connection. HTTP does not support subscriptions.
+/// Subscribe to signing status over WebSocket on the dedicated `rpc.ws_listening_addr` listener.
+/// Ordinary RPC calls can use the same connection. The original `rpc.listening_addr`
+/// listener retains its existing RPCs and CCH subscriptions, but does not expose
+/// these general signing subscriptions. Omit `ws_listening_addr` to disable them.
 ///
 /// Authenticate the WebSocket upgrade with the ordinary
 /// `Authorization: Bearer <Biscuit>` header. Tokens in URL parameters are not supported.
@@ -366,7 +136,7 @@ async fn run<S: RpcServerStore>(
 /// Unchanged states are deduplicated per subscription, and intermediate states may
 /// be coalesced. This API reports current state, with no historical cursor or
 /// exactly-once guarantee. Subscriptions end on disconnect, cancellation,
-/// authorization failure, or server shutdown. Reconnect and subscribe again to
+/// delivery failure, or server shutdown. Reconnect and subscribe again to
 /// receive pending requests. Deduplicate signing work by request ID and submit
 /// signatures through the existing signature-submission RPCs.
 ///
@@ -377,10 +147,10 @@ async fn run<S: RpcServerStore>(
 /// that remains full for five seconds terminates the affected subscription;
 /// reconnect and subscribe again to recover pending requests.
 ///
-/// Subscription and topic permissions are checked on creation, when signing state
-/// changes, and before enqueueing each notification. An update that finds expired
-/// or invalid credentials terminates the subscription without sending it. Token
-/// expiry alone does not proactively close an idle subscription.
+/// Subscription and topic permissions are checked when establishing the subscription.
+/// The resulting tenant/node scope is fixed for its lifetime. Updates do not
+/// revalidate the token; token expiry does not terminate an established subscription.
+/// New `subscribe` and `unsubscribe` requests still require valid credentials.
 ///
 /// Invalid topics or options, disabled topics, excessive filters, and exhausted
 /// subscription capacity reject the request. A missing channel and a channel
@@ -417,141 +187,141 @@ async fn run<S: RpcServerStore>(
 /// ```
 ///
 /// ---
-pub(crate) fn register_subscriptions<S: RpcServerStore + Clone + Send + Sync + 'static>(
-    modules: &mut RpcModule<()>,
+#[rpc(server)]
+pub(crate) trait SubscriptionRpc {
+    /// Subscribe to signing state in the authenticated namespace.
+    #[subscription(name = "subscribe", unsubscribe = "unsubscribe", item = fiber_json_types::SubscriptionEvent, with_extensions)]
+    async fn subscribe(
+        &self,
+        topic: SubscriptionTopic,
+        options: Option<SubscriptionOptions>,
+    ) -> SubscriptionResult;
+}
+
+#[derive(Clone)]
+pub(crate) struct SubscriptionRpcServerImpl<S> {
     store: S,
     lsp: Option<ractor::ActorRef<LspServiceMessage>>,
-    channels_enabled: bool,
-    watchtower_enabled: bool,
-) -> Result<()> {
-    let slots = Arc::new(Semaphore::new(MAX_SUBSCRIPTIONS));
-    modules.register_subscription(
-        "subscribe",
-        "subscribe",
-        "unsubscribe",
-        move |params, pending, _, extensions: Extensions| {
-            let store = store.clone();
-            let lsp = lsp.clone();
-            let slots = slots.clone();
-            async move {
-                let prepare = || -> Result<_> {
-                    let mut sequence = params.sequence();
-                    let topic: SubscriptionTopic = sequence.next()?;
-                    let options: SubscriptionOptions =
-                        sequence.optional_next()?.unwrap_or_default();
-                    if sequence.optional_next::<serde_json::Value>()?.is_some() {
-                        bail!("expected topic and optional options");
-                    }
-                    let enabled = match topic {
-                        SubscriptionTopic::ChannelSigning => channels_enabled,
-                        SubscriptionTopic::WatchtowerSigning => {
-                            cfg!(feature = "watchtower") && watchtower_enabled
-                        }
-                    };
-                    if !enabled {
-                        bail!("subscription topic is disabled");
-                    }
-                    if options
-                        .channel_ids
-                        .as_ref()
-                        .is_some_and(|ids| ids.len() > MAX_FILTER_CHANNELS)
-                    {
-                        bail!("too many channel filters");
-                    }
-                    let authorization = extensions
-                        .get::<RpcAuthorization>()
-                        .cloned()
-                        .ok_or_else(|| anyhow!("RPC authorization missing"))?;
-                    let (tenant, node) = authorize_topic(&authorization, topic)?;
-                    let permit = slots
-                        .try_acquire_owned()
-                        .map_err(|_| anyhow!("subscription limit reached"))?;
-                    Ok((topic, options, authorization, tenant, node, permit))
-                };
-                let (topic, options, authorization, tenant, node, _permit) = match prepare() {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        pending
-                            .reject(ErrorObjectOwned::owned(
-                                -32001,
-                                error.to_string(),
-                                None::<()>,
-                            ))
-                            .await;
-                        return Ok::<(), SubscriptionError>(());
-                    }
-                };
-                let result = if let Some(tenant) = tenant {
-                    let context = async {
-                        let actor =
-                            lsp.ok_or_else(|| anyhow!("hosted LSP service is not enabled"))?;
-                        ractor::call_t!(
-                            actor,
-                            LspServiceMessage::GetTenantSubscriptionContext,
-                            5_000,
-                            tenant
-                        )
-                        .map_err(|_| anyhow!("hosted LSP service unavailable"))?
-                        .map_err(anyhow::Error::msg)
-                    }
-                    .await;
-                    match context {
-                        Ok(context) => {
-                            if topic == SubscriptionTopic::WatchtowerSigning
-                                && node != context.node_id
-                            {
-                                pending
-                                    .reject(ErrorObjectOwned::owned(
-                                        -32001,
-                                        "watchtower identity does not match tenant",
-                                        None::<()>,
-                                    ))
-                                    .await;
-                                return Ok(());
-                            }
-                            run(
-                                Source {
-                                    channels: context.store,
-                                    watchtower: context.watchtower_store,
-                                    node,
-                                },
-                                topic,
-                                options,
-                                authorization,
-                                pending,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            pending
-                                .reject(ErrorObjectOwned::owned(
-                                    -32001,
-                                    error.to_string(),
-                                    None::<()>,
-                                ))
-                                .await;
-                            return Ok(());
-                        }
-                    }
-                } else {
-                    run(
-                        Source {
-                            channels: store.clone(),
-                            watchtower: store,
-                            node,
-                        },
-                        topic,
-                        options,
-                        authorization,
-                        pending,
-                    )
-                    .await
-                };
-                result.map_err(|error| SubscriptionError::from(error.to_string()))
+    service: SubscriptionService,
+}
+
+impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServerImpl<S> {
+    pub(crate) fn new(
+        store: S,
+        lsp: Option<ractor::ActorRef<LspServiceMessage>>,
+        channels_enabled: bool,
+        watchtower_enabled: bool,
+    ) -> Self {
+        Self {
+            store,
+            lsp,
+            service: SubscriptionService::new(channels_enabled, watchtower_enabled),
+        }
+    }
+
+    async fn stream(
+        &self,
+        extensions: &Extensions,
+        topic: SubscriptionTopic,
+        options: SubscriptionOptions,
+    ) -> Result<EventStream> {
+        // The middleware has already checked write("subscriptions"). Only the
+        // selected topic's read policy and scope are resolved here, once.
+        let method = match topic {
+            SubscriptionTopic::ChannelSigning => "get_channel_signing_status",
+            SubscriptionTopic::WatchtowerSigning => "get_watchtower_signing_status",
+        };
+        let (tenant, node) = {
+            let authorization = extensions
+                .get::<RpcAuthorization>()
+                .ok_or_else(|| anyhow!("RPC authorization missing"))?;
+            match authorization
+                .authorize(method)
+                .map_err(|_| anyhow!("Unauthorized"))?
+            {
+                Some((biscuit, _)) => (
+                    extract_tenant_id(&biscuit)?,
+                    if topic == SubscriptionTopic::WatchtowerSigning {
+                        scoped_rpc_node_id(&biscuit)?
+                    } else {
+                        NodeId::local()
+                    },
+                ),
+                None => (None, NodeId::local()),
             }
-        },
-    )?;
-    Ok(())
+        };
+        if let Some(tenant) = tenant {
+            let actor = self
+                .lsp
+                .as_ref()
+                .ok_or_else(|| anyhow!("hosted LSP service is not enabled"))?;
+            let context = ractor::call_t!(
+                actor,
+                LspServiceMessage::GetTenantSubscriptionContext,
+                5_000,
+                tenant
+            )
+            .map_err(|_| anyhow!("hosted LSP service unavailable"))?
+            .map_err(anyhow::Error::msg)?;
+            if topic == SubscriptionTopic::WatchtowerSigning && node != context.node_id {
+                bail!("watchtower identity does not match tenant");
+            }
+            self.service.subscribe(
+                Source {
+                    channels: context.store,
+                    watchtower: context.watchtower_store,
+                    node,
+                },
+                topic,
+                options,
+            )
+        } else {
+            self.service.subscribe(
+                Source {
+                    channels: self.store.clone(),
+                    watchtower: self.store.clone(),
+                    node,
+                },
+                topic,
+                options,
+            )
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: RpcServerStore + Clone + Send + Sync + 'static> SubscriptionRpcServer
+    for SubscriptionRpcServerImpl<S>
+{
+    async fn subscribe(
+        &self,
+        pending: PendingSubscriptionSink,
+        extensions: &Extensions,
+        topic: SubscriptionTopic,
+        options: Option<SubscriptionOptions>,
+    ) -> SubscriptionResult {
+        let stream = self
+            .stream(extensions, topic, options.unwrap_or_default())
+            .await;
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                pending
+                    .reject(ErrorObjectOwned::owned(
+                        -32001,
+                        error.to_string(),
+                        None::<()>,
+                    ))
+                    .await;
+                return Ok(());
+            }
+        };
+        // Credentials and RPC extensions are not retained by the event stream.
+        let sink = pending.accept().await?;
+        transport::forward(sink, stream)
+            .await
+            .map_err(|error| error.to_string().into())
+    }
 }
 
 #[cfg(test)]

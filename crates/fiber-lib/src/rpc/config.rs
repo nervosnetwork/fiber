@@ -14,6 +14,12 @@ pub struct RpcConfig {
     #[arg(name = "RPC_LISTENING_ADDR", long = "rpc-listening-addr", env)]
     pub listening_addr: Option<String>,
 
+    /// Dedicated WebSocket RPC address. Omission disables general subscriptions.
+    /// The original listener retains its existing WebSocket support for CCH.
+    #[default(None)]
+    #[arg(name = "RPC_WS_LISTENING_ADDR", long = "rpc-ws-listening-addr", env)]
+    pub ws_listening_addr: Option<String>,
+
     #[default(None)]
     #[arg(name = "RPC_BISCUIT_PUBLIC_KEY", long = "rpc-biscuit-public-key", env)]
     pub biscuit_public_key: Option<String>,
