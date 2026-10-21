@@ -12,7 +12,7 @@ use fiber_types::NodeId;
 /// Capabilities issued to tenant tokens. Middleware still denies methods
 /// outside the tenant RPC allowlist, so these resource capabilities cannot be
 /// used to reach public-node or LSP-administration methods.
-const TENANT_CAPABILITIES: [(&str, &str); 8] = [
+const TENANT_CAPABILITIES: [(&str, &str); 9] = [
     ("read", "channels"),
     ("write", "channels"),
     ("read", "invoices"),
@@ -21,6 +21,7 @@ const TENANT_CAPABILITIES: [(&str, &str); 8] = [
     ("write", "payments"),
     ("read", "watchtower"),
     ("write", "watchtower"),
+    ("write", "subscriptions"),
 ];
 
 /// Signs tenant-scoped Biscuit access tokens with the RPC authentication root key.

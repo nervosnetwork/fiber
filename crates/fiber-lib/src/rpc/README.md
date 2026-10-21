@@ -1448,6 +1448,11 @@ Ordinary RPC calls can use the same connection. HTTP does not support subscripti
 Authenticate the WebSocket upgrade with the ordinary
 `Authorization: Bearer <Biscuit>` header. Tokens in URL parameters are not supported.
 A connection keeps one credential; reconnect to use a refreshed token.
+When RPC authentication is enabled, both `subscribe` and `unsubscribe` require
+`write("subscriptions")`, using the ordinary RPC authorization rules. Subscribing
+also requires the selected topic's read permission. Tokens issued by hosted
+tenant registration include the subscription capability; existing tokens without
+it must be reissued.
 
 Tenant and node identities come from verified token authority facts, rather than
 subscription parameters. Tenant subscribers receive only their authorized tenant
@@ -1461,8 +1466,10 @@ Subscribe to a topic and return an ID for subsequent notifications and cancellat
 
 ##### Params
 
-* `topic` - String, one of the topics below. Each topic requires the same complete
-  read policy as its corresponding query RPC, including alternative capabilities.
+* `topic` - String, one of the topics below. In addition to `write("subscriptions")`,
+  each topic requires the same complete read policy as its corresponding query
+  RPC, including alternative capabilities. Missing permissions reject the
+  subscription before it is established.
 * `options` - Optional object with a single field, `channel_ids`, an optional array
   of [Hash256](#type-hash256). Omission selects all authorized channels; an empty
   array selects none. At most 256 IDs are allowed. Unknown fields are rejected.
@@ -1555,7 +1562,8 @@ WebSocket connection. The connection output buffer holds 64 messages. A queue
 that remains full for five seconds terminates the affected subscription;
 reconnect and subscribe again to recover pending requests.
 
-Authorization is checked on creation and before enqueueing each notification.
+Subscription and topic permissions are checked on creation and before enqueueing
+each notification.
 Idle subscriptions recheck authorization at most every ten seconds. Expired or
 invalid credentials terminate the subscription.
 
@@ -1569,6 +1577,9 @@ outside the authorized scope both return `channel not found`.
 #### Method `unsubscribe`
 
 Cancel a subscription created on the same WebSocket connection.
+Requires a valid token granting `write("subscriptions")` when RPC authentication
+is enabled. An expired token cannot cancel a subscription; disconnecting still
+releases the connection's subscriptions.
 
 ##### Params
 
@@ -1578,8 +1589,7 @@ Cancel a subscription created on the same WebSocket connection.
 
 A boolean: `true` if the subscription was cancelled, `false` if the ID does not
 identify an active subscription on this connection. Another connection cannot
-cancel it. Cancellation remains available after token expiry. Multiple
-subscribers for the same tenant are independent.
+cancel it. Multiple subscribers for the same tenant are independent.
 
 ##### Examples
 

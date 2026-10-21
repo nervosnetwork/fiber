@@ -3,7 +3,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Error, Result};
-use biscuit_auth::error::{RunLimit, Token as BiscuitError};
+use biscuit_auth::{
+    error::{RunLimit, Token as BiscuitError},
+    Biscuit,
+};
 use hyper::header::AUTHORIZATION;
 use hyper::HeaderMap;
 use jsonrpsee::core::middleware::{Batch, BatchEntry, BatchEntryErr, Notification};
@@ -16,9 +19,28 @@ use crate::rpc::tenant::{enforce_tenant_method_allowlist, AuthenticatedTenant};
 use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
 
-use super::biscuit::BiscuitAuth;
+use super::biscuit::{AuthRule, BiscuitAuth};
 
 const BEARER_PREFIX: &str = "Bearer ";
+
+/// Server-derived credentials, also retained by handlers that must recheck access.
+#[derive(Clone)]
+pub(crate) struct RpcAuthorization {
+    pub(crate) auth: Arc<BiscuitAuth>,
+    pub(crate) token: Option<String>,
+}
+
+impl RpcAuthorization {
+    /// Apply the ordinary method policy and tenant allowlist, or return None for local RPC.
+    pub(crate) fn authorize(&self, method: &str) -> Result<Option<(Biscuit, &AuthRule)>> {
+        let Some(token) = &self.token else {
+            return Ok(None);
+        };
+        let (token, rule) = self.auth.check_permission(method, token)?;
+        enforce_tenant_method_allowlist(method, &token)?;
+        Ok(Some((token, rule)))
+    }
+}
 
 #[derive(Clone)]
 pub struct BiscuitAuthMiddleware<S> {
@@ -70,31 +92,17 @@ impl<S> BiscuitAuthMiddleware<S> {
         Ok(())
     }
 
+    fn authorization(&self) -> Result<RpcAuthorization> {
+        Ok(RpcAuthorization {
+            auth: self.auth.clone(),
+            token: self.enable_auth.then(|| self.auth_token()).transpose()?,
+        })
+    }
+
     /// Authorize the request
     fn auth_call(&self, req: &mut Request<'_>) -> Result<()> {
-        if req.method == "subscribe" {
-            // The subscription handler checks the selected topic's existing read policy
-            // and derives its namespace. A broad method-level permission is insufficient.
-            req.extensions_mut()
-                .insert(super::subscription::SubscriptionAuthorization {
-                    auth: self.auth.clone(),
-                    token: if self.enable_auth {
-                        Some(self.auth_token()?)
-                    } else {
-                        None
-                    },
-                });
-            return Ok(());
-        }
-        if req.method == "unsubscribe" {
-            // jsonrpsee binds IDs to this connection. Releasing resources must also
-            // work after the connection's token expires.
-            return Ok(());
-        }
-        if self.enable_auth {
-            let token = self.auth_token()?;
-            let (token, rule) = self.auth.check_permission(&req.method, &token)?;
-            enforce_tenant_method_allowlist(&req.method, &token)?;
+        let authorization = self.authorization()?;
+        if let Some((token, rule)) = authorization.authorize(&req.method)? {
             self.inject_authenticated_tenant(req.extensions_mut(), &token)?;
             if rule.require_rpc_context {
                 let node_id = scoped_rpc_node_id(&token)?;
@@ -104,7 +112,6 @@ impl<S> BiscuitAuthMiddleware<S> {
                 };
                 self.inject_rpc_context(req, ctx);
             }
-            Ok(())
         } else {
             // local rpc, auth token is none
             match self.auth.get_rule(&req.method) {
@@ -125,20 +132,19 @@ impl<S> BiscuitAuthMiddleware<S> {
                     // no auth rule, but allow local rpc to proceed.
                 }
             }
-            Ok(())
         }
+        req.extensions_mut().insert(authorization);
+        Ok(())
     }
 
     /// Authorize the notification
     fn auth_notify(&self, notify: &mut Notification<'_>) -> Result<()> {
-        if self.enable_auth {
-            let token = self.auth_token()?;
-            let (token, _) = self.auth.check_permission(notify.method_name(), &token)?;
-            enforce_tenant_method_allowlist(notify.method_name(), &token)?;
-            self.inject_authenticated_tenant(notify.extensions_mut(), &token)
-        } else {
-            Ok(())
+        let authorization = self.authorization()?;
+        if let Some((token, _)) = authorization.authorize(notify.method_name())? {
+            self.inject_authenticated_tenant(notify.extensions_mut(), &token)?;
         }
+        notify.extensions_mut().insert(authorization);
+        Ok(())
     }
 }
 

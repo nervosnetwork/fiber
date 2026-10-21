@@ -246,7 +246,7 @@ Fiber RPC method names.
 The authority block of the Biscuit token contains `tenant("<tenant_id>")` plus
 the capabilities needed for the tenant allowlist (`read`/`write("channels")`,
 `read`/`write("invoices")`, `read`/`write("payments")`, and
-`read`/`write("watchtower")`).
+`read`/`write("watchtower")`, and `write("subscriptions")`).
 After Biscuit capability checks, the authentication middleware rejects tenant
 tokens that call any method outside that allowlist:
 
@@ -255,6 +255,8 @@ tokens that call any method outside that allowlist:
   `shutdown_channel`, `check_channel_shutdown`, and `update_channel`
 - signing: `get_channel_signing_status`, `submit_channel_signature`,
   `get_watchtower_signing_status`, and `submit_watchtower_signature`
+- subscriptions: `subscribe` and `unsubscribe`, with topic read permissions checked
+  when subscribing and delivering updates
 - watchtower preimages and watches: `create_preimage`, `remove_preimage`,
   `create_watch_channel`, and `remove_watch_channel`
 - tenant invoice and payment data plane: `new_invoice`, `get_invoice`,

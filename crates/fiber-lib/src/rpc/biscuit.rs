@@ -101,6 +101,9 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "subscribe_store_changes",
         r#"allow if internal("store_changes");"#,
     );
+    // subscriptions
+    b.rule("subscribe", r#"allow if write("subscriptions");"#);
+    b.rule("unsubscribe", r#"allow if write("subscriptions");"#);
     // channels
     b.rule("open_channel", r#"allow if write("channels");"#);
     b.rule("accept_channel", r#"allow if write("channels");"#);
@@ -404,6 +407,10 @@ mod tests {
             .unwrap();
         auth.check_permission("submit_watchtower_signature", &token)
             .unwrap();
+        for method in ["subscribe", "unsubscribe"] {
+            auth.check_permission(method, &token).unwrap();
+            crate::rpc::tenant::enforce_tenant_method_allowlist(method, &biscuit).unwrap();
+        }
         crate::rpc::tenant::enforce_tenant_method_allowlist("get_channel_signing_status", &biscuit)
             .unwrap();
         assert!(

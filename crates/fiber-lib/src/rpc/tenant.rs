@@ -40,6 +40,8 @@ pub(crate) const TENANT_ALLOWED_METHODS: &[&str] = &[
     "submit_commitment_transaction",
     "submit_signed_funding_tx",
     "submit_watchtower_signature",
+    "subscribe",
+    "unsubscribe",
     "update_channel",
 ];
 

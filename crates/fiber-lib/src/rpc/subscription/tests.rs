@@ -20,11 +20,11 @@ use jsonrpsee::{
 
 use crate::{
     fiber::channel::{ChannelActorState, ChannelActorStateStore},
-    rpc::biscuit::BiscuitAuth,
+    rpc::{biscuit::BiscuitAuth, middleware::RpcAuthorization},
     store::{open_store, sample::StoreSample, NodeNamespace, Store},
 };
 
-use super::{register_subscriptions, SubscriptionAuthorization};
+use super::register_subscriptions;
 
 struct Fixture {
     store: Store,
@@ -106,7 +106,7 @@ async fn next(subscription: &mut Subscription<SubscriptionEvent>) -> Subscriptio
 #[tokio::test]
 async fn subscription_host_scope_ignores_attenuation_and_tenant_writes() {
     let fixture = Fixture::new(true, true, false).await;
-    let token = biscuit!(r#"read("channels");"#)
+    let token = biscuit!(r#"write("subscriptions"); read("channels");"#)
         .build(&fixture.root)
         .unwrap()
         .append(block!(r#"tenant("alice"); node("0x0102");"#))
@@ -145,9 +145,55 @@ async fn subscription_host_scope_ignores_attenuation_and_tenant_writes() {
 }
 
 #[tokio::test]
+async fn subscription_requires_control_and_topic_permissions() {
+    let fixture = Fixture::new(true, true, false).await;
+    for facts in [
+        r#"read("channels");"#,
+        r#"read("subscriptions"); read("channels");"#,
+    ] {
+        let token = fixture.token(facts);
+        let client = fixture.client(Some(&token)).await;
+        let error = client
+            .subscribe::<SubscriptionEvent, _>(
+                "subscribe",
+                rpc_params!["channel_signing"],
+                "unsubscribe",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32999)
+        );
+        let error = client
+            .request::<bool, _>("unsubscribe", rpc_params!["unknown"])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32999)
+        );
+    }
+    let token = fixture.token(r#"write("subscriptions");"#);
+    let client = fixture.client(Some(&token)).await;
+    let error = client
+        .subscribe::<SubscriptionEvent, _>(
+            "subscribe",
+            rpc_params!["channel_signing"],
+            "unsubscribe",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, jsonrpsee::core::ClientError::Call(error)
+        if error.code() == -32001 && error.message() == "Unauthorized"));
+    assert!(!client
+        .request::<bool, _>("unsubscribe", rpc_params!["unknown"])
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn subscription_rejects_unreadable_topics_invalid_filters_and_spoofed_identity() {
     let fixture = Fixture::new(true, true, false).await;
-    let token = fixture.token(r#"write("channels");"#);
+    let token = fixture.token(r#"write("subscriptions"); write("channels");"#);
     let client = fixture.client(Some(&token)).await;
     assert!(client
         .subscribe::<SubscriptionEvent, _>(
@@ -157,7 +203,7 @@ async fn subscription_rejects_unreadable_topics_invalid_filters_and_spoofed_iden
         )
         .await
         .is_err());
-    let token = fixture.token(r#"read("channels");"#);
+    let token = fixture.token(r#"write("subscriptions"); read("channels");"#);
     let client = fixture.client(Some(&token)).await;
     for params in [
         serde_json::json!(["channel_signing", {"tenant_id":"alice"}]),
@@ -186,7 +232,7 @@ async fn subscription_rechecks_time_caveats_and_rejects_expired_tokens() {
     let fixture = Fixture::new(true, true, false).await;
     let expiry = std::time::SystemTime::now() + Duration::from_secs(2);
     let token = biscuit!(
-        r#"read("channels"); check if time($time), $time < {expiry};"#,
+        r#"write("subscriptions"); read("channels"); check if time($time), $time < {expiry};"#,
         expiry = expiry
     )
     .build(&fixture.root)
@@ -195,7 +241,16 @@ async fn subscription_rechecks_time_caveats_and_rejects_expired_tokens() {
     .unwrap();
     let client = fixture.client(Some(&token)).await;
     let mut subscription = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
+    let jsonrpsee::core::client::SubscriptionKind::Subscription(id) = subscription.kind() else {
+        panic!("server subscription ID");
+    };
+    let id = id.clone();
     tokio::time::sleep(Duration::from_secs(3)).await;
+    let error = client
+        .request::<bool, _>("unsubscribe", rpc_params![id])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32999));
     fixture
         .store
         .insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
@@ -277,7 +332,9 @@ async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channe
         );
     }
     // The query RPC also permits read("channels") for watchtower signing status.
-    let token = fixture.token(&format!(r#"read("channels"); node("{alice}");"#));
+    let token = fixture.token(&format!(
+        r#"write("subscriptions"); read("channels"); node("{alice}");"#
+    ));
     let client = fixture.client(Some(&token)).await;
     let mut subscription = subscribe(&client, SubscriptionTopic::WatchtowerSigning).await;
     fixture.store.remove_watch_channel(bob, channel);
@@ -323,7 +380,7 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
     let store = open_store(dir.path()).unwrap();
     let mut module = RpcModule::new(());
     register_subscriptions(&mut module, store.clone(), None, true, false).unwrap();
-    module.extensions_mut().insert(SubscriptionAuthorization {
+    module.extensions_mut().insert(RpcAuthorization {
         auth: Arc::new(BiscuitAuth::without_pubkey()),
         token: None,
     });

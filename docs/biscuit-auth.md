@@ -38,6 +38,9 @@ The current rules for each RPC methods:
 rule("send_btc", r#"allow if write("cch");"#); 
 rule("receive_btc", r#"allow if write("cch");"#);
 rule("get_cch_order", r#"allow if read("cch");"#); 
+// subscriptions
+rule("subscribe", r#"allow if write("subscriptions");"#);
+rule("unsubscribe", r#"allow if write("subscriptions");"#);
 // channels 
 rule("open_channel", r#"allow if write("channels");"#); 
 rule("accept_channel", r#"allow if write("channels");"#); 
@@ -129,6 +132,11 @@ rule(
     "#,
 );
 ```
+
+Subscriptions also check the selected topic's read permission before accepting the
+subscription and while delivering updates. The subscription capability does not
+grant access to channel or watchtower data by itself. See the
+[RPC subscription reference](../crates/fiber-lib/src/rpc/README.md#subscription).
 
 ## 3. How to Configure Biscuit Auth in Fiber
 

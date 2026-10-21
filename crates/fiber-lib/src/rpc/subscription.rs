@@ -16,9 +16,9 @@ use tokio::sync::Semaphore;
 use crate::{
     lsp::{LspServiceMessage, TenantId},
     rpc::{
-        biscuit::{extract_tenant_id, scoped_rpc_node_id, BiscuitAuth},
+        biscuit::{extract_tenant_id, scoped_rpc_node_id},
+        middleware::RpcAuthorization,
         server::RpcServerStore,
-        tenant::enforce_tenant_method_allowlist,
     },
     store::notifications::SigningChanges,
 };
@@ -27,13 +27,6 @@ const AUTH_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_SUBSCRIPTIONS: usize = 16_384;
 const MAX_FILTER_CHANNELS: usize = 256;
 
-/// Inserted by RPC middleware, never constructed from RPC parameters.
-#[derive(Clone)]
-pub(crate) struct SubscriptionAuthorization {
-    pub(crate) auth: Arc<BiscuitAuth>,
-    pub(crate) token: Option<String>,
-}
-
 fn read_method(topic: SubscriptionTopic) -> &'static str {
     match topic {
         SubscriptionTopic::ChannelSigning => "get_channel_signing_status",
@@ -41,24 +34,26 @@ fn read_method(topic: SubscriptionTopic) -> &'static str {
     }
 }
 
-impl SubscriptionAuthorization {
-    fn authorize(&self, topic: SubscriptionTopic) -> Result<(Option<TenantId>, NodeId)> {
-        let Some(token) = &self.token else {
-            return Ok((None, NodeId::local()));
-        };
-        let (biscuit, _) = self
-            .auth
-            .check_permission(read_method(topic), token)
-            .map_err(|_| anyhow!("Unauthorized"))?;
-        enforce_tenant_method_allowlist(read_method(topic), &biscuit)?;
-        let tenant = extract_tenant_id(&biscuit)?;
-        let node = if topic == SubscriptionTopic::WatchtowerSigning {
-            scoped_rpc_node_id(&biscuit)?
-        } else {
-            NodeId::local()
-        };
-        Ok((tenant, node))
-    }
+fn authorize_topic(
+    authorization: &RpcAuthorization,
+    topic: SubscriptionTopic,
+) -> Result<(Option<TenantId>, NodeId)> {
+    authorization
+        .authorize("subscribe")
+        .map_err(|_| anyhow!("Unauthorized"))?;
+    let Some((biscuit, _)) = authorization
+        .authorize(read_method(topic))
+        .map_err(|_| anyhow!("Unauthorized"))?
+    else {
+        return Ok((None, NodeId::local()));
+    };
+    let tenant = extract_tenant_id(&biscuit)?;
+    let node = if topic == SubscriptionTopic::WatchtowerSigning {
+        scoped_rpc_node_id(&biscuit)?
+    } else {
+        NodeId::local()
+    };
+    Ok((tenant, node))
 }
 
 struct Source<S> {
@@ -185,14 +180,14 @@ fn is_pending(event: &SubscriptionEvent) -> bool {
 
 async fn send(
     sink: &mut SubscriptionSink,
-    authorization: &SubscriptionAuthorization,
+    authorization: &RpcAuthorization,
     topic: SubscriptionTopic,
     event: &SubscriptionEvent,
 ) -> Result<()> {
     let message = serde_json::value::to_raw_value(event)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        authorization.authorize(topic)?;
+        authorize_topic(authorization, topic)?;
         if sink.try_send(message.clone()).is_ok() {
             return Ok(());
         }
@@ -207,7 +202,7 @@ async fn run<S: RpcServerStore>(
     source: Source<S>,
     topic: SubscriptionTopic,
     options: SubscriptionOptions,
-    authorization: SubscriptionAuthorization,
+    authorization: RpcAuthorization,
     pending: PendingSubscriptionSink,
 ) -> Result<()> {
     // Register first: changes during the initial read remain pending in this listener.
@@ -235,10 +230,10 @@ async fn run<S: RpcServerStore>(
         tokio::select! {
             biased;
             _ = sink.closed() => return Ok(()),
-            _ = recheck.tick() => { authorization.authorize(topic)?; continue; }
+            _ = recheck.tick() => { authorize_topic(&authorization, topic)?; continue; }
             _ = changes.changed() => {}
         }
-        authorization.authorize(topic)?;
+        authorize_topic(&authorization, topic)?;
         let current = source.current(topic, &options)?;
         for (id, event) in &current {
             if previous.get(id).map(serde_json::to_value).transpose()?
@@ -271,6 +266,11 @@ async fn run<S: RpcServerStore>(
 /// Authenticate the WebSocket upgrade with the ordinary
 /// `Authorization: Bearer <Biscuit>` header. Tokens in URL parameters are not supported.
 /// A connection keeps one credential; reconnect to use a refreshed token.
+/// When RPC authentication is enabled, both `subscribe` and `unsubscribe` require
+/// `write("subscriptions")`, using the ordinary RPC authorization rules. Subscribing
+/// also requires the selected topic's read permission. Tokens issued by hosted
+/// tenant registration include the subscription capability; existing tokens without
+/// it must be reissued.
 ///
 /// Tenant and node identities come from verified token authority facts, rather than
 /// subscription parameters. Tenant subscribers receive only their authorized tenant
@@ -284,8 +284,10 @@ async fn run<S: RpcServerStore>(
 ///
 /// ##### Params
 ///
-/// * `topic` - String, one of the topics below. Each topic requires the same complete
-///   read policy as its corresponding query RPC, including alternative capabilities.
+/// * `topic` - String, one of the topics below. In addition to `write("subscriptions")`,
+///   each topic requires the same complete read policy as its corresponding query
+///   RPC, including alternative capabilities. Missing permissions reject the
+///   subscription before it is established.
 /// * `options` - Optional object with a single field, `channel_ids`, an optional array
 ///   of [Hash256](#type-hash256). Omission selects all authorized channels; an empty
 ///   array selects none. At most 256 IDs are allowed. Unknown fields are rejected.
@@ -378,7 +380,8 @@ async fn run<S: RpcServerStore>(
 /// that remains full for five seconds terminates the affected subscription;
 /// reconnect and subscribe again to recover pending requests.
 ///
-/// Authorization is checked on creation and before enqueueing each notification.
+/// Subscription and topic permissions are checked on creation and before enqueueing
+/// each notification.
 /// Idle subscriptions recheck authorization at most every ten seconds. Expired or
 /// invalid credentials terminate the subscription.
 ///
@@ -392,6 +395,9 @@ async fn run<S: RpcServerStore>(
 /// #### Method `unsubscribe`
 ///
 /// Cancel a subscription created on the same WebSocket connection.
+/// Requires a valid token granting `write("subscriptions")` when RPC authentication
+/// is enabled. An expired token cannot cancel a subscription; disconnecting still
+/// releases the connection's subscriptions.
 ///
 /// ##### Params
 ///
@@ -401,8 +407,7 @@ async fn run<S: RpcServerStore>(
 ///
 /// A boolean: `true` if the subscription was cancelled, `false` if the ID does not
 /// identify an active subscription on this connection. Another connection cannot
-/// cancel it. Cancellation remains available after token expiry. Multiple
-/// subscribers for the same tenant are independent.
+/// cancel it. Multiple subscribers for the same tenant are independent.
 ///
 /// ##### Examples
 ///
@@ -457,10 +462,10 @@ pub(crate) fn register_subscriptions<S: RpcServerStore + Clone + Send + Sync + '
                         bail!("too many channel filters");
                     }
                     let authorization = extensions
-                        .get::<SubscriptionAuthorization>()
+                        .get::<RpcAuthorization>()
                         .cloned()
-                        .ok_or_else(|| anyhow!("subscription authorization missing"))?;
-                    let (tenant, node) = authorization.authorize(topic)?;
+                        .ok_or_else(|| anyhow!("RPC authorization missing"))?;
+                    let (tenant, node) = authorize_topic(&authorization, topic)?;
                     let permit = slots
                         .try_acquire_owned()
                         .map_err(|_| anyhow!("subscription limit reached"))?;
