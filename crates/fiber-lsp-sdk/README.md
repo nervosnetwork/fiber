@@ -39,11 +39,12 @@ wallet transaction and opening context, and persists the baseline and binding
 before returning. Retry the same request after interruption. There is no separate
 approval or bind RPC.
 
-RPC clients should convert `get_channel_signing_status` and
+RPC clients can subscribe to `channel_signing` and `watchtower_signing` over
+WebSocket, or query `get_channel_signing_status` and
 `get_watchtower_signing_status` through `fiber_lsp_sdk::json` (`json` feature,
 on by default). Production clients then drive [`HostedSession`]: feed each
-RPC result in, inspect [`ProcessOutcome`], and POST the returned submit
-params. The session uses injected transport for opening and has no HTTP dependency. Auto-approving poll loops stay in
+query or subscription result in, inspect [`ProcessOutcome`], and POST the returned submit
+params. The session uses injected transport for opening and has no HTTP dependency. Auto-approving subscription loops stay in
 `tests/fiber-lsp-sdk-agent` and must not be copied into production.
 
 The wallet's RPC transport uses the tenant Biscuit returned by

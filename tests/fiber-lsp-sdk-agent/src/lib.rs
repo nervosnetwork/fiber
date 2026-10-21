@@ -6,6 +6,7 @@
 mod agent;
 mod chain;
 mod convert;
+mod events;
 mod rpc;
 mod store;
 
@@ -13,5 +14,6 @@ pub use agent::{
     Agent, AgentConfig, AgentStatus, FixtureAuthorization, PreimageTarget, WatchtowerSubmission,
 };
 pub use chain::DevChain;
+pub use events::{EventDelivery, EventStream};
 pub use rpc::{FiberRpc, HttpFiberRpc};
 pub use store::FileSignerStore;

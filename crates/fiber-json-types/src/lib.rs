@@ -45,6 +45,7 @@ pub mod lsp;
 pub mod payment;
 pub mod peer;
 pub mod prof;
+pub mod subscription;
 #[cfg(feature = "watchtower")]
 pub mod watchtower;
 
@@ -63,5 +64,6 @@ pub use prof::*;
 pub use serde_utils::Hash256;
 pub use serde_utils::Privkey;
 pub use serde_utils::Pubkey;
+pub use subscription::*;
 #[cfg(feature = "watchtower")]
 pub use watchtower::*;

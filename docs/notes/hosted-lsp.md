@@ -4,7 +4,7 @@ This note describes the first implementation of a hosted Lightning Service
 Provider (LSP) in Fiber. It focuses on trampoline routing and receiving payments
 for mobile tenants that may be offline.
 
-The implemented remote channel signer architecture, its current RPC polling
+The implemented remote channel signer architecture, its current RPC subscription
 transport, and the remaining production-safety boundaries are described in
 [Hosted LSP remote signer integration](hosted-lsp-remote-signer.md).
 
@@ -33,9 +33,9 @@ endpoint.
 
 ```mermaid
 flowchart TB
-    S1["Mobile signer 1"] -. "typed requests and signatures<br/>JSON-RPC polling" .-> U1
-    S2["Mobile signer 2"] -. "typed requests and signatures<br/>JSON-RPC polling" .-> U2
-    S3["Mobile signer 3"] -. "typed requests and signatures<br/>JSON-RPC polling" .-> U3
+    S1["Mobile signer 1"] -. "typed requests and signatures<br/>JSON-RPC subscriptions" .-> U1
+    S2["Mobile signer 2"] -. "typed requests and signatures<br/>JSON-RPC subscriptions" .-> U2
+    S3["Mobile signer 3"] -. "typed requests and signatures<br/>JSON-RPC subscriptions" .-> U3
 
     subgraph LSP["Multi-tenant Fiber LSP service"]
         direction TB
@@ -292,10 +292,10 @@ external-signer channels use the restricted
   are single-owner and refuse replacement by another live actor.
 - Private channels may use the existing internal signer path or the external
   funding/signer workflow. External channel and watchtower requests are
-  persisted, polled through tenant-authenticated RPCs, verified by the Node,
+  persisted, streamed through tenant-authenticated subscriptions, verified by the Node,
   and resumed idempotently after submission.
-- The current remote signer transport is polling rather than a durable push
-  gateway. Production readiness still requires strict fail-closed nonce reuse,
+- The current remote signer transport provides pending-state recovery over
+  WebSocket subscriptions, without a durable historical event log. Production readiness still requires strict fail-closed nonce reuse,
   stronger signer-readiness/session fencing, and crash/race coverage around
   persisted signature receipts and channel continuation.
 - Trampoline/LSP metrics are intentionally outside this implementation.

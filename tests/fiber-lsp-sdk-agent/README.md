@@ -4,7 +4,7 @@ The agent exercises the production SDK validation path. It uses Manual policy,
 then explicitly confirms a successfully prepared request. It never infers payment
 approval or opening terms from an LSP signing response.
 
-Before polling a channel, the local fixture driver must:
+Before servicing a channel, the local fixture driver must:
 
 1. Send the original `OpenChannelWithExternalFundingParams` to `POST /open-channel` as
    `{ "params": ... }`, setting `pubkey` to the LSP public node, `public: false`,
@@ -59,3 +59,8 @@ partial signatures. The watchtower restart test first signs a complete local
 commitment, reopens the file-backed SDK store, and spends that commitment with
 verified input/witness/output data. It also checks that missing evidence and a
 spent input produce no submission and leave the persisted snapshot unchanged.
+
+The agent uses the general WebSocket `channel_signing` and `watchtower_signing`
+subscriptions with its tenant token. It requests pending snapshots on reconnect
+and reuses the SDK verification and submission paths. `--once` processes the
+initial snapshots and exits. See [RPC subscriptions](../../docs/notes/rpc-subscriptions.md).

@@ -72,6 +72,25 @@ impl<S> BiscuitAuthMiddleware<S> {
 
     /// Authorize the request
     fn auth_call(&self, req: &mut Request<'_>) -> Result<()> {
+        if req.method == "subscribe" {
+            // The subscription handler checks the selected topic's existing read policy
+            // and derives its namespace. A broad method-level permission is insufficient.
+            req.extensions_mut()
+                .insert(super::subscription::SubscriptionAuthorization {
+                    auth: self.auth.clone(),
+                    token: if self.enable_auth {
+                        Some(self.auth_token()?)
+                    } else {
+                        None
+                    },
+                });
+            return Ok(());
+        }
+        if req.method == "unsubscribe" {
+            // jsonrpsee binds IDs to this connection. Releasing resources must also
+            // work after the connection's token expires.
+            return Ok(());
+        }
         if self.enable_auth {
             let token = self.auth_token()?;
             let (token, rule) = self.auth.check_permission(&req.method, &token)?;

@@ -569,7 +569,38 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(())
     }
 
+    /// Tenant credential reused by the WebSocket subscription transport.
+    pub fn tenant_token(&self) -> Result<String> {
+        self.session
+            .tenant_token()
+            .map(str::to_owned)
+            .context("agent is not registered")
+    }
+
+    /// Verify and service a typed event using the existing signing policy and submission RPCs.
+    pub async fn handle_event(&mut self, event: fiber_json_types::SubscriptionEvent) -> Result<()> {
+        let token = self.tenant_token()?;
+        match event {
+            fiber_json_types::SubscriptionEvent::ChannelSigning(result) => {
+                self.handle_channel_status(&token, result.channel_id.into(), result.status)
+                    .await?;
+            }
+            fiber_json_types::SubscriptionEvent::WatchtowerSigning(result) => {
+                self.handle_watchtower_status(result.channel_id.into(), result.status)
+                    .await?;
+            }
+            fiber_json_types::SubscriptionEvent::SnapshotComplete
+            | fiber_json_types::SubscriptionEvent::Removed { .. } => {}
+        }
+        let receipts = self.config.store_dir.join("watchtower-submissions.json");
+        if receipts.exists() {
+            self.watchtower_submissions = serde_json::from_slice(&fs::read(receipts)?)?;
+        }
+        self.write_status().await
+    }
+
     /// Service outstanding signing requests for already-bound channels.
+    #[cfg(test)]
     pub async fn poll_once(&mut self) -> Result<()> {
         let token = self
             .session
@@ -588,12 +619,28 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         self.write_status().await
     }
 
+    #[cfg(test)]
     async fn poll_channel(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
         let status = self
             .rpc
             .get_channel_signing_status(token, channel_id.into())
             .await?
             .status;
+        self.handle_event(fiber_json_types::SubscriptionEvent::ChannelSigning(
+            Box::new(fiber_json_types::GetChannelSigningStatusResult {
+                channel_id: channel_id.into(),
+                status,
+            }),
+        ))
+        .await
+    }
+
+    async fn handle_channel_status(
+        &mut self,
+        token: &str,
+        channel_id: Hash256,
+        status: fiber_json_types::ChannelSigningStatus,
+    ) -> Result<()> {
         match self
             .session
             .handle_channel_status(channel_id, status, now_ms())
@@ -626,6 +673,7 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         }
     }
 
+    #[cfg(test)]
     async fn poll_watchtower(&mut self, token: &str, channel_id: Hash256) -> Result<()> {
         let status = match self
             .rpc
@@ -636,6 +684,20 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
             Err(error) if error.to_string().contains("watched channel not found") => return Ok(()),
             Err(error) => return Err(error),
         };
+        self.handle_event(fiber_json_types::SubscriptionEvent::WatchtowerSigning(
+            Box::new(fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id: channel_id.into(),
+                status,
+            }),
+        ))
+        .await
+    }
+
+    async fn handle_watchtower_status(
+        &mut self,
+        channel_id: Hash256,
+        status: WatchtowerSigningStatus,
+    ) -> Result<()> {
         if matches!(status, WatchtowerSigningStatus::NoSignatureRequired) {
             return Ok(());
         }

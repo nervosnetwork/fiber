@@ -1,6 +1,6 @@
 # Hosted LSP remote signer integration
 
-Status: implemented polling prototype; production hardening in progress
+Status: implemented subscription prototype; production hardening in progress
 
 This note describes the remote channel and watchtower signer implementation in
 the hosted, multi-tenant LSP. It records the current architecture, the
@@ -11,7 +11,7 @@ The hosted LSP and remote signer were originally developed on separate
 branches. They are now integrated around the hosted `FiberActorCore`, tenant
 Store namespaces, tenant-authenticated RPC dispatch, and persistent channel and
 watchtower signer state. Public Fiber peer messages remain unchanged; the
-client-side signer boundary currently uses JSON-RPC polling rather than a new
+client-side signer boundary currently uses JSON-RPC subscriptions rather than a new
 Fiber wire protocol.
 
 ## Goals
@@ -103,7 +103,8 @@ The implementation is connected to the hosted tenant registry, tenant
 namespaces, external funding workflow, ChannelActor continuation, watchtower,
 and the SDK agent E2E. It does not yet provide a durable push mailbox,
 long-lived signer sessions with fencing, or an explicit signer-readiness gate
-for buffered delivery. The current agent polls the persisted status RPCs.
+for buffered delivery. The current agent uses the general WebSocket signing subscriptions with
+pending-state recovery. See [RPC subscriptions](rpc-subscriptions.md).
 
 ### Waiting for hosted channel signatures
 
@@ -140,7 +141,7 @@ does not need to know or validate the local `ChannelKeyId`.
 ```mermaid
 flowchart TB
     M["Mobile SDK<br/>RootSigner + policy + local store"]
-    G["Signer gateway or polling RPC<br/>tenant Biscuit authentication"]
+    G["Signer subscription RPC<br/>tenant Biscuit authentication"]
 
     subgraph LSP["Hosted LSP process"]
         API["Tenant-scoped RPC"]
@@ -166,8 +167,8 @@ flowchart TB
     G --> API
 ```
 
-The diagram's gateway is currently the shared JSON-RPC service plus a polling
-SDK agent, not a separate durable gateway. Tenant credentials and pending
+The diagram's gateway is currently the shared JSON-RPC service with WebSocket
+subscriptions and an SDK agent. Tenant credentials and pending
 channel/watchtower requests survive `HostedTenantActor U` eviction through the
 registry and Store. A future push gateway or long-lived signer session must
 remain service-scoped and must not make those durable states depend on one
@@ -190,13 +191,13 @@ fiber-lsp-sdk
   rpc
     hosted-LSP RPC client and wire conversion
   channel
-    signing-status polling, typed review, and signature submission
+    signing-status subscriptions or queries, typed review, and signature submission
 ```
 
 The signer and storage layers must remain runtime-independent and usable on
 native and WASM targets. Transport and scheduling are adapters above those
 layers so applications can select their own HTTP client, persistence backend,
-and polling or wake-up mechanism.
+and subscription or query mechanism.
 
 The Node must not depend on `fiber-lsp-sdk`. Shared canonical payloads, tenant
 ID derivation, public signer material, and signer RPC wire types belong in
@@ -266,12 +267,11 @@ parameter.
 the invoice using the LSP service's buffer policy. `send_payment` starts the normal
 tenant-owned payment session.
 
-Both reads and mutations currently resolve `GetTenantRpcContext`, which ensures
-the tenant runtime before returning its actor and namespaced Store. A signature
-submission verifies the persisted request, resumes the channel actor, and
-returns `Applied` or `AlreadyApplied`. A store-only context for signer-status
-polling remains an optimization: today even a read-only poll can hydrate a cold
-tenant.
+Channel signing-status queries and subscriptions read namespaced persistent state
+without activating a tenant runtime. Signature submissions resolve
+`GetTenantRpcContext`, ensure the runtime, verify the persisted request, resume
+the channel actor, and return `Applied` or `AlreadyApplied`. Watchtower signing
+subscriptions read only the token's authorized node namespace.
 
 ### Store and migrations
 
@@ -505,7 +505,7 @@ TenantSignReady =
 
 Until a production signer session exists, an external-signer tenant should not
 automatically consume a buffered delivery merely because its channel is online.
-The polling prototype may require explicit interactive activation.
+The subscription prototype may require explicit interactive activation.
 
 ### Cold query and signature submission
 
@@ -533,8 +533,8 @@ sequenceDiagram
 ```
 
 A crash between receiving a response and applying it must not lose the response
-or cause a different signature to be accepted for the same request. The polling
-MVP can rely on the persisted channel request plus `last_applied`. A mobile
+or cause a different signature to be accepted for the same request. The current
+prototype can rely on the persisted channel request plus `last_applied`. A mobile
 gateway additionally needs a durable mailbox response record so hydration
 failure does not discard a response already accepted from the device.
 
@@ -622,9 +622,9 @@ checks, or crash recovery.
 | 1. Shared types and SDK signer core | Implemented | `fiber-lsp-sdk`, canonical registration payloads, RootSigner restore, channel-key isolation, signer persistence, native tests, and WASM compilation are present. |
 | 2. Tenant registration | Implemented prototype | Nonce issuance/consumption, RootSigner proof, server-derived TenantId, and tenant Biscuit issuance are implemented. Production credential recovery and rotation remain open. |
 | 3. Channel signer state | Implemented prototype | Persistent internal/external channel signer states, migrations, signature verification, and idempotent receipts are present. Missing/partial next material and fail-closed nonce-reuse tests remain release gates. |
-| 4. Tenant-scoped signer RPC | Partially implemented | Namespace authorization and hydrated submission are implemented. Status polling reads the namespaced store without hydration; stronger cross-tenant concurrency coverage remains. |
-| 5. Hosted U-T external signer E2E | Implemented prototype | Registration, external funding, polling/signing, SDK restart, cooperative close, hosted incoming payments, and watchtower scenarios are covered. Production `Auto` policy and a complete external-signer outbound payment E2E remain. |
-| 6. Gateway and readiness | Not implemented | There is no durable push mailbox, session fencing, or `TenantSignReady` delivery gate; the SDK agent polls RPC state. |
+| 4. Tenant-scoped signer RPC | Partially implemented | Namespace authorization and hydrated submission are implemented. Status queries and subscription snapshots read the namespaced store without hydration; stronger cross-tenant concurrency coverage remains. |
+| 5. Hosted U-T external signer E2E | Implemented prototype | Registration, external funding, subscription/signing, SDK restart, cooperative close, hosted incoming payments, and watchtower scenarios are covered. Production `Auto` policy and a complete external-signer outbound payment E2E remain. |
+| 6. Gateway and readiness | Not implemented | There is no durable push mailbox, session fencing, or `TenantSignReady` delivery gate; the SDK agent subscribes to persisted signing state. |
 | 7. Remaining signer policy | Partially implemented | External watchtower signing, tenant eviction recovery, preimage claim, and revocation E2Es are present. Strict nonce behavior, invoice authorization policy, and crash/race coverage remain. |
 
 Each phase also runs formatting and targeted clippy checks. A change to shared

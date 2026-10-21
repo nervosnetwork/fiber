@@ -1,0 +1,409 @@
+use std::{sync::Arc, time::Duration};
+
+use biscuit_auth::{macros::biscuit, KeyPair};
+use fiber_json_types::{SubscriptionEvent, SubscriptionOptions, SubscriptionTopic};
+use fiber_types::Hash256;
+use hyper::{
+    header::{HeaderValue, AUTHORIZATION},
+    HeaderMap,
+};
+use jsonrpsee::{
+    core::client::{ClientT, Subscription, SubscriptionClientT},
+    rpc_params,
+    server::ServerHandle,
+    ws_client::{WsClient, WsClientBuilder},
+    RpcModule,
+};
+
+use crate::{
+    fiber::channel::{ChannelActorState, ChannelActorStateStore},
+    rpc::biscuit::BiscuitAuth,
+    store::{open_store, sample::StoreSample, NodeNamespace, Store},
+};
+
+use super::{register_subscriptions, SubscriptionAuthorization};
+
+struct Fixture {
+    store: Store,
+    root: KeyPair,
+    address: std::net::SocketAddr,
+    handle: ServerHandle,
+    _dir: tempfile::TempDir,
+}
+
+impl Fixture {
+    async fn new(authenticated: bool, channels: bool, watchtower: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path()).unwrap();
+        let root = KeyPair::new();
+        let auth =
+            authenticated.then(|| BiscuitAuth::from_pubkey(root.public().to_string()).unwrap());
+        let mut module = RpcModule::new(());
+        register_subscriptions(&mut module, store.clone(), None, channels, watchtower).unwrap();
+        let (handle, address) =
+            crate::rpc::server::start_server("127.0.0.1:0", auth, module, false, vec![])
+                .await
+                .unwrap();
+        Self {
+            store,
+            root,
+            address,
+            handle,
+            _dir: dir,
+        }
+    }
+
+    async fn client(&self, token: Option<&str>) -> WsClient {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = token {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+        }
+        WsClientBuilder::default()
+            .set_headers(headers)
+            .build(format!("ws://{}", self.address))
+            .await
+            .unwrap()
+    }
+
+    fn token(&self, facts: &str) -> String {
+        biscuit_auth::Biscuit::builder()
+            .code(facts)
+            .unwrap()
+            .build(&self.root)
+            .unwrap()
+            .to_base64()
+            .unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = self.handle.stop();
+    }
+}
+
+async fn subscribe(client: &WsClient, topic: SubscriptionTopic) -> Subscription<SubscriptionEvent> {
+    client
+        .subscribe(
+            "subscribe",
+            rpc_params![
+                topic,
+                SubscriptionOptions {
+                    include_snapshot: true,
+                    ..Default::default()
+                }
+            ],
+            "unsubscribe",
+        )
+        .await
+        .unwrap()
+}
+
+async fn next(subscription: &mut Subscription<SubscriptionEvent>) -> SubscriptionEvent {
+    tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn subscription_host_live_updates_are_isolated_from_tenant_writes_and_multiple_readers_work()
+{
+    let fixture = Fixture::new(false, true, false).await;
+    let client = fixture.client(None).await;
+    let mut first = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
+    let mut second = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
+    assert!(matches!(
+        next(&mut first).await,
+        SubscriptionEvent::SnapshotComplete
+    ));
+    assert!(matches!(
+        next(&mut second).await,
+        SubscriptionEvent::SnapshotComplete
+    ));
+    let tenant = fixture
+        .store
+        .namespaced(NodeNamespace::hosted_tenant("alice"));
+    let state = ChannelActorState::samples(42).remove(0);
+    let id = state.get_id();
+    tenant.insert_channel_actor_state(state.clone());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), first.next())
+            .await
+            .is_err()
+    );
+    fixture.store.insert_channel_actor_state(state);
+    for subscription in [&mut first, &mut second] {
+        let SubscriptionEvent::ChannelSigning(result) = next(subscription).await else {
+            panic!("channel event");
+        };
+        assert_eq!(result.channel_id, id.into());
+    }
+    fixture.store.delete_channel_actor_state(&id);
+    for subscription in [&mut first, &mut second] {
+        assert!(
+            matches!(next(subscription).await, SubscriptionEvent::Removed { channel_id } if channel_id == id.into())
+        );
+    }
+    first.unsubscribe().await.unwrap();
+    second.unsubscribe().await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_rejects_unreadable_topics_invalid_filters_and_spoofed_identity() {
+    let fixture = Fixture::new(true, true, false).await;
+    let token = fixture.token(r#"write("channels");"#);
+    let client = fixture.client(Some(&token)).await;
+    assert!(client
+        .subscribe::<SubscriptionEvent, _>(
+            "subscribe",
+            rpc_params!["channel_signing"],
+            "unsubscribe"
+        )
+        .await
+        .is_err());
+    let token = fixture.token(r#"read("channels");"#);
+    let client = fixture.client(Some(&token)).await;
+    for params in [
+        serde_json::json!(["channel_signing", {"tenant_id":"alice"}]),
+        serde_json::json!(["channel_signing", {"node_id":"host"}]),
+        serde_json::json!(["channel_signing", {"channel_ids":[format!("{:#x}", Hash256::from([1;32]))]}]),
+        serde_json::json!(["watchtower_signing"]),
+        serde_json::json!(["unknown"]),
+        serde_json::json!(["channel_signing", {}, 1]),
+    ] {
+        let mut arguments = jsonrpsee::core::params::ArrayParams::new();
+        for argument in params.as_array().unwrap() {
+            arguments.insert(argument).unwrap();
+        }
+        assert!(client
+            .subscribe::<SubscriptionEvent, _>("subscribe", arguments, "unsubscribe")
+            .await
+            .is_err());
+    }
+    let subscription = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
+    subscription.unsubscribe().await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_rechecks_time_caveats_and_rejects_expired_tokens() {
+    let fixture = Fixture::new(true, true, false).await;
+    let expiry = std::time::SystemTime::now() + Duration::from_secs(2);
+    let token = biscuit!(
+        r#"read("channels"); check if time($time), $time < {expiry};"#,
+        expiry = expiry
+    )
+    .build(&fixture.root)
+    .unwrap()
+    .to_base64()
+    .unwrap();
+    let client = fixture.client(Some(&token)).await;
+    let mut subscription = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
+    assert!(matches!(
+        next(&mut subscription).await,
+        SubscriptionEvent::SnapshotComplete
+    ));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    fixture
+        .store
+        .insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
+    let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .unwrap();
+    assert!(!matches!(
+        event,
+        Some(Ok(SubscriptionEvent::ChannelSigning(_)))
+    ));
+    assert!(client
+        .subscribe::<SubscriptionEvent, _>(
+            "subscribe",
+            rpc_params!["channel_signing"],
+            "unsubscribe"
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn subscription_cannot_be_cancelled_from_another_connection_and_http_is_rejected() {
+    let fixture = Fixture::new(false, true, false).await;
+    let client = fixture.client(None).await;
+    let other = fixture.client(None).await;
+    let mut subscription = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
+    next(&mut subscription).await;
+    assert!(!other
+        .request::<bool, _>(
+            "unsubscribe",
+            rpc_params![match subscription.kind() {
+                jsonrpsee::core::client::SubscriptionKind::Subscription(id) => id.clone(),
+                _ => unreachable!(),
+            }]
+        )
+        .await
+        .unwrap());
+    fixture
+        .store
+        .insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
+    assert!(matches!(
+        next(&mut subscription).await,
+        SubscriptionEvent::ChannelSigning(_)
+    ));
+    let http = jsonrpsee::http_client::HttpClientBuilder::default()
+        .build(format!("http://{}", fixture.address))
+        .unwrap();
+    assert!(http
+        .request::<String, _>("subscribe", rpc_params!["channel_signing"])
+        .await
+        .is_err());
+    subscription.unsubscribe().await.unwrap();
+}
+
+#[test]
+fn subscription_attenuation_cannot_change_namespace_identity() {
+    use biscuit_auth::macros::block;
+    let root = KeyPair::new();
+    let operator = biscuit!(r#"read("channels");"#).build(&root).unwrap();
+    let attenuated = operator
+        .append(block!(r#"tenant("alice"); node("0x0102");"#))
+        .unwrap();
+    let authorization = SubscriptionAuthorization {
+        auth: Arc::new(BiscuitAuth::from_pubkey(root.public().to_string()).unwrap()),
+        token: Some(attenuated.to_base64().unwrap()),
+    };
+    assert_eq!(
+        authorization
+            .authorize(SubscriptionTopic::ChannelSigning)
+            .unwrap()
+            .0,
+        None
+    );
+}
+
+#[cfg(feature = "watchtower")]
+#[tokio::test]
+async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channel_ids() {
+    use crate::watchtower::WatchtowerStore;
+    use fiber_types::{NodeId, Privkey, SettlementData};
+
+    let fixture = Fixture::new(true, true, true).await;
+    let alice = NodeId::from_bytes(vec![2; 33]);
+    let bob = NodeId::from_bytes(vec![3; 33]);
+    let channel = Hash256::from([42; 32]);
+    for node in [&alice, &bob] {
+        fixture.store.insert_watch_channel(
+            node.clone(),
+            channel,
+            None,
+            None,
+            Privkey::from(&[1; 32]).pubkey(),
+            Privkey::from(&[2; 32]).pubkey(),
+            Privkey::from(&[3; 32]).pubkey(),
+            Privkey::from(&[4; 32]).pubkey(),
+            SettlementData {
+                local_amount: 100,
+                remote_amount: 200,
+                tlcs: vec![],
+            },
+        );
+    }
+    // The query RPC also permits read("channels") for watchtower signing status.
+    let token = fixture.token(&format!(r#"read("channels"); node("{alice}");"#));
+    let client = fixture.client(Some(&token)).await;
+    let mut subscription = subscribe(&client, SubscriptionTopic::WatchtowerSigning).await;
+    assert!(matches!(
+        next(&mut subscription).await,
+        SubscriptionEvent::SnapshotComplete
+    ));
+    fixture.store.remove_watch_channel(bob, channel);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), subscription.next())
+            .await
+            .is_err()
+    );
+    fixture.store.remove_watch_channel(alice, channel);
+    assert!(
+        matches!(next(&mut subscription).await, SubscriptionEvent::Removed { channel_id } if channel_id == channel.into())
+    );
+    subscription.unsubscribe().await.unwrap();
+}
+
+#[tokio::test]
+async fn subscription_connection_limit_is_released_by_unsubscribe() {
+    let fixture = Fixture::new(false, true, false).await;
+    let client = fixture.client(None).await;
+    let mut subscriptions = Vec::new();
+    for _ in 0..32 {
+        subscriptions.push(
+            client
+                .subscribe::<SubscriptionEvent, _>(
+                    "subscribe",
+                    rpc_params!["channel_signing"],
+                    "unsubscribe",
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    assert!(client
+        .subscribe::<SubscriptionEvent, _>(
+            "subscribe",
+            rpc_params!["channel_signing"],
+            "unsubscribe"
+        )
+        .await
+        .is_err());
+    subscriptions.pop().unwrap().unsubscribe().await.unwrap();
+    let replacement = client
+        .subscribe::<SubscriptionEvent, _>(
+            "subscribe",
+            rpc_params!["channel_signing"],
+            "unsubscribe",
+        )
+        .await
+        .unwrap();
+    replacement.unsubscribe().await.unwrap();
+    for subscription in subscriptions {
+        subscription.unsubscribe().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_resync() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path()).unwrap();
+    let mut module = RpcModule::new(());
+    register_subscriptions(&mut module, store.clone(), None, true, false).unwrap();
+    module.extensions_mut().insert(SubscriptionAuthorization {
+        auth: Arc::new(BiscuitAuth::without_pubkey()),
+        token: None,
+    });
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing",{"include_snapshot":true}]}"#;
+    let (_, mut slow) = module.raw_json_request(request, 1).await.unwrap();
+    let (_, mut fast) = module.raw_json_request(request, 1).await.unwrap();
+    fast.recv().await.unwrap();
+    // The slow subscriber still has its snapshot marker in its one-message queue.
+    store.insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
+    let event = tokio::time::timeout(Duration::from_secs(1), fast.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(event.get()).unwrap()["params"]["result"]["type"],
+        "channel_signing"
+    );
+    tokio::time::sleep(Duration::from_millis(5_200)).await;
+    slow.recv().await.unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(1), slow.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let closed: serde_json::Value = serde_json::from_str(closed.get()).unwrap();
+    assert!(closed["params"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("reconnect and request a snapshot"));
+}

@@ -22,6 +22,8 @@ pub mod prof;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod pubsub;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod subscription;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod tenant;
 pub mod utils;
 pub mod watchtower;
@@ -95,6 +97,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + crate::store::notifications::SigningSubscriptionStore
         + WatchtowerStore
         + PreimageStore
     {
@@ -106,6 +109,7 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + crate::store::notifications::SigningSubscriptionStore
             + WatchtowerStore
             + PreimageStore
     {
@@ -117,6 +121,7 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
+        + crate::store::notifications::SigningSubscriptionStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -126,10 +131,11 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
+            + crate::store::notifications::SigningSubscriptionStore
     {
     }
 
-    async fn start_server(
+    pub(super) async fn start_server(
         addr: &str,
         auth: Option<BiscuitAuth>,
         methods: impl Into<Methods>,
@@ -165,7 +171,15 @@ pub mod server {
         let per_conn = PerConnection {
             methods: methods.into(),
             stop_handle: stop_handle.clone(),
-            svc_builder: jsonrpsee::server::Server::builder().to_service_builder(),
+            svc_builder: jsonrpsee::server::Server::builder()
+                .set_config(
+                    jsonrpsee::server::ServerConfig::builder()
+                        .max_subscriptions_per_connection(32)
+                        .set_message_buffer_capacity(64)
+                        .enable_ws_ping(jsonrpsee::server::PingConfig::default())
+                        .build(),
+                )
+                .to_service_builder(),
         };
         let enable_auth = auth.is_some();
         let auth = Arc::new(auth.unwrap_or_else(BiscuitAuth::without_pubkey));
@@ -315,6 +329,13 @@ pub mod server {
         };
 
         let mut modules = RpcModule::new(());
+        super::subscription::register_subscriptions(
+            &mut modules,
+            store.clone(),
+            lsp_actor.clone(),
+            config.is_module_enabled("channel"),
+            config.is_module_enabled("watchtower"),
+        )?;
         if config.is_module_enabled("invoice") {
             modules
                 .merge(

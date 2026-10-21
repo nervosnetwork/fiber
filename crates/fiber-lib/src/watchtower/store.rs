@@ -14,6 +14,14 @@ pub trait WatchtowerStore {
     /// Get the channels currently being watched together with their owning node.
     fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)>;
 
+    /// Get watched channels belonging to one authorized node.
+    fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.get_watch_channels_with_nodes()
+            .into_iter()
+            .filter_map(|(owner, channel)| (owner == *node_id).then_some(channel))
+            .collect()
+    }
+
     /// Get the channels that are currently being watched by the watchtower
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         self.get_watch_channels_with_nodes()

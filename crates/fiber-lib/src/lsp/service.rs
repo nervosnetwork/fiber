@@ -54,6 +54,17 @@ pub struct HostedTenantRegistration {
     pub access_token: String,
 }
 
+/// Cold stores resolved from an authenticated tenant without activating its runtime.
+#[derive(Clone, Debug)]
+pub struct TenantSubscriptionContext {
+    /// Channel state in the tenant namespace.
+    pub store: Store,
+    /// Shared watchtower store; access is restricted by `node_id`.
+    pub watchtower_store: Store,
+    /// Watchtower owner derived from the registered tenant.
+    pub node_id: fiber_types::NodeId,
+}
+
 /// Result of consulting the hosted invoice registry for an incoming trampoline TLC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LspDeliveryDecision {
@@ -84,6 +95,11 @@ pub enum LspServiceMessage {
         channel_id: Hash256,
         reply: RpcReplyPort<Result<ChannelActorState, String>>,
     },
+    /// Resolve cold subscription stores without hydrating a tenant runtime.
+    GetTenantSubscriptionContext(
+        TenantId,
+        RpcReplyPort<Result<TenantSubscriptionContext, String>>,
+    ),
     RegisterInvoice {
         tenant_id: TenantId,
         invoice: CkbInvoice,
@@ -336,6 +352,20 @@ impl Actor for LspService {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            LspServiceMessage::GetTenantSubscriptionContext(tenant_id, reply) => {
+                let result = state.registry.get(&tenant_id).and_then(|record| {
+                    let record =
+                        record.ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
+                    Ok(TenantSubscriptionContext {
+                        store: state
+                            .store
+                            .namespaced(NodeNamespace::hosted_tenant(tenant_id.as_str())),
+                        watchtower_store: state.watchtower_store.clone(),
+                        node_id: tenant_watchtower_node_id(&record.tenant_pubkey),
+                    })
+                });
+                let _ = reply.send(result);
+            }
             LspServiceMessage::GetStatus(reply) => {
                 let registered_tenants = state.registry.list().map_or(0, |tenants| tenants.len());
                 let _ = reply.send(LspServiceStatus {

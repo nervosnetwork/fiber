@@ -2,7 +2,7 @@
 
 Reuses the `e2e/lsp-remote-signer` setup (independent SDK agent + hosted
 private channel). Bruno does not call watchtower RPCs. The tenant Fiber
-registers the watch on `RemoteTxComplete`, and the agent polls
+registers the watch on `RemoteTxComplete`, and the agent subscribes to
 `get_watchtower_signing_status` / `submit_watchtower_signature`.
 
 This suite force-closes the channel from Public T, mines through the

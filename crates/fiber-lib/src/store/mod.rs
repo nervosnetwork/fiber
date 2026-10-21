@@ -1,5 +1,7 @@
 pub mod actor;
 pub mod namespace;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod notifications;
 pub mod restore;
 #[cfg(any(test, feature = "sample"))]
 pub mod sample;
