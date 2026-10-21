@@ -9,6 +9,7 @@ use ckb_types::{
 };
 use fiber_json_types::{
     ChannelSigningStatus, ChannelSigningTransition, InvoiceResult, OpenChannelResult,
+    SubscriptionEvent, SubscriptionTopic,
 };
 use fiber_lsp_sdk::{ChannelSigner, MemoryStore, RootSigner};
 use hyper::{
@@ -16,10 +17,11 @@ use hyper::{
     HeaderMap,
 };
 use jsonrpsee::{
-    core::client::ClientT,
+    core::client::{ClientT, Subscription, SubscriptionClientT},
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
     server::ServerHandle,
+    ws_client::{WsClient, WsClientBuilder},
 };
 use ractor::Actor;
 use secp256k1::SECP256K1;
@@ -467,9 +469,7 @@ async fn tenant_cannot_query_or_sign_another_tenants_channel() {
 #[tokio::test]
 async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     use crate::watchtower::WatchtowerStore;
-    use fiber_json_types::{SubscriptionEvent, SubscriptionOptions};
     use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerExternalSignerState};
-    use jsonrpsee::core::client::SubscriptionClientT;
 
     let fixture = TestLspFixture::new("isolation-watchtower").await;
     let (_, _, other_token, other) = fixture.register_tenant(1).await;
@@ -508,23 +508,8 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
 
     let owner_ws = authenticated_subscription_client(fixture.rpc_addr, &owner_token).await;
     let other_ws = authenticated_subscription_client(fixture.rpc_addr, &other_token).await;
-    let options = SubscriptionOptions::default();
-    let mut owner_events = owner_ws
-        .subscribe::<SubscriptionEvent, _>(
-            "subscribe",
-            rpc_params!["watchtower_signing", &options],
-            "unsubscribe",
-        )
-        .await
-        .unwrap();
-    let mut other_events = other_ws
-        .subscribe::<SubscriptionEvent, _>(
-            "subscribe",
-            rpc_params!["watchtower_signing", &options],
-            "unsubscribe",
-        )
-        .await
-        .unwrap();
+    let mut owner_events = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
+    let mut other_events = subscribe_signing(&other_ws, SubscriptionTopic::WatchtowerSigning).await;
 
     // This test checks authenticated routing only; the watchtower actor tests
     // cover generating and applying requests from real settlement transactions.
@@ -542,25 +527,14 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
         &channel_id,
         fiber_types::WatchtowerSignerState::External(external),
     );
-    let live = tokio::time::timeout(Duration::from_secs(5), owner_events.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(matches!(live, SubscriptionEvent::WatchtowerSigning(result)
+    let live = next_subscription_event(&mut owner_events).await;
+    assert!(matches!(&live, SubscriptionEvent::WatchtowerSigning(result)
         if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::SignatureRequired { request_id: id, .. } if id == request_id.into())));
-    let mut recovered = owner_ws
-        .subscribe::<SubscriptionEvent, _>(
-            "subscribe",
-            rpc_params!["watchtower_signing", &options],
-            "unsubscribe",
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        recovered.next().await.unwrap().unwrap(),
-        SubscriptionEvent::WatchtowerSigning(_)
-    ));
+    let mut recovered = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
+    assert_eq!(
+        serde_json::to_value(next_subscription_event(&mut recovered).await).unwrap(),
+        serde_json::to_value(live).unwrap()
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(100), recovered.next())
             .await
@@ -620,11 +594,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
             .expect("owner submit"),
         SubmitWatchtowerSignatureResult::Applied
     );
-    let cleared = tokio::time::timeout(Duration::from_secs(5), owner_events.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let cleared = next_subscription_event(&mut owner_events).await;
     assert!(
         matches!(cleared, SubscriptionEvent::WatchtowerSigning(result)
         if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired))
@@ -1297,16 +1267,13 @@ async fn hosted_external_signer_inbound_payment_requires_signing_during_commitme
     assert_eq!(invoice.status, fiber_json_types::CkbInvoiceStatus::Paid);
 }
 
-async fn authenticated_subscription_client(
-    address: std::net::SocketAddr,
-    token: &str,
-) -> jsonrpsee::ws_client::WsClient {
+async fn authenticated_subscription_client(address: std::net::SocketAddr, token: &str) -> WsClient {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
     );
-    jsonrpsee::ws_client::WsClientBuilder::default()
+    WsClientBuilder::default()
         .set_headers(headers)
         .build(format!("ws://{address}"))
         .await
@@ -1314,21 +1281,31 @@ async fn authenticated_subscription_client(
 }
 
 async fn subscribe_signing(
-    client: &jsonrpsee::ws_client::WsClient,
-) -> jsonrpsee::core::client::Subscription<fiber_json_types::SubscriptionEvent> {
-    use jsonrpsee::core::client::SubscriptionClientT;
+    client: &WsClient,
+    topic: SubscriptionTopic,
+) -> Subscription<SubscriptionEvent> {
     client
-        .subscribe("subscribe", rpc_params!["channel_signing"], "unsubscribe")
+        .subscribe("subscribe", rpc_params![topic], "unsubscribe")
         .await
         .unwrap()
 }
 
+async fn next_subscription_event(
+    subscription: &mut Subscription<SubscriptionEvent>,
+) -> SubscriptionEvent {
+    tokio::time::timeout(Duration::from_secs(5), subscription.next())
+        .await
+        .expect("subscription update arrives")
+        .expect("subscription stays open")
+        .expect("valid subscription update")
+}
+
 async fn next_subscription_signature(
-    subscription: &mut jsonrpsee::core::client::Subscription<fiber_json_types::SubscriptionEvent>,
+    subscription: &mut Subscription<SubscriptionEvent>,
 ) -> GetChannelSigningStatusResult {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if let fiber_json_types::SubscriptionEvent::ChannelSigning(result) =
+            if let SubscriptionEvent::ChannelSigning(result) =
                 subscription.next().await.unwrap().unwrap()
             {
                 if matches!(
@@ -1346,21 +1323,19 @@ async fn next_subscription_signature(
 
 #[tokio::test]
 async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenants() {
-    use fiber_json_types::SubscriptionEvent;
-    use jsonrpsee::core::client::SubscriptionClientT;
     let fixture = TestLspFixture::new("signing-subscription").await;
     let (tenant_id, _, token, owner) = fixture.register_tenant(1).await;
     let (_, _, other_token, _) = fixture.register_tenant(2).await;
     let client = authenticated_subscription_client(fixture.rpc_addr, &token).await;
     let other_client = authenticated_subscription_client(fixture.rpc_addr, &other_token).await;
-    let mut other = subscribe_signing(&other_client).await;
+    let mut other = subscribe_signing(&other_client, SubscriptionTopic::ChannelSigning).await;
     let status = ractor::call!(fixture._lsp_actor, LspServiceMessage::GetStatus).unwrap();
     assert_eq!(
         status.active_tenants, 0,
         "subscribing does not activate tenant runtimes"
     );
     let (channel_id, sdk) = open_hosted_external_channel(&fixture, &owner).await;
-    let mut first = subscribe_signing(&client).await;
+    let mut first = subscribe_signing(&client, SubscriptionTopic::ChannelSigning).await;
     let pending = next_subscription_signature(&mut first).await;
     assert_eq!(pending.channel_id, channel_id.into());
     first.unsubscribe().await.unwrap();
@@ -1374,7 +1349,7 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
         )
         .await
         .unwrap();
-    let mut replay = subscribe_signing(&client).await;
+    let mut replay = subscribe_signing(&client, SubscriptionTopic::ChannelSigning).await;
     let recovered = next_subscription_signature(&mut replay).await;
     assert_eq!(
         serde_json::to_value(&recovered).unwrap(),

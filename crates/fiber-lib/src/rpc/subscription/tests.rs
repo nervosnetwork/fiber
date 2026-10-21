@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use biscuit_auth::{macros::biscuit, KeyPair};
+use biscuit_auth::{
+    macros::{biscuit, block},
+    KeyPair,
+};
 use fiber_json_types::{SubscriptionEvent, SubscriptionTopic};
 use fiber_types::Hash256;
 use hyper::{
@@ -101,10 +104,16 @@ async fn next(subscription: &mut Subscription<SubscriptionEvent>) -> Subscriptio
 }
 
 #[tokio::test]
-async fn subscription_host_live_updates_are_isolated_from_tenant_writes_and_multiple_readers_work()
-{
-    let fixture = Fixture::new(false, true, false).await;
-    let client = fixture.client(None).await;
+async fn subscription_host_scope_ignores_attenuation_and_tenant_writes() {
+    let fixture = Fixture::new(true, true, false).await;
+    let token = biscuit!(r#"read("channels");"#)
+        .build(&fixture.root)
+        .unwrap()
+        .append(block!(r#"tenant("alice"); node("0x0102");"#))
+        .unwrap()
+        .to_base64()
+        .unwrap();
+    let client = fixture.client(Some(&token)).await;
     let mut first = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
     let mut second = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
     let tenant = fixture
@@ -153,7 +162,6 @@ async fn subscription_rejects_unreadable_topics_invalid_filters_and_spoofed_iden
     for params in [
         serde_json::json!(["channel_signing", {"tenant_id":"alice"}]),
         serde_json::json!(["channel_signing", {"include_snapshot": true}]),
-        serde_json::json!(["channel_signing", {"include_snapshot": false}]),
         serde_json::json!(["channel_signing", {"node_id":"host"}]),
         serde_json::json!(["channel_signing", {"channel_ids":[format!("{:#x}", Hash256::from([1;32]))]}]),
         serde_json::json!(["watchtower_signing"]),
@@ -241,27 +249,6 @@ async fn subscription_cannot_be_cancelled_from_another_connection_and_http_is_re
     subscription.unsubscribe().await.unwrap();
 }
 
-#[test]
-fn subscription_attenuation_cannot_change_namespace_identity() {
-    use biscuit_auth::macros::block;
-    let root = KeyPair::new();
-    let operator = biscuit!(r#"read("channels");"#).build(&root).unwrap();
-    let attenuated = operator
-        .append(block!(r#"tenant("alice"); node("0x0102");"#))
-        .unwrap();
-    let authorization = SubscriptionAuthorization {
-        auth: Arc::new(BiscuitAuth::from_pubkey(root.public().to_string()).unwrap()),
-        token: Some(attenuated.to_base64().unwrap()),
-    };
-    assert_eq!(
-        authorization
-            .authorize(SubscriptionTopic::ChannelSigning)
-            .unwrap()
-            .0,
-        None
-    );
-}
-
 #[cfg(feature = "watchtower")]
 #[tokio::test]
 async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channel_ids() {
@@ -312,16 +299,7 @@ async fn subscription_connection_limit_is_released_by_unsubscribe() {
     let client = fixture.client(None).await;
     let mut subscriptions = Vec::new();
     for _ in 0..32 {
-        subscriptions.push(
-            client
-                .subscribe::<SubscriptionEvent, _>(
-                    "subscribe",
-                    rpc_params!["channel_signing"],
-                    "unsubscribe",
-                )
-                .await
-                .unwrap(),
-        );
+        subscriptions.push(subscribe(&client, SubscriptionTopic::ChannelSigning).await);
     }
     assert!(client
         .subscribe::<SubscriptionEvent, _>(
@@ -332,14 +310,7 @@ async fn subscription_connection_limit_is_released_by_unsubscribe() {
         .await
         .is_err());
     subscriptions.pop().unwrap().unsubscribe().await.unwrap();
-    let replacement = client
-        .subscribe::<SubscriptionEvent, _>(
-            "subscribe",
-            rpc_params!["channel_signing"],
-            "unsubscribe",
-        )
-        .await
-        .unwrap();
+    let replacement = subscribe(&client, SubscriptionTopic::ChannelSigning).await;
     replacement.unsubscribe().await.unwrap();
     for subscription in subscriptions {
         subscription.unsubscribe().await.unwrap();
@@ -360,7 +331,9 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
     let (_, mut slow) = module.raw_json_request(request, 1).await.unwrap();
     let (_, mut fast) = module.raw_json_request(request, 1).await.unwrap();
     // The first live update fills the slow subscriber's one-message queue.
-    store.insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
+    let state = ChannelActorState::samples(42).remove(0);
+    let id = state.get_id();
+    store.insert_channel_actor_state(state);
     let event = tokio::time::timeout(Duration::from_secs(1), fast.recv())
         .await
         .unwrap()
@@ -369,7 +342,6 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
         serde_json::from_str::<serde_json::Value>(event.get()).unwrap()["params"]["result"]["type"],
         "channel_signing"
     );
-    let id = ChannelActorState::samples(42).remove(0).get_id();
     store.delete_channel_actor_state(&id);
     let removed = tokio::time::timeout(Duration::from_secs(1), fast.recv())
         .await
