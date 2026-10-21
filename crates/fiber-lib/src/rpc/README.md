@@ -1562,10 +1562,10 @@ WebSocket connection. The connection output buffer holds 64 messages. A queue
 that remains full for five seconds terminates the affected subscription;
 reconnect and subscribe again to recover pending requests.
 
-Subscription and topic permissions are checked on creation and before enqueueing
-each notification.
-Idle subscriptions recheck authorization at most every ten seconds. Expired or
-invalid credentials terminate the subscription.
+Subscription and topic permissions are checked on creation, when signing state
+changes, and before enqueueing each notification. An update that finds expired
+or invalid credentials terminates the subscription without sending it. Token
+expiry alone does not proactively close an idle subscription.
 
 Invalid topics or options, disabled topics, excessive filters, and exhausted
 subscription capacity reject the request. A missing channel and a channel

@@ -228,7 +228,7 @@ async fn subscription_rejects_unreadable_topics_invalid_filters_and_spoofed_iden
 }
 
 #[tokio::test]
-async fn subscription_rechecks_time_caveats_and_rejects_expired_tokens() {
+async fn subscription_rejects_expired_requests_and_updates() {
     let fixture = Fixture::new(true, true, false).await;
     let expiry = std::time::SystemTime::now() + Duration::from_secs(2);
     let token = biscuit!(
