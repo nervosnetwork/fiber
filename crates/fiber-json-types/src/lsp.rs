@@ -9,42 +9,6 @@ use crate::{
     Pubkey,
 };
 
-/// Versioned tenant event delivered by `GET /lsp/events` as SSE data.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LspEventEnvelope {
-    /// Event schema version, currently 1.
-    pub version: u8,
-    /// Event type and its typed payload.
-    #[serde(flatten)]
-    pub event: LspEvent,
-}
-
-/// Tenant event types. New variants may be added; consumers should ignore unknown types.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "type", content = "payload")]
-pub enum LspEvent {
-    /// A persisted channel signing request, including the typed signing content.
-    #[serde(rename = "lsp.channel.signature_required")]
-    ChannelSignatureRequired(Box<crate::GetChannelSigningStatusResult>),
-    /// A persisted watchtower signing request.
-    #[serde(rename = "lsp.watchtower.signature_required")]
-    WatchtowerSignatureRequired(Box<crate::GetWatchtowerSigningStatusResult>),
-    /// All pending requests from the initial snapshot have been sent.
-    #[serde(rename = "lsp.snapshot_complete")]
-    SnapshotComplete,
-}
-
-impl LspEvent {
-    /// The SSE event name, identical to the JSON `type` field.
-    pub fn event_name(&self) -> &'static str {
-        match self {
-            Self::ChannelSignatureRequired(_) => "lsp.channel.signature_required",
-            Self::WatchtowerSignatureRequired(_) => "lsp.watchtower.signature_required",
-            Self::SnapshotComplete => "lsp.snapshot_complete",
-        }
-    }
-}
-
 /// Parameters that identify a hosted tenant.
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct LspTenantParams {

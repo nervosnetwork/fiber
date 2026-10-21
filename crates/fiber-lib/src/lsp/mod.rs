@@ -99,8 +99,6 @@ mod config;
 #[cfg(not(target_arch = "wasm32"))]
 mod delivery;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod events;
-#[cfg(not(target_arch = "wasm32"))]
 mod invoice;
 #[cfg(not(target_arch = "wasm32"))]
 mod registry;
@@ -137,7 +135,7 @@ pub use runtime::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use service::{
     HostedTenantRegistration, LspDeliveryDecision, LspService, LspServiceArgs, LspServiceMessage,
-    LspServiceState, LspServiceStatus, TenantEventContext,
+    LspServiceState, LspServiceStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use tenant::{

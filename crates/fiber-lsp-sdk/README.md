@@ -39,20 +39,12 @@ wallet transaction and opening context, and persists the baseline and binding
 before returning. Retry the same request after interruption. There is no separate
 approval or bind RPC.
 
-Clients can consume `GET /lsp/events` with the tenant token, or query
-`get_channel_signing_status` and `get_watchtower_signing_status`. Convert status
-results through `fiber_lsp_sdk::json` (`json` feature,
+RPC clients should convert `get_channel_signing_status` and
+`get_watchtower_signing_status` through `fiber_lsp_sdk::json` (`json` feature,
 on by default). Production clients then drive [`HostedSession`]: feed each
-status in, inspect [`ProcessOutcome`], and POST the returned submit
-params. The session uses injected transport for opening and has no HTTP dependency. The test-only SSE driver stays in
+RPC result in, inspect [`ProcessOutcome`], and POST the returned submit
+params. The session uses injected transport for opening and has no HTTP dependency. Auto-approving poll loops stay in
 `tests/fiber-lsp-sdk-agent` and must not be copied into production.
-
-An SSE connection without `X-Lsp-Session-Id` takes over the tenant's signer
-stream. Retain the response's `X-Lsp-Session-Id` and send it on every automatic
-reconnect, including the five-minute connection expiry. HTTP 409 means another
-device replaced the session: stop retries and require an explicit takeover.
-These sessions are local to one RPC listener; they do not revoke the tenant
-token or fence signature submissions.
 
 The wallet's RPC transport uses the tenant Biscuit returned by
 `HostedSession::finish_registration` with the standard Fiber data-plane

@@ -8,8 +8,6 @@ pub mod channel;
 pub mod config;
 #[cfg(debug_assertions)]
 pub mod dev;
-#[cfg(not(target_arch = "wasm32"))]
-mod events;
 pub mod graph;
 pub mod info;
 pub mod invoice;
@@ -137,7 +135,6 @@ pub mod server {
         methods: impl Into<Methods>,
         cors_enabled: bool,
         cors_allowed_origins: Vec<String>,
-        events: Option<Arc<super::events::LspEvents>>,
     ) -> Result<(ServerHandle, SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
         let listen_addr = listener.local_addr().expect("get local address");
@@ -191,15 +188,6 @@ pub mod server {
 
                 let per_conn2 = per_conn.clone();
                 let auth = auth.clone();
-                let events = events.clone();
-                // Also bound stalled socket writes: a full kernel send buffer must
-                // not keep a slow SSE consumer alive after its producer exits.
-                let mut sock = Box::pin(tokio_io_timeout::TimeoutStream::new(sock));
-                if events.is_some() {
-                    sock.as_mut().set_write_timeout_pinned(Some(
-                        super::events::EventLimits::default().write_timeout,
-                    ));
-                }
 
                 let svc = tower::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                     let PerConnection {
@@ -209,9 +197,6 @@ pub mod server {
                     } = per_conn2.clone();
 
                     let headers = req.headers().clone();
-                    let event_auth = auth.clone();
-                    let events = events.clone();
-                    let event_stop = stop_handle.clone();
                     let auth = auth.clone();
                     let rpc_middleware =
                         RpcServiceBuilder::new().layer_fn(move |service| BiscuitAuthMiddleware {
@@ -223,18 +208,7 @@ pub mod server {
                     let mut svc = svc_builder
                         .set_rpc_middleware(rpc_middleware)
                         .build(methods, stop_handle);
-                    async move {
-                        if req.uri().path() == "/lsp/events" {
-                            if let Some(events) = events.filter(|_| enable_auth) {
-                                return Ok(events.serve(req, event_auth, event_stop).await);
-                            }
-                            return Ok(super::events::response(
-                                hyper::StatusCode::NOT_FOUND,
-                                "tenant events unavailable",
-                            ));
-                        }
-                        svc.call(req).await
-                    }
+                    async move { svc.call(req).await }
                 });
 
                 // Conditionally wrap the service with CORS layer if enabled
@@ -340,16 +314,6 @@ pub mod server {
             None => None,
         };
 
-        let events = lsp_actor
-            .as_ref()
-            .filter(|_| config.is_module_enabled("lsp"))
-            .map(|actor| {
-                Arc::new(super::events::LspEvents::new(
-                    actor.clone(),
-                    config.is_module_enabled("channel"),
-                    config.is_module_enabled("watchtower"),
-                ))
-            });
         let mut modules = RpcModule::new(());
         if config.is_module_enabled("invoice") {
             modules
@@ -479,7 +443,6 @@ pub mod server {
             modules,
             config.cors_enabled,
             config.cors_allowed_origins.clone(),
-            events,
         )
         .await?;
         debug!("started listen to RPC addr {:?}", &listening_addr);

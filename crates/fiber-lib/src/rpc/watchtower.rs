@@ -473,7 +473,7 @@ where
 }
 
 #[cfg(feature = "watchtower")]
-pub(crate) fn to_rpc_watchtower_signing_status(
+fn to_rpc_watchtower_signing_status(
     state: fiber_types::WatchtowerSignerState,
 ) -> WatchtowerSigningStatus {
     use fiber_types::{OnchainKeyPurpose, WatchtowerSignerState};

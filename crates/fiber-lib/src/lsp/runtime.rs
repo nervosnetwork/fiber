@@ -209,26 +209,22 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
         // Live updates while the tenant is running. Evict stops this loop but
         // must not remove the host watch row; PeriodicCheck keeps scanning it.
         // LspService also ensures the row exists on TenantChannelOnline.
-        let public_network_actor = self.public_network_actor.clone();
         #[cfg(feature = "watchtower")]
-        let watchtower_store = self.tenant_store.clone();
-        #[cfg(feature = "watchtower")]
-        let tenant_node_id = super::tenant_watchtower_node_id(&tenant_pubkey);
-        tokio::spawn(async move {
-            while let Some(event) = event_receiver.recv().await {
-                if matches!(event, crate::NetworkServiceEvent::SigningStateChanged(_)) {
-                    let _ = public_network_actor
-                        .send_message(NetworkActorMessage::new_notification(event));
-                } else {
-                    #[cfg(feature = "watchtower")]
+        {
+            let watchtower_store = self.tenant_store.clone();
+            let tenant_node_id = super::tenant_watchtower_node_id(&tenant_pubkey);
+            tokio::spawn(async move {
+                while let Some(event) = event_receiver.recv().await {
                     crate::event_handler::forward_event_to_watchtower_store(
                         event,
                         &watchtower_store,
                         tenant_node_id.clone(),
                     );
                 }
-            }
-        });
+            });
+        }
+        #[cfg(not(feature = "watchtower"))]
+        tokio::spawn(async move { while event_receiver.recv().await.is_some() {} });
 
         let mut runtime = HostedTenantRuntime {
             tenant_pubkey,

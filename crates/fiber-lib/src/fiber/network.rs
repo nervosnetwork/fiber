@@ -1457,8 +1457,6 @@ macro_rules! debug_event {
 
 #[derive(Clone, Debug, AsRefStr)]
 pub enum NetworkServiceEvent {
-    /// A business actor persisted a change to a node's external signing requests.
-    SigningStateChanged(fiber_types::NodeId),
     NetworkStarted(Pubkey, Vec<MultiAddr>, Vec<Multiaddr>),
     NetworkStopped(Pubkey),
     PeerConnected(Pubkey, Multiaddr),
@@ -9618,16 +9616,6 @@ where
                 }
             }
             NetworkActorMessage::Fiber(FiberActorMessage::Notification(event)) => {
-                if let NetworkServiceEvent::SigningStateChanged(node) = event {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(lsp_service) = state.fiber.lsp_service.as_ref() {
-                        let _ =
-                            lsp_service.send_message(LspServiceMessage::SigningStateChanged(node));
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    let _ = node;
-                    return Ok(());
-                }
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Some(lsp_service) = state.fiber.lsp_service.as_ref() {
                     match &event {

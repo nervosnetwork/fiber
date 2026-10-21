@@ -5119,11 +5119,6 @@ where
         );
 
         let previous_oldest_round = state.oldest_retained_signer_round();
-        let previous_signing_request = state
-            .signing_context
-            .pending_signature
-            .as_ref()
-            .map(|pending| pending.request_id);
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self
@@ -5188,22 +5183,6 @@ where
         }
         self.store
             .insert_channel_actor_state(state.clone_for_store());
-
-        let signing_request = state
-            .signing_context
-            .pending_signature
-            .as_ref()
-            .map(|pending| pending.request_id);
-        if !state.channel_signer.is_local() && signing_request != previous_signing_request {
-            // Observers must only read the new request after its checkpoint is durable.
-            let _ = self
-                .network
-                .send_message(FiberActorMessage::new_notification(
-                    NetworkServiceEvent::SigningStateChanged(fiber_types::NodeId::from_bytes(
-                        state.get_local_pubkey().serialize().to_vec(),
-                    )),
-                ));
-        }
 
         if state.needs_backup {
             if let Some(ref store_actor) = self.store_actor {
