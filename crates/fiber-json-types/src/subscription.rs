@@ -26,7 +26,7 @@ pub struct SubscriptionOptions {
 }
 
 /// A typed state update. Signing subscriptions also resend current pending requests on connect.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SubscriptionEvent {
     /// Channel status, identical to `get_channel_signing_status`.

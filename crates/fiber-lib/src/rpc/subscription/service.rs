@@ -87,16 +87,12 @@ impl SubscriptionService {
             .filter(|event| is_pending(event))
             .cloned()
             .collect();
-        let previous = initial
-            .into_iter()
-            .map(|(id, event)| serde_json::to_value(event).map(|value| (id, value)))
-            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
         let state = State {
             filters: options
                 .channel_ids
                 .map(|ids| ids.into_iter().map(Into::into).collect()),
             changes,
-            previous,
+            previous: initial,
             pending,
             _permit: permit,
         };
@@ -140,11 +136,10 @@ impl SubscriptionService {
                         return Ok(Some((SubscriptionEvent::Removed { channel_id: id.into() }, state)));
                     }
                 };
-                let value = serde_json::to_value(&event)?;
-                if state.previous.get(&id) == Some(&value) {
+                if state.previous.get(&id) == Some(&event) {
                     continue;
                 }
-                state.previous.insert(id, value);
+                state.previous.insert(id, event.clone());
                 return Ok(Some((event, state)));
             }
         }).boxed())
@@ -154,7 +149,7 @@ impl SubscriptionService {
 struct State {
     filters: Option<HashSet<Hash256>>,
     changes: SigningChanges,
-    previous: HashMap<Hash256, serde_json::Value>,
+    previous: HashMap<Hash256, SubscriptionEvent>,
     pending: VecDeque<SubscriptionEvent>,
     _permit: OwnedSemaphorePermit,
 }

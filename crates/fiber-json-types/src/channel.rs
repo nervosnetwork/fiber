@@ -653,7 +653,7 @@ pub struct GetChannelSigningStatusParams {
 }
 
 /// Result of querying a channel's external signing status.
-#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema, PartialEq, Eq)]
 pub struct GetChannelSigningStatusResult {
     /// The channel whose signer state was read.
     pub channel_id: Hash256,
@@ -663,7 +663,7 @@ pub struct GetChannelSigningStatusResult {
 
 /// Read-only projection of a channel's external signing requests.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 #[allow(clippy::large_enum_variant)]
 pub enum ChannelSigningStatus {
@@ -687,7 +687,7 @@ pub enum ChannelSigningStatus {
 
 /// Participant evidence bound to the enclosing signing request.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SigningSessionEvidence {
     /// Counterparty public nonce (66 bytes), never an aggregate nonce.
     #[serde_as(as = "SliceHex")]
@@ -705,7 +705,7 @@ pub struct SigningSessionEvidence {
 /// args and compare that hash to the unsigned commitment transaction. The
 /// amounts and TLC set are not trustworthy until that check succeeds.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SigningSettlement {
     /// Local channel balance assigned by this commitment.
     #[serde_as(as = "U128Hex")]
@@ -727,7 +727,7 @@ pub struct SigningSettlement {
 
 /// One TLC in a [`SigningSettlement`].
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SigningSettlementTlc {
     /// Stable TLC id within its wallet-relative direction. Required for safe state tracking.
     #[serde_as(as = "U64Hex")]
@@ -808,7 +808,7 @@ pub enum CommitmentCounter {
 
 /// Plaintext MuSig2 payload from which the signer computes the signing digest.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum Musig2SignableContent {
     /// An unsigned commitment transaction.
@@ -847,7 +847,7 @@ pub enum Musig2SignableContent {
 
 /// MuSig2 plaintext and session context signed by a channel signer.
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct Musig2SigningContent {
     /// Domain-separated nonce slot.
     pub slot: NonceSlot,

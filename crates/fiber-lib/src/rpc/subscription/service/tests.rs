@@ -78,6 +78,61 @@ async fn live_events_filter_deduplicate_and_remove_without_a_database() {
             .await
             .is_err()
     );
+    use fiber_json_types::{
+        ChannelSigningStatus, ChannelSigningTransition, Musig2SignableContent,
+        Musig2SigningContent, NoncePurpose, NonceSlot, SigningSessionEvidence,
+    };
+    let mut status = ChannelSigningStatus::SignatureRequired {
+        request_id: Hash256::from([3; 32]).into(),
+        transition: ChannelSigningTransition::SignChannelAnnouncement,
+        content: Musig2SigningContent {
+            slot: NonceSlot {
+                purpose: NoncePurpose::ChannelAnnouncement,
+                commitment_number: 0,
+            },
+            commitment_counter: None,
+            key_agg_ctx: vec![],
+            agg_nonce: vec![],
+            content: Musig2SignableContent::ChannelAnnouncement {
+                unsigned_announcement: vec![1],
+            },
+        },
+        session_evidence: SigningSessionEvidence {
+            peer_public_nonce: vec![],
+            peer_partial_signature: None,
+        },
+        settlement: None,
+    };
+    // The same request ID can carry changed nested evidence. Compare the complete
+    // status, while suppressing repeated copies of each version.
+    for nonce in [vec![1; 66], vec![2; 66]] {
+        let ChannelSigningStatus::SignatureRequired {
+            session_evidence, ..
+        } = &mut status
+        else {
+            unreachable!();
+        };
+        session_evidence.peer_public_nonce = nonce;
+        for _ in 0..2 {
+            topic.write().publish(|| SigningChange::Channel {
+                channel_id: id,
+                status: Ok(status.clone()),
+            });
+        }
+        for stream in [&mut all, &mut filtered] {
+            let SubscriptionEvent::ChannelSigning(result) =
+                stream.try_next().await.unwrap().unwrap()
+            else {
+                panic!("channel signing event");
+            };
+            assert_eq!(result.status, status);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), stream.next())
+                    .await
+                    .is_err()
+            );
+        }
+    }
     topic.write().publish(|| SigningChange::Removed(id));
     for stream in [&mut all, &mut filtered] {
         assert!(
