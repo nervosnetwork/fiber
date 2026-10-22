@@ -1042,7 +1042,6 @@ async fn create_lsp_test_network_inner(
             http_address: rpc_addr,
             ..
         } = start_rpc(
-            nodes[lsp_node_index].signing_events.clone(),
             rpc_config,
             None,
             Some(nodes[lsp_node_index].fiber_config.clone()),
@@ -1054,6 +1053,7 @@ async fn create_lsp_test_network_inner(
             None,
             root_actor.get_cell(),
             None,
+            nodes[lsp_node_index].signing_events.clone(),
             #[cfg(debug_assertions)]
             None,
             #[cfg(debug_assertions)]
@@ -1259,7 +1259,6 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         http_address: rpc_addr,
         ..
     } = start_rpc(
-        public_t.signing_events.clone(),
         rpc_config,
         None,
         None,
@@ -1271,6 +1270,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         None,
         root_actor.get_cell(),
         None,
+        public_t.signing_events.clone(),
         #[cfg(debug_assertions)]
         None,
         #[cfg(debug_assertions)]
@@ -1528,7 +1528,6 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         http_address: rpc_addr,
         ..
     } = start_rpc(
-        public_t.signing_events.clone(),
         rpc_config,
         None,
         Some(public_t.fiber_config.clone()),
@@ -1540,6 +1539,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         Some(public_t.network_graph.clone()),
         root_actor.get_cell(),
         None,
+        public_t.signing_events.clone(),
         #[cfg(debug_assertions)]
         None,
         #[cfg(debug_assertions)]
@@ -1883,7 +1883,6 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         http_address: rpc_addr,
         ..
     } = start_rpc(
-        Default::default(),
         rpc_config,
         None,
         None,
@@ -1895,6 +1894,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         None,
         root_actor.get_cell(),
         None,
+        Default::default(),
         #[cfg(debug_assertions)]
         None,
         #[cfg(debug_assertions)]

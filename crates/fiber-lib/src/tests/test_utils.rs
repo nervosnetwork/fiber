@@ -1767,7 +1767,6 @@ impl NetworkNode {
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
                 start_rpc(
-                    signing_events.clone(),
                     rpc_config,
                     ckb_config.clone(),
                     Some(fiber_config.clone()),
@@ -1779,6 +1778,7 @@ impl NetworkNode {
                     Some(network_graph.clone()),
                     root.get_cell(),
                     None,
+                    signing_events.clone(),
                     #[cfg(debug_assertions)]
                     None,
                     #[cfg(debug_assertions)]

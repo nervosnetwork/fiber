@@ -324,7 +324,6 @@ pub mod server {
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
-        signing_events: crate::signing::SigningEvents,
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,
@@ -336,6 +335,7 @@ pub mod server {
         network_graph: Option<Arc<RwLock<NetworkGraph<S>>>>,
         supervisor: ActorCell,
         store_change_port: Option<Arc<OutputPort<StoreChange>>>,
+        signing_events: crate::signing::SigningEvents,
         #[cfg(debug_assertions)] ckb_chain_actor: Option<ActorRef<CkbChainMessage>>,
         #[cfg(debug_assertions)] rpc_dev_module_commitment_txs: Option<
             Arc<RwLock<HashMap<(Hash256, u64), TransactionView>>>,
@@ -593,7 +593,6 @@ pub mod server {
             store: Store,
         ) -> anyhow::Result<RpcServer> {
             start_rpc(
-                events,
                 config,
                 None,
                 None,
@@ -605,6 +604,7 @@ pub mod server {
                 None,
                 get_test_root_actor().await.get_cell(),
                 None,
+                events,
                 #[cfg(debug_assertions)]
                 None,
                 #[cfg(debug_assertions)]

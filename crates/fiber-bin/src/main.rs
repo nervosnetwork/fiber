@@ -637,7 +637,6 @@ async fn run_node(
     let rpc_server_handle = match config.rpc {
         Some(rpc_config) => {
             match start_rpc(
-                signing_events,
                 rpc_config,
                 config.ckb,
                 config.fiber,
@@ -649,6 +648,7 @@ async fn run_node(
                 network_graph,
                 root_actor.get_cell(),
                 store_change_port,
+                signing_events,
                 #[cfg(debug_assertions)]
                 ckb_chain_actor,
                 #[cfg(debug_assertions)]

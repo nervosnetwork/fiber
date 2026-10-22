@@ -238,7 +238,6 @@ impl TestLspFixture {
             http_address: rpc_addr,
             ws_address,
         } = start_rpc(
-            public_t.signing_events.clone(),
             rpc_config,
             None,
             Some(public_t.fiber_config.clone()),
@@ -250,6 +249,7 @@ impl TestLspFixture {
             Some(public_t.network_graph.clone()),
             root_actor.get_cell(),
             None,
+            public_t.signing_events.clone(),
             #[cfg(debug_assertions)]
             None,
             #[cfg(debug_assertions)]
