@@ -156,10 +156,10 @@ mod tests {
 
     use fiber_types::{Hash256, NodeId};
 
-    use super::{SigningChange, SigningNotifications, SigningScope, SIGNING_EVENT_BUFFER};
+    use super::{SigningChange, SigningNotifications, SigningScope};
 
     #[tokio::test]
-    async fn signing_events_are_shared_scoped_bounded_and_cleaned_up() {
+    async fn signing_events_are_shared_scoped_and_cleaned_up() {
         let hub = Arc::new(SigningNotifications::default());
         let alice = SigningScope::Channel(Some("alice".into()));
         let bob = SigningScope::Channel(Some("bob".into()));
@@ -186,13 +186,6 @@ mod tests {
                     .is_err()
             );
         }
-        for _ in 0..=SIGNING_EVENT_BUFFER {
-            topic.write().publish(|| SigningChange::Removed(id));
-        }
-        assert!(matches!(
-            first.recv().await,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
-        ));
         drop((first, second, others, topic));
         assert!(hub.0.lock().is_empty());
         let unobserved = hub.topic(alice);

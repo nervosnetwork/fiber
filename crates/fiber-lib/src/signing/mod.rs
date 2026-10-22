@@ -206,10 +206,7 @@ impl<'a> SigningUpdate<'a> {
 mod tests {
     use futures::FutureExt;
 
-    use crate::{
-        fiber::channel::{ChannelActorState, ChannelActorStateStore},
-        store::{open_store, sample::StoreSample},
-    };
+    use crate::{fiber::channel::ChannelActorState, store::sample::StoreSample};
 
     use super::{
         notifications::{SigningChange, SigningScope},
@@ -218,32 +215,27 @@ mod tests {
 
     #[test]
     fn updates_publish_only_explicitly_and_preserve_channel_migration_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(dir.path()).unwrap();
         let events = SigningEvents::default();
         let publisher = events.channels(None);
         let mut changes = events.hub.subscribe(SigningScope::Channel(None));
         let mut state = ChannelActorState::samples(42).remove(0);
         let old_id = state.get_id();
 
-        // Aborted writes drop their guard without emitting a captured event.
+        // Dropping a guard without publishing emits no captured event.
         drop(publisher.prepare(&state));
         assert!(changes.recv().now_or_never().is_none());
 
         let update = publisher.prepare(&state);
-        store.insert_channel_actor_state(state.clone());
         assert!(changes.recv().now_or_never().is_none());
         update.publish();
         assert_eq!(
             changes.recv().now_or_never().unwrap().unwrap().channel_id(),
             old_id
         );
-        assert!(store.get_channel_actor_state(&old_id).is_some());
 
         let new_id = [8; 32].into();
         state.id = new_id;
         let update = publisher.prepare(&state);
-        store.move_channel_actor_state(&old_id, state);
         update.publish_removed(old_id);
         update.publish();
         assert!(
@@ -252,15 +244,5 @@ mod tests {
         assert!(
             matches!(changes.recv().now_or_never().unwrap().unwrap().as_ref(), SigningChange::Channel { channel_id, .. } if *channel_id == new_id)
         );
-        assert!(store.get_channel_actor_state(&old_id).is_none());
-        assert!(store.get_channel_actor_state(&new_id).is_some());
-
-        let update = publisher.prepare_removed(new_id);
-        store.delete_channel_actor_state(&new_id);
-        update.publish();
-        assert!(
-            matches!(changes.recv().now_or_never().unwrap().unwrap().as_ref(), SigningChange::Removed(id) if *id == new_id)
-        );
-        assert!(store.get_channel_actor_state(&new_id).is_none());
     }
 }

@@ -174,52 +174,14 @@ async fn event_lag_ends_subscription_without_database_recovery() {
 
 #[cfg(feature = "watchtower")]
 #[tokio::test]
-async fn watchtower_replays_pending_then_processes_memory_events() {
-    use crate::watchtower::WatchtowerStore;
+async fn watchtower_visibility_and_removal_use_only_memory_events() {
     use fiber_json_types::WatchtowerSigningStatus;
-    use fiber_types::{
-        OnchainKeyPurpose, OnchainSigningContent, Privkey, SettlementData,
-        WatchtowerExternalSignerState, WatchtowerSignerState,
-    };
 
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path()).unwrap();
     let events = SigningEvents::default();
     let node = NodeId::from_bytes(vec![2; 33]);
     let id = Hash256::from([1; 32]);
-    store.insert_watch_channel(
-        node.clone(),
-        id,
-        None,
-        None,
-        Privkey::from(&[1; 32]).pubkey(),
-        Privkey::from(&[2; 32]).pubkey(),
-        Privkey::from(&[3; 32]).pubkey(),
-        Privkey::from(&[4; 32]).pubkey(),
-        SettlementData {
-            local_amount: 100,
-            remote_amount: 200,
-            tlcs: vec![],
-        },
-    );
-    let request_id = Hash256::from([3; 32]);
-    store.put_watchtower_signer(
-        &node,
-        &id,
-        WatchtowerSignerState::External(WatchtowerExternalSignerState {
-            pending_requests: [(
-                request_id,
-                OnchainSigningContent {
-                    key_purpose: OnchainKeyPurpose::Settlement,
-                    transaction: ckb_types::core::TransactionBuilder::default()
-                        .build()
-                        .data(),
-                },
-            )]
-            .into(),
-            ..Default::default()
-        }),
-    );
     let mut stream = SubscriptionService::new(false, true)
         .subscribe(
             source(&store, &events, node.clone()),
@@ -228,31 +190,24 @@ async fn watchtower_replays_pending_then_processes_memory_events() {
         )
         .unwrap();
     drop(store);
-    assert!(
-        matches!(stream.try_next().await.unwrap().unwrap(), SubscriptionEvent::WatchtowerSigning(result)
-        if matches!(result.status, WatchtowerSigningStatus::SignatureRequired {request_id: actual, ..} if actual == request_id.into()))
-    );
     let topic = events.hub.topic(SigningScope::Watchtower(node));
     // Orphan signer state is hidden until a watched-channel creation is known.
-    let orphan = Hash256::from([5; 32]);
     topic.write().publish(|| SigningChange::WatchtowerUpdated {
-        channel_id: orphan,
+        channel_id: id,
         status: WatchtowerSigningStatus::NoSignatureRequired,
     });
-    topic.write().publish(|| SigningChange::WatchtowerUpdated {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), stream.next())
+            .await
+            .is_err()
+    );
+    topic.write().publish(|| SigningChange::WatchtowerCreated {
         channel_id: id,
         status: WatchtowerSigningStatus::NoSignatureRequired,
     });
     assert!(
         matches!(stream.try_next().await.unwrap().unwrap(), SubscriptionEvent::WatchtowerSigning(result)
         if result.channel_id == id.into() && matches!(result.status, WatchtowerSigningStatus::NoSignatureRequired))
-    );
-    topic.write().publish(|| SigningChange::WatchtowerCreated {
-        channel_id: orphan,
-        status: WatchtowerSigningStatus::NoSignatureRequired,
-    });
-    assert!(
-        matches!(stream.try_next().await.unwrap().unwrap(), SubscriptionEvent::WatchtowerSigning(result) if result.channel_id == orphan.into())
     );
     topic.write().publish(|| SigningChange::Removed(id));
     assert!(

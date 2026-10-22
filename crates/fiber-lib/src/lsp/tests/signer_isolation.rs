@@ -549,10 +549,7 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     assert!(matches!(&live, SubscriptionEvent::WatchtowerSigning(result)
         if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::SignatureRequired { request_id: id, .. } if id == request_id.into())));
     let mut recovered = subscribe_signing(&owner_ws, SubscriptionTopic::WatchtowerSigning).await;
-    assert_eq!(
-        serde_json::to_value(next_subscription_event(&mut recovered).await).unwrap(),
-        serde_json::to_value(live).unwrap()
-    );
+    assert_eq!(next_subscription_event(&mut recovered).await, live);
     assert!(
         tokio::time::timeout(Duration::from_millis(100), recovered.next())
             .await
@@ -1369,10 +1366,7 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
         .unwrap();
     let mut replay = subscribe_signing(&client, SubscriptionTopic::ChannelSigning).await;
     let recovered = next_subscription_signature(&mut replay).await;
-    assert_eq!(
-        serde_json::to_value(&recovered).unwrap(),
-        serde_json::to_value(&pending).unwrap()
-    );
+    assert_eq!(recovered, pending);
     let status = ractor::call!(fixture._lsp_actor, LspServiceMessage::GetStatus).unwrap();
     assert_eq!(status.active_tenants, 0, "pending replay stays cold");
     let denied = other_client
@@ -1394,10 +1388,7 @@ async fn hosted_signing_subscription_recovers_pending_without_waking_cold_tenant
         SubmitChannelSignatureResult::Applied
     );
     let next = next_subscription_signature(&mut replay).await;
-    assert_ne!(
-        serde_json::to_value(&next.status).unwrap(),
-        serde_json::to_value(&pending.status).unwrap()
-    );
+    assert_ne!(next.status, pending.status);
     assert!(
         tokio::time::timeout(Duration::from_millis(100), other.next())
             .await
