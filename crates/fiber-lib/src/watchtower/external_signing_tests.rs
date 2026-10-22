@@ -54,6 +54,7 @@ impl CellCollector for FeeCells {
 }
 
 struct Fixture {
+    events: crate::signing::SigningEvents,
     store: Store,
     _dir: TempDir,
     node_id: NodeId,
@@ -219,6 +220,7 @@ impl Fixture {
             tx_index: 0u32.into(),
         };
         Self {
+            events: Default::default(),
             store,
             _dir: dir,
             node_id,
@@ -250,6 +252,7 @@ impl Fixture {
             &self.channel.local_settlement_data
         };
         build_settlement_tx(
+            &self.events,
             self.cell.clone(),
             EpochNumberWithFraction::new(10, 0, 1),
             EpochNumberWithFraction::new(14, 0, 1),
@@ -282,7 +285,8 @@ impl Fixture {
         request_id: Hash256,
         signature: [u8; 65],
     ) -> Result<SubmitWatchtowerSignatureResult, jsonrpsee::types::ErrorObjectOwned> {
-        let rpc = WatchtowerRpcServerImpl::new(self.store.clone());
+        let rpc = WatchtowerRpcServerImpl::new(self.store.clone())
+            .with_signing_events(self.events.clone());
         tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(rpc.submit_watchtower_signature(
@@ -568,7 +572,28 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
                 )
                 .expect("settlement witness")
             });
+            use crate::signing::notifications::{SigningChange, SigningScope};
+            let mut events = fixture
+                .events
+                .hub
+                .subscribe(SigningScope::Watchtower(fixture.node_id.clone()));
+            let runtime = tokio::runtime::Runtime::new().expect("event runtime");
+            let receive = |events: &mut crate::signing::notifications::SigningChanges| {
+                runtime.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                        .await
+                        .expect("business event")
+                        .expect("active receiver")
+                })
+            };
             assert!(fixture.build().expect("queue settlement").is_none());
+            assert!(matches!(
+                receive(&mut events).as_ref(),
+                SigningChange::WatchtowerUpdated {
+                    status: fiber_json_types::WatchtowerSigningStatus::SignatureRequired { .. },
+                    ..
+                }
+            ));
             let (request_id, content) = fixture.pending();
             assert_eq!(content.key_purpose, OnchainKeyPurpose::Settlement);
             let wrong =
@@ -579,6 +604,15 @@ fn external_final_settlement_uses_base_key_through_transaction_builder() {
             fixture
                 .submit(request_id, signature)
                 .expect("submit settlement");
+            // The rejected signature above emitted nothing; the next event is
+            // the successfully committed signature's cleared pending status.
+            assert!(matches!(
+                receive(&mut events).as_ref(),
+                SigningChange::WatchtowerUpdated {
+                    status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
+                    ..
+                }
+            ));
             let tx = fixture
                 .build()
                 .expect("apply settlement")

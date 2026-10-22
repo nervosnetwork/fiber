@@ -1,7 +1,7 @@
 //! Signing state streams, independent of JSON-RPC connections and credentials.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -13,7 +13,13 @@ use fiber_types::{Hash256, NodeId};
 use futures::{stream, stream::BoxStream, StreamExt};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::{rpc::server::RpcServerStore, store::notifications::SigningChanges};
+use crate::{
+    rpc::server::RpcServerStore,
+    signing::{
+        notifications::{SigningChange, SigningChanges, SigningScope},
+        SigningEvents,
+    },
+};
 
 const MAX_SUBSCRIPTIONS: usize = 16_384;
 const MAX_FILTER_CHANNELS: usize = 256;
@@ -34,6 +40,15 @@ impl SubscriptionService {
             channels_enabled,
             watchtower_enabled,
         }
+    }
+
+    pub(super) async fn subscribe_async<S: RpcServerStore + Send + 'static>(
+        self,
+        source: Source<S>,
+        topic: SubscriptionTopic,
+        options: SubscriptionOptions,
+    ) -> Result<EventStream> {
+        tokio::task::spawn_blocking(move || self.subscribe(source, topic, options)).await?
     }
 
     pub(super) fn subscribe<S: RpcServerStore + Send + 'static>(
@@ -63,104 +78,102 @@ impl SubscriptionService {
             .clone()
             .try_acquire_owned()
             .map_err(|_| anyhow!("subscription limit reached"))?;
-        // Listen before reading, so changes during the initial read remain pending.
-        let changes = source.listen(topic);
-        if options
-            .channel_ids
-            .as_ref()
-            .is_some_and(|ids| ids.iter().any(|id| !source.exists(topic, &(*id).into())))
-        {
-            bail!("channel not found");
-        }
-        let previous = source.current(topic, &options)?;
-        let pending = previous
+        let mut changes = source.listen(topic);
+        // Business persistence and publication use the same scope lock. This read is
+        // the only database access retained by a subscription.
+        let initial = changes.snapshot(|| source.current(topic, &options))?;
+        let pending = initial
             .values()
             .filter(|event| is_pending(event))
             .cloned()
             .collect();
+        let previous = initial
+            .into_iter()
+            .map(|(id, event)| serde_json::to_value(event).map(|value| (id, value)))
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
         let state = State {
-            source,
-            topic,
-            options,
+            filters: options
+                .channel_ids
+                .map(|ids| ids.into_iter().map(Into::into).collect()),
             changes,
             previous,
             pending,
             _permit: permit,
         };
+        // State owns no source or database handle after the initial read.
         Ok(stream::try_unfold(state, |mut state| async move {
             loop {
                 if let Some(event) = state.pending.pop_front() {
                     return Ok(Some((event, state)));
                 }
-                state.changes.changed().await;
-                let current = state.source.current(state.topic, &state.options)?;
-                for (id, event) in &current {
-                    if state
-                        .previous
-                        .get(id)
-                        .map(serde_json::to_value)
-                        .transpose()?
-                        != Some(serde_json::to_value(event)?)
-                    {
-                        state.pending.push_back(event.clone());
+                let change = state.changes.recv().await.map_err(|error| {
+                    anyhow!("signing event stream interrupted ({error}); reconnect to recover pending requests")
+                })?;
+                let id = change.channel_id();
+                if state.filters.as_ref().is_some_and(|ids| !ids.contains(&id)) {
+                    continue;
+                }
+                let event = match change.as_ref() {
+                    SigningChange::Channel { status, .. } => {
+                        SubscriptionEvent::ChannelSigning(Box::new(GetChannelSigningStatusResult {
+                            channel_id: id.into(), status: status.clone().map_err(anyhow::Error::msg)?,
+                        }))
                     }
+                    #[cfg(feature = "watchtower")]
+                    SigningChange::WatchtowerUpdated { .. } if !state.previous.contains_key(&id) => {
+                        // A signer row without a watched channel is not visible.
+                        continue;
+                    }
+                    #[cfg(feature = "watchtower")]
+                    SigningChange::WatchtowerCreated { status, .. }
+                    | SigningChange::WatchtowerUpdated { status, .. } => {
+                        SubscriptionEvent::WatchtowerSigning(Box::new(
+                            fiber_json_types::GetWatchtowerSigningStatusResult {
+                                channel_id: id.into(), status: status.clone(),
+                            },
+                        ))
+                    }
+                    SigningChange::Removed(_) => {
+                        if state.previous.remove(&id).is_none() {
+                            continue;
+                        }
+                        return Ok(Some((SubscriptionEvent::Removed { channel_id: id.into() }, state)));
+                    }
+                };
+                let value = serde_json::to_value(&event)?;
+                if state.previous.get(&id) == Some(&value) {
+                    continue;
                 }
-                for id in state.previous.keys().filter(|id| !current.contains_key(id)) {
-                    state.pending.push_back(SubscriptionEvent::Removed {
-                        channel_id: (*id).into(),
-                    });
-                }
-                state.previous = current;
+                state.previous.insert(id, value);
+                return Ok(Some((event, state)));
             }
-        })
-        .boxed())
+        }).boxed())
     }
 }
 
-struct State<S> {
-    source: Source<S>,
-    topic: SubscriptionTopic,
-    options: SubscriptionOptions,
+struct State {
+    filters: Option<HashSet<Hash256>>,
     changes: SigningChanges,
-    previous: HashMap<Hash256, SubscriptionEvent>,
+    previous: HashMap<Hash256, serde_json::Value>,
     pending: VecDeque<SubscriptionEvent>,
     _permit: OwnedSemaphorePermit,
 }
 
 pub(super) struct Source<S> {
+    pub(super) events: SigningEvents,
+    pub(super) tenant: Option<String>,
     pub(super) channels: S,
+    #[cfg(feature = "watchtower")]
     pub(super) watchtower: S,
     pub(super) node: NodeId,
 }
 
 impl<S: RpcServerStore> Source<S> {
     fn listen(&self, topic: SubscriptionTopic) -> SigningChanges {
-        match topic {
-            SubscriptionTopic::ChannelSigning => self.channels.subscribe_channel_signing(),
-            SubscriptionTopic::WatchtowerSigning => {
-                self.watchtower.subscribe_watchtower_signing(&self.node)
-            }
-        }
-    }
-
-    fn exists(&self, topic: SubscriptionTopic, channel: &Hash256) -> bool {
-        match topic {
-            SubscriptionTopic::ChannelSigning => {
-                self.channels.get_channel_actor_state(channel).is_some()
-            }
-            SubscriptionTopic::WatchtowerSigning => {
-                #[cfg(feature = "watchtower")]
-                {
-                    self.watchtower
-                        .get_watch_channel(&self.node, channel)
-                        .is_some()
-                }
-                #[cfg(not(feature = "watchtower"))]
-                {
-                    false
-                }
-            }
-        }
+        self.events.hub.subscribe(match topic {
+            SubscriptionTopic::ChannelSigning => SigningScope::Channel(self.tenant.clone()),
+            SubscriptionTopic::WatchtowerSigning => SigningScope::Watchtower(self.node.clone()),
+        })
     }
 
     fn current(
@@ -180,11 +193,15 @@ impl<S: RpcServerStore> Source<S> {
                 SubscriptionTopic::WatchtowerSigning => {
                     #[cfg(feature = "watchtower")]
                     {
-                        self.watchtower
+                        return self
+                            .watchtower
                             .get_watch_channels_for_node(&self.node)
                             .into_iter()
-                            .map(|channel| channel.channel_id)
-                            .collect()
+                            .map(|channel| {
+                                let id = channel.channel_id;
+                                Ok((id, self.watchtower_event(id)))
+                            })
+                            .collect();
                     }
                     #[cfg(not(feature = "watchtower"))]
                     {
@@ -197,9 +214,10 @@ impl<S: RpcServerStore> Source<S> {
         for id in ids {
             let event = match topic {
                 SubscriptionTopic::ChannelSigning => {
-                    let Some(state) = self.channels.get_channel_actor_state(&id) else {
-                        continue;
-                    };
+                    let state = self
+                        .channels
+                        .get_channel_actor_state(&id)
+                        .ok_or_else(|| anyhow!("channel not found"))?;
                     let status = crate::rpc::channel::to_rpc_channel_signing_status(&state)
                         .map_err(|error| anyhow!(error))?;
                     SubscriptionEvent::ChannelSigning(Box::new(GetChannelSigningStatusResult {
@@ -211,16 +229,9 @@ impl<S: RpcServerStore> Source<S> {
                     #[cfg(feature = "watchtower")]
                     {
                         if self.watchtower.get_watch_channel(&self.node, &id).is_none() {
-                            continue;
+                            bail!("channel not found");
                         }
-                        SubscriptionEvent::WatchtowerSigning(Box::new(
-                            fiber_json_types::GetWatchtowerSigningStatusResult {
-                                channel_id: id.into(),
-                                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status(
-                                    self.watchtower.get_watchtower_signer(&self.node, &id),
-                                ),
-                            },
-                        ))
+                        self.watchtower_event(id)
                     }
                     #[cfg(not(feature = "watchtower"))]
                     {
@@ -231,6 +242,18 @@ impl<S: RpcServerStore> Source<S> {
             current.insert(id, event);
         }
         Ok(current)
+    }
+
+    #[cfg(feature = "watchtower")]
+    fn watchtower_event(&self, id: Hash256) -> SubscriptionEvent {
+        SubscriptionEvent::WatchtowerSigning(Box::new(
+            fiber_json_types::GetWatchtowerSigningStatusResult {
+                channel_id: id.into(),
+                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status(
+                    self.watchtower.get_watchtower_signer(&self.node, &id),
+                ),
+            },
+        ))
     }
 }
 
@@ -248,3 +271,6 @@ fn is_pending(event: &SubscriptionEvent) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests;

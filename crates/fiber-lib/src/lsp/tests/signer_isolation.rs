@@ -155,6 +155,7 @@ impl TestLspFixture {
         let config = lsp_config(root.path().join("lsp"));
         let root_actor = get_test_root_actor().await;
         let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+            public_t.signing_events.clone(),
             config.clone(),
             public_t.fiber_config.clone(),
             public_t.chain_client.clone(),
@@ -182,6 +183,7 @@ impl TestLspFixture {
                 signing_key: public_t.private_key.clone(),
                 token_issuer,
                 watchtower_store: public_t.store.clone(),
+                signing_events: public_t.signing_events.clone(),
             },
             root_actor.get_cell(),
         )
@@ -236,6 +238,7 @@ impl TestLspFixture {
             http_address: rpc_addr,
             ws_address,
         } = start_rpc(
+            public_t.signing_events.clone(),
             rpc_config,
             None,
             Some(public_t.fiber_config.clone()),
@@ -475,7 +478,6 @@ async fn tenant_cannot_query_or_sign_another_tenants_channel() {
 
 #[tokio::test]
 async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
-    use crate::watchtower::WatchtowerStore;
     use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerExternalSignerState};
 
     let fixture = TestLspFixture::new("isolation-watchtower").await;
@@ -529,11 +531,19 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     external
         .pending_requests
         .insert(request_id, content.clone());
-    fixture.public_t.store.put_watchtower_signer(
-        &crate::lsp::tenant_watchtower_node_id(&owner_pubkey),
-        &channel_id,
-        fiber_types::WatchtowerSignerState::External(external),
-    );
+    fixture
+        .public_t
+        .signing_events
+        .update_watch_signer(
+            &fixture.public_t.store,
+            &crate::lsp::tenant_watchtower_node_id(&owner_pubkey),
+            &channel_id,
+            |state| {
+                *state = fiber_types::WatchtowerSignerState::External(external);
+                Ok::<_, ()>(())
+            },
+        )
+        .unwrap();
     let live = next_subscription_event(&mut owner_events).await;
     assert!(matches!(&live, SubscriptionEvent::WatchtowerSigning(result)
         if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::SignatureRequired { request_id: id, .. } if id == request_id.into())));

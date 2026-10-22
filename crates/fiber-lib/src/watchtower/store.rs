@@ -73,8 +73,8 @@ pub trait WatchtowerStore {
         settlement_data: SettlementData,
         commitment_contract_features: CommitmentContractFeatures,
     );
-    /// Remove a channel from the store, the watchtower will stop monitoring the channel
-    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256);
+    /// Stop monitoring a channel. Returns false if removal is refused for a live channel.
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool;
 
     /// Read one watched channel, if present.
     fn get_watch_channel(&self, node_id: &NodeId, channel_id: &Hash256) -> Option<ChannelData> {

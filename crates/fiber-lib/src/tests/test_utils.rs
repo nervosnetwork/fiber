@@ -261,6 +261,7 @@ pub fn generate_store() -> (Store, ()) {
 
 #[derive(Debug)]
 pub struct NetworkNode {
+    pub signing_events: crate::signing::SigningEvents,
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
@@ -1681,6 +1682,7 @@ impl NetworkNode {
             true,
         )));
 
+        let signing_events = crate::signing::SigningEvents::default();
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {}", base_dir.to_str())),
             NetworkActor::new(
@@ -1690,7 +1692,8 @@ impl NetworkNode {
                 None,
                 network_graph.clone(),
                 chain_client.clone(),
-            ),
+            )
+            .with_signing_events(signing_events.channels(None)),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
                 tracker: new_tokio_task_tracker(),
@@ -1764,6 +1767,7 @@ impl NetworkNode {
         let rpc_server = if let Some(rpc_config) = rpc_config.clone() {
             Some(
                 start_rpc(
+                    signing_events.clone(),
                     rpc_config,
                     ckb_config.clone(),
                     Some(fiber_config.clone()),
@@ -1789,6 +1793,7 @@ impl NetworkNode {
         };
 
         Self {
+            signing_events,
             base_dir,
             node_name,
             store,

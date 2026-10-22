@@ -1843,6 +1843,7 @@ impl GossipMessageWithTarget {
 /// the public `NetworkActor` and a local-only `HostedTenantActor` drive it with
 /// their respective runtime state.
 pub(crate) struct FiberActorCore<S, C> {
+    signing_events: crate::signing::ChannelSigningEvents,
     // An event emitter to notify outside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
@@ -1905,6 +1906,7 @@ where
         chain_client: C,
     ) -> Self {
         Self {
+            signing_events: Default::default(),
             event_sender,
             chain_actor,
             store: store.clone(),
@@ -1912,6 +1914,12 @@ where
             network_graph,
             chain_client,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_signing_events(mut self, events: crate::signing::ChannelSigningEvents) -> Self {
+        self.signing_events = events;
+        self
     }
 
     fn build_actor_state(
@@ -1956,6 +1964,7 @@ where
         }
 
         FiberActorState {
+            signing_events: self.signing_events.clone(),
             store: self.store.clone(),
             currency: config.currency(),
             store_actor: self.store_actor.clone(),
@@ -4104,7 +4113,7 @@ where
                         // Persist relay completion even when a peer fulfill already set the
                         // removal reason before the channel closed.
                         tlc.applied_flags.insert(AppliedFlags::REMOVE);
-                        self.store.insert_channel_actor_state(channel_state);
+                        self.signing_events.save(&self.store, channel_state);
                     }
                 }
             }
@@ -4405,7 +4414,7 @@ where
         // no-live-actor path aligned with the live RemoveTlc ack ordering: channel state is durable
         // before higher-level payment or invoice notifications are emitted.
         if actor_state_changed {
-            self.store.insert_channel_actor_state(actor_state.clone());
+            self.signing_events.save(&self.store, actor_state.clone());
             if let Some(ref store_actor) = state.store_actor {
                 if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
                     error!(
@@ -4434,7 +4443,7 @@ where
                         | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
                 );
                 actor_state.state = ChannelState::Closed(flags);
-                self.store.insert_channel_actor_state(actor_state.clone());
+                self.signing_events.save(&self.store, actor_state.clone());
                 self.store.delete_shutdown_settlement_record(&channel_id);
                 if let Some(ref store_actor) = state.store_actor {
                     if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
@@ -4448,7 +4457,7 @@ where
         }
 
         if settlement_state_changed {
-            self.store.insert_channel_actor_state(actor_state.clone());
+            self.signing_events.save(&self.store, actor_state.clone());
             if let Some(ref store_actor) = state.store_actor {
                 if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
                     error!("Failed to request store backup after on-chain settlement finalization: {err}");
@@ -6059,6 +6068,12 @@ where
         }
     }
 
+    /// Share the application's channel signing publisher with spawned channel actors.
+    pub fn with_signing_events(mut self, events: crate::signing::ChannelSigningEvents) -> Self {
+        self.core.signing_events = events;
+        self
+    }
+
     async fn handle_public_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
@@ -6486,6 +6501,7 @@ where
 }
 
 pub struct FiberActorState<S, C> {
+    signing_events: crate::signing::ChannelSigningEvents,
     store: S,
     // Keep the configured network available for both public and hosted payment validation.
     currency: Currency,
@@ -7478,7 +7494,8 @@ where
                 network.clone(),
                 store,
                 self.store_actor.clone(),
-            ),
+            )
+            .with_signing_events(self.signing_events.clone()),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannel(OpenChannelParameter {
                     funding_amount,
@@ -7613,7 +7630,8 @@ where
                 network.clone(),
                 store,
                 self.store_actor.clone(),
-            ),
+            )
+            .with_signing_events(self.signing_events.clone()),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::OpenChannelWithExternalFunding(
                     OpenChannelWithExternalFundingParameter {
@@ -7729,7 +7747,8 @@ where
                 network.clone(),
                 store,
                 self.store_actor.clone(),
-            ),
+            )
+            .with_signing_events(self.signing_events.clone()),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::AcceptChannel(AcceptChannelParameter {
                     funding_amount,
@@ -8102,7 +8121,7 @@ where
         if !state.retryable_tlc_operations.contains(&operation) {
             state.retryable_tlc_operations.push_back(operation);
         }
-        self.store.insert_channel_actor_state(state);
+        self.signing_events.save(&self.store, state);
         true
     }
 
@@ -8170,7 +8189,7 @@ where
                             state.update_state(ChannelState::ShuttingDown(
                                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
                             ));
-                            self.store.insert_channel_actor_state(state);
+                            self.signing_events.save(&self.store, state);
                             if let Some(ref store_actor) = self.store_actor {
                                 store_actor
                                     .cast(StoreActorMessage::RequestBackup)
@@ -8262,7 +8281,8 @@ where
                 self.network.clone(),
                 self.store.clone(),
                 self.store_actor.clone(),
-            ),
+            )
+            .with_signing_events(self.signing_events.clone()),
             ChannelInitializationParameter {
                 operation: ChannelInitializationOperation::RestoreOfflineChannel(channel_id),
                 ephemeral_config: self.channel_ephemeral_config.clone(),
@@ -8344,7 +8364,7 @@ where
             }
 
             channel_state.mark_reestablishing_offline();
-            self.store.insert_channel_actor_state(channel_state);
+            self.signing_events.save(&self.store, channel_state);
         }
     }
 
@@ -8431,7 +8451,7 @@ where
                                 ChannelState::Closed(flags)
                                     if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
                             );
-                            self.store.insert_channel_actor_state(state);
+                            self.signing_events.save(&self.store, state);
                             if should_restore_onchain_settlement_actor {
                                 if let Err(err) =
                                     self.restore_offline_channel(*pubkey, *channel_id).await
@@ -8509,7 +8529,7 @@ where
                         ))
                         .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW);
                 }
-                self.store.delete_channel_actor_state(&channel_id);
+                self.signing_events.remove(&self.store, &channel_id);
             }
             // notify event observers, such as remove from watchtower
             self.network
@@ -9958,6 +9978,7 @@ pub async fn start_network<
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 >(
+    signing_events: crate::signing::ChannelSigningEvents,
     config: FiberConfig,
     chain_client: C,
     chain_actor: ActorRef<CkbChainMessage>,
@@ -9980,7 +10001,8 @@ pub async fn start_network<
             store_actor,
             network_graph,
             chain_client,
-        ),
+        )
+        .with_signing_events(signing_events),
         NetworkActorStartArguments {
             config,
             tracker,
@@ -10010,6 +10032,7 @@ pub(crate) async fn start_hosted_tenant_actor<
         + 'static,
     C: CkbChainClient + Clone + Send + Sync + 'static,
 >(
+    signing_events: crate::signing::ChannelSigningEvents,
     config: FiberConfig,
     chain_client: C,
     chain_actor: ActorRef<CkbChainMessage>,
@@ -10023,14 +10046,17 @@ pub(crate) async fn start_hosted_tenant_actor<
     let actor_name = format!("HostedTenant {:?}", config.public_key());
     Actor::spawn_linked(
         Some(actor_name),
-        HostedTenantActor::new(FiberActorCore::new(
-            event_sender,
-            chain_actor,
-            store,
-            store_actor,
-            network_graph,
-            chain_client,
-        )),
+        HostedTenantActor::new(
+            FiberActorCore::new(
+                event_sender,
+                chain_actor,
+                store,
+                store_actor,
+                network_graph,
+                chain_client,
+            )
+            .with_signing_events(signing_events),
+        ),
         HostedTenantActorStartArguments {
             config,
             default_shutdown_script,

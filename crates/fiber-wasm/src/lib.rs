@@ -232,6 +232,7 @@ pub async fn fiber(
 
             info!("Starting fiber");
             let network_actor = start_network(
+                Default::default(),
                 fiber_config.clone(),
                 chain_client,
                 ckb_chain_actor.clone(),

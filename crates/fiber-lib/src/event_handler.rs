@@ -151,6 +151,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
 /// from a biscuit `node(...)` fact.
 #[cfg(feature = "watchtower")]
 pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
     event: NetworkServiceEvent,
     store: &S,
     node_id: fiber_types::NodeId,
@@ -171,23 +172,25 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             remote_funding_pubkey,
             settlement_data,
             commitment_contract_features,
-        ) => store.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            funding_udt_type_script,
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-            commitment_contract_features,
-        ),
+        ) => events.create_watch(&node_id, channel_id, || {
+            store.insert_watch_channel_with_features(
+                node_id.clone(),
+                channel_id,
+                funding_udt_type_script,
+                local_settlement_key,
+                local_settlement_key_pubkey,
+                remote_settlement_key,
+                local_funding_pubkey,
+                remote_funding_pubkey,
+                settlement_data,
+                commitment_contract_features,
+            )
+        }),
         // remove_watch_channel: stop scanning a closed or aborted channel.
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
         | NetworkServiceEvent::ChannelAbandon(channel_id)
         | NetworkServiceEvent::ChannelFundingAborted(channel_id) => {
-            store.remove_watch_channel(node_id, channel_id);
+            events.remove_watch(store, node_id, channel_id);
         }
         // update_revocation: justice path for an outdated remote commitment.
         NetworkServiceEvent::RevokeAndAckReceived(
@@ -243,6 +246,7 @@ mod tests {
         let channel_id = Hash256::from([0x11; 32]);
         let local_settlement_pubkey = Privkey::from(&[1; 32]).pubkey();
         forward_event_to_watchtower_store(
+            &Default::default(),
             NetworkServiceEvent::RemoteTxComplete(
                 Privkey::from(&[9; 32]).pubkey(),
                 channel_id,

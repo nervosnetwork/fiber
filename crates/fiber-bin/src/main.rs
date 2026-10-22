@@ -203,6 +203,7 @@ async fn run_node(
         }
     });
 
+    let signing_events = fnn::signing::SigningEvents::default();
     let mut tenant_runtime_factory = None;
     #[allow(unused_variables)]
     let (network_actor, ckb_chain_actor, network_graph, store_actor) = match config.fiber.clone() {
@@ -288,6 +289,7 @@ async fn run_node(
 
             let chain_client = CkbRpcClient::new(&ckb_config);
             let network_actor: ActorRef<NetworkActorMessage> = start_network(
+                signing_events.channels(None),
                 fiber_config.clone(),
                 chain_client.clone(),
                 ckb_chain_actor.clone(),
@@ -303,6 +305,7 @@ async fn run_node(
 
             if let Some(lsp_config) = config.lsp.clone() {
                 tenant_runtime_factory = Some(Arc::new(FiberTenantRuntimeFactory::new(
+                    signing_events.clone(),
                     lsp_config,
                     fiber_config.clone(),
                     chain_client,
@@ -356,7 +359,7 @@ async fn run_node(
             } else {
                 let watchtower_actor = Actor::spawn_linked(
                     Some("watchtower".to_string()),
-                    WatchtowerActor::new(store.clone()),
+                    WatchtowerActor::new(store.clone()).with_signing_events(signing_events.clone()),
                     ckb_config,
                     root_actor.get_cell(),
                 )
@@ -515,6 +518,7 @@ async fn run_node(
                     signing_key,
                     token_issuer,
                     watchtower_store: store.clone(),
+                    signing_events: signing_events.clone(),
                 },
                 root_actor.get_cell(),
             )
@@ -633,6 +637,7 @@ async fn run_node(
     let rpc_server_handle = match config.rpc {
         Some(rpc_config) => {
             match start_rpc(
+                signing_events,
                 rpc_config,
                 config.ckb,
                 config.fiber,

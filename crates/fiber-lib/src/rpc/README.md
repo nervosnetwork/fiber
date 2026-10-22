@@ -1575,11 +1575,12 @@ Subscribe to a topic and return an ID for subsequent notifications and cancellat
  then send status changes, including transitions to no pending request. Initial
  requests use the same `SignatureRequired` status and notification format as live
  requests. There is no separate completion marker or option to enable this replay.
- Changes during the initial read are picked up afterwards; the initial requests
- are not an atomic view across channels.
+ The initial read is ordered with writes in the selected topic and authorized
+ scope, so live updates follow it without a gap. Database reads happen only
+ during subscription setup; live filtering and deduplication use memory.
 
- Unchanged states are deduplicated per subscription, and intermediate states may
- be coalesced. This API reports current state, with no historical cursor or
+ Unchanged states are deduplicated per subscription. This API reports current
+ state, with no historical cursor or
  exactly-once guarantee. Subscriptions end on disconnect, cancellation,
  delivery failure, or server shutdown. Reconnect and subscribe again to
  receive pending requests. Deduplicate signing work by request ID and submit
@@ -1590,7 +1591,10 @@ Subscribe to a topic and return an ID for subsequent notifications and cancellat
  Each listener allows 16,384 active general subscriptions, with at most 32 per
  WebSocket connection. The connection output buffer holds 64 messages. A queue
  that remains full for five seconds terminates the affected subscription;
- reconnect and subscribe again to recover pending requests.
+ reconnect and subscribe again to recover pending requests. Subscribers in the
+ same topic and authorized scope also share a bounded buffer of 1,024 state
+ events. Falling behind that buffer terminates the subscription and requires
+ reconnection; it does not trigger a database reload.
 
  Subscription and topic permissions are checked when establishing the subscription.
  The resulting tenant/node scope is fixed for its lifetime. Updates do not

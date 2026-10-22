@@ -67,8 +67,6 @@ pub struct Store {
     inner: fiber_store::Store,
     namespace: Option<NodeNamespace>,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    signing_notifications: Arc<super::notifications::SigningNotifications>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
     #[cfg(feature = "watchtower")]
@@ -112,8 +110,6 @@ impl Store {
             // Public T's watcher would expose hosted tenant invoices and
             // payments to Public T consumers such as CCH.
             watcher: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            signing_notifications: self.signing_notifications.clone(),
             #[cfg(feature = "watchtower")]
             watchtower_write_locks: self.watchtower_write_locks.clone(),
             #[cfg(feature = "watchtower")]
@@ -326,8 +322,6 @@ pub fn open_store_with_migration<P: AsRef<Path>>(
         inner: db,
         namespace: None,
         watcher: None,
-        #[cfg(not(target_arch = "wasm32"))]
-        signing_notifications: Arc::default(),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -353,8 +347,6 @@ pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
         inner: db,
         namespace: None,
         watcher: None,
-        #[cfg(not(target_arch = "wasm32"))]
-        signing_notifications: Arc::default(),
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         #[cfg(feature = "watchtower")]
@@ -1102,7 +1094,6 @@ impl ChannelActorStateStore for Store {
         let kv = KeyValue::ChannelActorState(state.id, state);
         batch.put(kv.key(), kv.value());
         batch.commit();
-        self.notify_channel_signing();
     }
 
     fn insert_channel_actor_state_with_pending_commit_diff(
@@ -1126,7 +1117,6 @@ impl ChannelActorStateStore for Store {
         let key = [&[PENDING_COMMIT_DIFF_PREFIX], channel_id.as_ref()].concat();
         batch.put(key, serialize_to_vec(diff, "CommitDiff"));
         batch.commit();
-        self.notify_channel_signing();
     }
 
     fn move_channel_actor_state(&self, old_id: &Hash256, mut state: ChannelActorState) {
@@ -1164,7 +1154,6 @@ impl ChannelActorStateStore for Store {
         let kv = KeyValue::ChannelActorState(state.id, state);
         batch.put(kv.key(), kv.value());
         batch.commit();
-        self.notify_channel_signing();
     }
 
     fn delete_channel_actor_state(&self, id: &Hash256) {
@@ -1186,7 +1175,6 @@ impl ChannelActorStateStore for Store {
             batch.delete([&[CHANNEL_SHUTDOWN_SETTLEMENT_PREFIX], id.as_ref()].concat());
             batch.delete([&[PENDING_COMMIT_DIFF_PREFIX], id.as_ref()].concat());
             batch.commit();
-            self.notify_channel_signing();
         }
     }
 
@@ -1956,10 +1944,9 @@ impl WatchtowerStore for Store {
             serialize_to_vec(&signer_state, "WatchtowerSignerState"),
         );
         batch.commit();
-        self.notify_watchtower_signing(&node_id);
     }
 
-    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool {
         // Only allow removing watchtower monitoring for closed channels.
         // Prevents accidental or malicious disabling of active channel protection.
         // Skipped in test builds to allow e2e tests to simulate stopping the watchtower.
@@ -1970,7 +1957,7 @@ impl WatchtowerStore for Store {
                     "Refusing to remove watchtower for live channel {} (state: {:?})",
                     channel_id, state.state
                 );
-                return;
+                return false;
             }
         }
         let key = [
@@ -2000,7 +1987,7 @@ impl WatchtowerStore for Store {
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
             || {},
         );
-        self.notify_watchtower_signing(&node_id);
+        true
     }
 
     fn update_revocation(
@@ -2156,7 +2143,6 @@ impl WatchtowerStore for Store {
         let mut batch = self.batch();
         batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
         batch.commit();
-        self.notify_watchtower_signing(node_id);
     }
 
     fn update_watchtower_signer<R, E>(
@@ -2181,7 +2167,6 @@ impl WatchtowerStore for Store {
             let mut batch = self.batch();
             batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
             batch.commit();
-            self.notify_watchtower_signing(node_id);
         }
         Ok(result)
     }
@@ -2871,42 +2856,5 @@ mod watchtower_preimage_gc_tests {
             Some(writer_preimage),
             "another node's preimage write must complete independently"
         );
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl super::notifications::SigningSubscriptionStore for Store {
-    fn subscribe_channel_signing(&self) -> super::notifications::SigningChanges {
-        self.signing_notifications
-            .subscribe(super::notifications::SigningScope::Channel(
-                self.namespace.clone(),
-            ))
-    }
-
-    fn subscribe_watchtower_signing(
-        &self,
-        node: &fiber_types::NodeId,
-    ) -> super::notifications::SigningChanges {
-        self.signing_notifications
-            .subscribe(super::notifications::SigningScope::Watchtower(node.clone()))
-    }
-}
-
-impl Store {
-    fn notify_channel_signing(&self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.signing_notifications
-            .notify(super::notifications::SigningScope::Channel(
-                self.namespace.clone(),
-            ));
-    }
-
-    #[cfg(feature = "watchtower")]
-    fn notify_watchtower_signing(&self, node: &fiber_types::NodeId) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.signing_notifications
-            .notify(super::notifications::SigningScope::Watchtower(node.clone()));
-        #[cfg(target_arch = "wasm32")]
-        let _ = node;
     }
 }

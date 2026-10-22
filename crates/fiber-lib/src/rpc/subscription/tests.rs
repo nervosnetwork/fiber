@@ -19,7 +19,7 @@ use jsonrpsee::{
 };
 
 use crate::{
-    fiber::channel::{ChannelActorState, ChannelActorStateStore},
+    fiber::channel::ChannelActorState,
     rpc::{biscuit::BiscuitAuth, middleware::RpcAuthorization},
     store::{open_store, sample::StoreSample, NodeNamespace, Store},
 };
@@ -27,6 +27,7 @@ use crate::{
 use super::{SubscriptionRpcServer, SubscriptionRpcServerImpl};
 
 struct Fixture {
+    events: crate::signing::SigningEvents,
     store: Store,
     root: KeyPair,
     address: std::net::SocketAddr,
@@ -38,14 +39,21 @@ impl Fixture {
     async fn new(authenticated: bool, channels: bool, watchtower: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
+        let events = crate::signing::SigningEvents::default();
         let root = KeyPair::new();
         let auth =
             authenticated.then(|| BiscuitAuth::from_pubkey(root.public().to_string()).unwrap());
         let mut module = RpcModule::new(());
         module
             .merge(
-                SubscriptionRpcServerImpl::new(store.clone(), None, channels, watchtower)
-                    .into_rpc(),
+                SubscriptionRpcServerImpl::new(
+                    events.clone(),
+                    store.clone(),
+                    None,
+                    channels,
+                    watchtower,
+                )
+                .into_rpc(),
             )
             .unwrap();
         let (handle, address) =
@@ -53,6 +61,7 @@ impl Fixture {
                 .await
                 .unwrap();
         Self {
+            events,
             store,
             root,
             address,
@@ -126,20 +135,23 @@ async fn subscription_host_scope_ignores_attenuation_and_tenant_writes() {
         .namespaced(NodeNamespace::hosted_tenant("alice"));
     let state = ChannelActorState::samples(42).remove(0);
     let id = state.get_id();
-    tenant.insert_channel_actor_state(state.clone());
+    fixture
+        .events
+        .channels(Some("alice".into()))
+        .save(&tenant, state.clone());
     assert!(
         tokio::time::timeout(Duration::from_millis(100), first.next())
             .await
             .is_err()
     );
-    fixture.store.insert_channel_actor_state(state);
+    fixture.events.channels(None).save(&fixture.store, state);
     for subscription in [&mut first, &mut second] {
         let SubscriptionEvent::ChannelSigning(result) = next(subscription).await else {
             panic!("channel event");
         };
         assert_eq!(result.channel_id, id.into());
     }
-    fixture.store.delete_channel_actor_state(&id);
+    fixture.events.channels(None).remove(&fixture.store, &id);
     for subscription in [&mut first, &mut second] {
         assert!(
             matches!(next(subscription).await, SubscriptionEvent::Removed { channel_id } if channel_id == id.into())
@@ -256,8 +268,9 @@ async fn subscription_keeps_existing_scope_but_rejects_expired_requests() {
         .unwrap_err();
     assert!(matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32999));
     fixture
-        .store
-        .insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
+        .events
+        .channels(None)
+        .save(&fixture.store, ChannelActorState::samples(42).remove(0));
     let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
         .await
         .unwrap();
@@ -292,8 +305,9 @@ async fn subscription_cannot_be_cancelled_from_another_connection_and_http_is_re
         .await
         .unwrap());
     fixture
-        .store
-        .insert_channel_actor_state(ChannelActorState::samples(42).remove(0));
+        .events
+        .channels(None)
+        .save(&fixture.store, ChannelActorState::samples(42).remove(0));
     assert!(matches!(
         next(&mut subscription).await,
         SubscriptionEvent::ChannelSigning(_)
@@ -341,13 +355,13 @@ async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channe
     ));
     let client = fixture.client(Some(&token)).await;
     let mut subscription = subscribe(&client, SubscriptionTopic::WatchtowerSigning).await;
-    fixture.store.remove_watch_channel(bob, channel);
+    fixture.events.remove_watch(&fixture.store, bob, channel);
     assert!(
         tokio::time::timeout(Duration::from_millis(100), subscription.next())
             .await
             .is_err()
     );
-    fixture.store.remove_watch_channel(alice, channel);
+    fixture.events.remove_watch(&fixture.store, alice, channel);
     assert!(
         matches!(next(&mut subscription).await, SubscriptionEvent::Removed { channel_id } if channel_id == channel.into())
     );
@@ -382,9 +396,13 @@ async fn subscription_connection_limit_is_released_by_unsubscribe() {
 async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_resync() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path()).unwrap();
+    let events = crate::signing::SigningEvents::default();
     let mut module = RpcModule::new(());
     module
-        .merge(SubscriptionRpcServerImpl::new(store.clone(), None, true, false).into_rpc())
+        .merge(
+            SubscriptionRpcServerImpl::new(events.clone(), store.clone(), None, true, false)
+                .into_rpc(),
+        )
         .unwrap();
     module.extensions_mut().insert(RpcAuthorization {
         auth: Arc::new(BiscuitAuth::without_pubkey()),
@@ -396,7 +414,7 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
     // The first live update fills the slow subscriber's one-message queue.
     let state = ChannelActorState::samples(42).remove(0);
     let id = state.get_id();
-    store.insert_channel_actor_state(state);
+    events.channels(None).save(&store, state);
     let event = tokio::time::timeout(Duration::from_secs(1), fast.recv())
         .await
         .unwrap()
@@ -405,7 +423,7 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
         serde_json::from_str::<serde_json::Value>(event.get()).unwrap()["params"]["result"]["type"],
         "channel_signing"
     );
-    store.delete_channel_actor_state(&id);
+    events.channels(None).remove(&store, &id);
     let removed = tokio::time::timeout(Duration::from_secs(1), fast.recv())
         .await
         .unwrap()

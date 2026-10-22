@@ -1015,6 +1015,7 @@ async fn create_lsp_test_network_inner(
                 signing_key: nodes[lsp_node_index].private_key.clone(),
                 token_issuer,
                 watchtower_store: nodes[lsp_node_index].store.clone(),
+                signing_events: nodes[lsp_node_index].signing_events.clone(),
             },
             root_actor.get_cell(),
         )
@@ -1041,6 +1042,7 @@ async fn create_lsp_test_network_inner(
             http_address: rpc_addr,
             ..
         } = start_rpc(
+            nodes[lsp_node_index].signing_events.clone(),
             rpc_config,
             None,
             Some(nodes[lsp_node_index].fiber_config.clone()),
@@ -1212,6 +1214,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
     };
     let root_actor = get_test_root_actor().await;
     let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        public_t.signing_events.clone(),
         config.clone(),
         public_t.fiber_config.clone(),
         CkbRpcClient::new(&ckb_config),
@@ -1241,6 +1244,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
             signing_key: public_t.private_key.clone(),
             token_issuer: super::test_token_issuer(),
             watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
         },
         root_actor.get_cell(),
     )
@@ -1255,6 +1259,7 @@ async fn production_factory_activates_one_tenant_runtime_via_rpc() {
         http_address: rpc_addr,
         ..
     } = start_rpc(
+        public_t.signing_events.clone(),
         rpc_config,
         None,
         None,
@@ -1442,6 +1447,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
     };
     let root_actor = get_test_root_actor().await;
     let runtime_factory = Arc::new(FiberTenantRuntimeFactory::new(
+        public_t.signing_events.clone(),
         config.clone(),
         public_t.fiber_config.clone(),
         CkbRpcClient::new(&ckb_config),
@@ -1474,6 +1480,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
             signing_key: public_t.private_key.clone(),
             token_issuer,
             watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
         },
         root_actor.get_cell(),
     )
@@ -1521,6 +1528,7 @@ async fn biscuit_tenant_context_routes_standard_rpc_to_hosted_runtime() {
         http_address: rpc_addr,
         ..
     } = start_rpc(
+        public_t.signing_events.clone(),
         rpc_config,
         None,
         Some(public_t.fiber_config.clone()),
@@ -1854,6 +1862,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
             signing_key: public_t.private_key.clone(),
             token_issuer: super::test_token_issuer(),
             watchtower_store: public_t.store.clone(),
+            signing_events: public_t.signing_events.clone(),
         },
         root_actor.get_cell(),
     )
@@ -1874,6 +1883,7 @@ async fn hosted_payment_buffers_offline_private_channel_and_resumes_via_rpc() {
         http_address: rpc_addr,
         ..
     } = start_rpc(
+        Default::default(),
         rpc_config,
         None,
         None,

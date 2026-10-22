@@ -159,7 +159,8 @@ fn ensure_hosted_watch_skips_an_existing_row() {
         },
     );
 
-    super::watch::ensure_hosted_watch_channel(&store, &record, channel_id).unwrap();
+    super::watch::ensure_hosted_watch_channel(&Default::default(), &store, &record, channel_id)
+        .unwrap();
 
     let watched = store
         .get_watch_channel(&node_id, &channel_id)
@@ -1308,6 +1309,7 @@ async fn start_test_lsp_service_with_all_dispatch_failures(
             public_node_id: lsp_key.pubkey(),
             public_network_actor,
             watchtower_store: store.clone(),
+            signing_events: Default::default(),
             store,
             runtime_factory: factory,
             signing_key: lsp_key,
@@ -1500,6 +1502,7 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
             public_node_id: lsp_key.pubkey(),
             public_network_actor,
             watchtower_store: store.clone(),
+            signing_events: Default::default(),
             store,
             runtime_factory: factory,
             signing_key: lsp_key.clone(),
@@ -1582,6 +1585,7 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
         public_node_id: lsp_key.pubkey(),
         public_network_actor: public_network_actor.clone(),
         watchtower_store: store.clone(),
+        signing_events: Default::default(),
         store: store.clone(),
         runtime_factory: factory.clone(),
         signing_key: lsp_key.clone(),
@@ -2915,6 +2919,7 @@ async fn check_settling_delivery_reconciliation(code: TlcErrorCode, status: Paym
             public_node_id: lsp_key.pubkey(),
             public_network_actor: network.clone(),
             watchtower_store: store.clone(),
+            signing_events: Default::default(),
             store,
             runtime_factory: Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
             signing_key: lsp_key,

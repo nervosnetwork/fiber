@@ -34,6 +34,8 @@ pub struct LspServiceArgs {
     pub token_issuer: BiscuitTokenIssuer,
     /// Un-namespaced Public T store used for hosted watchtower rows.
     pub watchtower_store: Store,
+    /// Application business event publisher.
+    pub signing_events: crate::signing::SigningEvents,
 }
 
 /// Read-only status for callers that need to discover the hosted service.
@@ -149,6 +151,8 @@ pub struct LspServiceState {
     pub signing_key: Privkey,
     pub token_issuer: BiscuitTokenIssuer,
     pub watchtower_store: Store,
+    #[cfg(feature = "watchtower")]
+    signing_events: crate::signing::SigningEvents,
     pub ready_tenants: HashMap<TenantId, Hash256>,
 }
 
@@ -341,6 +345,8 @@ impl Actor for LspService {
             signing_key: args.signing_key,
             token_issuer: args.token_issuer,
             watchtower_store: args.watchtower_store,
+            #[cfg(feature = "watchtower")]
+            signing_events: args.signing_events,
             ready_tenants: HashMap::new(),
         })
     }
@@ -573,6 +579,7 @@ impl Actor for LspService {
                         .insert(tenant.tenant_id.clone(), channel_id);
                     #[cfg(feature = "watchtower")]
                     if let Err(error) = super::watch::ensure_hosted_watch_channel(
+                        &state.signing_events,
                         &state.watchtower_store,
                         &tenant,
                         channel_id,

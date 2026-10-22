@@ -97,7 +97,6 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
-        + crate::store::notifications::SigningSubscriptionStore
         + WatchtowerStore
         + PreimageStore
     {
@@ -109,7 +108,6 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
-            + crate::store::notifications::SigningSubscriptionStore
             + WatchtowerStore
             + PreimageStore
     {
@@ -121,7 +119,6 @@ pub mod server {
         + InvoiceStore
         + NetworkGraphStateStore
         + GossipMessageStore
-        + crate::store::notifications::SigningSubscriptionStore
     {
     }
     #[cfg(not(feature = "watchtower"))]
@@ -131,7 +128,6 @@ pub mod server {
             + InvoiceStore
             + NetworkGraphStateStore
             + GossipMessageStore
-            + crate::store::notifications::SigningSubscriptionStore
     {
     }
 
@@ -328,6 +324,7 @@ pub mod server {
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     pub async fn start_rpc<S: RpcServerStore + Clone + Send + Sync + 'static>(
+        signing_events: crate::signing::SigningEvents,
         config: RpcConfig,
         ckb_config: Option<CkbConfig>,
         fiber_config: Option<FiberConfig>,
@@ -432,7 +429,11 @@ pub mod server {
             #[cfg(feature = "watchtower")]
             if config.is_module_enabled("watchtower") {
                 modules
-                    .merge(WatchtowerRpcServerImpl::new(store.clone()).into_rpc())
+                    .merge(
+                        WatchtowerRpcServerImpl::new(store.clone())
+                            .with_signing_events(signing_events.clone())
+                            .into_rpc(),
+                    )
                     .unwrap();
             }
 
@@ -509,6 +510,7 @@ pub mod server {
             let mut ws_modules = modules.clone();
             ws_modules.merge(
                 SubscriptionRpcServerImpl::new(
+                    signing_events,
                     store,
                     lsp_actor,
                     config.is_module_enabled("channel"),
@@ -578,15 +580,20 @@ pub mod server {
         };
 
         use crate::{
-            fiber::channel::{ChannelActorState, ChannelActorStateStore},
+            fiber::channel::ChannelActorState,
             store::{open_store, sample::StoreSample, Store},
             tests::test_utils::{gen_rpc_config, get_test_root_actor},
         };
 
         use super::{start_rpc, RpcConfig, RpcServer};
 
-        async fn start(config: RpcConfig, store: Store) -> anyhow::Result<RpcServer> {
+        async fn start(
+            events: crate::signing::SigningEvents,
+            config: RpcConfig,
+            store: Store,
+        ) -> anyhow::Result<RpcServer> {
             start_rpc(
+                events,
                 config,
                 None,
                 None,
@@ -613,7 +620,8 @@ pub mod server {
             let mut config = gen_rpc_config();
             config.listening_addr = Some("127.0.0.1:0".into());
             config.ws_listening_addr = Some("127.0.0.1:0".into());
-            let server = start(config, store.clone()).await.unwrap();
+            let events = crate::signing::SigningEvents::default();
+            let server = start(events.clone(), config, store.clone()).await.unwrap();
             let ws_address = server.ws_address.unwrap();
             let original = WsClientBuilder::default()
                 .build(format!("ws://{}", server.http_address))
@@ -672,7 +680,7 @@ pub mod server {
                 .unwrap();
             let state = ChannelActorState::samples(42).remove(0);
             let channel_id = state.get_id();
-            store.insert_channel_actor_state(state);
+            events.channels(None).save(&store, state);
             let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
                 .await
                 .unwrap()
@@ -707,14 +715,19 @@ pub mod server {
             let dir = tempfile::tempdir().unwrap();
             let store = open_store(dir.path()).unwrap();
             let config = gen_rpc_config();
-            let server = start(config.clone(), store.clone()).await.unwrap();
+            let server = start(Default::default(), config.clone(), store.clone())
+                .await
+                .unwrap();
             assert!(server.ws_address.is_none());
             server.handle.stop().unwrap();
             server.handle.stopped().await;
 
             let mut config = config;
             config.ws_listening_addr = Some("0.0.0.0:0".into());
-            let error = start(config, store).await.err().unwrap();
+            let error = start(Default::default(), config, store)
+                .await
+                .err()
+                .unwrap();
             assert!(error.to_string().contains("biscuit public key"));
         }
 
@@ -729,7 +742,7 @@ pub mod server {
             config.listening_addr = Some(primary_address.to_string());
             config.ws_listening_addr = Some(occupied.local_addr().unwrap().to_string());
             drop(primary);
-            assert!(start(config, store).await.is_err());
+            assert!(start(Default::default(), config, store).await.is_err());
             let _available = tokio::net::TcpListener::bind(primary_address)
                 .await
                 .unwrap();

@@ -13,6 +13,7 @@ use super::{tenant_watchtower_node_id, HostedTenantRecord};
 /// a repeated ChannelOnline. Evicting the tenant runtime must not call this with
 /// a remove.
 pub fn ensure_hosted_watch_channel(
+    events: &crate::signing::SigningEvents,
     store: &Store,
     tenant: &HostedTenantRecord,
     channel_id: Hash256,
@@ -25,18 +26,20 @@ pub fn ensure_hosted_watch_channel(
     let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant.tenant_id.as_str()));
     if let Some(state) = tenant_store.get_channel_actor_state(&channel_id) {
         let params = state.hosted_watch_channel_params()?;
-        store.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            params.funding_udt_type_script,
-            params.local_settlement_key,
-            params.local_settlement_key_pubkey,
-            params.remote_settlement_key,
-            params.local_funding_pubkey,
-            params.remote_funding_pubkey,
-            params.settlement_data,
-            params.commitment_contract_features,
-        );
+        events.create_watch(&node_id, channel_id, || {
+            store.insert_watch_channel_with_features(
+                node_id.clone(),
+                channel_id,
+                params.funding_udt_type_script,
+                params.local_settlement_key,
+                params.local_settlement_key_pubkey,
+                params.remote_settlement_key,
+                params.local_funding_pubkey,
+                params.remote_funding_pubkey,
+                params.settlement_data,
+                params.commitment_contract_features,
+            )
+        });
         return Ok(());
     }
 
@@ -57,18 +60,20 @@ pub fn ensure_hosted_watch_channel(
         );
         return Ok(());
     }
-    store.insert_watch_channel_with_features(
-        node_id,
-        channel_id,
-        params.funding_udt_type_script,
-        None,
-        params.remote_settlement_key,
-        params.local_settlement_key_pubkey,
-        params.remote_funding_pubkey,
-        params.local_funding_pubkey,
-        invert_empty_settlement(params.settlement_data),
-        params.commitment_contract_features,
-    );
+    events.create_watch(&node_id, channel_id, || {
+        store.insert_watch_channel_with_features(
+            node_id.clone(),
+            channel_id,
+            params.funding_udt_type_script,
+            None,
+            params.remote_settlement_key,
+            params.local_settlement_key_pubkey,
+            params.remote_funding_pubkey,
+            params.local_funding_pubkey,
+            invert_empty_settlement(params.settlement_data),
+            params.commitment_contract_features,
+        )
+    });
     Ok(())
 }
 

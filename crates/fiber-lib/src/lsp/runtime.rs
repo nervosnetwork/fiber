@@ -116,6 +116,7 @@ pub trait TenantRuntimeFactory: Send + Sync {
 /// Starts a tenant-scoped Fiber channel/payment runtime and wires it to Public
 /// T through the in-process transport.
 pub struct FiberTenantRuntimeFactory<C = CkbRpcClient> {
+    events: crate::signing::SigningEvents,
     lsp_config: LspConfig,
     template_config: FiberConfig,
     chain_client: C,
@@ -129,6 +130,7 @@ pub struct FiberTenantRuntimeFactory<C = CkbRpcClient> {
 impl<C: CkbChainClient + Clone + Send + Sync + 'static> FiberTenantRuntimeFactory<C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        events: crate::signing::SigningEvents,
         lsp_config: LspConfig,
         template_config: FiberConfig,
         chain_client: C,
@@ -139,6 +141,7 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> FiberTenantRuntimeFactor
         default_shutdown_script: Script,
     ) -> Self {
         Self {
+            events,
             lsp_config,
             template_config,
             chain_client,
@@ -195,6 +198,7 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
         )));
         let (event_sender, mut event_receiver) = mpsc::channel(1024);
         let actor = start_hosted_tenant_actor(
+            self.events.channels(Some(record.tenant_id.to_string())),
             config.clone(),
             self.chain_client.clone(),
             self.chain_actor.clone(),
@@ -211,11 +215,13 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
         // LspService also ensures the row exists on TenantChannelOnline.
         #[cfg(feature = "watchtower")]
         {
+            let events = self.events.clone();
             let watchtower_store = self.tenant_store.clone();
             let tenant_node_id = super::tenant_watchtower_node_id(&tenant_pubkey);
             tokio::spawn(async move {
                 while let Some(event) = event_receiver.recv().await {
                     crate::event_handler::forward_event_to_watchtower_store(
+                        &events,
                         event,
                         &watchtower_store,
                         tenant_node_id.clone(),

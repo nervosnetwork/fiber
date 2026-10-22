@@ -63,6 +63,7 @@ use super::{WatchtowerSignOutcome, WatchtowerSigner, WatchtowerStore};
 pub const DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS: u64 = 60;
 
 pub struct WatchtowerActor<S> {
+    signing_events: crate::signing::SigningEvents,
     store: S,
     // a node_id represent the watchtower itself
     node_id: NodeId,
@@ -98,7 +99,17 @@ pub(crate) fn build_settlement_transaction(
 impl<S: WatchtowerStore> WatchtowerActor<S> {
     pub fn new(store: S) -> Self {
         let node_id = NodeId::local();
-        Self { store, node_id }
+        Self {
+            store,
+            node_id,
+            signing_events: Default::default(),
+        }
+    }
+
+    /// Share the application's signing events with RPC subscribers.
+    pub fn with_signing_events(mut self, events: crate::signing::SigningEvents) -> Self {
+        self.signing_events = events;
+        self
     }
 }
 
@@ -177,20 +188,25 @@ where
                 remote_funding_pubkey,
                 settlement_data,
                 commitment_contract_features,
-            ) => self.store.insert_watch_channel_with_features(
-                NodeId::local(),
-                channel_id,
-                funding_udt_type_script,
-                local_settlement_key,
-                local_settlement_key_pubkey,
-                remote_settlement_key,
-                local_funding_pubkey,
-                remote_funding_pubkey,
-                settlement_data,
-                commitment_contract_features,
-            ),
+            ) => self
+                .signing_events
+                .create_watch(&NodeId::local(), channel_id, || {
+                    self.store.insert_watch_channel_with_features(
+                        NodeId::local(),
+                        channel_id,
+                        funding_udt_type_script,
+                        local_settlement_key,
+                        local_settlement_key_pubkey,
+                        remote_settlement_key,
+                        local_funding_pubkey,
+                        remote_funding_pubkey,
+                        settlement_data,
+                        commitment_contract_features,
+                    )
+                }),
             WatchtowerMessage::RemoveChannel(channel_id) => {
-                self.store.remove_watch_channel(NodeId::local(), channel_id)
+                self.signing_events
+                    .remove_watch(&self.store, NodeId::local(), channel_id)
             }
             WatchtowerMessage::UpdateRevocation(
                 channel_id,
@@ -238,6 +254,7 @@ where
                     return Ok(());
                 }
                 // Spawn the periodic check task
+                let events = self.signing_events.clone();
                 let store = self.store.clone();
                 let node_id = self.node_id.clone();
                 let rpc_url = state.config.rpc_url.clone();
@@ -248,7 +265,7 @@ where
                     let _guard = PeriodicCheckGuard(periodic_check_running);
                     info!("PeriodicCheck started");
                     let start = now_timestamp_as_millis_u64();
-                    run_periodic_check(store, node_id, signer, rpc_url);
+                    run_periodic_check(&events, store, node_id, signer, rpc_url);
                     let elapsed = now_timestamp_as_millis_u64().saturating_sub(start);
                     info!("PeriodicCheck finished elapsed: {}ms", elapsed);
                 });
@@ -267,8 +284,13 @@ impl Drop for PeriodicCheckGuard {
     }
 }
 
-fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_url: String)
-where
+fn run_periodic_check<S>(
+    events: &crate::signing::SigningEvents,
+    store: S,
+    _node_id: NodeId,
+    signer: LocalSigner,
+    rpc_url: String,
+) where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
@@ -394,6 +416,7 @@ where
                                         }
                                         _ => {
                                             try_settle_commitment_tx(
+                                                events,
                                                 commitment_lock,
                                                 first_commitment_tx_out_point,
                                                 ckb_client,
@@ -409,6 +432,7 @@ where
                                     }
                                 } else {
                                     try_settle_commitment_tx(
+                                        events,
                                         commitment_lock,
                                         first_commitment_tx_out_point,
                                         ckb_client,
@@ -556,6 +580,7 @@ fn build_revocation_tx(
 
 #[allow(clippy::too_many_arguments)]
 fn try_settle_commitment_tx<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
     commitment_lock: Script,
     first_commitment_tx_out_point: OutPoint,
     ckb_client: CkbRpcClient,
@@ -761,6 +786,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         }
                     };
                     match build_settlement_tx(
+                        events,
                         cell,
                         cell_header_epoch,
                         current_epoch,
@@ -1248,6 +1274,7 @@ fn first_settlement_witness(
 
 #[allow(clippy::too_many_arguments)]
 fn build_settlement_tx<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
     commitment_cell: Cell,
     cell_header_epoch: EpochNumberWithFraction,
     current_epoch: EpochNumberWithFraction,
@@ -1825,6 +1852,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                 };
                 let tx = tx_builder.set_outputs(outputs).build();
                 return build_signed_settlement_tx(
+                    events,
                     store,
                     self_node_id,
                     channel_data.channel_id,
@@ -2062,6 +2090,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
                     .set_outputs_data(outputs_data)
                     .build();
                 return build_signed_settlement_tx(
+                    events,
                     store,
                     self_node_id,
                     channel_data.channel_id,
@@ -2080,6 +2109,7 @@ fn build_settlement_tx<S: WatchtowerStore>(
 
 #[allow(clippy::too_many_arguments)]
 fn build_signed_settlement_tx<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
     store: &S,
     node_id: &NodeId,
     channel_id: Hash256,
@@ -2114,7 +2144,8 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
             request_id,
             content: awaiting,
         } => {
-            let signature = store.update_watchtower_signer(
+            let signature = events.update_watch_signer(
+                store,
                 node_id,
                 &channel_id,
                 |state| -> Result<Option<[u8; 65]>, std::convert::Infallible> {
@@ -2602,7 +2633,9 @@ mod tests {
                 .push(commitment_contract_features);
         }
 
-        fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) {}
+        fn remove_watch_channel(&self, _node_id: NodeId, _channel_id: Hash256) -> bool {
+            true
+        }
 
         fn update_revocation(
             &self,
@@ -3027,6 +3060,7 @@ mod tests {
         let mut cell_collector = new_default_cell_collector("http://127.0.0.1:8114");
 
         let result = build_settlement_tx(
+            &Default::default(),
             commitment_cell,
             EpochNumberWithFraction::new(10, 0, 1),
             EpochNumberWithFraction::new(10, 0, 1),
@@ -3808,6 +3842,7 @@ mod tests {
         // Supply the correct empty TLC mapping independently so this catches the builder
         // reselecting the pending snapshot even after snapshot verification is repaired.
         let tx = build_settlement_tx(
+            &Default::default(),
             commitment_cell,
             EpochNumberWithFraction::new(10, 0, 1),
             EpochNumberWithFraction::new(13, 0, 1),

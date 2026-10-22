@@ -31,6 +31,7 @@ pub use lsp::LspConfig;
 
 pub mod invoice;
 pub mod rpc;
+pub mod signing;
 pub mod store;
 #[cfg(feature = "watchtower")]
 pub mod watchtower;

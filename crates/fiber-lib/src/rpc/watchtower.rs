@@ -188,12 +188,21 @@ trait WatchtowerRpc {
 #[cfg(feature = "watchtower")]
 pub struct WatchtowerRpcServerImpl<S> {
     store: S,
+    signing_events: crate::signing::SigningEvents,
 }
 
 #[cfg(feature = "watchtower")]
 impl<S> WatchtowerRpcServerImpl<S> {
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            signing_events: Default::default(),
+        }
+    }
+
+    pub(crate) fn with_signing_events(mut self, events: crate::signing::SigningEvents) -> Self {
+        self.signing_events = events;
+        self
     }
 }
 
@@ -266,18 +275,20 @@ where
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
-        self.store.insert_watch_channel_with_features(
-            node_id,
-            channel_id,
-            funding_udt_type_script.map(Into::into),
-            local_settlement_key,
-            local_settlement_key_pubkey,
-            remote_settlement_key,
-            local_funding_pubkey,
-            remote_funding_pubkey,
-            settlement_data,
-            commitment_contract_features,
-        );
+        self.signing_events.create_watch(&node_id, channel_id, || {
+            self.store.insert_watch_channel_with_features(
+                node_id.clone(),
+                channel_id,
+                funding_udt_type_script.map(Into::into),
+                local_settlement_key,
+                local_settlement_key_pubkey,
+                remote_settlement_key,
+                local_funding_pubkey,
+                remote_funding_pubkey,
+                settlement_data,
+                commitment_contract_features,
+            )
+        });
         Ok(())
     }
 
@@ -288,7 +299,8 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
-        self.store.remove_watch_channel(node_id, channel_id);
+        self.signing_events
+            .remove_watch(&self.store, node_id, channel_id);
         Ok(())
     }
 
@@ -414,8 +426,8 @@ where
             .as_slice()
             .try_into()
             .map_err(|_| rpc_error("watchtower signature must be 65 bytes"))?;
-        self.store
-            .update_watchtower_signer(&node_id, &channel_id, |state| {
+        self.signing_events
+            .update_watch_signer(&self.store, &node_id, &channel_id, |state| {
                 let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
                     return Err(rpc_error("watched channel not found"));
                 };
