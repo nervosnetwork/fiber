@@ -172,9 +172,11 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
             remote_funding_pubkey,
             settlement_data,
             commitment_contract_features,
-        ) => events.create_watch(&node_id, channel_id, || {
+        ) => {
+            let signing_scope = events.watchtower(&node_id);
+            let signing_update = signing_scope.prepare_created(channel_id);
             store.insert_watch_channel_with_features(
-                node_id.clone(),
+                node_id,
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
@@ -184,13 +186,18 @@ pub fn forward_event_to_watchtower_store<S: crate::watchtower::WatchtowerStore>(
                 remote_funding_pubkey,
                 settlement_data,
                 commitment_contract_features,
-            )
-        }),
+            );
+            signing_update.publish();
+        }
         // remove_watch_channel: stop scanning a closed or aborted channel.
         NetworkServiceEvent::ChannelClosed(_, channel_id, _)
         | NetworkServiceEvent::ChannelAbandon(channel_id)
         | NetworkServiceEvent::ChannelFundingAborted(channel_id) => {
-            events.remove_watch(store, node_id, channel_id);
+            let signing_scope = events.watchtower(&node_id);
+            let signing_update = signing_scope.prepare_removed(channel_id);
+            if store.remove_watch_channel(node_id, channel_id) {
+                signing_update.publish();
+            }
         }
         // update_revocation: justice path for an outdated remote commitment.
         NetworkServiceEvent::RevokeAndAckReceived(

@@ -478,6 +478,7 @@ async fn tenant_cannot_query_or_sign_another_tenants_channel() {
 
 #[tokio::test]
 async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
+    use crate::watchtower::WatchtowerStore;
     use fiber_types::{OnchainKeyPurpose, OnchainSigningContent, WatchtowerExternalSignerState};
 
     let fixture = TestLspFixture::new("isolation-watchtower").await;
@@ -531,19 +532,19 @@ async fn tenant_watchtower_rpc_rejects_secrets_and_cross_tenant_signatures() {
     external
         .pending_requests
         .insert(request_id, content.clone());
+    let node = crate::lsp::tenant_watchtower_node_id(&owner_pubkey);
+    let signing_scope = fixture.public_t.signing_events.watchtower(&node);
+    let mut signing_update = signing_scope.prepare_update();
     fixture
         .public_t
-        .signing_events
-        .update_watch_signer(
-            &fixture.public_t.store,
-            &crate::lsp::tenant_watchtower_node_id(&owner_pubkey),
-            &channel_id,
-            |state| {
-                *state = fiber_types::WatchtowerSignerState::External(external);
-                Ok::<_, ()>(())
-            },
-        )
+        .store
+        .update_watchtower_signer(&node, &channel_id, |state| {
+            *state = fiber_types::WatchtowerSignerState::External(external);
+            signing_update.watchtower_state(channel_id, state);
+            Ok::<_, ()>(())
+        })
         .unwrap();
+    signing_update.publish();
     let live = next_subscription_event(&mut owner_events).await;
     assert!(matches!(&live, SubscriptionEvent::WatchtowerSigning(result)
         if matches!(result.status, fiber_json_types::WatchtowerSigningStatus::SignatureRequired { request_id: id, .. } if id == request_id.into())));

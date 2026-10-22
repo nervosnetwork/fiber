@@ -580,7 +580,7 @@ pub mod server {
         };
 
         use crate::{
-            fiber::channel::ChannelActorState,
+            fiber::channel::{ChannelActorState, ChannelActorStateStore},
             store::{open_store, sample::StoreSample, Store},
             tests::test_utils::{gen_rpc_config, get_test_root_actor},
         };
@@ -680,7 +680,12 @@ pub mod server {
                 .unwrap();
             let state = ChannelActorState::samples(42).remove(0);
             let channel_id = state.get_id();
-            events.channels(None).save(&store, state);
+            {
+                let publisher = events.channels(None);
+                let update = publisher.prepare(&state);
+                store.insert_channel_actor_state(state);
+                update.publish();
+            };
             let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
                 .await
                 .unwrap()

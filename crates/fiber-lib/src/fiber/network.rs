@@ -4113,7 +4113,9 @@ where
                         // Persist relay completion even when a peer fulfill already set the
                         // removal reason before the channel closed.
                         tlc.applied_flags.insert(AppliedFlags::REMOVE);
-                        self.signing_events.save(&self.store, channel_state);
+                        let signing_update = self.signing_events.prepare(&channel_state);
+                        self.store.insert_channel_actor_state(channel_state);
+                        signing_update.publish();
                     }
                 }
             }
@@ -4414,7 +4416,9 @@ where
         // no-live-actor path aligned with the live RemoveTlc ack ordering: channel state is durable
         // before higher-level payment or invoice notifications are emitted.
         if actor_state_changed {
-            self.signing_events.save(&self.store, actor_state.clone());
+            let signing_update = self.signing_events.prepare(actor_state);
+            self.store.insert_channel_actor_state(actor_state.clone());
+            signing_update.publish();
             if let Some(ref store_actor) = state.store_actor {
                 if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
                     error!(
@@ -4443,7 +4447,9 @@ where
                         | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
                 );
                 actor_state.state = ChannelState::Closed(flags);
-                self.signing_events.save(&self.store, actor_state.clone());
+                let signing_update = self.signing_events.prepare(actor_state);
+                self.store.insert_channel_actor_state(actor_state.clone());
+                signing_update.publish();
                 self.store.delete_shutdown_settlement_record(&channel_id);
                 if let Some(ref store_actor) = state.store_actor {
                     if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
@@ -4457,7 +4463,9 @@ where
         }
 
         if settlement_state_changed {
-            self.signing_events.save(&self.store, actor_state.clone());
+            let signing_update = self.signing_events.prepare(actor_state);
+            self.store.insert_channel_actor_state(actor_state.clone());
+            signing_update.publish();
             if let Some(ref store_actor) = state.store_actor {
                 if let Err(err) = store_actor.cast(StoreActorMessage::RequestBackup) {
                     error!("Failed to request store backup after on-chain settlement finalization: {err}");
@@ -8121,7 +8129,9 @@ where
         if !state.retryable_tlc_operations.contains(&operation) {
             state.retryable_tlc_operations.push_back(operation);
         }
-        self.signing_events.save(&self.store, state);
+        let signing_update = self.signing_events.prepare(&state);
+        self.store.insert_channel_actor_state(state);
+        signing_update.publish();
         true
     }
 
@@ -8189,7 +8199,9 @@ where
                             state.update_state(ChannelState::ShuttingDown(
                                 ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
                             ));
-                            self.signing_events.save(&self.store, state);
+                            let signing_update = self.signing_events.prepare(&state);
+                            self.store.insert_channel_actor_state(state);
+                            signing_update.publish();
                             if let Some(ref store_actor) = self.store_actor {
                                 store_actor
                                     .cast(StoreActorMessage::RequestBackup)
@@ -8364,7 +8376,9 @@ where
             }
 
             channel_state.mark_reestablishing_offline();
-            self.signing_events.save(&self.store, channel_state);
+            let signing_update = self.signing_events.prepare(&channel_state);
+            self.store.insert_channel_actor_state(channel_state);
+            signing_update.publish();
         }
     }
 
@@ -8451,7 +8465,9 @@ where
                                 ChannelState::Closed(flags)
                                     if flags.contains(CloseFlags::WAITING_ONCHAIN_SETTLEMENT)
                             );
-                            self.signing_events.save(&self.store, state);
+                            let signing_update = self.signing_events.prepare(&state);
+                            self.store.insert_channel_actor_state(state);
+                            signing_update.publish();
                             if should_restore_onchain_settlement_actor {
                                 if let Err(err) =
                                     self.restore_offline_channel(*pubkey, *channel_id).await
@@ -8529,7 +8545,9 @@ where
                         ))
                         .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW);
                 }
-                self.signing_events.remove(&self.store, &channel_id);
+                let signing_update = self.signing_events.prepare_removed(channel_id);
+                self.store.delete_channel_actor_state(&channel_id);
+                signing_update.publish();
             }
             // notify event observers, such as remove from watchtower
             self.network

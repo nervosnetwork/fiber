@@ -648,8 +648,10 @@ where
                     // External funding may pause while the initiator leaves the app to sign
                     // the funding tx. Persist the acceptor under the final channel id now so
                     // reconnect/restart can still route the later TxUpdate/CommitmentSigned.
-                    self.signing_events
-                        .move_channel(&self.store, &old_id, state.clone());
+                    let signing_update = self.signing_events.prepare(state);
+                    self.store.move_channel_actor_state(&old_id, state.clone());
+                    signing_update.publish_removed(old_id);
+                    signing_update.publish();
 
                     // For external funding, send a different event and transition to
                     // NegotiatingFunding(AWAITING_EXTERNAL_FUNDING).
@@ -2159,8 +2161,13 @@ where
                 None
             }
         };
-        self.signing_events
-            .save_with_diff(&self.store, state.clone_for_store(), &commit_diff);
+        let signing_update = self.signing_events.prepare(state);
+        self.store
+            .insert_channel_actor_state_with_pending_commit_diff(
+                state.clone_for_store(),
+                &commit_diff,
+            );
+        signing_update.publish();
 
         // Notify outside observers.
         self.network
@@ -2290,8 +2297,10 @@ where
         // Keep the request with the validated signature until its continuation
         // advances the durable protocol state. Restore can then resume even if
         // the phone never resubmits after this checkpoint.
-        self.signing_events
-            .save(&self.store, state.clone_for_store());
+        let signing_update = self.signing_events.prepare(state);
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
+        signing_update.publish();
 
         Ok(Some((request, partial_signature)))
     }
@@ -2325,9 +2334,12 @@ where
             .continue_signer_notification_at(myself, state, notification, now)
             .await;
         match &result {
-            Ok(_) => self
-                .signing_events
-                .save(&self.store, state.clone_for_store()),
+            Ok(_) => {
+                let signing_update = self.signing_events.prepare(state);
+                self.store
+                    .insert_channel_actor_state(state.clone_for_store());
+                signing_update.publish()
+            }
             Err(_) => {
                 // Do not let the actor's final save overwrite a recoverable
                 // checkpoint with an incomplete in-memory continuation.
@@ -3271,8 +3283,10 @@ where
                         // Persist before acking: on-chain relay callers treat this reply as
                         // proof that the upstream removal is durable. The handler-end persist
                         // would leave a crash window between reply and disk.
-                        self.signing_events
-                            .save(&self.store, state.clone_for_store());
+                        let signing_update = self.signing_events.prepare(state);
+                        self.store
+                            .insert_channel_actor_state(state.clone_for_store());
+                        signing_update.publish();
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
@@ -3287,8 +3301,10 @@ where
                             // `WaitingTlcAck` means the operation was accepted for retry. Persist
                             // the queue before replying so callers can safely hand ownership over
                             // and remove their own durable retry record.
-                            self.signing_events
-                                .save(&self.store, state.clone_for_store());
+                            let signing_update = self.signing_events.prepare(state);
+                            self.store
+                                .insert_channel_actor_state(state.clone_for_store());
+                            signing_update.publish();
                         }
                         let _ = reply.send(Err(err.clone()));
                         Err(err)
@@ -3413,8 +3429,10 @@ where
         state.signing_context.cancel_request();
         state.pending_messages = Default::default();
         state.deferred_peer_tlc_updates.clear();
-        self.signing_events
-            .save(&self.store, state.clone_for_store());
+        let signing_update = self.signing_events.prepare(state);
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
+        signing_update.publish();
         Ok(())
     }
 
@@ -3749,8 +3767,10 @@ where
         }
 
         if !onchain_fulfilled_invoice_hashes.is_empty() {
-            self.signing_events
-                .save(&self.store, state.clone_for_store());
+            let signing_update = self.signing_events.prepare(state);
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
+            signing_update.publish();
             for payment_hash in onchain_fulfilled_invoice_hashes {
                 self.network
                     .send_message(FiberActorMessage::new_command(
@@ -3847,8 +3867,10 @@ where
             })
             .collect();
         if !invoice_hashes.is_empty() {
-            self.signing_events
-                .save(&self.store, state.clone_for_store());
+            let signing_update = self.signing_events.prepare(state);
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
+            signing_update.publish();
             for payment_hash in invoice_hashes {
                 self.network
                     .send_message(FiberActorMessage::new_command(
@@ -3948,16 +3970,20 @@ where
         flags.insert(CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED);
         // Persist the chain signal before asking NetworkActor to validate exclusion evidence.
         state.update_state(ChannelState::Closed(flags));
-        self.signing_events
-            .save(&self.store, state.clone_for_store());
+        let signing_update = self.signing_events.prepare(state);
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
+        signing_update.publish();
         let now = now_timestamp_as_millis_u64();
         if self.reconcile_onchain_tlcs(state, now).await {
             flags.remove(
                 CloseFlags::WAITING_ONCHAIN_SETTLEMENT | CloseFlags::ONCHAIN_SETTLEMENT_CONFIRMED,
             );
             state.update_state(ChannelState::Closed(flags));
-            self.signing_events
-                .save(&self.store, state.clone_for_store());
+            let signing_update = self.signing_events.prepare(state);
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
+            signing_update.publish();
             // Recovery no longer needs this snapshot. Persist completion first so a crash
             // cannot leave a waiting channel without its snapshot.
             self.store
@@ -3966,8 +3992,10 @@ where
             myself.stop(Some("OnChainSettlementCompleted".to_string()));
         } else {
             state.update_state(ChannelState::Closed(flags));
-            self.signing_events
-                .save(&self.store, state.clone_for_store());
+            let signing_update = self.signing_events.prepare(state);
+            self.store
+                .insert_channel_actor_state(state.clone_for_store());
+            signing_update.publish();
             info!(
                 "Channel {:?} on-chain settlement reconciliation incomplete; keeping ONCHAIN_SETTLEMENT_CONFIRMED",
                 state.get_id()
@@ -4158,8 +4186,10 @@ where
         state.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::AWAITING_EXTERNAL_FUNDING,
         ));
-        self.signing_events
-            .save(&self.store, state.clone_for_store());
+        let signing_update = self.signing_events.prepare(state);
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
+        signing_update.publish();
         self.schedule_external_funding_timeout_check(myself, state);
         Ok(())
     }
@@ -4892,8 +4922,10 @@ where
                 channel.ephemeral_config = args.ephemeral_config.clone();
                 channel.hydrate_external_funding_runtime();
                 channel.private_key = Some(args.private_key.clone());
-                self.signing_events
-                    .save(&self.store, channel.clone_for_store());
+                let signing_update = self.signing_events.prepare(&channel);
+                self.store
+                    .insert_channel_actor_state(channel.clone_for_store());
+                signing_update.publish();
 
                 if channel.state != ChannelState::Stale && !awaiting_signature {
                     let reestablish_channel = ReestablishChannel {
@@ -5189,8 +5221,10 @@ where
         if state.ephemeral_config.external_funding.enabled {
             state.persist_external_funding_state();
         }
-        self.signing_events
-            .save(&self.store, state.clone_for_store());
+        let signing_update = self.signing_events.prepare(state);
+        self.store
+            .insert_channel_actor_state(state.clone_for_store());
+        signing_update.publish();
 
         if state.needs_backup {
             if let Some(ref store_actor) = self.store_actor {

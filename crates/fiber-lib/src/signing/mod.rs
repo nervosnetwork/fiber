@@ -3,9 +3,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod notifications;
 
-use fiber_types::{CommitDiff, Hash256};
+use fiber_types::Hash256;
 
-use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+use crate::fiber::channel::ChannelActorState;
 
 /// One event hub per running application. It is independent of database handles.
 #[derive(Clone, Default)]
@@ -15,12 +15,22 @@ pub struct SigningEvents {
 }
 
 /// Trusted host or tenant channel scope assigned by the runtime, never by clients.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ChannelSigningEvents {
     #[cfg(not(target_arch = "wasm32"))]
-    events: SigningEvents,
+    topic: std::sync::Arc<notifications::SigningTopic>,
+}
+
+#[cfg(feature = "watchtower")]
+pub(crate) struct WatchtowerSigningEvents {
     #[cfg(not(target_arch = "wasm32"))]
-    tenant: Option<String>,
+    topic: std::sync::Arc<notifications::SigningTopic>,
+}
+
+impl Default for ChannelSigningEvents {
+    fn default() -> Self {
+        SigningEvents::default().channels(None)
+    }
 }
 
 impl std::fmt::Debug for SigningEvents {
@@ -36,169 +46,221 @@ impl SigningEvents {
         let _ = tenant;
         ChannelSigningEvents {
             #[cfg(not(target_arch = "wasm32"))]
-            events: self.clone(),
+            topic: self.hub.topic(notifications::SigningScope::Channel(tenant)),
+        }
+    }
+
+    #[cfg(feature = "watchtower")]
+    pub(crate) fn watchtower(&self, node: &fiber_types::NodeId) -> WatchtowerSigningEvents {
+        #[cfg(target_arch = "wasm32")]
+        let _ = node;
+        WatchtowerSigningEvents {
             #[cfg(not(target_arch = "wasm32"))]
-            tenant,
+            topic: self
+                .hub
+                .topic(notifications::SigningScope::Watchtower(node.clone())),
         }
     }
 }
 
 impl ChannelSigningEvents {
-    fn persist(
-        &self,
-        state: ChannelActorState,
-        removed: Option<Hash256>,
-        commit: impl FnOnce(ChannelActorState),
-    ) {
+    /// Capture the public state before persistence consumes the channel snapshot.
+    pub(crate) fn prepare(&self, state: &ChannelActorState) -> SigningUpdate<'_> {
+        let update = SigningUpdate::new(
+            #[cfg(not(target_arch = "wasm32"))]
+            &self.topic,
+        );
         #[cfg(not(target_arch = "wasm32"))]
-        let topic = self
-            .events
-            .hub
-            .topic(notifications::SigningScope::Channel(self.tenant.clone()));
-        #[cfg(not(target_arch = "wasm32"))]
-        let write = topic.write();
-        // Capture only the public projection before moving state into persistence.
-        // No full channel clone or database lookup is needed for publication.
-        #[cfg(not(target_arch = "wasm32"))]
-        let change = write
-            .observed()
-            .then(|| notifications::SigningChange::Channel {
-                channel_id: state.get_id(),
-                status: crate::rpc::channel::to_rpc_channel_signing_status(&state),
-            });
-        commit(state);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(id) = removed {
-                write.publish(|| notifications::SigningChange::Removed(id));
+        let update = {
+            let mut update = update;
+            if update.write.observed() {
+                update.change = Some(notifications::SigningChange::Channel {
+                    channel_id: state.get_id(),
+                    status: crate::rpc::channel::to_rpc_channel_signing_status(state),
+                });
             }
-            if let Some(change) = change {
-                write.publish(|| change);
-            }
-        }
+            update
+        };
         #[cfg(target_arch = "wasm32")]
-        let _ = (self, removed);
+        let _ = state;
+        update
     }
 
-    pub(crate) fn save<S: ChannelActorStateStore>(&self, store: &S, state: ChannelActorState) {
-        self.persist(state, None, |state| store.insert_channel_actor_state(state));
-    }
-
-    pub(crate) fn save_with_diff<S: ChannelActorStateStore>(
-        &self,
-        store: &S,
-        state: ChannelActorState,
-        diff: &CommitDiff,
-    ) {
-        self.persist(state, None, |state| {
-            store.insert_channel_actor_state_with_pending_commit_diff(state, diff)
-        });
-    }
-
-    pub(crate) fn move_channel<S: ChannelActorStateStore>(
-        &self,
-        store: &S,
-        old_id: &Hash256,
-        state: ChannelActorState,
-    ) {
-        self.persist(state, Some(*old_id), |state| {
-            store.move_channel_actor_state(old_id, state)
-        });
-    }
-
-    pub(crate) fn remove<S: ChannelActorStateStore>(&self, store: &S, id: &Hash256) {
-        #[cfg(not(target_arch = "wasm32"))]
-        let topic = self
-            .events
-            .hub
-            .topic(notifications::SigningScope::Channel(self.tenant.clone()));
-        #[cfg(not(target_arch = "wasm32"))]
-        let write = topic.write();
-        store.delete_channel_actor_state(id);
-        #[cfg(not(target_arch = "wasm32"))]
-        write.publish(|| notifications::SigningChange::Removed(*id));
+    pub(crate) fn prepare_removed(&self, id: Hash256) -> SigningUpdate<'_> {
+        SigningUpdate::new(
+            #[cfg(not(target_arch = "wasm32"))]
+            &self.topic,
+        )
+        .removed(id)
     }
 }
 
 #[cfg(feature = "watchtower")]
-impl SigningEvents {
-    /// Register a watched channel and publish its freshly initialized signer status.
-    pub(crate) fn create_watch(
-        &self,
-        node: &fiber_types::NodeId,
-        id: Hash256,
-        commit: impl FnOnce(),
-    ) {
-        #[cfg(not(target_arch = "wasm32"))]
-        let topic = self
-            .hub
-            .topic(notifications::SigningScope::Watchtower(node.clone()));
-        #[cfg(not(target_arch = "wasm32"))]
-        let write = topic.write();
-        commit();
-        #[cfg(not(target_arch = "wasm32"))]
-        write.publish(|| notifications::SigningChange::WatchtowerCreated {
-            channel_id: id,
-            // Registration resets the signer to Internal or an empty External.
-            status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
-        });
-        #[cfg(target_arch = "wasm32")]
-        let _ = (node, id);
+impl WatchtowerSigningEvents {
+    pub(crate) fn prepare_update(&self) -> SigningUpdate<'_> {
+        SigningUpdate::new(
+            #[cfg(not(target_arch = "wasm32"))]
+            &self.topic,
+        )
     }
 
-    pub(crate) fn remove_watch<S: crate::watchtower::WatchtowerStore>(
-        &self,
-        store: &S,
-        node: fiber_types::NodeId,
-        id: Hash256,
-    ) {
+    pub(crate) fn prepare_created(&self, id: Hash256) -> SigningUpdate<'_> {
+        let update = self.prepare_update();
         #[cfg(not(target_arch = "wasm32"))]
-        let topic = self
-            .hub
-            .topic(notifications::SigningScope::Watchtower(node.clone()));
+        let update = {
+            let mut update = update;
+            if update.write.observed() {
+                update.change = Some(notifications::SigningChange::WatchtowerCreated {
+                    channel_id: id,
+                    // Registration resets the signer to Internal or an empty External.
+                    status: fiber_json_types::WatchtowerSigningStatus::NoSignatureRequired,
+                });
+            }
+            update
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = id;
+        update
+    }
+
+    pub(crate) fn prepare_removed(&self, id: Hash256) -> SigningUpdate<'_> {
+        self.prepare_update().removed(id)
+    }
+}
+
+/// Orders business writes and their notifications with subscription initialization.
+/// Dropping an unpublished update releases the lock without emitting an event.
+#[must_use = "publish the update only after persistence succeeds"]
+pub(crate) struct SigningUpdate<'a> {
+    #[cfg(not(target_arch = "wasm32"))]
+    write: notifications::SigningWrite<'a>,
+    #[cfg(not(target_arch = "wasm32"))]
+    change: Option<notifications::SigningChange>,
+    #[cfg(target_arch = "wasm32")]
+    _scope: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> SigningUpdate<'a> {
+    fn new(#[cfg(not(target_arch = "wasm32"))] topic: &'a notifications::SigningTopic) -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            write: topic.write(),
+            #[cfg(not(target_arch = "wasm32"))]
+            change: None,
+            #[cfg(target_arch = "wasm32")]
+            _scope: std::marker::PhantomData,
+        }
+    }
+
+    fn removed(self, id: Hash256) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        let write = topic.write();
-        let removed = store.remove_watch_channel(node, id);
-        #[cfg(not(target_arch = "wasm32"))]
-        if removed {
-            write.publish(|| notifications::SigningChange::Removed(id));
+        {
+            let mut update = self;
+            update.change = Some(notifications::SigningChange::Removed(id));
+            update
         }
         #[cfg(target_arch = "wasm32")]
-        let _ = removed;
+        {
+            let _ = id;
+            self
+        }
     }
 
-    pub(crate) fn update_watch_signer<S: crate::watchtower::WatchtowerStore, R, E>(
-        &self,
-        store: &S,
-        node: &fiber_types::NodeId,
-        id: &Hash256,
-        update: impl FnOnce(&mut fiber_types::WatchtowerSignerState) -> Result<R, E>,
-    ) -> Result<R, E> {
+    /// Capture the final signer projection inside a successful read/modify/write.
+    #[cfg(feature = "watchtower")]
+    pub(crate) fn watchtower_state(
+        &mut self,
+        id: Hash256,
+        state: &fiber_types::WatchtowerSignerState,
+    ) {
         #[cfg(not(target_arch = "wasm32"))]
-        let topic = self
-            .hub
-            .topic(notifications::SigningScope::Watchtower(node.clone()));
-        #[cfg(not(target_arch = "wasm32"))]
-        let write = topic.write();
-        let result = store.update_watchtower_signer(node, id, |state| {
-            let result = update(state)?;
-            // Capture the final projection inside the ordinary read/modify/write.
-            // Publish only after that operation has committed successfully.
-            #[cfg(not(target_arch = "wasm32"))]
-            let status = crate::rpc::watchtower::to_rpc_watchtower_signing_status(state.clone());
-            #[cfg(target_arch = "wasm32")]
-            let status = ();
-            Ok((result, status))
-        });
-        result.map(|(result, status)| {
-            #[cfg(not(target_arch = "wasm32"))]
-            write.publish(|| notifications::SigningChange::WatchtowerUpdated {
-                channel_id: *id,
-                status,
+        if self.write.observed() {
+            self.change = Some(notifications::SigningChange::WatchtowerUpdated {
+                channel_id: id,
+                status: crate::rpc::watchtower::to_rpc_watchtower_signing_status(state.clone()),
             });
-            #[cfg(target_arch = "wasm32")]
-            let _ = status;
-            result
-        })
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (id, state);
+    }
+
+    /// Notify the old ID during a committed channel-ID migration, under the same lock.
+    pub(crate) fn publish_removed(&self, id: Hash256) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.write
+            .publish(|| notifications::SigningChange::Removed(id));
+        #[cfg(target_arch = "wasm32")]
+        let _ = id;
+    }
+
+    /// Publish the captured state after persistence, then release the scope lock.
+    pub(crate) fn publish(self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(change) = self.change {
+            self.write.publish(|| change);
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use futures::FutureExt;
+
+    use crate::{
+        fiber::channel::{ChannelActorState, ChannelActorStateStore},
+        store::{open_store, sample::StoreSample},
+    };
+
+    use super::{
+        notifications::{SigningChange, SigningScope},
+        SigningEvents,
+    };
+
+    #[test]
+    fn updates_publish_only_explicitly_and_preserve_channel_migration_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path()).unwrap();
+        let events = SigningEvents::default();
+        let publisher = events.channels(None);
+        let mut changes = events.hub.subscribe(SigningScope::Channel(None));
+        let mut state = ChannelActorState::samples(42).remove(0);
+        let old_id = state.get_id();
+
+        // Aborted writes drop their guard without emitting a captured event.
+        drop(publisher.prepare(&state));
+        assert!(changes.recv().now_or_never().is_none());
+
+        let update = publisher.prepare(&state);
+        store.insert_channel_actor_state(state.clone());
+        assert!(changes.recv().now_or_never().is_none());
+        update.publish();
+        assert_eq!(
+            changes.recv().now_or_never().unwrap().unwrap().channel_id(),
+            old_id
+        );
+        assert!(store.get_channel_actor_state(&old_id).is_some());
+
+        let new_id = [8; 32].into();
+        state.id = new_id;
+        let update = publisher.prepare(&state);
+        store.move_channel_actor_state(&old_id, state);
+        update.publish_removed(old_id);
+        update.publish();
+        assert!(
+            matches!(changes.recv().now_or_never().unwrap().unwrap().as_ref(), SigningChange::Removed(id) if *id == old_id)
+        );
+        assert!(
+            matches!(changes.recv().now_or_never().unwrap().unwrap().as_ref(), SigningChange::Channel { channel_id, .. } if *channel_id == new_id)
+        );
+        assert!(store.get_channel_actor_state(&old_id).is_none());
+        assert!(store.get_channel_actor_state(&new_id).is_some());
+
+        let update = publisher.prepare_removed(new_id);
+        store.delete_channel_actor_state(&new_id);
+        update.publish();
+        assert!(
+            matches!(changes.recv().now_or_never().unwrap().unwrap().as_ref(), SigningChange::Removed(id) if *id == new_id)
+        );
+        assert!(store.get_channel_actor_state(&new_id).is_none());
     }
 }

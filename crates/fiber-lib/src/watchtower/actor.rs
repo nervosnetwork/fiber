@@ -188,25 +188,29 @@ where
                 remote_funding_pubkey,
                 settlement_data,
                 commitment_contract_features,
-            ) => self
-                .signing_events
-                .create_watch(&NodeId::local(), channel_id, || {
-                    self.store.insert_watch_channel_with_features(
-                        NodeId::local(),
-                        channel_id,
-                        funding_udt_type_script,
-                        local_settlement_key,
-                        local_settlement_key_pubkey,
-                        remote_settlement_key,
-                        local_funding_pubkey,
-                        remote_funding_pubkey,
-                        settlement_data,
-                        commitment_contract_features,
-                    )
-                }),
+            ) => {
+                let signing_scope = self.signing_events.watchtower(&NodeId::local());
+                let signing_update = signing_scope.prepare_created(channel_id);
+                self.store.insert_watch_channel_with_features(
+                    NodeId::local(),
+                    channel_id,
+                    funding_udt_type_script,
+                    local_settlement_key,
+                    local_settlement_key_pubkey,
+                    remote_settlement_key,
+                    local_funding_pubkey,
+                    remote_funding_pubkey,
+                    settlement_data,
+                    commitment_contract_features,
+                );
+                signing_update.publish();
+            }
             WatchtowerMessage::RemoveChannel(channel_id) => {
-                self.signing_events
-                    .remove_watch(&self.store, NodeId::local(), channel_id)
+                let signing_scope = self.signing_events.watchtower(&NodeId::local());
+                let signing_update = signing_scope.prepare_removed(channel_id);
+                if self.store.remove_watch_channel(NodeId::local(), channel_id) {
+                    signing_update.publish();
+                }
             }
             WatchtowerMessage::UpdateRevocation(
                 channel_id,
@@ -2144,8 +2148,9 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
             request_id,
             content: awaiting,
         } => {
-            let signature = events.update_watch_signer(
-                store,
+            let signing_scope = events.watchtower(node_id);
+            let mut signing_update = signing_scope.prepare_update();
+            let signature = store.update_watchtower_signer(
                 node_id,
                 &channel_id,
                 |state| -> Result<Option<[u8; 65]>, std::convert::Infallible> {
@@ -2167,6 +2172,7 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                                     request_id,
                                     signature,
                                 });
+                            signing_update.watchtower_state(channel_id, state);
                             return Ok(Some(signature));
                         }
                         external.signed_signatures.remove(&request_id);
@@ -2191,9 +2197,11 @@ fn build_signed_settlement_tx<S: WatchtowerStore>(
                     {
                         external.last_applied = None;
                     }
+                    signing_update.watchtower_state(channel_id, state);
                     Ok(None)
                 },
             )?;
+            signing_update.publish();
             // Only signer-state mutation holds the lock; transaction construction
             // and broadcasting must not block other signer submissions.
             signature

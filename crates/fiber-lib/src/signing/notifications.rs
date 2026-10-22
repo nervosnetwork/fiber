@@ -81,7 +81,8 @@ impl SigningNotifications {
 }
 
 /// One topic/scope lock orders initial reads with commits and their publications.
-/// Unobserved scopes allocate no broadcast buffer, and disappear after the write.
+/// Scopes allocate no broadcast buffer until subscribed, and disappear when the
+/// last publisher or subscriber releases them.
 pub(crate) struct SigningTopic {
     notifications: Weak<SigningNotifications>,
     scope: SigningScope,

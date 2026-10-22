@@ -26,20 +26,21 @@ pub fn ensure_hosted_watch_channel(
     let tenant_store = store.namespaced(NodeNamespace::hosted_tenant(tenant.tenant_id.as_str()));
     if let Some(state) = tenant_store.get_channel_actor_state(&channel_id) {
         let params = state.hosted_watch_channel_params()?;
-        events.create_watch(&node_id, channel_id, || {
-            store.insert_watch_channel_with_features(
-                node_id.clone(),
-                channel_id,
-                params.funding_udt_type_script,
-                params.local_settlement_key,
-                params.local_settlement_key_pubkey,
-                params.remote_settlement_key,
-                params.local_funding_pubkey,
-                params.remote_funding_pubkey,
-                params.settlement_data,
-                params.commitment_contract_features,
-            )
-        });
+        let signing_scope = events.watchtower(&node_id);
+        let signing_update = signing_scope.prepare_created(channel_id);
+        store.insert_watch_channel_with_features(
+            node_id,
+            channel_id,
+            params.funding_udt_type_script,
+            params.local_settlement_key,
+            params.local_settlement_key_pubkey,
+            params.remote_settlement_key,
+            params.local_funding_pubkey,
+            params.remote_funding_pubkey,
+            params.settlement_data,
+            params.commitment_contract_features,
+        );
+        signing_update.publish();
         return Ok(());
     }
 
@@ -60,20 +61,21 @@ pub fn ensure_hosted_watch_channel(
         );
         return Ok(());
     }
-    events.create_watch(&node_id, channel_id, || {
-        store.insert_watch_channel_with_features(
-            node_id.clone(),
-            channel_id,
-            params.funding_udt_type_script,
-            None,
-            params.remote_settlement_key,
-            params.local_settlement_key_pubkey,
-            params.remote_funding_pubkey,
-            params.local_funding_pubkey,
-            invert_empty_settlement(params.settlement_data),
-            params.commitment_contract_features,
-        )
-    });
+    let signing_scope = events.watchtower(&node_id);
+    let signing_update = signing_scope.prepare_created(channel_id);
+    store.insert_watch_channel_with_features(
+        node_id.clone(),
+        channel_id,
+        params.funding_udt_type_script,
+        None,
+        params.remote_settlement_key,
+        params.local_settlement_key_pubkey,
+        params.remote_funding_pubkey,
+        params.local_funding_pubkey,
+        invert_empty_settlement(params.settlement_data),
+        params.commitment_contract_features,
+    );
+    signing_update.publish();
     Ok(())
 }
 

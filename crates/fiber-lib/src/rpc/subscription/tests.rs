@@ -19,7 +19,7 @@ use jsonrpsee::{
 };
 
 use crate::{
-    fiber::channel::ChannelActorState,
+    fiber::channel::{ChannelActorState, ChannelActorStateStore},
     rpc::{biscuit::BiscuitAuth, middleware::RpcAuthorization},
     store::{open_store, sample::StoreSample, NodeNamespace, Store},
 };
@@ -135,23 +135,35 @@ async fn subscription_host_scope_ignores_attenuation_and_tenant_writes() {
         .namespaced(NodeNamespace::hosted_tenant("alice"));
     let state = ChannelActorState::samples(42).remove(0);
     let id = state.get_id();
-    fixture
-        .events
-        .channels(Some("alice".into()))
-        .save(&tenant, state.clone());
+    {
+        let publisher = fixture.events.channels(Some("alice".into()));
+        let update = publisher.prepare(&state);
+        tenant.insert_channel_actor_state(state.clone());
+        update.publish();
+    }
     assert!(
         tokio::time::timeout(Duration::from_millis(100), first.next())
             .await
             .is_err()
     );
-    fixture.events.channels(None).save(&fixture.store, state);
+    {
+        let publisher = fixture.events.channels(None);
+        let update = publisher.prepare(&state);
+        fixture.store.insert_channel_actor_state(state);
+        update.publish();
+    };
     for subscription in [&mut first, &mut second] {
         let SubscriptionEvent::ChannelSigning(result) = next(subscription).await else {
             panic!("channel event");
         };
         assert_eq!(result.channel_id, id.into());
     }
-    fixture.events.channels(None).remove(&fixture.store, &id);
+    {
+        let publisher = fixture.events.channels(None);
+        let update = publisher.prepare_removed(id);
+        fixture.store.delete_channel_actor_state(&id);
+        update.publish();
+    };
     for subscription in [&mut first, &mut second] {
         assert!(
             matches!(next(subscription).await, SubscriptionEvent::Removed { channel_id } if channel_id == id.into())
@@ -267,10 +279,13 @@ async fn subscription_keeps_existing_scope_but_rejects_expired_requests() {
         .await
         .unwrap_err();
     assert!(matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32999));
-    fixture
-        .events
-        .channels(None)
-        .save(&fixture.store, ChannelActorState::samples(42).remove(0));
+    {
+        let state = ChannelActorState::samples(42).remove(0);
+        let publisher = fixture.events.channels(None);
+        let update = publisher.prepare(&state);
+        fixture.store.insert_channel_actor_state(state);
+        update.publish();
+    };
     let event = tokio::time::timeout(Duration::from_secs(5), subscription.next())
         .await
         .unwrap();
@@ -304,10 +319,13 @@ async fn subscription_cannot_be_cancelled_from_another_connection_and_http_is_re
         )
         .await
         .unwrap());
-    fixture
-        .events
-        .channels(None)
-        .save(&fixture.store, ChannelActorState::samples(42).remove(0));
+    {
+        let state = ChannelActorState::samples(42).remove(0);
+        let publisher = fixture.events.channels(None);
+        let update = publisher.prepare(&state);
+        fixture.store.insert_channel_actor_state(state);
+        update.publish();
+    };
     assert!(matches!(
         next(&mut subscription).await,
         SubscriptionEvent::ChannelSigning(_)
@@ -355,13 +373,25 @@ async fn subscription_watchtower_uses_the_authorized_node_even_for_shared_channe
     ));
     let client = fixture.client(Some(&token)).await;
     let mut subscription = subscribe(&client, SubscriptionTopic::WatchtowerSigning).await;
-    fixture.events.remove_watch(&fixture.store, bob, channel);
+    {
+        let signing_scope = fixture.events.watchtower(&bob);
+        let signing_update = signing_scope.prepare_removed(channel);
+        if fixture.store.remove_watch_channel(bob, channel) {
+            signing_update.publish();
+        }
+    };
     assert!(
         tokio::time::timeout(Duration::from_millis(100), subscription.next())
             .await
             .is_err()
     );
-    fixture.events.remove_watch(&fixture.store, alice, channel);
+    {
+        let signing_scope = fixture.events.watchtower(&alice);
+        let signing_update = signing_scope.prepare_removed(channel);
+        if fixture.store.remove_watch_channel(alice, channel) {
+            signing_update.publish();
+        }
+    };
     assert!(
         matches!(next(&mut subscription).await, SubscriptionEvent::Removed { channel_id } if channel_id == channel.into())
     );
@@ -414,7 +444,12 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
     // The first live update fills the slow subscriber's one-message queue.
     let state = ChannelActorState::samples(42).remove(0);
     let id = state.get_id();
-    events.channels(None).save(&store, state);
+    {
+        let publisher = events.channels(None);
+        let update = publisher.prepare(&state);
+        store.insert_channel_actor_state(state);
+        update.publish();
+    };
     let event = tokio::time::timeout(Duration::from_secs(1), fast.recv())
         .await
         .unwrap()
@@ -423,7 +458,12 @@ async fn subscription_slow_queue_does_not_block_other_subscribers_and_requires_r
         serde_json::from_str::<serde_json::Value>(event.get()).unwrap()["params"]["result"]["type"],
         "channel_signing"
     );
-    events.channels(None).remove(&store, &id);
+    {
+        let publisher = events.channels(None);
+        let update = publisher.prepare_removed(id);
+        store.delete_channel_actor_state(&id);
+        update.publish();
+    };
     let removed = tokio::time::timeout(Duration::from_secs(1), fast.recv())
         .await
         .unwrap()

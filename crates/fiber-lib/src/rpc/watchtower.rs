@@ -275,20 +275,21 @@ where
             .settlement_data
             .try_into()
             .map_err(|e: String| rpc_error(e))?;
-        self.signing_events.create_watch(&node_id, channel_id, || {
-            self.store.insert_watch_channel_with_features(
-                node_id.clone(),
-                channel_id,
-                funding_udt_type_script.map(Into::into),
-                local_settlement_key,
-                local_settlement_key_pubkey,
-                remote_settlement_key,
-                local_funding_pubkey,
-                remote_funding_pubkey,
-                settlement_data,
-                commitment_contract_features,
-            )
-        });
+        let signing_scope = self.signing_events.watchtower(&node_id);
+        let signing_update = signing_scope.prepare_created(channel_id);
+        self.store.insert_watch_channel_with_features(
+            node_id,
+            channel_id,
+            funding_udt_type_script.map(Into::into),
+            local_settlement_key,
+            local_settlement_key_pubkey,
+            remote_settlement_key,
+            local_funding_pubkey,
+            remote_funding_pubkey,
+            settlement_data,
+            commitment_contract_features,
+        );
+        signing_update.publish();
         Ok(())
     }
 
@@ -299,8 +300,11 @@ where
     ) -> Result<(), ErrorObjectOwned> {
         let node_id = authorized_watchtower_node_id(&ctx)?;
         let channel_id = params.channel_id.into();
-        self.signing_events
-            .remove_watch(&self.store, node_id, channel_id);
+        let signing_scope = self.signing_events.watchtower(&node_id);
+        let signing_update = signing_scope.prepare_removed(channel_id);
+        if self.store.remove_watch_channel(node_id, channel_id) {
+            signing_update.publish();
+        }
         Ok(())
     }
 
@@ -426,8 +430,11 @@ where
             .as_slice()
             .try_into()
             .map_err(|_| rpc_error("watchtower signature must be 65 bytes"))?;
-        self.signing_events
-            .update_watch_signer(&self.store, &node_id, &channel_id, |state| {
+        let signing_scope = self.signing_events.watchtower(&node_id);
+        let mut signing_update = signing_scope.prepare_update();
+        let result = self
+            .store
+            .update_watchtower_signer(&node_id, &channel_id, |state| {
                 let Some(channel) = self.store.get_watch_channel(&node_id, &channel_id) else {
                     return Err(rpc_error("watched channel not found"));
                 };
@@ -479,8 +486,11 @@ where
                 external
                     .signed_signatures
                     .insert(request_id, (content, signature));
+                signing_update.watchtower_state(channel_id, state);
                 Ok(SubmitWatchtowerSignatureResult::Applied)
-            })
+            })?;
+        signing_update.publish();
+        Ok(result)
     }
 }
 
