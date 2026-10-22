@@ -109,6 +109,17 @@ impl Store {
         self.watcher = Some(watcher);
     }
 
+    /// Whether every write waits for the disk, see `FiberConfig::store_sync_writes`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_sync_writes(&mut self, sync_writes: bool) {
+        self.inner.set_sync_writes(sync_writes);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn sync_writes(&self) -> bool {
+        self.inner.sync_writes()
+    }
+
     fn notify(&self, change: StoreChange) {
         if let Some(ref watcher) = self.watcher {
             watcher(change);
