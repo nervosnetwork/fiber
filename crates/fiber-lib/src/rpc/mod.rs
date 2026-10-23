@@ -679,13 +679,12 @@ pub mod server {
             let store = open_store(dir.path()).unwrap();
             let events = crate::signing::SigningEvents::default();
             let root = KeyPair::new();
-            let token = biscuit_auth::Biscuit::builder()
+            let biscuit = biscuit_auth::Biscuit::builder()
                 .code(r#"write("subscriptions"); read("channels");"#)
                 .unwrap()
                 .build(&root)
-                .unwrap()
-                .to_base64()
                 .unwrap();
+            let token = URL_SAFE_NO_PAD.encode(biscuit.to_vec().unwrap());
             let mut config = gen_rpc_config();
             config.ws_listening_addr = Some("127.0.0.1:0".into());
             config.biscuit_public_key = Some(root.public().to_string());
@@ -693,16 +692,13 @@ pub mod server {
             let mut request = format!("ws://{}", server.ws_address.unwrap())
                 .into_client_request()
                 .unwrap();
-            let protocols = format!(
-                "fiber-rpc, base64url.bearer.authorization.fiber.{}",
-                token.trim_end_matches('=')
-            );
+            let protocols = format!("fiber-rpc, base64url.bearer.authorization.fiber.{}", token);
             request
                 .headers_mut()
                 .insert(SEC_WEBSOCKET_PROTOCOL, protocols.parse().unwrap());
             let (mut socket, response) = connect_async(request).await.unwrap();
             assert_eq!(response.headers()[SEC_WEBSOCKET_PROTOCOL], "fiber-rpc");
-            assert!(!format!("{:?}", response.headers()).contains(token.trim_end_matches('=')));
+            assert!(!format!("{:?}", response.headers()).contains(&token));
             socket
                 .send(Message::text(
                     r#"{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing"]}"#,

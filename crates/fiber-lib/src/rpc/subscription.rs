@@ -47,9 +47,11 @@ use service::{EventStream, Source, SubscriptionService};
 ///
 /// Browsers cannot set an `Authorization` header with the native WebSocket API.
 /// On the dedicated listener, offer the `fiber-rpc` subprotocol and a second
-/// subprotocol named `base64url.bearer.authorization.fiber.<token-without-padding>`.
-/// The Biscuit token is already base64url: remove only its trailing `=` padding,
-/// without encoding it again. The server restores padding for Bearer authentication.
+/// subprotocol named `base64url.bearer.authorization.fiber.<token>`.
+/// Tenant registration issues unpadded base64url Biscuit tokens, which can be used
+/// directly without encoding or padding conversion. For older tokens with trailing
+/// `=` padding, remove it before using the token as a browser subprotocol.
+/// Bearer headers continue to accept both padded and unpadded tokens.
 /// This uses the same Biscuit permissions as the Bearer header. The server selects
 /// only `fiber-rpc` in its response and never echoes the credential protocol.
 /// Do not combine this credential with an `Authorization` header. Multiple tokens,
@@ -60,10 +62,9 @@ use service::{EventStream, Source, SubscriptionService};
 ///
 /// ```javascript
 /// // token is the Biscuit token string returned by tenant registration.
-/// const unpaddedToken = token.replace(/=+$/, "");
 /// const socket = new WebSocket("ws://127.0.0.1:8229", [
 ///   "fiber-rpc",
-///   `base64url.bearer.authorization.fiber.${unpaddedToken}`,
+///   `base64url.bearer.authorization.fiber.${token}`,
 /// ]);
 /// socket.onopen = () => {
 ///   const topics = ["channel_signing", "watchtower_signing"];

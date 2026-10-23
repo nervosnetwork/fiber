@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn test_biscuit_auth() {
+    fn test_biscuit_auth_accepts_padded_and_unpadded_tokens() {
         let root = KeyPair::new();
 
         // auth
@@ -571,15 +571,15 @@ mod tests {
         .to_base64()
         .unwrap();
 
-        // check permission
-        assert!(auth.check_permission("send_payment", &token,).is_ok());
-        // write permission do not implies read
-        assert!(auth.check_permission("get_payment", &token).is_err());
-        assert!(auth.check_permission("list_peers", &token).is_ok());
-        assert!(auth.check_permission("connect_peer", &token).is_err());
-
-        // if not match any rule, it should be denied
-        assert!(auth.check_permission("unknown", &token).is_err());
+        for token in [token.as_str(), token.trim_end_matches('=')] {
+            assert!(auth.check_permission("send_payment", token).is_ok());
+            // Write permission does not imply read permission.
+            assert!(auth.check_permission("get_payment", token).is_err());
+            assert!(auth.check_permission("list_peers", token).is_ok());
+            assert!(auth.check_permission("connect_peer", token).is_err());
+            // Methods without a matching rule are denied.
+            assert!(auth.check_permission("unknown", token).is_err());
+        }
     }
 
     #[test]

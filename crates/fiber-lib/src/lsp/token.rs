@@ -1,6 +1,7 @@
 use std::{path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use biscuit_auth::{
     builder::{Fact, Term},
     Biscuit, KeyPair, PrivateKey, PublicKey,
@@ -54,7 +55,8 @@ impl BiscuitTokenIssuer {
         })
     }
 
-    /// Build a tenant-scoped access token. This is the only token-minting implementation.
+    /// Build an unpadded base64url tenant token, suitable for HTTP and browser WebSockets.
+    /// This is the only token-minting implementation.
     pub fn issue_tenant_token(&self, tenant_id: &TenantId, node_id: &NodeId) -> Result<String> {
         let mut builder = Biscuit::builder()
             .fact(Fact::new(
@@ -83,7 +85,8 @@ impl BiscuitTokenIssuer {
         }
         builder
             .build(&self.root)?
-            .to_base64()
+            .to_vec()
+            .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
             .context("failed to encode tenant Biscuit token")
     }
 }

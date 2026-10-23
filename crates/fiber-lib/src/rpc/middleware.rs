@@ -35,20 +35,16 @@ pub(super) fn prepare_browser_websocket(headers: &mut HeaderMap) -> Result<bool>
         for protocol in value.to_str()?.split(',').map(str::trim) {
             if protocol == BROWSER_WS_PROTOCOL {
                 supported = true;
-            } else if let Some(unpadded) = protocol.strip_prefix(BROWSER_BEARER_PREFIX) {
+            } else if let Some(credential) = protocol.strip_prefix(BROWSER_BEARER_PREFIX) {
                 if token.is_some() {
                     bail!("multiple WebSocket credentials");
                 }
-                if unpadded.is_empty() {
+                if credential.is_empty() {
                     bail!("empty WebSocket credential");
                 }
-                // The Biscuit string is already base64url. Validate it and restore
-                // the padding omitted to fit the WebSocket subprotocol grammar.
-                URL_SAFE_NO_PAD.decode(unpadded)?;
-                token = Some(format!(
-                    "{unpadded}{}",
-                    "=".repeat((4 - unpadded.len() % 4) % 4)
-                ));
+                // Check the subprotocol's encoding; ordinary RPC auth verifies the token.
+                URL_SAFE_NO_PAD.decode(credential)?;
+                token = Some(credential.to_owned());
             }
         }
     }
@@ -320,25 +316,6 @@ fn auth_reject_error(method: &str, error: &Error) -> ErrorObjectOwned {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn browser_credentials_restore_biscuit_padding() {
-        for token in ["YWJj", "YWI=", "YQ=="] {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                SEC_WEBSOCKET_PROTOCOL,
-                format!(
-                    "{BROWSER_WS_PROTOCOL}, {BROWSER_BEARER_PREFIX}{}",
-                    token.trim_end_matches('=')
-                )
-                .parse()
-                .unwrap(),
-            );
-            assert!(prepare_browser_websocket(&mut headers).unwrap());
-            assert_eq!(headers[AUTHORIZATION], format!("Bearer {token}"));
-            assert_eq!(headers[SEC_WEBSOCKET_PROTOCOL], BROWSER_WS_PROTOCOL);
-        }
-    }
 
     #[test]
     fn test_auth_reject_error_reports_run_limit_reason() {

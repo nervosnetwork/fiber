@@ -1532,6 +1532,10 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     .unwrap()
     .unwrap();
     let token = issued.access_token;
+    assert!(
+        !token.contains('='),
+        "issued tokens need no WS padding removal"
+    );
     let auth = BiscuitAuth::from_pubkey(biscuit_root.public().to_string()).unwrap();
     auth.check_permission("get_channel_signing_status", &token)
         .unwrap();
