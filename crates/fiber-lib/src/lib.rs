@@ -22,8 +22,16 @@ pub mod cch;
 #[cfg(not(target_arch = "wasm32"))]
 pub use cch::{CchActor, CchConfig};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lsp;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod lsp;
+#[cfg(not(target_arch = "wasm32"))]
+pub use lsp::LspConfig;
+
 pub mod invoice;
 pub mod rpc;
+pub mod signing;
 pub mod store;
 #[cfg(feature = "watchtower")]
 pub mod watchtower;

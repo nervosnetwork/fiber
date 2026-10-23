@@ -64,6 +64,8 @@ if ! [[ -d "$data_dir" ]]; then
         fi
     done
 
+    "$script_dir/generate-blocks.sh" 20
+
     # Transfer some money to the node 1/2/3.
     # The address of node 1 can be seen with the following command:
     # echo | HOME=/tmp ckb-cli account import --local-only --privkey-path "$$nodes_dir/1/ckb/plain_key"
@@ -90,5 +92,5 @@ if ! [[ -d "$data_dir" ]]; then
     echo "deploy.sh..."
     "$script_dir/deploy.sh"
 
-    pkill -P $$
+    pkill -P $$ || true
 fi

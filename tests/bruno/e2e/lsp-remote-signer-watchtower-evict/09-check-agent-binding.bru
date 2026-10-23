@@ -1,0 +1,24 @@
+meta {
+  name: verify SDK agent persisted channel binding
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  if (!res.body.bound_channel_ids.includes(bru.getVar("REMOTE_CHANNEL_ID"))) {
+    throw new Error(`agent did not bind channel: ${JSON.stringify(res.body)}`);
+  }
+  if (res.body.channel_open_signer_material !== null) {
+    throw new Error("agent must consume open material after binding");
+  }
+}

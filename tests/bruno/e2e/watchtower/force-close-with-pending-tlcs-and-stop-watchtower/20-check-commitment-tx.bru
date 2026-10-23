@@ -31,9 +31,17 @@ body:json {
 }
 
 assert {
-  res.body.result.status: eq "unknown"
+  res.body.error: isUndefined
+  res.body.result.status: isDefined
 }
 
 script:post-response {
-  console.log("generated result: ", res.body);
+  if (res.body.result.status === "unknown") {
+    return;
+  }
+  if (Date.now() < Number(bru.getVar("SETTLEMENT_DEADLINE"))) {
+    bru.setNextRequest("generate a few blocks for final settlement tx1 to be committed");
+    return;
+  }
+  throw new Error(`commitment output was not settled: ${JSON.stringify(res.body.result)}`);
 }

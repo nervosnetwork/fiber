@@ -1,0 +1,45 @@
+meta {
+  name: get Public T force-closed commitment tx hash
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"list_channels","params":[{"include_closed":true}]}
+}
+
+vars:post-response {
+  REMOTE_COMMITMENT_MAX_ITERATIONS: 30
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
+  const channel = (res.body.result.channels || []).find(
+    item => item.channel_id === bru.getVar("REMOTE_CHANNEL_ID")
+  );
+  const hash = channel?.latest_commitment_transaction_hash;
+  const iteration = Number(bru.getVar("REMOTE_COMMITMENT_ITERATION") || 0);
+  if (hash) {
+    bru.setVar("TX_HASH", hash);
+    bru.setVar("REMOTE_COMMITMENT_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < Number(bru.getVar("REMOTE_COMMITMENT_MAX_ITERATIONS"))) {
+    bru.setVar("REMOTE_COMMITMENT_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("get Public T force-closed commitment tx hash");
+    return;
+  }
+  throw new Error(`force-closed commitment tx hash missing: ${JSON.stringify(channel)}`);
+}

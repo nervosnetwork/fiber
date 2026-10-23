@@ -36,5 +36,19 @@ script:pre-request {
 }
 
 assert {
-  Number(BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(res.body.result.capacity)): lt 5000
+  res.body.error: isUndefined
+  res.body.result.capacity: isDefined
+}
+
+script:post-response {
+  const delta = BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(res.body.result.capacity);
+  if (delta >= BigInt(0) && delta < BigInt(5000)) {
+    return;
+  }
+  if (Date.now() < Number(bru.getVar("SETTLEMENT_DEADLINE"))) {
+    console.log(`waiting for Node1 final settlement, balance delta=${delta}`);
+    bru.setNextRequest("generate a few blocks for final settlement tx1 to be committed");
+    return;
+  }
+  throw new Error(`Node1 balance delta=${delta} is outside expected range [0, 5000)`);
 }

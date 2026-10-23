@@ -1,0 +1,49 @@
+meta {
+  name: wait for SDK-signed channel ready
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{REMOTE_TENANT_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"list_channels","params":[{"include_closed":true}]}
+}
+
+script:pre-request {
+  const token = bru.getVar("REMOTE_TENANT_TOKEN") || bru.getEnvVar("REMOTE_TENANT_TOKEN");
+  if (token) {
+    req.setHeader("Authorization", `Bearer ${token}`);
+  }
+}
+
+vars:post-response {
+  REMOTE_READY_MAX_ITERATIONS: 60
+}
+
+script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
+  const channel = (res.body.result.channels || []).find(item => item.channel_id === bru.getVar("REMOTE_CHANNEL_ID"));
+  const iteration = Number(bru.getVar("REMOTE_READY_ITERATION") || 0);
+  if (channel?.state?.state_name === "ChannelReady") {
+    if (channel.is_public !== false) throw new Error("hosted signer channel must be private");
+    bru.setVar("REMOTE_READY_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < Number(bru.getVar("REMOTE_READY_MAX_ITERATIONS"))) {
+    bru.setVar("REMOTE_READY_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait for SDK-signed channel ready");
+    return;
+  }
+  throw new Error(`external signer channel did not become ready: ${JSON.stringify(channel)}`);
+}

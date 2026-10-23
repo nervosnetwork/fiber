@@ -262,7 +262,7 @@ impl From<SecretKey> for Privkey {
 
 /// A 256-bit hash digest, used as identifier of channel, payment, transaction hash etc.
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
+#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default, PartialOrd, Ord)]
 pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
 
 impl From<[u8; 32]> for Hash256 {

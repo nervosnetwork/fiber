@@ -1,0 +1,59 @@
+meta {
+  name: check submitted commitment tx should be revoked
+  type: http
+  seq: 20
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "get_live_cell",
+    "params": [
+      {
+        "index": "0x0",
+        "tx_hash": "{{TX_HASH}}"
+      },
+      false
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  const txHash = bru.getVar("TX_HASH") || bru.getEnvVar("TX_HASH");
+  if (txHash) {
+    body.params[0].tx_hash = txHash;
+    req.setBody(body);
+  }
+}
+
+vars:post-response {
+  REVOKE_MAX_ITERATIONS: 60
+}
+
+script:post-response {
+  const status = res.body.result && res.body.result.status;
+  const iteration = Number(bru.getVar("REVOKE_ITERATION") || 0);
+  if (status === "unknown") {
+    bru.setVar("REVOKE_ITERATION", 0);
+    return;
+  }
+  if (iteration + 1 < Number(bru.getVar("REVOKE_MAX_ITERATIONS"))) {
+    bru.setVar("REVOKE_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("check submitted commitment tx should be revoked");
+    return;
+  }
+  throw new Error(`stale commitment was not revoked: ${JSON.stringify(res.body)}`);
+}

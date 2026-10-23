@@ -446,6 +446,7 @@ pub struct NetworkGraph<S> {
     pub always_process_gossip_message: bool,
     // The pubkey of the node that is running this instance of the network graph.
     source: Pubkey,
+    scope: NetworkGraphScope,
     // All the channels in the network.
     pub(crate) channels: HashMap<OutPoint, ChannelInfo>,
     // Index: node_id -> set of channel outpoints involving this node
@@ -478,6 +479,15 @@ pub struct NetworkGraph<S> {
 
     #[cfg(any(feature = "metrics", test, feature = "bench"))]
     pub(crate) payment_find_path_stats: Arc<Mutex<HashMap<Hash256, u128>>>,
+}
+
+/// Selects which routing information a Fiber actor may retain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkGraphScope {
+    /// Public nodes load and process the shared gossip graph.
+    Public,
+    /// Hosted tenants retain only channel events owned by their Fiber actor.
+    OwnedChannelsOnly,
 }
 
 #[derive(Error, Debug)]
@@ -525,10 +535,38 @@ where
         + 'static,
 {
     pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
-        let mut network_graph = Self {
+        let mut network_graph = Self::empty(
+            store,
+            source,
+            announce_private_addr,
+            NetworkGraphScope::Public,
+        );
+        network_graph.load_from_store();
+        network_graph
+    }
+
+    /// Build a graph view for a local-only hosted tenant.
+    ///
+    /// The view starts empty and is populated only by owned-channel events. It
+    /// deliberately does not load public gossip from the shared physical store;
+    /// the tenant only needs its private first-hop channel to the public LSP
+    /// node when constructing a trampoline payment.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_owned_channels(store: S, source: Pubkey) -> Self {
+        Self::empty(store, source, false, NetworkGraphScope::OwnedChannelsOnly)
+    }
+
+    fn empty(
+        store: S,
+        source: Pubkey,
+        announce_private_addr: bool,
+        scope: NetworkGraphScope,
+    ) -> Self {
+        Self {
             #[cfg(any(test, feature = "bench"))]
             always_process_gossip_message: false,
             source,
+            scope,
             channels: HashMap::new(),
             node_channels: HashMap::new(),
             channel_stats: Default::default(),
@@ -541,9 +579,7 @@ where
             fixed_rand_expiry_delta: None,
             #[cfg(any(feature = "metrics", test, feature = "bench"))]
             payment_find_path_stats: Default::default(),
-        };
-        network_graph.load_from_store();
-        network_graph
+        }
     }
 
     pub fn get_latest_cursor(&self) -> &Cursor {
@@ -583,6 +619,9 @@ where
         &mut self,
         messages: Vec<BroadcastMessageWithTimestamp>,
     ) -> bool {
+        if self.scope == NetworkGraphScope::OwnedChannelsOnly {
+            return false;
+        }
         if messages.is_empty() {
             return false;
         }

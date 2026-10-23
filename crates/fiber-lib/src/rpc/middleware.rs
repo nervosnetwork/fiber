@@ -2,22 +2,88 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Error, Result};
-use biscuit_auth::error::{RunLimit, Token as BiscuitError};
-use hyper::header::AUTHORIZATION;
+use anyhow::{anyhow, bail, Error, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use biscuit_auth::{
+    error::{RunLimit, Token as BiscuitError},
+    Biscuit,
+};
+use hyper::header::{HeaderValue, AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use hyper::HeaderMap;
 use jsonrpsee::core::middleware::{Batch, BatchEntry, BatchEntryErr, Notification};
 use jsonrpsee::server::middleware::rpc::RpcServiceT;
 use jsonrpsee::types::{ErrorObject, ErrorObjectOwned, Id, Request};
-use jsonrpsee::MethodResponse;
+use jsonrpsee::{Extensions, MethodResponse};
 
-use crate::rpc::biscuit::extract_node_id;
+use crate::rpc::biscuit::{extract_tenant_id, scoped_rpc_node_id};
+use crate::rpc::tenant::{enforce_tenant_method_allowlist, AuthenticatedTenant};
 use fiber_json_types::RpcContext;
 use fiber_types::NodeId;
 
-use super::biscuit::BiscuitAuth;
+use super::biscuit::{AuthRule, BiscuitAuth};
 
 const BEARER_PREFIX: &str = "Bearer ";
+pub(super) const BROWSER_WS_PROTOCOL: &str = "fiber-rpc";
+const BROWSER_BEARER_PREFIX: &str = "base64url.bearer.authorization.fiber.";
+
+/// Normalize browser credentials on the dedicated WS listener into ordinary Bearer auth.
+/// The credential protocol is removed before upgrading so it cannot be echoed back.
+pub(super) fn prepare_browser_websocket(headers: &mut HeaderMap) -> Result<bool> {
+    let mut supported = false;
+    let mut token = None;
+    for value in headers.get_all(SEC_WEBSOCKET_PROTOCOL) {
+        for protocol in value.to_str()?.split(',').map(str::trim) {
+            if protocol == BROWSER_WS_PROTOCOL {
+                supported = true;
+            } else if let Some(credential) = protocol.strip_prefix(BROWSER_BEARER_PREFIX) {
+                if token.is_some() {
+                    bail!("multiple WebSocket credentials");
+                }
+                if credential.is_empty() {
+                    bail!("empty WebSocket credential");
+                }
+                // Check the subprotocol's encoding; ordinary RPC auth verifies the token.
+                URL_SAFE_NO_PAD.decode(credential)?;
+                token = Some(credential.to_owned());
+            }
+        }
+    }
+    if let Some(token) = token {
+        if !supported || headers.contains_key(AUTHORIZATION) {
+            bail!("missing WebSocket protocol or conflicting credentials");
+        }
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("{BEARER_PREFIX}{token}"))?,
+        );
+    }
+    if supported {
+        headers.insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(BROWSER_WS_PROTOCOL),
+        );
+    }
+    Ok(supported)
+}
+
+/// Server-derived credentials, also retained by handlers that must recheck access.
+#[derive(Clone)]
+pub(crate) struct RpcAuthorization {
+    pub(crate) auth: Arc<BiscuitAuth>,
+    pub(crate) token: Option<String>,
+}
+
+impl RpcAuthorization {
+    /// Apply the ordinary method policy and tenant allowlist, or return None for local RPC.
+    pub(crate) fn authorize(&self, method: &str) -> Result<Option<(Biscuit, &AuthRule)>> {
+        let Some(token) = &self.token else {
+            return Ok(None);
+        };
+        let (token, rule) = self.auth.check_permission(method, token)?;
+        enforce_tenant_method_allowlist(method, &token)?;
+        Ok(Some((token, rule)))
+    }
+}
 
 #[derive(Clone)]
 pub struct BiscuitAuthMiddleware<S> {
@@ -58,21 +124,37 @@ impl<S> BiscuitAuthMiddleware<S> {
         tracing::trace!("Injected req params {:?}", &req.params);
     }
 
+    fn inject_authenticated_tenant(
+        &self,
+        extensions: &mut Extensions,
+        token: &biscuit_auth::Biscuit,
+    ) -> Result<()> {
+        if let Some(tenant_id) = extract_tenant_id(token)? {
+            extensions.insert(AuthenticatedTenant(tenant_id));
+        }
+        Ok(())
+    }
+
+    fn authorization(&self) -> Result<RpcAuthorization> {
+        Ok(RpcAuthorization {
+            auth: self.auth.clone(),
+            token: self.enable_auth.then(|| self.auth_token()).transpose()?,
+        })
+    }
+
     /// Authorize the request
     fn auth_call(&self, req: &mut Request<'_>) -> Result<()> {
-        if self.enable_auth {
-            let token = self.auth_token()?;
-            let (token, rule) = self.auth.check_permission(&req.method, &token)?;
+        let authorization = self.authorization()?;
+        if let Some((token, rule)) = authorization.authorize(&req.method)? {
+            self.inject_authenticated_tenant(req.extensions_mut(), &token)?;
             if rule.require_rpc_context {
-                let node_id = extract_node_id(&token)?;
-
-                // Inject RpcContext as first param (node_id as String)
+                let node_id = scoped_rpc_node_id(&token)?;
                 let ctx = RpcContext {
                     node_id: node_id.to_string(),
+                    tenant_scoped: extract_tenant_id(&token)?.is_some(),
                 };
                 self.inject_rpc_context(req, ctx);
             }
-            Ok(())
         } else {
             // local rpc, auth token is none
             match self.auth.get_rule(&req.method) {
@@ -83,6 +165,7 @@ impl<S> BiscuitAuthMiddleware<S> {
                         // Inject RpcContext as first param (node_id as String)
                         let ctx = RpcContext {
                             node_id: node_id.to_string(),
+                            tenant_scoped: false,
                         };
                         self.inject_rpc_context(req, ctx);
                     }
@@ -92,16 +175,19 @@ impl<S> BiscuitAuthMiddleware<S> {
                     // no auth rule, but allow local rpc to proceed.
                 }
             }
-            Ok(())
         }
+        req.extensions_mut().insert(authorization);
+        Ok(())
     }
 
     /// Authorize the notification
-    fn auth_notify(&self, notify: &Notification<'_>) -> Result<()> {
-        let token = self.auth_token()?;
-        self.auth
-            .check_permission(notify.method_name(), &token)
-            .map(|_| ())
+    fn auth_notify(&self, notify: &mut Notification<'_>) -> Result<()> {
+        let authorization = self.authorization()?;
+        if let Some((token, _)) = authorization.authorize(notify.method_name())? {
+            self.inject_authenticated_tenant(notify.extensions_mut(), &token)?;
+        }
+        notify.extensions_mut().insert(authorization);
+        Ok(())
     }
 }
 
@@ -149,9 +235,9 @@ where
                         Some(Err(BatchEntryErr::new(req.id, rpc_error)))
                     }
                 },
-                Ok(BatchEntry::Notification(notif)) => {
+                Ok(BatchEntry::Notification(mut notif)) => {
                     // ignore permissionless notification
-                    match self.auth_notify(&notif) {
+                    match self.auth_notify(&mut notif) {
                         Ok(()) => Some(Ok(BatchEntry::Notification(notif))),
                         Err(err) => {
                             log_auth_rejection(notif.method_name(), &err);
@@ -168,11 +254,11 @@ where
 
     fn notification<'a>(
         &self,
-        n: Notification<'a>,
+        mut n: Notification<'a>,
     ) -> impl Future<Output = Self::NotificationResponse> + Send + 'a {
         let this = self.clone();
         let auth_error = this
-            .auth_notify(&n)
+            .auth_notify(&mut n)
             .err()
             .map(|err| auth_reject_error(n.method_name(), &err));
 
