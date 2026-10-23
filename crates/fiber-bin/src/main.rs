@@ -165,10 +165,13 @@ async fn run() -> Result<(), ExitMessage> {
 
     // Derive store_path: prefer fiber config, fall back to base_dir/fiber/store
     let store_path = parsed_fiber_config.store_path();
-    let mut raw_store =
-        open_store_with_migration(store_path, Box::new(cli_confirm), Box::new(cli_progress))
-            .map_err(|err| ExitMessage(err.to_string()))?;
-    raw_store.set_sync_writes(parsed_fiber_config.store_sync_writes());
+    let raw_store = open_store_with_migration(
+        store_path,
+        parsed_fiber_config.store_sync_writes(),
+        Box::new(cli_confirm),
+        Box::new(cli_progress),
+    )
+    .map_err(|err| ExitMessage(err.to_string()))?;
     info!("Store sync writes: {}", raw_store.sync_writes());
 
     if config.cch.is_some() || config.rpc.is_some() {

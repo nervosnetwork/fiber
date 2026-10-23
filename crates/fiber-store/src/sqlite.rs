@@ -71,8 +71,12 @@ impl Store {
             .execute_batch(&format!("PRAGMA synchronous = {level};"))
             .expect("set synchronous should be OK");
     }
+}
 
-    pub fn sync_writes(&self) -> bool {
+impl StorageBackend for Store {
+    type Batch = Batch;
+
+    fn sync_writes(&self) -> bool {
         let level: i64 = self
             .conn
             .lock()
@@ -82,10 +86,6 @@ impl Store {
         // 2 is FULL and 3 is EXTRA.
         level >= 2
     }
-}
-
-impl StorageBackend for Store {
-    type Batch = Batch;
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         let conn = self.conn.lock().expect("lock poisoned");

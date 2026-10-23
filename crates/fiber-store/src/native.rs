@@ -29,10 +29,6 @@ impl Store {
         self.sync_writes = sync_writes;
     }
 
-    pub fn sync_writes(&self) -> bool {
-        self.sync_writes
-    }
-
     /// Open a store (without migration check — use `check_migrate` or `DbMigrate` for that)
     pub fn open_db(path: &Path) -> Result<Self, String> {
         let mut options = Options::default();
@@ -61,6 +57,10 @@ impl Store {
 
 impl StorageBackend for Store {
     type Batch = Batch;
+
+    fn sync_writes(&self) -> bool {
+        self.sync_writes
+    }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         self.db
