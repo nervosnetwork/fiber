@@ -143,6 +143,7 @@ jsonrpsee = { version = "0.25.1", features = [
   "http-client",
 ] }
 tokio = { version = "1.x", features = ["test-util"] }
+tokio-tungstenite = "0.28"
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 fiber-store = { path = "../fiber-store", features = ["browser-test"] }

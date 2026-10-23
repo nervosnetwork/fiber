@@ -43,7 +43,9 @@ pub mod server {
     use crate::rpc::info::{InfoRpcServer, InfoRpcServerImpl};
     use crate::rpc::invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
     use crate::rpc::lsp::{LspRpcServer, LspRpcServerImpl};
-    use crate::rpc::middleware::BiscuitAuthMiddleware;
+    use crate::rpc::middleware::{
+        prepare_browser_websocket, BiscuitAuthMiddleware, BROWSER_WS_PROTOCOL,
+    };
     use crate::rpc::payment::PaymentRpcServer;
     use crate::rpc::payment::PaymentRpcServerImpl;
     use crate::rpc::peer::{PeerRpcServer, PeerRpcServerImpl};
@@ -213,6 +215,7 @@ pub mod server {
         }
         let cors_enabled = config.cors_enabled;
         let cors_allowed_origins = config.cors_allowed_origins;
+        let browser_ws = config.ws_only;
         let per_conn = PerConnection {
             methods,
             stop_handle: stop_handle.clone(),
@@ -240,27 +243,60 @@ pub mod server {
                 let per_conn2 = per_conn.clone();
                 let auth = auth.clone();
 
-                let svc = tower::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let PerConnection {
-                        methods,
-                        stop_handle,
-                        svc_builder,
-                    } = per_conn2.clone();
+                let svc =
+                    tower::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        let PerConnection {
+                            methods,
+                            stop_handle,
+                            svc_builder,
+                        } = per_conn2.clone();
 
-                    let headers = req.headers().clone();
-                    let auth = auth.clone();
-                    let rpc_middleware =
-                        RpcServiceBuilder::new().layer_fn(move |service| BiscuitAuthMiddleware {
-                            headers: headers.clone(),
-                            inner: service,
-                            auth: auth.clone(),
-                            enable_auth,
+                        let browser_protocol =
+                            if browser_ws && jsonrpsee::server::ws::is_upgrade_request(&req) {
+                                prepare_browser_websocket(req.headers_mut())
+                            } else {
+                                Ok(false)
+                            };
+                        let headers = req.headers().clone();
+                        let auth = auth.clone();
+                        let rpc_middleware = RpcServiceBuilder::new().layer_fn(move |service| {
+                            BiscuitAuthMiddleware {
+                                headers: headers.clone(),
+                                inner: service,
+                                auth: auth.clone(),
+                                enable_auth,
+                            }
                         });
-                    let mut svc = svc_builder
-                        .set_rpc_middleware(rpc_middleware)
-                        .build(methods, stop_handle);
-                    async move { svc.call(req).await }
-                });
+                        let mut svc = svc_builder
+                            .set_rpc_middleware(rpc_middleware)
+                            .build(methods, stop_handle);
+                        async move {
+                            let browser_protocol = match browser_protocol {
+                                Ok(protocol) => protocol,
+                                Err(_) => {
+                                    let mut response =
+                                        hyper::Response::new(jsonrpsee::server::HttpBody::from(
+                                            "Invalid WebSocket authentication protocols".to_owned(),
+                                        ));
+                                    *response.status_mut() = hyper::StatusCode::BAD_REQUEST;
+                                    return Ok(response);
+                                }
+                            };
+                            svc.call(req).await.map(|mut response| {
+                                if browser_protocol
+                                    && response.status() == hyper::StatusCode::SWITCHING_PROTOCOLS
+                                {
+                                    response.headers_mut().insert(
+                                        hyper::header::SEC_WEBSOCKET_PROTOCOL,
+                                        hyper::header::HeaderValue::from_static(
+                                            BROWSER_WS_PROTOCOL,
+                                        ),
+                                    );
+                                }
+                                response
+                            })
+                        }
+                    });
 
                 // Conditionally wrap the service with CORS layer if enabled
                 let svc = if cors_enabled {
@@ -571,12 +607,21 @@ pub mod server {
     mod listener_tests {
         use std::time::Duration;
 
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use biscuit_auth::KeyPair;
         use fiber_json_types::SubscriptionEvent;
+        use futures::{SinkExt, StreamExt};
+        use hyper::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
         use jsonrpsee::{
             core::client::{ClientT, SubscriptionClientT},
             http_client::HttpClientBuilder,
             rpc_params,
             ws_client::WsClientBuilder,
+        };
+        use tokio_tungstenite::{
+            connect_async,
+            tungstenite::{client::IntoClientRequest, Message},
+            MaybeTlsStream, WebSocketStream,
         };
 
         use crate::{
@@ -611,6 +656,164 @@ pub mod server {
                 None,
             )
             .await
+        }
+
+        async fn browser_message(
+            socket: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        ) -> serde_json::Value {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    // Browsers handle ping/pong internally and expose only data messages.
+                    if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                        return serde_json::from_str(&text).unwrap();
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn browser_websocket_authenticates_without_echoing_credentials() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path()).unwrap();
+            let events = crate::signing::SigningEvents::default();
+            let root = KeyPair::new();
+            let token = biscuit_auth::Biscuit::builder()
+                .code(r#"write("subscriptions"); read("channels");"#)
+                .unwrap()
+                .build(&root)
+                .unwrap()
+                .to_base64()
+                .unwrap();
+            let mut config = gen_rpc_config();
+            config.ws_listening_addr = Some("127.0.0.1:0".into());
+            config.biscuit_public_key = Some(root.public().to_string());
+            let server = start(events.clone(), config, store.clone()).await.unwrap();
+            let mut request = format!("ws://{}", server.ws_address.unwrap())
+                .into_client_request()
+                .unwrap();
+            let protocols = format!(
+                "fiber-rpc, base64url.bearer.authorization.fiber.{}",
+                token.trim_end_matches('=')
+            );
+            request
+                .headers_mut()
+                .insert(SEC_WEBSOCKET_PROTOCOL, protocols.parse().unwrap());
+            let (mut socket, response) = connect_async(request).await.unwrap();
+            assert_eq!(response.headers()[SEC_WEBSOCKET_PROTOCOL], "fiber-rpc");
+            assert!(!format!("{:?}", response.headers()).contains(token.trim_end_matches('=')));
+            socket
+                .send(Message::text(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing"]}"#,
+                ))
+                .await
+                .unwrap();
+            let reply = browser_message(&mut socket).await;
+            assert!(reply.get("result").is_some(), "{reply}");
+            let state = ChannelActorState::samples(42).remove(0);
+            let id = state.get_id();
+            let publisher = events.channels(None);
+            let update = publisher.prepare(&state);
+            store.insert_channel_actor_state(state);
+            update.publish();
+            let event = browser_message(&mut socket).await;
+            assert_eq!(event["params"]["subscription"], reply["result"]);
+            assert_eq!(
+                event["params"]["result"]["data"]["channel_id"],
+                format!("{id:#x}")
+            );
+            socket.close(None).await.unwrap();
+            server.handle.stop().unwrap();
+        }
+
+        #[tokio::test]
+        async fn browser_websocket_rejects_ambiguous_credentials_and_enforces_permissions() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = open_store(dir.path()).unwrap();
+            let root = KeyPair::new();
+            let token = biscuit_auth::Biscuit::builder()
+                .code(r#"write("subscriptions"); read("invoices");"#)
+                .unwrap()
+                .build(&root)
+                .unwrap()
+                .to_base64()
+                .unwrap();
+            let credential = format!(
+                "base64url.bearer.authorization.fiber.{}",
+                token.trim_end_matches('=')
+            );
+            let mut config = gen_rpc_config();
+            config.ws_listening_addr = Some("127.0.0.1:0".into());
+            config.biscuit_public_key = Some(root.public().to_string());
+            let server = start(Default::default(), config, store).await.unwrap();
+            let url = format!("ws://{}", server.ws_address.unwrap());
+            for (protocols, bearer) in [
+                (format!("fiber-rpc, {credential}, {credential}"), None),
+                (credential.clone(), None),
+                (
+                    "fiber-rpc, base64url.bearer.authorization.fiber.".into(),
+                    None,
+                ),
+                (
+                    "fiber-rpc, base64url.bearer.authorization.fiber.!".into(),
+                    None,
+                ),
+                (format!("fiber-rpc, {credential}"), Some("Bearer invalid")),
+            ] {
+                let mut request = url.clone().into_client_request().unwrap();
+                request
+                    .headers_mut()
+                    .insert(SEC_WEBSOCKET_PROTOCOL, protocols.parse().unwrap());
+                if let Some(bearer) = bearer {
+                    request
+                        .headers_mut()
+                        .insert(AUTHORIZATION, bearer.parse().unwrap());
+                }
+                let error = connect_async(request).await.unwrap_err();
+                assert!(
+                    matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                    if response.status() == hyper::StatusCode::BAD_REQUEST)
+                );
+            }
+            // Well-formed browser credentials still use the ordinary RPC policies.
+            let invalid_token = URL_SAFE_NO_PAD.encode(b"not a Biscuit");
+            for (token, code) in [(token.as_str(), -32001), (invalid_token.as_str(), -32999)] {
+                let mut request = url.clone().into_client_request().unwrap();
+                request.headers_mut().insert(
+                    SEC_WEBSOCKET_PROTOCOL,
+                    format!(
+                        "fiber-rpc, base64url.bearer.authorization.fiber.{}",
+                        token.trim_end_matches('=')
+                    )
+                    .parse()
+                    .unwrap(),
+                );
+                let (mut socket, _) = connect_async(request).await.unwrap();
+                socket.send(Message::text(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"subscribe","params":["channel_signing"]}"#,
+                )).await.unwrap();
+                let reply = browser_message(&mut socket).await;
+                assert_eq!(reply["error"]["code"], code);
+                socket.close(None).await.unwrap();
+            }
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(
+                SEC_WEBSOCKET_PROTOCOL,
+                format!("fiber-rpc, {credential}").parse().unwrap(),
+            );
+            let http = HttpClientBuilder::default()
+                .set_headers(headers)
+                .build(format!("http://{}", server.http_address))
+                .unwrap();
+            let error = http
+                .request::<serde_json::Value, _>("parse_invoice", rpc_params![{}])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, jsonrpsee::core::ClientError::Call(error) if error.code() == -32999)
+            );
+            server.handle.stop().unwrap();
         }
 
         #[tokio::test]

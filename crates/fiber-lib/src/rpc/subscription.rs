@@ -43,6 +43,40 @@ use service::{EventStream, Source, SubscriptionService};
 /// data. Non-tenant subscribers follow host query permissions and cannot access all
 /// tenant stores. Without RPC authentication, subscriptions use the local host scope.
 ///
+/// #### Browser authentication
+///
+/// Browsers cannot set an `Authorization` header with the native WebSocket API.
+/// On the dedicated listener, offer the `fiber-rpc` subprotocol and a second
+/// subprotocol named `base64url.bearer.authorization.fiber.<token-without-padding>`.
+/// The Biscuit token is already base64url: remove only its trailing `=` padding,
+/// without encoding it again. The server restores padding for Bearer authentication.
+/// This uses the same Biscuit permissions as the Bearer header. The server selects
+/// only `fiber-rpc` in its response and never echoes the credential protocol.
+/// Do not combine this credential with an `Authorization` header. Multiple tokens,
+/// malformed encodings, or a missing `fiber-rpc` protocol reject the handshake.
+///
+/// For example, with `rpc.ws_listening_addr` set to `127.0.0.1:8229` and both signing
+/// topics enabled and authorized:
+///
+/// ```javascript
+/// // token is the Biscuit token string returned by tenant registration.
+/// const unpaddedToken = token.replace(/=+$/, "");
+/// const socket = new WebSocket("ws://127.0.0.1:8229", [
+///   "fiber-rpc",
+///   `base64url.bearer.authorization.fiber.${unpaddedToken}`,
+/// ]);
+/// socket.onopen = () => {
+///   const topics = ["channel_signing", "watchtower_signing"];
+///   topics.forEach((topic, index) => socket.send(JSON.stringify({
+///     jsonrpc: "2.0", id: index + 1, method: "subscribe", params: [topic],
+///   })));
+/// };
+/// socket.onmessage = ({ data }) => console.log(JSON.parse(data));
+/// ```
+///
+/// Use `wss://` when connecting over TLS. Reconnect with a refreshed token when
+/// needed; credentials cannot be replaced on an existing connection.
+///
 /// #### Unsubscribe
 ///
 /// Cancel a subscription created on the same WebSocket connection.
