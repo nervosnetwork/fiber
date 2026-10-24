@@ -60,10 +60,32 @@ impl Store {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    /// Whether each commit waits for the disk (`synchronous = FULL`). Off when opened: in WAL
+    /// mode `NORMAL` may lose the last commits on a power loss or a hard reboot.
+    pub fn set_sync_writes(&mut self, sync_writes: bool) {
+        let level = if sync_writes { "FULL" } else { "NORMAL" };
+        self.conn
+            .lock()
+            .expect("lock poisoned")
+            .execute_batch(&format!("PRAGMA synchronous = {level};"))
+            .expect("set synchronous should be OK");
+    }
 }
 
 impl StorageBackend for Store {
     type Batch = Batch;
+
+    fn sync_writes(&self) -> bool {
+        let level: i64 = self
+            .conn
+            .lock()
+            .expect("lock poisoned")
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous should be OK");
+        // 2 is FULL and 3 is EXTRA.
+        level >= 2
+    }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         let conn = self.conn.lock().expect("lock poisoned");

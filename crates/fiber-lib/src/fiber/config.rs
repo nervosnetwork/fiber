@@ -107,6 +107,9 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
+/// Whether every store write waits for the disk before it returns.
+pub const DEFAULT_STORE_SYNC_WRITES: bool = false;
+
 pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
@@ -342,6 +345,17 @@ pub struct FiberConfig {
         help = "Whether to sync the network graph from the network. [default: true]"
     )]
     pub(crate) sync_network_graph: Option<bool>,
+
+    /// Whether every store write waits for the disk before it returns. Off is faster, but a
+    /// power loss or a hard reboot can lose the last writes and bring the node back with an
+    /// older channel state. A node that holds others' funds should turn it on. [default: false]
+    #[arg(
+        name = "FIBER_STORE_SYNC_WRITES",
+        long = "fiber-store-sync-writes",
+        env,
+        help = "Whether every store write waits for the disk before it returns. Off is faster, but a power loss can lose the last writes; a node that holds others' funds should turn it on. [default: false]"
+    )]
+    pub(crate) store_sync_writes: Option<bool>,
 
     /// The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]
     #[arg(
@@ -624,6 +638,10 @@ impl FiberConfig {
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
+    }
+
+    pub fn store_sync_writes(&self) -> bool {
+        self.store_sync_writes.unwrap_or(DEFAULT_STORE_SYNC_WRITES)
     }
 
     pub fn gen_node_features(&self) -> FeatureVector {
