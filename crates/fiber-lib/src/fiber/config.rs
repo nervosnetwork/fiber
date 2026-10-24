@@ -108,7 +108,7 @@ pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 50;
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
 /// Whether every store write waits for the disk before it returns.
-pub const DEFAULT_STORE_SYNC_WRITES: bool = true;
+pub const DEFAULT_STORE_SYNC_WRITES: bool = false;
 
 pub const PAYMENT_MAX_PARTS_LIMIT: u64 = 24;
 
@@ -348,12 +348,12 @@ pub struct FiberConfig {
 
     /// Whether every store write waits for the disk before it returns. Off is faster, but a
     /// power loss or a hard reboot can lose the last writes and bring the node back with an
-    /// older channel state. [default: true]
+    /// older channel state. A node that holds others' funds should turn it on. [default: false]
     #[arg(
         name = "FIBER_STORE_SYNC_WRITES",
         long = "fiber-store-sync-writes",
         env,
-        help = "Whether every store write waits for the disk before it returns. Off is faster, but a power loss can lose the last writes. [default: true]"
+        help = "Whether every store write waits for the disk before it returns. Off is faster, but a power loss can lose the last writes; a node that holds others' funds should turn it on. [default: false]"
     )]
     pub(crate) store_sync_writes: Option<bool>,
 
