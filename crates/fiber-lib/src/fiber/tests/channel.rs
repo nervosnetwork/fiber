@@ -10401,13 +10401,17 @@ async fn test_reestablish_replays_reverse_commitment_for_different_next_nonce() 
     );
 }
 
-// TODO(v2-nonce-rotation): this scenario drives recovery by replaying the ACK captured *before*
-// the reconnect, then discards the messages the sender generates afterwards. With nonce rotation
-// the stale ACK can no longer be verified against the regenerated commitment (it is now ignored
-// during recovery, so the channel does reach `reestablishing == false`), but the payment still
-// needs one further ACK round that this test never delivers. Re-drive the test from the regenerated
-// commitment instead of the pre-rotation ACK before re-enabling it.
-#[ignore = "needs re-driving from the regenerated commitment; see TODO above"]
+// TODO(v2-nonce-rotation): this scenario keeps the whole owed round (commitment and answer) and
+// then replays the ACK captured *before* the reconnect. With nonce rotation that ACK can no longer
+// be verified against the regenerated commitment, and the replay the peer actually sends is the
+// commitment for a round this test has already discarded, so the sender stays in `reestablishing`
+// and the payment never completes. The behaviour it was written for is covered elsewhere:
+// `test_v2_recovery_dual_owed_preserves_both_original_orders` asserts the cached ACK is replayed
+// byte for byte and that recovery is gated, and
+// `test_v2_crossed_lost_commitments_settle_after_reconnect` asserts both payments settle. Rewrite
+// this one around the regenerated commitment (deliver what the peer sends after the handshake, do
+// not replay the pre-rotation ACK) before re-enabling it.
+#[ignore = "drives recovery through a pre-rotation ACK; see TODO above"]
 #[tokio::test]
 async fn test_v2_reestablish_lost_raa_replays_exact_response_and_gates_ready() {
     init_tracing();

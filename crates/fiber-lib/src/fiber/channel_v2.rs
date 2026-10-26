@@ -1506,7 +1506,10 @@ where
             session.remote_number = peer_number;
         }
         if resign_outstanding_cs {
-            // Carry the original updates into the regenerated round so another crash can replay them.
+            // Carry the original updates into the regenerated round so another crash can replay
+            // them. `pending_replay_updates` and `outgoing.updates` are disjoint by construction
+            // (`prepare_outgoing_v2` drains the former into the latter), and the merged list is
+            // drained again by the next commitment, so repeated crashes cannot accumulate it.
             let mut updates = outgoing
                 .as_ref()
                 .expect("outstanding CS validated")
