@@ -3,6 +3,7 @@ mod channel_commit_diff;
 mod channel_restart_stress;
 mod features;
 mod fee;
+mod forward_recovery;
 mod gossip;
 mod gossip_policy;
 mod graph;

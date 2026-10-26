@@ -32,6 +32,18 @@ fn invalid(message: impl Into<String>) -> ProcessingChannelError {
 }
 
 impl ChannelActorState {
+    /// A peer cannot answer while this channel is offline or its reestablishment is still in
+    /// flight, so a reconnect starts a fresh peer-response window instead of charging the
+    /// partition against the peer. A reconnect that never completes is bounded separately by
+    /// `REESTABLISH_TIMEOUT`.
+    pub(super) fn refresh_peer_response_wait_v2_after_reestablish(&mut self) {
+        if self.session_v2.is_none() {
+            return;
+        }
+        self.clear_waiting_peer_response();
+        self.reset_peer_response_wait_v2();
+    }
+
     pub(super) fn reset_peer_response_wait_v2(&mut self) {
         let ack_pending = self.ack_peer_wait_v2().is_some();
         let close_pending = self.close_peer_wait_v2().is_some();
@@ -194,6 +206,7 @@ impl ChannelActorState {
             self.reestablishing = false;
             self.connectivity_state = fiber_types::ChannelConnectivityState::Online;
             self.reestablish_started_at = None;
+            self.refresh_peer_response_wait_v2_after_reestablish();
             self.schedule_next_retry_task(myself);
             return;
         }
@@ -1468,7 +1481,7 @@ where
         state.recovery_peer_v2 = Some(peer);
         self.replay_effects_v2(state);
         self.update_tlc_status_on_ack(myself, state).await;
-        self.apply_settled_remove_tlcs(state, true).await;
+        self.apply_settled_remove_tlcs(myself, state, true).await;
         self.replay_remove_effects_v2(state);
         if !matches!(state.state, ChannelState::ShuttingDown(_)) {
             state.set_waiting_peer_response();
@@ -1770,7 +1783,7 @@ where
         if let ChannelState::SigningCommitment(flags) = state.state {
             state.maybe_transfer_to_tx_signatures(flags)?;
         }
-        self.apply_settled_remove_tlcs(state, true).await;
+        self.apply_settled_remove_tlcs(myself, state, true).await;
         let external_reply = state.ephemeral_config.external_funding.signed_submitted
             && matches!(state.state, ChannelState::SigningCommitment(flags) if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT));
         state.finish_recovery_v2(myself);
@@ -2325,16 +2338,32 @@ mod tests {
                     state.core = bincode::deserialize(&encoded).unwrap();
                     state.waiting_peer_response = None;
                     state.mark_reestablishing_offline();
+                    // A reconnected peer cannot have answered while the channel was offline, so
+                    // the handshake itself must not be judged against the old deadline.
+                    state.connectivity_state = fiber_types::ChannelConnectivityState::Syncing;
+                    assert!(
+                        !state.peer_does_not_reply_ack_in_time(),
+                        "a reestablishing channel must not exceed the deadline yet"
+                    );
                     actor
                         .reestablish_v2(&myself, &mut state, peer.reestablish_message_v2())
                         .await
                         .unwrap();
                     assert!(!state.reestablishing);
-                    assert_eq!(
-                        state.waiting_peer_response,
-                        Some(0),
-                        "reconnect must not extend the deadline"
+                    // The reconnected peer gets a fresh window instead of being force-closed.
+                    assert!(
+                        !state.peer_does_not_reply_ack_in_time(),
+                        "a reconnect must restart the peer response window, not extend the old deadline"
                     );
+                    assert!(
+                        state.peer_response_wait_v2().is_some_and(|started| {
+                            crate::now_timestamp_as_millis_u64().saturating_sub(started) < 5_000
+                        }),
+                        "the deadline must be refreshed on reconnect"
+                    );
+                    network.stop(None);
+                    task.await.unwrap();
+                    continue;
                 }
                 assert!(
                     state.peer_does_not_reply_ack_in_time(),
@@ -2379,6 +2408,88 @@ mod tests {
                 assert!(!state.peer_does_not_reply_ack_in_time());
             }
         }
+    }
+
+    /// A network partition must not consume the peer's response window: while the channel is
+    /// offline or reestablishing the peer cannot answer, and the window restarts when the
+    /// channel is back online (bounded by `REESTABLISH_TIMEOUT` for a reconnect that never
+    /// completes).
+    #[tokio::test]
+    async fn test_v2_partition_suspends_and_then_restarts_peer_response_window() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+        // A cooperative close is in flight, so our own peer-response obligation exists.
+        actor
+            .shutdown_v2(
+                &mut state,
+                super::super::ShutdownCommand {
+                    force: false,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .session_v2
+            .as_mut()
+            .unwrap()
+            .closing
+            .as_mut()
+            .unwrap()
+            .peer_wait_started_at = 0;
+        assert!(
+            state.peer_does_not_reply_ack_in_time(),
+            "a live channel with an ancient deadline is timed out"
+        );
+
+        // A peer that stays away must still be closed: the deadline keeps counting offline.
+        state.mark_reestablishing_offline();
+        assert!(
+            state.peer_does_not_reply_ack_in_time(),
+            "an absent peer must still be force-closed"
+        );
+
+        // Peer is back and its reestablishment handshake is in flight: the owed messages could
+        // not have been answered before the reconnect, so judgement is suspended.
+        state.connectivity_state = fiber_types::ChannelConnectivityState::Syncing;
+        assert!(
+            !state.peer_does_not_reply_ack_in_time(),
+            "a reestablishing channel must not consume the peer response window"
+        );
+
+        // Reestablishment completed: the peer is reachable again, so the window restarts.
+        state
+            .session_v2
+            .as_mut()
+            .unwrap()
+            .closing
+            .as_mut()
+            .unwrap()
+            .peer_wait_started_at = 0;
+        state.refresh_peer_response_wait_v2_after_reestablish();
+        let started = state
+            .peer_response_wait_v2()
+            .expect("the close obligation still has a deadline");
+        assert!(
+            crate::now_timestamp_as_millis_u64().saturating_sub(started) < 5_000,
+            "a reconnect must restart the peer response window"
+        );
+        assert!(
+            !state.peer_does_not_reply_ack_in_time(),
+            "a reconnect must not force-close immediately"
+        );
+
+        network.stop(None);
+        task.await.unwrap();
     }
 
     async fn assert_timer_publishes_usable(
@@ -3458,6 +3569,86 @@ mod tests {
             a.store.get_attempt(hash, attempt.id).unwrap().tried_times,
             attempt.tried_times
         );
+    }
+
+    /// The relay confirmation for an on-chain settlement drops the matching durable remove
+    /// effect and persists that removal. The effect lookup already proves that a removal
+    /// happened, so the persisted write must not depend on a separate length comparison.
+    #[tokio::test]
+    async fn test_v2_onchain_relay_confirmation_drops_matching_remove_effect() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let myself = a.get_channel_actor(id).await.unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+
+        let reason = fiber_types::RemoveTlcReason::RemoveTlcFail(fiber_types::TlcErrPacket::new(
+            fiber_types::TlcErr::new(fiber_types::TlcErrorCode::HoldTlcTimeout),
+            &[0u8; 32],
+        ));
+        let tlc = fiber_types::TlcInfo {
+            status: fiber_types::TlcStatus::Outbound(
+                fiber_types::OutboundTlcStatus::RemoveAckConfirmed,
+            ),
+            tlc_id: fiber_types::TLCId::Offered(7),
+            amount: 1000,
+            payment_hash: crate::gen_rand_sha256_hash(),
+            total_amount: None,
+            payment_secret: None,
+            attempt_id: Some(1),
+            expiry: crate::now_timestamp_as_millis_u64() + 1_000_000,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0u8; 32],
+            is_trampoline_hop: false,
+            created_at: fiber_types::CommitmentNumbers::default(),
+            removed_reason: Some(reason.clone()),
+            removed_confirmed_at: None,
+            applied_flags: fiber_types::AppliedFlags::empty(),
+            forwarding_tlc: None,
+        };
+        state
+            .session_v2
+            .as_mut()
+            .expect("v2 session")
+            .remove_effects
+            .push((tlc, None));
+        a.store.insert_channel_actor_state(state.clone());
+
+        actor
+            .handle_event(
+                &myself,
+                &mut state,
+                super::super::ChannelEvent::OnChainTlcRelayConfirmed(
+                    fiber_types::TLCId::Offered(7),
+                    reason,
+                ),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            state.session_v2.as_ref().unwrap().remove_effects.is_empty(),
+            "the matching remove effect must be dropped"
+        );
+        assert!(
+            a.store
+                .get_channel_actor_state(&id)
+                .unwrap()
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .remove_effects
+                .is_empty(),
+            "the drop must be persisted"
+        );
+        network.stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]
