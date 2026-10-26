@@ -809,6 +809,47 @@ impl TlcState {
             )
     }
 
+    /// Content rule for V2 channels: Lightning's "two-part" rule.
+    ///
+    /// A commitment contains the updates its owner received, plus the updates its owner sent that
+    /// the counterparty has already acknowledged. Fiber's status ladder defers an update by one
+    /// round when a `CommitmentSigned` was already in flight (`*PrevAck`), which makes the answer
+    /// depend on *local* round ordering and lets the two peers disagree. V2 treats those rungs
+    /// like their `*WaitAck` counterparts, so both peers derive the same content from the same
+    /// acknowledged history (see `docs/notes/channel-v2-commitment-rounds.md`).
+    pub fn commitment_signed_tlcs_v2(
+        &self,
+        for_remote: bool,
+    ) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| match tlc.outbound_status() {
+                // Updates we sent apply to the peer's commitment on delivery and to our own only
+                // after the peer acknowledges them.
+                OutboundTlcStatus::LocalAnnounced => for_remote,
+                OutboundTlcStatus::Committed => true,
+                OutboundTlcStatus::RemoteRemoved => for_remote,
+                OutboundTlcStatus::RemoveWaitPrevAck | OutboundTlcStatus::RemoveWaitAck => false,
+                OutboundTlcStatus::RemoveAckConfirmed => false,
+            })
+            .chain(
+                self.received_tlcs
+                    .tlcs
+                    .iter()
+                    .filter(move |tlc| match tlc.inbound_status() {
+                        // Updates we received are in our own commitment immediately and in the
+                        // peer's commitment once we acknowledge them.
+                        InboundTlcStatus::RemoteAnnounced => !for_remote,
+                        InboundTlcStatus::AnnounceWaitPrevAck
+                        | InboundTlcStatus::AnnounceWaitAck => true,
+                        InboundTlcStatus::Committed => true,
+                        InboundTlcStatus::LocalRemoved => !for_remote,
+                        InboundTlcStatus::RemoveAckConfirmed => false,
+                    }),
+            )
+    }
+
     pub fn update_for_commitment_signed(&mut self) -> bool {
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             if tlc.outbound_status() == OutboundTlcStatus::RemoteRemoved {

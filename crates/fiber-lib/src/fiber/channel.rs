@@ -6416,6 +6416,25 @@ impl ChannelActorState {
             self.connectivity_state = ChannelConnectivityState::Syncing;
             if self.session_v2.is_some() {
                 self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
+                // Every handshake must carry a fresh verification nonce (`next_local_nonces` in
+                // `bolt-simple-taproot`). Rotate at the single place a handshake can be emitted, so
+                // no path can advertise a superseded nonce. Staged records bound to the old nonce
+                // are dropped; `incoming` is kept because ACK processing needs its history.
+                let channel_id = self.id;
+                let local_funding_pubkey = *self.get_local_funding_pubkey();
+                let funding_key = self.signer.funding_key.clone();
+                let number = self.get_remote_commitment_number();
+                if let Some(session) = self.session_v2.as_mut() {
+                    session.own = crate::fiber::session_v2::allocate_nonce(
+                        channel_id,
+                        local_funding_pubkey,
+                        number,
+                        fiber_types::NoncePurposeV2::Commitment,
+                        &funding_key,
+                    );
+                    session.pending_incoming = None;
+                    session.pending_ack = None;
+                }
             }
             self.send_reestablish_message();
         }
@@ -7832,6 +7851,32 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
+    fn get_active_tlcs_v2(&self, for_remote: bool) -> Vec<TlcInfo> {
+        let (mut received_tlcs, mut offered_tlcs) = (
+            self.tlc_state
+                .commitment_signed_tlcs_v2(for_remote)
+                .filter(|tlc| tlc.is_received())
+                .cloned()
+                .collect::<Vec<_>>(),
+            self.tlc_state
+                .commitment_signed_tlcs_v2(for_remote)
+                .filter(|tlc| tlc.is_offered())
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let (mut a, mut b) = if for_remote {
+            (received_tlcs, offered_tlcs)
+        } else {
+            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                tlc.flip_mut();
+            }
+            (offered_tlcs, received_tlcs)
+        };
+        a.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        b.sort_by(|x, y| u64::from(x.tlc_id).cmp(&u64::from(y.tlc_id)));
+        [a, b].concat()
+    }
+
     fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
             .commitment_signed_tlcs(for_remote)
@@ -7919,6 +7964,11 @@ impl ChannelActorState {
     }
 
     fn get_active_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
+        // V2 derives commitment content from the acknowledged history (Lightning's two-part rule);
+        // V1 keeps its historical status ladder so released channels do not change content.
+        if self.channel_features.is_v2() {
+            return self.get_active_tlcs_v2(for_remote);
+        }
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
         let (mut received_tlcs, mut offered_tlcs) = (
             self.get_active_received_tlcs(for_remote),

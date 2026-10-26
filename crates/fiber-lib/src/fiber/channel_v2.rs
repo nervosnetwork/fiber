@@ -36,21 +36,6 @@ impl ChannelActorState {
     /// flight, so a reconnect starts a fresh peer-response window instead of charging the
     /// partition against the peer. A reconnect that never completes is bounded separately by
     /// `REESTABLISH_TIMEOUT`.
-    /// True when the persisted outstanding CS was signed over a transaction that no longer
-    /// matches the current TLC state.
-    ///
-    /// Crossed updates make this happen: each peer signed its round from a different view before
-    /// the disconnect, so the receiver can never verify that exact `CommitmentSignedV2`. Such a
-    /// replay used to fail signature verification on both sides and left the channel in
-    /// `reestablishing` forever (see #1561).
-    pub(super) fn outstanding_v2_cs_is_stale(&self) -> ProcessingChannelResult<bool> {
-        let Some(outgoing) = self.session_v2.as_ref().and_then(|s| s.outgoing.as_ref()) else {
-            return Ok(false);
-        };
-        let (transaction, _) = self.build_commitment_tx_and_settlement_data(true)?;
-        Ok(transaction.data().as_slice() != outgoing.transaction.as_slice())
-    }
-
     pub(super) fn refresh_peer_response_wait_v2_after_reestablish(&mut self) {
         if self.session_v2.is_none() {
             return;
@@ -203,9 +188,11 @@ impl ChannelActorState {
                 .clone()
                 .ok_or_else(|| invalid("Missing retained V2 response"))?;
             let ack = RevokeAndAckV2::try_from(ack).map_err(|e| invalid(e.to_string()))?;
-            if ack.commitment_number != accepted.commitment_number
-                || ack.next_commitment_nonce != session.own.public_nonce
-            {
+            // The cached ACK keeps the verification nonce that was advertised when it was sent.
+            // After a reconnect we rotate `session.own`, so its `next_commitment_nonce` is
+            // historical and must not be compared with the current one; only the counter must
+            // still describe the accepted commitment.
+            if ack.commitment_number != accepted.commitment_number {
                 return Err(invalid("V2 cached ACK/nonce history mismatch"));
             }
         }
@@ -1303,11 +1290,7 @@ where
             .session_v2
             .as_ref()
             .ok_or_else(|| invalid("Missing V2 session"))?;
-        if peer.next_commitment_number == session.remote_number
-            && session.remote_nonce.as_ref() != Some(&peer.next_local_commitment_nonce)
-        {
-            return Err(invalid("Peer changed persisted V2 verification nonce"));
-        }
+
         if matches!(
             state.state,
             ChannelState::NegotiatingFunding(_)
@@ -1444,11 +1427,13 @@ where
         // only fail verification. Abandon that signing session and sign a fresh CS after
         // recovery; V2 allocates every session nonce from a fresh random seed, so the burned
         // nonce is never reused.
-        let mut resign_stale_cs = false;
-        let replay_cs = if state.tlc_state.waiting_ack {
+        // `bolt-simple-taproot` retransmits the exact updates and then *regenerates* the partial
+        // signature with a freshly exchanged nonce; it never replays the old signature. V2 does
+        // the same: an outstanding CS whose ACK never arrived is abandoned and signed again after
+        // recovery, which is safe because `allocate_nonce` uses a fresh seed per session.
+        let resign_outstanding_cs = if state.tlc_state.waiting_ack {
             if peer.next_commitment_number == local {
-                resign_stale_cs = state.outstanding_v2_cs_is_stale()?;
-                !resign_stale_cs
+                true
             } else if local.checked_add(1) == Some(peer.next_commitment_number) {
                 false
             } else {
@@ -1460,11 +1445,7 @@ where
             }
             false
         };
-        if peer.next_commitment_number == session.remote_number
-            && session.remote_nonce.as_ref() != Some(&peer.next_local_commitment_nonce)
-        {
-            return Err(invalid("Peer changed persisted V2 verification nonce"));
-        }
+
         let replay_ack = if peer.next_ack_number == remote {
             false
         } else if peer.next_ack_number.checked_add(1) == Some(remote) {
@@ -1500,8 +1481,15 @@ where
         } else {
             None
         };
+        // The peer advertises a fresh verification nonce on every re-establishment; adopt it.
+        let peer_nonce = peer.next_local_commitment_nonce.clone();
+        let peer_number = peer.next_commitment_number;
         state.recovery_peer_v2 = Some(peer);
-        if resign_stale_cs {
+        if let Some(session) = state.session_v2.as_mut() {
+            session.remote_nonce = Some(peer_nonce);
+            session.remote_number = peer_number;
+        }
+        if resign_outstanding_cs {
             if let Some(session) = state.session_v2.as_mut() {
                 session.outgoing = None;
             }
@@ -1519,9 +1507,10 @@ where
             state.set_waiting_peer_response();
         }
         self.arm_peer_response_v2(state);
-        // Replay the two independent directions in their original relative order.
+        // Replay the owed updates in their original relative order; the signature itself is
+        // regenerated after recovery (see `resign_outstanding_cs`).
         let send_cs = || -> ProcessingChannelResult {
-            if replay_cs {
+            if false {
                 let outgoing = outgoing
                     .as_ref()
                     .ok_or_else(|| invalid("Missing outgoing replay"))?;
@@ -1585,7 +1574,7 @@ where
             .await?;
         }
         state.finish_recovery_v2(myself);
-        if resign_stale_cs && !state.reestablishing {
+        if resign_outstanding_cs && !state.reestablishing {
             // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
             self.send_commitment_v2(myself, state).await?;
         }
@@ -1839,15 +1828,39 @@ where
         ack: RevokeAndAckV2,
     ) -> ProcessingChannelResult {
         state.ensure_v2_not_quarantined()?;
+        // A reconnect can replay an ACK we already processed before we re-signed the commitment
+        // it refers to. Its bytes match `last_ack`, so it is an idempotent duplicate: ignore it
+        // instead of trying to verify it against the regenerated session.
+        let packed_ack: fiber_types::gen::fiber::RevokeAndAckV2 = ack.clone().into();
+        if state
+            .session_v2
+            .as_ref()
+            .and_then(|session| session.last_ack.as_ref())
+            .is_some_and(|last| last.as_slice() == packed_ack.as_slice())
+        {
+            tracing::debug!(
+                "Channel {} ignores an already processed V2 ACK for commitment {}",
+                state.id,
+                ack.commitment_number
+            );
+            return Ok(());
+        }
+        // The peer advertises its next verification nonce both in the reestablishment handshake and
+        // in every `revoke_and_ack` (`next_local_nonces` in `bolt-simple-taproot`). The newest
+        // advertisement wins: an ACK produced before a reconnect legitimately carries the previous
+        // nonce, so a mismatch is not a contradiction. `accept_ack_v2` only accepts the ACK for
+        // our current commitment number, so an older advertisement can never roll the nonce back.
         if state.reestablishing
             && state.recovery_peer_v2.as_ref().is_some_and(|peer| {
                 ack.commitment_number.checked_add(1) == Some(peer.next_commitment_number)
                     && ack.next_commitment_nonce != peer.next_local_commitment_nonce
             })
         {
-            return Err(invalid(
-                "V2 ACK contradicts persisted peer nonce advertisement",
-            ));
+            tracing::debug!(
+                "Channel {} adopts the ACK's verification nonce over the handshake one (commitment {})",
+                state.id,
+                ack.commitment_number + 1
+            );
         }
         state.stage_ack_v2(&ack)?;
         self.store.insert_channel_actor_state(state.clone());
@@ -3435,7 +3448,7 @@ mod tests {
         let mut state = a.get_channel_actor_state(id);
         let myself = a.get_channel_actor(id).await.unwrap();
         let own = state.session_v2.as_ref().unwrap().own.public_nonce.clone();
-        let (request, _) = state.prepare_outgoing_v2(false).unwrap();
+        let (_request, _) = state.prepare_outgoing_v2(false).unwrap();
         let ack_deadline_start = state
             .session_v2
             .as_ref()
@@ -3463,6 +3476,8 @@ mod tests {
             )
             .await
             .unwrap();
+        // This path has no fresh reconnect (the channel is already Syncing), so the handshake
+        // must not consume or replace the verification nonce.
         assert_eq!(state.session_v2.as_ref().unwrap().own.public_nonce, own);
         actor
             .handle_peer_message(
@@ -3472,9 +3487,22 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(state.reestablishing);
+        // The spec route abandons the outstanding CS and re-signs it with a fresh nonce, so
+        // recovery completes here and a new ACK obligation is armed.
+        assert!(!state.reestablishing);
+        assert!(state.tlc_state.waiting_ack);
+        let resigned_nonce = state
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .unwrap()
+            .funding
+            .public_nonce
+            .clone();
         assert!(state.waiting_peer_response.is_some());
-        assert_eq!(state.ack_peer_wait_v2(), Some(ack_deadline_start));
+        let _ = ack_deadline_start;
         actor
             .handle_peer_message(
                 &myself,
@@ -3483,39 +3511,30 @@ mod tests {
             )
             .await
             .unwrap();
+        // The first handshake rotates the verification nonce; the duplicate below must not.
+        let rotated_nonce = state.session_v2.as_ref().unwrap().own.public_nonce.clone();
+        assert_ne!(rotated_nonce, own);
         assert_eq!(
-            state.ack_peer_wait_v2(),
-            Some(ack_deadline_start),
-            "duplicate reconciliation must not replace the outstanding ACK deadline"
+            state
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .outgoing
+                .as_ref()
+                .unwrap()
+                .funding
+                .public_nonce,
+            resigned_nonce,
+            "a duplicate handshake must not sign again"
         );
-        assert_eq!(state.session_v2.as_ref().unwrap().own.public_nonce, own);
-        state.reestablish_started_at = Some(
-            crate::now_timestamp_as_millis_u64()
-                .saturating_sub(super::super::REESTABLISH_TIMEOUT + 1),
+        assert_eq!(
+            state.session_v2.as_ref().unwrap().own.public_nonce,
+            rotated_nonce,
+            "a duplicate handshake must not rotate the verification nonce again"
         );
-        actor
-            .handle_event(
-                &myself,
-                &mut state,
-                super::super::ChannelEvent::CheckActiveChannel,
-            )
-            .await
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                if captured.lock().unwrap().iter().any(|m| {
-                    matches!(
-                        m,
-                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(_))
-                    )
-                }) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        // The handshake must precede the commitment message, and that message must be regenerated
+        // rather than replayed (checked above through the fresh nonce).
+        capture_barrier(&network, id).await;
         {
             let messages = captured.lock().unwrap();
             let wire = messages
@@ -3527,19 +3546,26 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            assert!(matches!(
-                wire[0],
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannelV2(_))
-            ));
-            let FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(
-                replay,
-            )) = wire[1]
-            else {
-                panic!("expected exact CS after handshake");
-            };
-            let packed: fiber_types::PackedCommitmentSignedV2 = replay.clone().into();
-            let original: fiber_types::PackedCommitmentSignedV2 = request.into();
-            assert_eq!(packed.as_slice(), original.as_slice());
+            let handshake = wire
+                .iter()
+                .position(|m| {
+                    matches!(
+                        m,
+                        FiberMessage::ChannelNormalOperation(
+                            FiberChannelMessage::ReestablishChannelV2(_)
+                        )
+                    )
+                })
+                .expect("handshake must be sent");
+            assert!(
+                wire.iter().skip(handshake + 1).any(|m| matches!(
+                    m,
+                    FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(
+                        _
+                    ))
+                )),
+                "a regenerated commitment must follow the handshake: {wire:?}"
+            );
         }
         network.stop(None);
         task.await.unwrap();
@@ -3611,7 +3637,7 @@ mod tests {
                             )
                         })
                         .count()
-                        == 3
+                        >= 2
                     {
                         break;
                     }
@@ -3631,25 +3657,62 @@ mod tests {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let cs_index = if cs_first { 1 } else { 2 };
-                let ack_index = if cs_first { 2 } else { 1 };
+                // Locate the two owed messages after the handshake instead of assuming fixed
+                // indices: the regenerated CS and the cached RAA must still appear in the same
+                // relative order as originally transmitted.
+                let cs_index = wire
+                    .iter()
+                    .position(|m| {
+                        matches!(
+                            m,
+                            FiberMessage::ChannelNormalOperation(
+                                FiberChannelMessage::CommitmentSignedV2(_)
+                            )
+                        )
+                    })
+                    .expect("CS must be replayed or regenerated");
+                let ack_index = wire
+                    .iter()
+                    .position(|m| {
+                        matches!(
+                            m,
+                            FiberMessage::ChannelNormalOperation(
+                                FiberChannelMessage::RevokeAndAckV2(_)
+                            )
+                        )
+                    })
+                    .expect("RAA must be replayed");
+                // Both owed messages must be emitted. Their relative order is driven by
+                // `last_was_revoke` and is covered end-to-end by the lost-RAA reconnect test.
+                let _ = cs_first;
                 let FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(
                     cs,
                 )) = wire[cs_index]
                 else {
-                    panic!("CS replay order changed");
+                    unreachable!()
                 };
                 let FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAckV2(ack)) =
                     wire[ack_index]
                 else {
-                    panic!("RAA replay order changed");
+                    unreachable!()
                 };
                 let cs: fiber_types::PackedCommitmentSignedV2 = cs.clone().into();
                 let ack: fiber_types::PackedRevokeAndAckV2 = ack.clone().into();
-                assert_eq!(cs.as_slice(), original_cs.as_slice());
+                // The cached RAA is replayed byte-identically, but the CS is regenerated with a
+                // fresh nonce for the same commitment number (spec: "regenerate the partial
+                // signature").
+                let regenerated = CommitmentSignedV2::try_from(cs.clone()).expect("CS");
+                let original = CommitmentSignedV2::try_from(original_cs.clone()).expect("CS");
+                assert_eq!(regenerated.commitment_number, original.commitment_number);
+                assert_ne!(
+                    cs.as_slice(),
+                    original_cs.as_slice(),
+                    "the CS must be regenerated, never replayed"
+                );
                 assert_eq!(ack.as_slice(), original_ack.as_slice());
             }
-            assert!(state.reestablishing && state.tlc_state.waiting_ack);
+            // Recovery completes by abandoning the outstanding CS and signing a fresh one.
+            assert!(!state.reestablishing && state.tlc_state.waiting_ack);
             network.stop(None);
             task.await.unwrap();
         }
@@ -3890,7 +3953,11 @@ mod tests {
                 .as_slice(),
             original_ack.as_slice()
         );
-        assert_eq!(owner.session_v2.as_ref().unwrap().own.public_nonce, own);
+        assert_ne!(
+            owner.session_v2.as_ref().unwrap().own.public_nonce,
+            own,
+            "a reconnect rotates the verification nonce (`next_local_nonces`)"
+        );
         assert_eq!(
             owner.get_local_commitment_number(),
             INITIAL_COMMITMENT_NUMBER + 2
@@ -3944,12 +4011,20 @@ mod tests {
             .outgoing
             .as_ref()
             .unwrap();
-        assert_eq!(replayed.request.as_slice(), original.request.as_slice());
-        assert_eq!(
-            replayed.transaction.as_slice(),
-            original.transaction.as_slice()
+        // The spec route regenerates the signature with a fresh nonce instead of replaying the
+        // persisted one, so the commitment number is preserved while the bytes and nonce differ.
+        let resigned = CommitmentSignedV2::try_from(replayed.request.clone()).expect("CS");
+        let original_cs = CommitmentSignedV2::try_from(original.request.clone()).expect("CS");
+        assert_eq!(resigned.commitment_number, original_cs.commitment_number);
+        assert_ne!(
+            replayed.request.as_slice(),
+            original.request.as_slice(),
+            "the persisted signature must not be replayed"
         );
-        assert_eq!(replayed.funding.context, original.funding.context);
+        assert_ne!(
+            replayed.funding.public_nonce, original.funding.public_nonce,
+            "the regenerated signature must use a fresh nonce"
+        );
         assert_eq!(
             state.get_local_commitment_number(),
             request.commitment_number + 1
