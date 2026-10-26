@@ -7639,17 +7639,7 @@ impl ChannelActorState {
 
     fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
         self.tlc_state.apply_remove_tlc(tlc_id);
-
-        let points: HashSet<u64> = self
-            .tlc_state
-            .all_tlcs()
-            .flat_map(|x| [x.created_at.get_local(), x.created_at.get_remote()])
-            .chain(iter::once(self.get_local_commitment_number()))
-            .chain(iter::once(self.get_remote_commitment_number()))
-            .collect();
-
-        self.remote_commitment_points
-            .retain(|(number, _)| points.contains(number));
+        self.prune_remote_commitment_points();
     }
 
     pub fn clean_up_failed_tlcs(&mut self) {
@@ -9317,12 +9307,41 @@ impl ChannelActorState {
             .remote_commitment_points
             .push((local_commitment_number, commitment_point));
 
-        debug_assert!(
-            self.remote_commitment_points.len()
-                <= self.local_constraints.max_tlc_number_in_flight as usize
-                    + self.remote_constraints.max_tlc_number_in_flight as usize
-                    + 2
-        );
+        // Every completed round appends one point, so the vector has to be pruned here rather
+        // than only when a TLC is removed: a channel can complete many rounds while its TLC set
+        // is unchanged (see the V2 round storm in #1561), and nothing else would shrink it.
+        self.prune_remote_commitment_points();
+
+        let limit = self.local_constraints.max_tlc_number_in_flight as usize
+            + self.remote_constraints.max_tlc_number_in_flight as usize
+            + 2;
+        if self.remote_commitment_points.len() > limit {
+            // `prune_remote_commitment_points` keeps every point a live TLC can still reference,
+            // so this means more commitment rounds than in-flight TLCs allow. Keep the most
+            // recent points and never panic the channel actor over a bookkeeping overflow.
+            let excess = self.remote_commitment_points.len() - limit;
+            self.remote_commitment_points.drain(0..excess);
+            error!(
+                "Channel {} retained more remote commitment points than its constraints allow, dropped {} oldest entries",
+                self.get_id(),
+                excess
+            );
+        }
+    }
+
+    /// Drop remote commitment points that no live TLC (nor the current commitment numbers) can
+    /// reference any more.
+    pub(crate) fn prune_remote_commitment_points(&mut self) {
+        let points: HashSet<u64> = self
+            .tlc_state
+            .all_tlcs()
+            .flat_map(|x| [x.created_at.get_local(), x.created_at.get_remote()])
+            .chain(iter::once(self.get_local_commitment_number()))
+            .chain(iter::once(self.get_remote_commitment_number()))
+            .collect();
+
+        self.remote_commitment_points
+            .retain(|(number, _)| points.contains(number));
     }
 
     fn handle_revoke_and_ack_peer_message(

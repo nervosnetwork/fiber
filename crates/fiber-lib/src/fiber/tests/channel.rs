@@ -14091,38 +14091,28 @@ async fn probe_1561_v2_lost_sender_commitment_signed() {
     println!("#1561 V2 variants that did not settle: {stalled:?}");
 }
 
-/// Diagnostic for the V2 `append_remote_commitment_point` debug assertion.
+/// Regression for the V2 commitment-round storm behind the
+/// `append_remote_commitment_point` debug assertion.
 ///
-/// Same crossed-round + lost-`CommitmentSigned` recipe that stalls on V2, sampled instead of
-/// asserted. Findings from this probe (deterministic on this machine):
+/// Crossed rounds plus a lost `CommitmentSigned` leave A waiting for an ACK of a CS the peer
+/// never saw, and B with an inbound TLC in `InboundTlcStatus::RemoteAnnounced`. Because
+/// `need_another_commitment_signed()` counts that status and `receive_ack_v2` used it to decide
+/// whether to send another CS, B used to start a new round on **every** ACK (~35 rounds/s on this
+/// machine): its local commitment number ran from 2 to 252 in ~7s, one remote commitment point was
+/// appended per round, and the `2 * max_tlc_number_in_flight + 2` bound tripped the debug
+/// assertion that killed the channel actor.
 ///
-/// * the `CommitmentSigned` that A sent before the partition never reaches B, so A stays
-///   `waiting_ack = true` with a persisted outgoing V2 session and never sends another CS;
-/// * B keeps an inbound TLC in `InboundTlcStatus::RemoteAnnounced`, which
-///   `need_another_commitment_signed()` reports as "needs a CS" forever because the only
-///   conversion out of `RemoteAnnounced` happens when B processes a CS from A;
-/// * `receive_ack_v2` ends with `if needs_cs { send_commitment_v2() }`, so **every** ACK from A
-///   triggers another CS: B's local commitment number advances ~35 times per second while the
-///   TLC set stays unchanged;
-/// * each accepted ACK appends one remote commitment point, and that vector is only pruned
-///   inside `apply_remove_tlc` (i.e. when a TLC is removed, which never happens here), so the
-///   list grows by one per round until the `2 * max_tlc_number_in_flight + 2` debug assertion
-///   fires after ~7s and kills the channel actor.
+/// The state still has to be repaired by replay (A never resends the lost CS), so this test only
+/// asserts that the storm and the unbounded point growth are gone.
 #[tokio::test]
-#[ignore = "diagnostic: remote_commitment_points growth on V2 crossed rounds"]
-async fn probe_1561_v2_crossed_points_growth() {
+async fn test_v2_crossed_rounds_do_not_storm_commitments() {
     init_tracing();
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
     let initial = node_a.get_channel_actor_state(channel_id);
-    let bound = initial.local_constraints.max_tlc_number_in_flight
+    let bound = (initial.local_constraints.max_tlc_number_in_flight
         + initial.remote_constraints.max_tlc_number_in_flight
-        + 2;
-    println!(
-        "bound={bound} (local_max={}, remote_max={})",
-        initial.local_constraints.max_tlc_number_in_flight,
-        initial.remote_constraints.max_tlc_number_in_flight
-    );
+        + 2) as usize;
 
     node_a
         .hold_next_fiber_messages(
@@ -14136,72 +14126,68 @@ async fn probe_1561_v2_crossed_points_growth() {
         node_a.send_payment_keysend(&node_b, 2000, false),
         node_b.send_payment_keysend(&node_a, 2000, false),
     );
-    let payments = [
+    let _payments = [
         a_to_b.expect("a->b").payment_hash,
         b_to_a.expect("b->a").payment_hash,
     ];
     node_a.wait_for_held_fiber_messages(1).await;
     node_a.discard_held_fiber_messages().await;
-    disconnect_peers_and_wait_for_channel_offline(&mut node_a, &mut node_b, channel_id, "growth")
+    disconnect_peers_and_wait_for_channel_offline(&mut node_a, &mut node_b, channel_id, "storm")
         .await;
     node_a.connect_to(&mut node_b).await;
 
-    let started = std::time::Instant::now();
-    let mut last_sample = std::time::Instant::now();
-    loop {
+    // Rounds that complete in the same instant as the reconnect are part of the repair, so only
+    // count what happens afterwards.
+    let baseline = {
         let a = node_a.get_channel_actor_state(channel_id);
         let b = node_b.get_channel_actor_state(channel_id);
-        if last_sample.elapsed() >= Duration::from_millis(500) {
-            last_sample = std::time::Instant::now();
-            let needs_cs = |state: &ChannelActorState| {
-                let mut probe = state.tlc_state.clone();
-                probe.update_for_commitment_signed()
-            };
-            println!(
-                "t={:>5}ms A points={} local={} remote={} waiting_ack={} needs_cs={} | B points={} local={} remote={} waiting_ack={} needs_cs={} retry_ops={}",
-                started.elapsed().as_millis(),
-                a.remote_commitment_points.len(),
-                a.get_local_commitment_number(),
-                a.get_remote_commitment_number(),
-                a.tlc_state.waiting_ack,
-                needs_cs(&a),
-                b.remote_commitment_points.len(),
-                b.get_local_commitment_number(),
-                b.get_remote_commitment_number(),
-                b.tlc_state.waiting_ack,
-                needs_cs(&b),
-                b.retryable_tlc_operations.len(),
-            );
-        }
-        let statuses = [
-            node_a.get_payment_status(payments[0]).await,
-            node_b.get_payment_status(payments[1]).await,
-        ];
-        if statuses
-            .iter()
-            .all(|status| matches!(status, PaymentStatus::Success | PaymentStatus::Failed))
-        {
-            println!("settled at {:?}: {statuses:?}", started.elapsed());
-            break;
-        }
-        if started.elapsed() > Duration::from_secs(10) {
-            let a_statuses: Vec<String> = a
-                .tlc_state
-                .all_tlcs()
-                .map(|tlc| format!("{:?}:{:?}", tlc.tlc_id, tlc.status))
-                .collect();
-            let b_statuses: Vec<String> = b
-                .tlc_state
-                .all_tlcs()
-                .map(|tlc| format!("{:?}:{:?}", tlc.tlc_id, tlc.status))
-                .collect();
-            println!("not settled after 10s: {statuses:?}");
-            println!("  A tlcs: {a_statuses:?}");
-            println!("  B tlcs: {b_statuses:?}");
-            break;
-        }
+        a.get_local_commitment_number()
+            + a.get_remote_commitment_number()
+            + b.get_local_commitment_number()
+            + b.get_remote_commitment_number()
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let baseline = {
+        let a = node_a.get_channel_actor_state(channel_id);
+        let b = node_b.get_channel_actor_state(channel_id);
+        baseline.max(
+            a.get_local_commitment_number()
+                + a.get_remote_commitment_number()
+                + b.get_local_commitment_number()
+                + b.get_remote_commitment_number(),
+        )
+    };
+
+    let started = std::time::Instant::now();
+    let mut max_rounds = 0u64;
+    let mut max_points = 0usize;
+    while started.elapsed() < Duration::from_secs(4) {
+        let a = node_a.get_channel_actor_state(channel_id);
+        let b = node_b.get_channel_actor_state(channel_id);
+        let rounds = a.get_local_commitment_number()
+            + a.get_remote_commitment_number()
+            + b.get_local_commitment_number()
+            + b.get_remote_commitment_number()
+            - baseline;
+        max_rounds = max_rounds.max(rounds);
+        max_points = max_points.max(a.remote_commitment_points.len());
+        max_points = max_points.max(b.remote_commitment_points.len());
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+
+    // The stuck state itself is repaired by replay (A's lost CS), which is a separate fix.
+    println!(
+        "max_rounds={max_rounds} max_points={max_points} bound={bound} payments={:?}",
+        node_a.get_payment_status(_payments[0]).await
+    );
+    assert!(
+        max_points <= bound,
+        "retained remote commitment points reached {max_points} over the {bound} bound"
+    );
+    assert!(
+        max_rounds <= 16,
+        "commitment rounds stormed: {max_rounds} rounds in 4s after the reconnect"
+    );
 }
 
 #[tokio::test]

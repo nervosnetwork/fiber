@@ -1831,7 +1831,14 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.update_tlc_status_on_ack(myself, state).await;
         state.finish_recovery_v2(myself);
-        if state.tlc_state.need_another_commitment_signed() {
+        // `need_another_commitment_signed` also counts TLCs that only wait for *our* next
+        // commitment, and the only place that folds such a TLC (`RemoteAnnounced` in
+        // particular) is `update_for_commitment_signed`. Using the bare predicate here started a
+        // new round on every ACK while such a TLC stayed pinned - for example when the peer's
+        // `CommitmentSigned` was lost - which storms commitment rounds and grows
+        // `remote_commitment_points` without bound (see #1561). Folding first lets those statuses
+        // advance, so each ACK can trigger at most the rounds that actually commit new updates.
+        if state.tlc_state.update_for_commitment_signed() {
             self.send_commitment_v2(myself, state).await?;
         }
         if !state.is_waiting_tlc_ack() {
