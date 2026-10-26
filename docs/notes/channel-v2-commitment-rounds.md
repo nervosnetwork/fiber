@@ -1,7 +1,7 @@
 # V2 commitment rounds after a reconnect
 
 This note records what the crossed-round investigation actually found, so the
-conclusions are not re-derived (or mis-derived) later.
+conclusions are not re-derived incorrectly later.
 
 ## Root cause: the owed updates were never replayed
 
