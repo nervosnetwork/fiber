@@ -13,7 +13,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use crate::fiber::channel::{
     ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
 };
-use crate::fiber::network::NetworkActorMessage;
+use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage};
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
 };
@@ -21,7 +21,7 @@ use crate::fiber::types::RemoveTlcReason;
 use crate::gen_rand_sha256_hash;
 use crate::tests::gen_utils::gen_rand_fiber_public_key;
 use fiber_types::{
-    AppliedFlags, CommitmentNumbers, Hash256, HashAlgorithm, OutboundTlcStatus,
+    AppliedFlags, CommitmentNumbers, Hash256, HashAlgorithm, OutboundTlcStatus, RemoveTlcFulfill,
     RetryableTlcOperation, TLCId, TlcInfo, TlcStatus,
 };
 
@@ -301,5 +301,91 @@ async fn test_v2_settled_remove_defers_when_payment_effect_lookup_times_out() {
             .remove_effects
             .is_empty(),
         "no outbox entry may be durable before its payment effect is bound"
+    );
+}
+
+/// A settled removal that cannot be applied any more (here: a fulfill whose preimage does not
+/// match the payment hash) must not kill the channel actor. The settled state is inconsistent,
+/// so the only safe action is a bounded on-chain close.
+#[tokio::test]
+async fn test_v2_unapplicable_settled_remove_closes_instead_of_panicking() {
+    use fiber_types::sample::StoreSample;
+
+    let payment_hash = gen_rand_sha256_hash();
+    let data = fiber_types::ChannelActorData::samples(7)
+        .into_iter()
+        .find(|data| data.session_v2.is_some())
+        .expect("a V2 sample");
+    let mut state = ChannelActorState::from(data);
+    state.tlc_state = Default::default();
+    let mut tlc = offered_tlc(0, 1000, payment_hash, None);
+    tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed);
+    tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+        payment_preimage: gen_rand_sha256_hash(),
+    }));
+    state.tlc_state.offered_tlcs.tlcs.push(tlc);
+    state.tlc_state.offered_tlcs.next_tlc_id = 1;
+
+    let captured: Arc<Mutex<Vec<NetworkActorMessage>>> = Default::default();
+    let (network, _) = Actor::spawn(None, SilentNetworkActor, captured.clone())
+        .await
+        .expect("spawn network actor");
+    state.network = Some(network.clone());
+    let store = MockStore::new();
+    store.insert_channel_actor_state(state.clone());
+    let myself = spawn_null_channel_actor().await;
+    let actor = ChannelActor::new(
+        gen_rand_fiber_public_key(),
+        gen_rand_fiber_public_key(),
+        network.clone(),
+        store,
+        None,
+    );
+
+    let balance_before = state.get_local_balance();
+
+    // Used to panic with `expect remove tlc success: FinalIncorrectPreimage`.
+    actor
+        .apply_settled_remove_tlcs(&myself, &mut state, false)
+        .await;
+
+    let force_closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            {
+                let messages = captured.lock().unwrap();
+                if messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                            crate::fiber::channel::ChannelCommandWithId {
+                                channel_id,
+                                command: crate::fiber::channel::ChannelCommand::Shutdown(
+                                    command,
+                                    _
+                                )
+                            }
+                        )) if *channel_id == state.id && command.force
+                    )
+                }) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        force_closed,
+        "an unapplicable settled removal must ask for a force close instead of panicking"
+    );
+    assert_eq!(
+        state.get_local_balance(),
+        balance_before,
+        "a failed removal must not change the local balance"
+    );
+    assert!(
+        state.tlc_state.get(&TLCId::Offered(0)).is_some(),
+        "the unsettled tlc must stay in the channel state"
     );
 }

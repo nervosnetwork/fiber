@@ -1439,7 +1439,18 @@ where
                     break;
                 }
                 Err(err) => {
-                    panic!("expect remove tlc success: {err:?}");
+                    // The settled state can no longer be applied locally (for example a fulfill
+                    // whose preimage does not match the payment hash). Killing the actor would
+                    // strand every other TLC on the channel, so close on-chain instead and
+                    // recover the settlement from the chain outcome.
+                    error!(
+                        "Cannot apply settled removal of tlc {:?} on channel {}: {:?}; force closing",
+                        tlc_id,
+                        state.get_id(),
+                        err
+                    );
+                    self.notify_network_actor_shutdown_me(state);
+                    break;
                 }
             }
         }
