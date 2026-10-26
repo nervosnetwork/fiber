@@ -119,6 +119,15 @@ instead of including everything the owner received for that commitment number.
 
 So the remaining fix belongs in the *membership* rule after all, but not in the
 form the earlier 15-fixture sweep rejected: the sweep varied whole status→membership
-maps, whereas the defect here is narrower — a received TLC drops out of the owner's
-commitment only in the crossed/announced rungs. Re-run the fixture sweep with the
-received half pinned to "always included" before changing anything else.
+maps, whereas the defect here is narrower — a TLC drops out of one side's view of
+the owner's commitment in the crossed/removal rungs.
+
+Tried and rejected: switching `build_settlement_data` to
+`TlcState::commitment_signed_tlcs_v2(for_remote)` when the channel is V2. That makes
+the crossed reproducer strictly worse (0/6 settle, previously 4/6) because the
+two-part rule re-includes updates that the durable commitment had already dropped,
+so healthy rounds stop agreeing too. The settlement builder must key on the durable
+commitment numbers stored on the TLC (`created_at`, and whatever removed-at marker
+is added), not on the live status ladder; the 15-fixture sweep showed `created_at`
+alone changes the content of 8/10 healthy pairs, which is why a *removed-at*
+marker is required before this can be attempted again.
