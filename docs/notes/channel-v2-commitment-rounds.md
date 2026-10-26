@@ -70,3 +70,27 @@ the update stream and the counters, which both peers derive identically.
 1. Update the four tests above to the new contract.
 2. Crossed-round reproducer: expect deterministic convergence instead of 4/6.
 3. Re-run `v2` + `settle` + `onchain` suites and the storm regression.
+
+## Residual crossed-round failure: the signed message differs
+
+With the retired-nonce history in place the reconnect reproducer settles 4/6 instead
+of 2/6. Instrumenting both sides for the remaining cases gives a conclusive split:
+
+```
+DIAG sign   n=3 nonce=<X> msg=30a065d7...
+DIAG verify n=3 own=<X>   msg=591d982c...   (signature invalid)
+```
+
+The aggregate nonce matches and the commitment number matches, yet the message the
+peer signed is not the message we rebuild. So the residual is *not* about nonces or
+about which TLCs a commitment contains: on the failing pairs both sides report the
+same set (`["Received(0)", "Offered(0)"]`) and the same `created_at` values. The
+divergence must therefore be a role-dependent field of
+`build_commitment_tx_and_settlement_data(for_remote)` — the two sides call it with
+opposite `for_remote` values for the same commitment, so any field that is computed
+from the local view instead of the commitment owner's view splits them.
+
+Next step for whoever picks this up: log the full `SettlementData` from both sides
+for the same commitment number and diff it field by field (balances, fees, removed
+TLC effects, revocation/delayed outputs). Do not guess the membership rule again —
+the 15-fixture sweep in this note already ruled out per-status membership changes.
