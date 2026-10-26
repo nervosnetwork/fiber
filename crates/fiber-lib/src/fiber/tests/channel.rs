@@ -1547,6 +1547,112 @@ async fn test_v2_paired_concurrent_updates() {
 }
 
 #[tokio::test]
+async fn test_v2_crossed_lost_commitments_settle_after_reconnect() {
+    init_tracing();
+    for lose_raa in [false, true] {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let balance_a = a.get_local_balance_from_channel(id);
+        let balance_b = b.get_local_balance_from_channel(id);
+        a.hold_next_fiber_messages(
+            b.pubkey,
+            id,
+            TestFiberMessageKind::CommitmentOrAck,
+            if lose_raa { 2 } else { 1 },
+        )
+        .await;
+        b.hold_next_fiber_messages(a.pubkey, id, TestFiberMessageKind::CommitmentSigned, 1)
+            .await;
+        let pa = a.send_payment_keysend(&b, 2000, false).await.unwrap();
+        a.wait_for_held_fiber_messages(1).await;
+        let pb = b.send_payment_keysend(&a, 1999, false).await.unwrap();
+        b.wait_for_held_fiber_messages(1).await;
+        // Deliver B's first CS; optionally lose its RAA as well as A's CS.
+        // Hold any premature follow-up CS from B so the reconnect order is deterministic.
+        let first = take_held_fiber_messages_bounded(&b, "first crossed CS").await;
+        assert_eq!(first.len(), 1);
+        b.hold_next_fiber_messages(a.pubkey, id, TestFiberMessageKind::CommitmentSigned, 1)
+            .await;
+        a.network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+                b.pubkey,
+                first[0].message.clone(),
+                None,
+            )))
+            .unwrap();
+        if lose_raa {
+            a.wait_for_held_fiber_messages(2).await;
+        } else {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while b.get_channel_actor_state(id).get_local_commitment_number() != 3 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("B must process the first RAA before disconnecting");
+        }
+        let b_actor = b.get_channel_actor(id).await.unwrap();
+        call!(b_actor, |reply| ChannelActorMessage::Command(
+            ChannelCommand::TestBarrier(reply)
+        ))
+        .unwrap();
+        assert_eq!(
+            a.get_channel_actor_state(id).get_local_commitment_number(),
+            2
+        );
+        assert_eq!(
+            a.get_channel_actor_state(id).get_remote_commitment_number(),
+            3
+        );
+        assert_eq!(
+            b.get_channel_actor_state(id).get_local_commitment_number(),
+            if lose_raa { 2 } else { 3 }
+        );
+        assert_eq!(
+            b.get_channel_actor_state(id).get_remote_commitment_number(),
+            2
+        );
+        a.discard_held_fiber_messages().await;
+        b.discard_held_fiber_messages().await;
+        disconnect_peers_and_wait_for_channel_offline(&mut a, &mut b, id, "crossed recovery").await;
+        a.connect_to(&mut b).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                a.wait_until_success(pa.payment_hash),
+                b.wait_until_success(pb.payment_hash)
+            );
+            loop {
+                let sa = a.get_channel_actor_state(id);
+                let sb = b.get_channel_actor_state(id);
+                if !sa.tlc_state.waiting_ack
+                    && !sb.tlc_state.waiting_ack
+                    && sa.tlc_state.all_tlcs().next().is_none()
+                    && sb.tlc_state.all_tlcs().next().is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "crossed recovery did not settle (lose_raa={lose_raa}): A={}, B={}",
+                describe_1561_v2("", &a.get_channel_actor_state(id)),
+                describe_1561_v2("", &b.get_channel_actor_state(id)),
+            )
+        });
+        for node in [&a, &b] {
+            let state = node.get_channel_actor_state(id);
+            assert_eq!(state.state, ChannelState::ChannelReady);
+            fiber_types::channel_v2_validation::validate_channel_v2(&state.core).unwrap();
+        }
+        assert_eq!(a.get_local_balance_from_channel(id), balance_a - 1);
+        assert_eq!(b.get_local_balance_from_channel(id), balance_b + 1);
+    }
+}
+
+#[tokio::test]
 async fn test_v2_external_funding_bootstrap_and_payment() {
     let [a, b] = new_2_nodes_with_auto_accept().await;
     let (id, unsigned) = open_external_funding_channel(&a, &b, 100_000_000_000).await;
@@ -14103,8 +14209,8 @@ async fn probe_1561_v2_lost_sender_commitment_signed() {
 /// appended per round, and the `2 * max_tlc_number_in_flight + 2` bound tripped the debug
 /// assertion that killed the channel actor.
 ///
-/// The state still has to be repaired by replay (A never resends the lost CS), so this test only
-/// asserts that the storm and the unbounded point growth are gone.
+/// An ACK must not advance the ladder as if a missing peer CS had arrived. Only TLCs already
+/// folded by a real peer CS can trigger a follow-up round; reconnect must settle both payments.
 #[tokio::test]
 async fn test_v2_crossed_rounds_do_not_storm_commitments() {
     init_tracing();
@@ -14127,7 +14233,7 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
         node_a.send_payment_keysend(&node_b, 2000, false),
         node_b.send_payment_keysend(&node_a, 2000, false),
     );
-    let _payments = [
+    let payments = [
         a_to_b.expect("a->b").payment_hash,
         b_to_a.expect("b->a").payment_hash,
     ];
@@ -14202,12 +14308,12 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // The stuck state itself is repaired by replay (A's lost CS), which is a separate fix.
+    // Recovery must converge, not merely stop generating new rounds.
     let final_a = node_a.get_channel_actor_state(channel_id);
     let final_b = node_b.get_channel_actor_state(channel_id);
     println!(
         "max_rounds={max_rounds} max_points={max_points} bound={bound} payments={:?}",
-        node_a.get_payment_status(_payments[0]).await
+        node_a.get_payment_status(payments[0]).await
     );
     let statuses = |state: &ChannelActorState| {
         state
@@ -14259,6 +14365,17 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
     );
     println!("  A created_at {:?}", created_at(&final_a));
     println!("  B created_at {:?}", created_at(&final_b));
+    assert_eq!(
+        node_a.get_payment_status(payments[0]).await,
+        PaymentStatus::Success
+    );
+    assert_eq!(
+        node_b.get_payment_status(payments[1]).await,
+        PaymentStatus::Success
+    );
+    assert_eq!(final_a.state, ChannelState::ChannelReady);
+    assert_eq!(final_b.state, ChannelState::ChannelReady);
+    assert!(!final_a.tlc_state.waiting_ack && !final_b.tlc_state.waiting_ack);
     assert!(
         max_points <= bound,
         "retained remote commitment points reached {max_points} over the {bound} bound"

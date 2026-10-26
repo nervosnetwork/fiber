@@ -10662,6 +10662,7 @@ impl ChannelActorState {
         &self,
         for_remote: bool,
     ) -> Result<SettlementData, ProcessingChannelError> {
+        let v2 = self.channel_features.is_v2();
         let pending_tlcs = self
             .tlc_state
             .offered_tlcs
@@ -10678,7 +10679,7 @@ impl ChannelActorState {
             .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
                 match tlc.inbound_status() {
                     InboundTlcStatus::RemoteAnnounced => !for_remote,
-                    InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
+                    InboundTlcStatus::AnnounceWaitPrevAck => v2 || !for_remote,
                     InboundTlcStatus::AnnounceWaitAck => true,
                     InboundTlcStatus::Committed => true,
                     InboundTlcStatus::LocalRemoved => true,
@@ -10696,6 +10697,7 @@ impl ChannelActorState {
                 let confirmed_remove_reason = (info.outbound_status()
                     == OutboundTlcStatus::RemoveWaitAck
                     || info.outbound_status() == OutboundTlcStatus::RemoveAckConfirmed
+                    || (v2 && info.outbound_status() == OutboundTlcStatus::RemoveWaitPrevAck)
                     || (info.outbound_status() == OutboundTlcStatus::RemoteRemoved && !for_remote))
                     .then(|| info.removed_reason.as_ref().unwrap());
                 match confirmed_remove_reason {

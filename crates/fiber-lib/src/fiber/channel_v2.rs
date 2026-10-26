@@ -1506,6 +1506,14 @@ where
             session.remote_number = peer_number;
         }
         if resign_outstanding_cs {
+            // Carry the original updates into the regenerated round so another crash can replay them.
+            let mut updates = outgoing
+                .as_ref()
+                .expect("outstanding CS validated")
+                .updates
+                .clone();
+            updates.append(&mut state.pending_replay_updates);
+            state.pending_replay_updates = updates;
             if let Some(session) = state.session_v2.as_mut() {
                 session.outgoing = None;
             }
@@ -1525,8 +1533,8 @@ where
         self.arm_peer_response_v2(state);
         // Replay the owed updates in their original relative order; the signature itself is
         // regenerated after recovery (see `resign_outstanding_cs`).
-        let send_cs = || -> ProcessingChannelResult {
-            if false {
+        let send_updates = || -> ProcessingChannelResult {
+            if resign_outstanding_cs {
                 let outgoing = outgoing
                     .as_ref()
                     .ok_or_else(|| invalid("Missing outgoing replay"))?;
@@ -1548,21 +1556,17 @@ where
                         }
                     }
                 }
-                state.send_v2_message(FiberMessage::commitment_signed_v2(
-                    CommitmentSignedV2::try_from(outgoing.request.clone())
-                        .map_err(|e| invalid(e.to_string()))?,
-                ));
             }
             Ok(())
         };
         if state.last_was_revoke {
-            send_cs()?;
+            send_updates()?;
         }
         if let Some(ack) = ack {
             state.send_v2_message(FiberMessage::revoke_and_ack_v2(ack));
         }
         if !state.last_was_revoke {
-            send_cs()?;
+            send_updates()?;
         }
         let pending_incoming = state
             .session_v2
@@ -1913,14 +1917,18 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.update_tlc_status_on_ack(myself, state).await;
         state.finish_recovery_v2(myself);
-        // `need_another_commitment_signed` also counts TLCs that only wait for *our* next
-        // commitment, and the only place that folds such a TLC (`RemoteAnnounced` in
-        // particular) is `update_for_commitment_signed`. Using the bare predicate here started a
-        // new round on every ACK while such a TLC stayed pinned - for example when the peer's
-        // `CommitmentSigned` was lost - which storms commitment rounds and grows
-        // `remote_commitment_points` without bound (see #1561). Folding first lets those statuses
-        // advance, so each ACK can trigger at most the rounds that actually commit new updates.
-        if state.tlc_state.update_for_commitment_signed() {
+        // An RAA cannot stand in for an unreceived CS: only updates already folded by a real
+        // peer CS need another round. Otherwise we sign too early or storm rounds (#1561).
+        let needs_cs = state.tlc_state.all_tlcs().any(|tlc| {
+            matches!(
+                tlc.status,
+                fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::RemoveWaitAck)
+                    | fiber_types::TlcStatus::Inbound(
+                        fiber_types::InboundTlcStatus::AnnounceWaitAck
+                    )
+            )
+        });
+        if needs_cs {
             self.send_commitment_v2(myself, state).await?;
         }
         if !state.is_waiting_tlc_ack() {
@@ -4003,6 +4011,181 @@ mod tests {
             sender.get_local_commitment_number(),
             request.commitment_number + 1
         );
+    }
+
+    #[tokio::test]
+    async fn test_v2_settlement_accounts_for_prev_ack_updates() {
+        use fiber_types::{
+            InboundTlcStatus, OutboundTlcStatus, RemoveTlcFulfill, RemoveTlcReason, TlcStatus,
+        };
+        let (a, _, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let initial = a.get_channel_actor_state(id);
+        let local = initial.to_local_amount + u128::from(initial.local_reserved_ckb_amount);
+        let remote = initial.to_remote_amount + u128::from(initial.remote_reserved_ckb_amount);
+        let preimage = fiber_types::Hash256::from([42; 32]);
+        let tlc = initial
+            .create_inbounding_tlc(fiber_types::AddTlc {
+                channel_id: id,
+                tlc_id: 0,
+                amount: 2000,
+                payment_hash: fiber_types::HashAlgorithm::CkbHash.hash(preimage).into(),
+                expiry: crate::now_timestamp_as_millis_u64() + 86_400_000,
+                hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+                onion_packet: None,
+            })
+            .unwrap();
+        for for_remote in [false, true] {
+            for status in [
+                InboundTlcStatus::AnnounceWaitPrevAck,
+                InboundTlcStatus::AnnounceWaitAck,
+            ] {
+                let mut state = initial.clone();
+                let mut received = tlc.clone();
+                received.status = TlcStatus::Inbound(status.clone());
+                state.tlc_state.add_received_tlc(received);
+                let settlement = state.build_settlement_data(for_remote).unwrap();
+                assert_eq!(settlement.tlcs.len(), 1);
+                assert_eq!(settlement.local_amount, local);
+                assert_eq!(
+                    settlement.remote_amount,
+                    remote - 2000,
+                    "{status:?}, for_remote={for_remote}"
+                );
+            }
+            for status in [
+                OutboundTlcStatus::RemoveWaitPrevAck,
+                OutboundTlcStatus::RemoveWaitAck,
+            ] {
+                for fulfill in [false, true] {
+                    let mut state = initial.clone();
+                    let mut offered = tlc.clone();
+                    offered.flip_mut();
+                    offered.status = TlcStatus::Outbound(status.clone());
+                    offered.removed_reason = Some(if fulfill {
+                        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage,
+                        })
+                    } else {
+                        RemoveTlcReason::RemoveTlcFail(fiber_types::TlcErrPacket::new(
+                            fiber_types::TlcErr::new(
+                                fiber_types::TlcErrorCode::TemporaryChannelFailure,
+                            ),
+                            &[0; 32],
+                        ))
+                    });
+                    state.tlc_state.add_offered_tlc(offered);
+                    let settlement = state.build_settlement_data(for_remote).unwrap();
+                    assert!(settlement.tlcs.is_empty());
+                    let transferred = if fulfill { 2000 } else { 0 };
+                    assert_eq!(
+                        settlement.local_amount,
+                        local - transferred,
+                        "{status:?}, fulfill={fulfill}, for_remote={for_remote}"
+                    );
+                    assert_eq!(settlement.remote_amount, remote + transferred);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v2_recovery_replays_updates_before_regenerated_cs() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sender = a.get_channel_actor_state(id);
+        let mut receiver = b.get_channel_actor_state(id);
+        let myself = a.get_channel_actor(id).await.unwrap();
+        let command = fiber_types::AddTlcCommand {
+            amount: 2000,
+            payment_hash: [42; 32].into(),
+            attempt_id: None,
+            expiry: crate::now_timestamp_as_millis_u64() + 86_400_000,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        };
+        let tlc = sender.create_outbounding_tlc(&command);
+        let add = fiber_types::AddTlc {
+            channel_id: id,
+            tlc_id: tlc.id(),
+            amount: command.amount,
+            payment_hash: command.payment_hash,
+            expiry: command.expiry,
+            hash_algorithm: command.hash_algorithm,
+            onion_packet: None,
+        };
+        sender.tlc_state.add_offered_tlc(tlc);
+        sender.increment_next_offered_tlc_id();
+        sender.record_pending_replay_update(fiber_types::TlcReplayUpdate::Add(add.clone()));
+        let (original, _) = sender.prepare_outgoing_v2(false).unwrap();
+        sender.tlc_state.waiting_ack = true;
+        sender.mark_reestablishing_offline();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        sender.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        actor
+            .reestablish_v2(&myself, &mut sender, receiver.reestablish_message_v2())
+            .await
+            .unwrap();
+        capture_barrier(&network, id).await;
+        let wire = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(message)) => {
+                    Some(message.message.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let peer_actor =
+            ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+        let mut accepted = false;
+        for message in wire {
+            match message {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(add)) => {
+                    peer_actor
+                        .handle_add_tlc_peer_message(&mut receiver, add)
+                        .unwrap();
+                }
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(
+                    cs,
+                )) => {
+                    assert_eq!(cs.commitment_number, original.commitment_number);
+                    assert_ne!(cs.funding_nonce, original.funding_nonce);
+                    receiver
+                        .stage_incoming_v2(&cs, false)
+                        .expect("replayed updates must reach the peer before the regenerated CS");
+                    accepted = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(accepted, "recovery must regenerate the outstanding CS");
+        let stored = a.get_channel_actor_state(id);
+        stored.validate_session_v2().unwrap();
+        assert_eq!(
+            stored
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .outgoing
+                .as_ref()
+                .unwrap()
+                .updates,
+            vec![fiber_types::TlcReplayUpdate::Add(add)],
+            "a second crash must retain the regenerated round's replay updates"
+        );
+        network.stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]
