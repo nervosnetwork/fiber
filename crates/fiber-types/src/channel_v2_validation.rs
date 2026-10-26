@@ -317,6 +317,15 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
         NoncePurposeV2::Commitment,
         session.own.number,
     )?;
+    for retired in &session.own_retired {
+        nonce(
+            retired,
+            key,
+            local,
+            NoncePurposeV2::Commitment,
+            retired.number,
+        )?;
+    }
     if session.own.number > 1 {
         check(
             session.own.channel_id == channel.id,
@@ -516,7 +525,11 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
         if pending {
             check(
                 number == session.own.number
-                    && incoming.funding.public_nonce == session.own.public_nonce,
+                    && (incoming.funding.public_nonce == session.own.public_nonce
+                        || session
+                            .own_retired
+                            .iter()
+                            .any(|n| n.public_nonce == incoming.funding.public_nonce)),
                 "V2 staged incoming active nonce mismatch",
             )?;
         }

@@ -53,6 +53,7 @@ fn sample_v2(seed: u64) -> ChannelActorData {
     channel.session_v2 = Some(crate::ChannelSessionV2 {
         marker: 0x56320001,
         own,
+        own_retired: vec![],
         remote_nonce: None,
         remote_number: 1,
         bootstrap_remote_nonce: None,

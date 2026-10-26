@@ -1561,6 +1561,11 @@ pub struct ChannelSessionV2 {
     pub marker: u32,
     /// Exactly one active own commitment verification nonce.
     pub own: SigningNonceV2,
+    /// Previously advertised own verification nonces, newest first. A reconnect rotates `own`
+    /// (`next_local_nonces`), but a commitment the peer signed before it saw the rotation still
+    /// verifies against the older public nonce, so the latest retired entries are retained.
+    #[serde(default)]
+    pub own_retired: Vec<SigningNonceV2>,
     /// The remote owner's advertised verification nonce and number.
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub remote_nonce: Option<PubNonce>,
