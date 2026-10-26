@@ -94,3 +94,31 @@ Next step for whoever picks this up: log the full `SettlementData` from both sid
 for the same commitment number and diff it field by field (balances, fees, removed
 TLC effects, revocation/delayed outputs). Do not guess the membership rule again —
 the 15-fixture sweep in this note already ruled out per-status membership changes.
+
+### Instrumented confirmation: the commitment *membership* differs by one TLC
+
+Dumping `build_commitment_transaction_output` on both sides (for_remote, version,
+settlement witness hash, TLC list) for a failing sample gives this table:
+
+```
+rm=true  v=3 wit=2415e67e tlcs=["Received(0)/2000/1793884789228", "Offered(0)/2000/1794172789228"]
+rm=false v=3 wit=8a678f13 tlcs=["Offered(0)/2000/1794172789228"]
+```
+
+The lock-script aggregate key is symmetric (matching `rm=true` / `rm=false` pairs
+agree), the version is the same, the TLC ids that *both* include are identical in
+amount and expiry. The only difference is that one side omits the TLC it
+**received** from the commitment it is about to sign, while the peer signing that
+same commitment includes it.
+
+In BOLT 2 terms, the owner's commitment contains the updates it received plus the
+updates it sent that the peer acknowledged. The failing side is dropping a
+received update, i.e. `commitment_signed_tlcs_v2` still gates the received half on
+an acknowledgement rung (`AnnounceWaitAck` / `AnnounceWaitPrevAck`) in this state
+instead of including everything the owner received for that commitment number.
+
+So the remaining fix belongs in the *membership* rule after all, but not in the
+form the earlier 15-fixture sweep rejected: the sweep varied whole status→membership
+maps, whereas the defect here is narrower — a received TLC drops out of the owner's
+commitment only in the crossed/announced rungs. Re-run the fixture sweep with the
+received half pinned to "always included" before changing anything else.
