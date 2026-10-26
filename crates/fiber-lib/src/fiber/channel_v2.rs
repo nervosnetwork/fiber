@@ -1864,7 +1864,24 @@ where
         }
         state.stage_ack_v2(&ack)?;
         self.store.insert_channel_actor_state(state.clone());
-        let Some((revocation, settlement)) = state.accept_ack_v2(myself, &ack)? else {
+        // A reconnect abandons the outstanding commitment and re-signs it with a fresh nonce, so
+        // the peer may still answer the *previous* round with an ACK that can no longer be
+        // verified. Such an ACK is stale by construction: the peer answers the regenerated
+        // commitment with a new ACK, so dropping it costs nothing. Outside recovery an
+        // unverifiable ACK remains a hard error.
+        let accepted = match state.accept_ack_v2(myself, &ack) {
+            Ok(accepted) => accepted,
+            Err(err) if state.reestablishing => {
+                tracing::warn!(
+                    "Channel {} ignores an ACK for a superseded V2 commitment round: {}",
+                    state.id,
+                    err
+                );
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
+        let Some((revocation, settlement)) = accepted else {
             return Ok(());
         };
         self.store.insert_channel_actor_state(state.clone());
