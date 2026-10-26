@@ -148,6 +148,35 @@ New deterministic coverage:
 6. Nonce audit: the feature-gated secnonce-reuse assertion
    (`Musig2SignContext::sign`) must stay clean across the crash schedules.
 
+## Why not reuse `ReestablishChannelV2`
+
+`ReestablishChannelV2 { channel_id, next_commitment_number, next_ack_number,
+next_local_commitment_nonce }` is the natural candidate, because it is already
+the V2 reconnection message. It cannot also delimit the end of the replay:
+
+1. **Order.** It must be the first message: `replay_cs`, `replay_ack` and the
+   nonce checks all read its cursors. The completion signal must be the last
+   message of the replay phase. One message cannot mark both ends of a window.
+2. **Existing semantics.** A repeated handshake is silently ignored today
+   (`if !reestablishing { return Ok(()) }`, and an identical
+   `recovery_peer_v2` returns `Ok`). Reusing it would make "the peer finished
+   its replay" indistinguishable from "the peer retransmitted the handshake",
+   and a forged or stale retransmission would unlock signing early.
+3. **Stale content.** By the time the replay is finished, the sender's cursors
+   may already have advanced from processing the peer's replay, so a second
+   copy of the same message would carry stale numbers and need its own
+   validation rules anyway.
+4. **The commit step must follow the window.** The fix is not to replay the
+   old CS (its signature is over a pre-disconnect view), it is to sign again
+   *after* both replays landed. That requires an explicit end-of-window signal,
+   which is exactly what the first handshake cannot be.
+
+The viable alternative is to extend the existing message with a phase or
+`replay_complete` flag and send it twice. That is also a wire change, and it
+turns a one-shot handshake into a two-phase one, so duplicate/retransmission
+semantics and validation of the completing copy have to be redefined. A separate
+variant keeps those rules untouched, which is why it is proposed instead.
+
 ## Alternatives considered
 
 - **Reuse `ChannelReadyV2` as the marker.** Rejected: it is bound to the opening
