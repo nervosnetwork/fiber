@@ -153,3 +153,42 @@ Next step: debug the 0/6 variant first. It needs no crossing, so the failure sho
 reduce to "which of the two owed messages is replayed and in what order" rather than
 to commitment content. Only if that variant turns out to agree on content should the
 content question be revisited.
+
+### The crossed-round deadlock is already bounded (measured)
+
+The stuck state (`waiting_ack = true`, `ChannelReady`, a commitment we cannot
+rebuild) looked like a permanently wedged channel, but it is covered by the existing
+peer-response watchdog:
+
+- `set_waiting_ack(true)` arms a `CheckActiveChannel` at `PEER_CHANNEL_RESPONSE_TIMEOUT`
+  (30 s in production, 10 s under `cfg(test)`);
+- `ack_peer_wait_v2()` exposes `outgoing.peer_wait_started_at` for the durable
+  deadline, and `peer_does_not_reply_ack_in_time()` compares it with the clock;
+- `MaintainChannelTlcs` re-checks the same deadline, so a delayed one-shot is not the
+  only route;
+- on expiry the actor calls `notify_network_actor_shutdown_me`, which force closes.
+
+Measured by widening the reproducer's observation window past the test timeout and
+dropping a whole commitment round:
+
+```
+A final: state=Closed(CloseFlags(UNCOOPERATIVE_LOCAL | WAITING_ONCHAIN_SETTLEMENT))
+B final: state=Closed(CloseFlags(UNCOOPERATIVE_LOCAL | WAITING_ONCHAIN_SETTLEMENT))
+```
+
+Both sides force close. The earlier "deadlock" was an artifact of the test giving the
+channel 4-5 s while the watchdog needs 10 s under `cfg(test)` (30 s in production).
+
+Consequences for this investigation:
+
+- no attempt counter is needed: the time-based watchdog is the bounded fallback and is
+  the same call an attempt counter would make;
+- the residual crossed-round failure is a *degradation* (uncooperative close), not a
+  hang, and it costs an on-chain close in a rare reconnect race;
+- a test that asserts "the payment settles" must either avoid the race or accept the
+  close, since 10 s of botched recovery legitimately ends in a force close.
+
+The only remaining design question is whether to make the commitment content
+deterministic so the race does not happen at all. Both membership experiments tried so
+far regress healthy pairs, so that needs the durable-commitment-number approach, not
+another status-table tweak.
