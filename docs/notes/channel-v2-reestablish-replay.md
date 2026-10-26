@@ -1,4 +1,4 @@
-# Design: ordered V2 reestablishment replay (`ReestablishReplayCompleteV2`)
+# Design: reconciling V2 commitment content after a reconnect
 
 Status: proposal, not implemented. Related: #1561, #1677, and the cursor
 reconciliation section of `channel-v2.md`.
@@ -6,199 +6,161 @@ reconciliation section of `channel-v2.md`.
 ## Problem
 
 After a reconnect, `reestablish_v2` replays the persisted outstanding
-`CommitmentSignedV2` as soon as the handshake is validated. The peer verifies it
-by rebuilding the commitment transaction from its *current* `tlc_state`.
+`CommitmentSignedV2`. The peer verifies it by rebuilding the commitment
+transaction from its own `tlc_state`, and the two sides can disagree even when
+they hold exactly the same TLCs. The replay then fails with
+`failed to verify signature: signature is invalid`, and both channels stay
+`reestablishing` in `Syncing` until `REESTABLISH_TIMEOUT` (5 minutes).
 
-When TLC updates crossed during the disconnect, the two peers signed their
-rounds from different `tlc_state` views, so the rebuilt transaction differs and
-the replay fails with `failed to verify signature: signature is invalid`. Both
-channels then stay `reestablishing` in `Syncing` until `REESTABLISH_TIMEOUT`
-(5 minutes) and are force-closed.
+Measured on the crossed-round reproduction
+(`test_v2_crossed_rounds_do_not_storm_commitments`): 1 of 6 runs converged
+before any fix, 4 of 6 after abandoning a CS whose own rebuild already differs
+(`c8b7bba0`). The rest are this class.
 
-Evidence from the crossed-round reproduction
-(`test_v2_crossed_rounds_do_not_storm_commitments`): before any fix 1 of 6 runs
-converged; abandoning a CS whose *own* rebuild already differs raised that to
-4 of 6. The remaining 2 of 6 are this case.
+## Minimal experiment
 
-Cursors cannot detect it. The signer rebuilds from its own (unchanged) state and
-gets exactly the transaction it signed, so `outstanding_v2_cs_is_stale` is
-false; only the peer's state differs. There is no field in
-`ReestablishChannelV2` that describes the peer's TLC set, and adding one would
-be a full state digest exchange.
-
-## Proposal
-
-Make reestablishment explicitly two-phase for V2 channels:
-
-1. **Phase 1 (replay).** Exchange `ReestablishChannelV2`, validate cursors and
-   nonces as today, replay owed `AddTlc`/`RemoveTlc` updates in their original
-   order, and replay the owed ACK (`session.incoming.response`) if the peer
-   missed it. **Do not sign or replay a `CommitmentSignedV2`.**
-2. **Marker.** After Phase 1 finishes, send the new
-   `ReestablishReplayCompleteV2 { channel_id }`.
-3. **Phase 2 (commitment).** Run the commitment step only after the peer's
-   marker has been received: replay the persisted CS, abandon + re-sign a stale
-   one, or answer the peer's replay from the durable record.
-
-Because messages on a connection are delivered in order, the marker is only
-received after the peer has applied every replayed update from that side. Both
-peers therefore enter Phase 2 with the same TLC set, which is exactly the
-guarantee that is missing today.
+In a failing run both peers hold the same two TLCs with identical creation
+numbers, but one rung apart in their status ladder:
 
 ```
-A                                                    B
-|-- ReestablishChannelV2 --------------------------->|
-|<-------------------------------- ReestablishChannelV2|
-|-- AddTlc/RemoveTlc replay (owed) ---------------->|
-|<--------------- AddTlc/RemoveTlc replay (owed) ---|
-|-- ReestablishReplayCompleteV2 ------------------->|
-|<------------------ ReestablishReplayCompleteV2 ---|
-|-- CommitmentSignedV2 (replay or fresh) ---------->|
-|<----------------- CommitmentSignedV2 (replay/fresh)|
-|-- RevokeAndAckV2 -------------------------------->|
+A: local=2 remote=3  offered(0)=LocalAnnounced  received(0)=AnnounceWaitPrevAck
+B: local=3 remote=2  offered(0)=Committed       received(0)=AnnounceWaitAck
+
+A set for B's commitment #2 (by status) = ["Offered(0)"]
+B set for B's commitment #2 (by status) = ["Received(0)", "Offered(0)"]
+A created_at = Offered(0)@local=2@remote=2, Received(0)@local=2@remote=2
+B created_at = Offered(0)@local=2@remote=2, Received(0)@local=2@remote=2
 ```
 
-## Wire format and compatibility
+So the *inputs* both peers keep are identical, while the *selector* disagrees.
+The selector is `ChannelActorState::build_settlement_data`, which decides
+membership from the mutable status:
 
-Append `ReestablishReplayCompleteV2 { channel_id: [u8; 32] }` to the V2 channel
-message union in `fiber-types/src/schema/fiber.mol` the same way
-`CommitmentSignedV2`/`RevokeAndAckV2` were appended, without touching legacy
-discriminants. It is only meaningful for `channel_features.is_v2()`; on a legacy
-channel it is rejected like any other V2-only message
-(`channel.rs::handle_peer_message` version filter).
+| TLC status | in our own commitment (`for_remote = false`) | in the peer's commitment (`for_remote = true`) |
+| --- | --- | --- |
+| Offered `LocalAnnounced` | no | yes |
+| Offered `Committed` / `RemoveWait*` | yes | yes |
+| Received `RemoteAnnounced` / `AnnounceWaitPrevAck` | yes | no |
+| Received `AnnounceWaitAck` / `Committed` | yes | yes |
 
-V2 is not released yet (the feature byte `1` and its messages are unpublished,
-and the migration merged in #1665 keeps the same epoch), so no legacy
-negotiation is required. A node that speaks V2 without this message cannot
-complete Phase 2 with a peer that waits for the marker; since the capability is
-unreleased, treat that as a coordinated rollout requirement and record it in
-`channel-v2.md`. Do not add a silent fallback initially: falling back would
-reintroduce the crossed-view failure while hiding it.
+A signed B's commitment while B's TLC was `AnnounceWaitPrevAck` on A's side
+(excluded), but B rebuilds it from `Committed` (included). Same TLCs, different
+transaction.
 
-## State machine
+## Why a "replay complete" marker would not fix this
 
-Runtime-only fields on `ChannelActorState` (no migration; the durable
-`session.outgoing`/`session.incoming` records stay the source of truth):
+An extra `ReestablishReplayCompleteV2` (or a `replay_complete` field on
+`ReestablishChannelV2`) only orders the replayed updates before the commitment
+step. Here nothing is missing: both peers already applied every update, and
+replaying them again does not change any status. The disagreement is produced by
+the status ladder itself, so the same replay would still fail after the marker.
+That proposal is withdrawn as the primary fix; it could only narrow a crash
+window once the content is deterministic.
 
-- `recovery_replay_sent: bool` — Phase 1 finished for the current recovery.
-- `recovery_peer_replay_complete: bool` — peer marker received.
-- `recovery_commitment_pending: bool` — Phase 2 is owed but parked.
+## Correct direction
 
-Changes in `channel_v2.rs::reestablish_v2`:
+Make the membership of a commitment a function of durable, symmetric inputs
+instead of the mutable ladder. Both peers already persist what is needed:
 
-1. After cursor/nonce/history validation, replay updates and the owed ACK only;
-   set `recovery_replay_sent = true`; send the marker.
-2. Replace the current "replay/sign CS here" tail with
-   `self.run_recovery_commitment_step(myself, state).await?`, which returns
-   early (and sets `recovery_commitment_pending`) while
-   `recovery_peer_replay_complete == false`.
-3. `run_recovery_commitment_step` keeps today's decisions: replay a verifiable
-   persisted CS, abandon and re-sign a stale one, answer a duplicate from
-   `session.incoming`, then `finish_recovery_v2`.
+- `TlcInfo.created_at` (the local and remote commitment numbers at creation),
+  identical on both sides in the experiment above;
+- `OutgoingCommitmentV2.settlement` / `IncomingCommitmentV2.settlement`, the
+  exact TLC set that was signed in that round.
 
-New handler `receive_reestablish_replay_complete_v2`:
+Concretely:
 
-- reject unless `state.reestablishing && state.recovery_peer_v2.is_some()`
-  (a marker on an idle channel is a protocol violation);
-- idempotent on duplicates;
-- set `recovery_peer_replay_complete = true`, clear
-  `recovery_commitment_pending`, and run `run_recovery_commitment_step`.
+1. Define a canonical predicate `tlc_in_commitment(tlc, commitment_number)` from
+   `created_at` plus the removal snapshot (for example: created at or before
+   that number and not removed before it). Its offset must be pinned by tests,
+   but the experiment shows both peers' inputs are symmetric, so the predicate
+   evaluates identically on both sides.
+2. Use that predicate as the selector in `build_settlement_data` for V2
+   channels, and keep the status ladder for progression bookkeeping only. The
+   ladder can then skew without changing what a commitment contains.
+3. On reestablishment, verify a replayed CS against the canonical set (or, when
+   available, against the persisted `settlement` snapshot of the accepted
+   round), so a byte-identical replay verifies even if the ladder drifted.
+4. Keep V1 behaviour unchanged: gate the selector on `channel_features.is_v2()`
+   or prove equivalence for the legacy layout, because `build_settlement_data`
+   is shared with V1 and the V1 commitment layout must not change.
 
-`session.pending_incoming` / `session.pending_ack` processing currently happens
-at the end of `reestablish_v2`; it must move into Phase 2 as well, because those
-paths can sign or answer commitments.
+This removes the need for a new wire message. The remaining wire-level question
+is whether a replayed CS must also carry the settlement snapshot to be verified
+against; that is only needed if the canonical predicate cannot be derived
+locally, which the experiment suggests it can.
 
-## Crash and loss points
+## MuSig2 nonce constraints (why BOLT 2 is not directly transferable)
 
-The marker is runtime-only and the CS session records are durable, so a crash
-only restarts recovery:
+BOLT 2 recovers by retransmitting byte-identical `commitment_signed` and
+`revoke_and_ack` messages, chosen by `next_commitment_number` /
+`next_revocation_number`. That is safe for Lightning because each commitment is
+a single-party ECDSA signature whose nonce is derived per message, so
+retransmission never reuses a nonce across different messages.
 
-| Crash point | After restart |
-| --- | --- |
-| after replay, before marker | new handshake; replay repeats (duplicate `AddTlc` with the same id is rejected as an error today and must be made idempotent, see below); marker re-sent |
-| after marker sent, before Phase 2 | peer re-handshakes; Phase 1 repeats; Phase 2 runs |
-| after Phase 2 CS, before ACK | existing durable CS replay/abandon rules apply |
-| marker lost in flight | both sides park; bounded by `REESTABLISH_TIMEOUT`. Optional: re-send the marker from `MaintainChannelTlcs` while parked and `recovery_replay_sent` is true |
-| both peers crash | symmetric; each restart replays and re-marks |
+Our commitment is a MuSig2 aggregation, so the constraint is stricter:
 
-One prerequisite falls out of the table: a replayed `AddTlc` for a TLC the peer
-already applied must be a no-op (identical content) rather than
-`InvalidParameter("Received tlc id ... is not the expected next id ...")`. That
-is safe and independent of the marker, and should land first.
+- A secret nonce MUST NOT sign two different messages (nonce reuse leaks the
+  key). RFC 9611 also asks implementations to persist nonces before use and to
+  treat a possibly-used nonce as burned.
+- Therefore only two moves are legal after a reconnect: **replay the exact
+  bytes** that were signed, or **burn that session and sign with a fresh
+  nonce**. "Re-sign the same state until the peer accepts" is not a safe loop.
+- V2 already provides this: `session_v2::allocate_nonce` uses a fresh random
+  seed per session (not derived from the commitment number), the exact
+  transaction, settlement and signing context are persisted in
+  `session.outgoing` before the message leaves, and `bind_context` refuses to
+  bind the same nonce to a different `(keys, aggregate nonce, message)`
+  (`Conflicting V2 signing context for consumed nonce`). The abandoned-session
+  path added in `c8b7bba0` relies on all three.
+- This is also why the V1 re-sync proposal was rejected (#1590/#1628): V1 derives
+  the secret nonce from the commitment number and purpose, so re-signing the
+  same number in a different context can reuse it.
+
+How other proposals avoid the problem:
+
+- **Simple taproot channels**: MuSig2 is used only for the funding output, which
+  is signed once (or during a splice), while commitment transactions stay
+  single-party. BOLT 2 retransmission remains valid there.
+- **eltoo / Decker-Russell-Osuntokun (LN symmetry)**: a single signature stays
+  valid for any successor state (`SIGHASH_SINGLE|ANYONECANPAY` over the update
+  transaction), so state changes never require re-signing the same data with the
+  same nonce.
+- **Common practice for MuSig2 state machines**: pre-commit the public nonce,
+  persist the signing context before sending, and on restart replay the exact
+  message or burn the session. Nobody retransmits a *different* signature for
+  the same slot.
+
+The design implication is that recovery must make the message reproducible
+(deterministic content, as proposed above), not make the signer try again.
 
 ## Tests
 
-Acceptance is the existing crossed-round reproducer converging every run:
-
-- `test_v2_crossed_rounds_do_not_storm_commitments`: extend to assert both
-  payments settle, and run it repeatedly (it is the regression for this design).
+Acceptance: the crossed-round reproducer settles every run, asserted in
+`test_v2_crossed_rounds_do_not_storm_commitments` (currently it only asserts
+bounded rounds and points).
 
 New deterministic coverage:
 
-1. Ordering: with the peer's marker withheld, no CS is signed or replayed;
-   delivering the marker then performs exactly one Phase 2 step.
-2. Idempotency: duplicate marker, plus a marker received before our own Phase 1
-   finished, still produce one Phase 2 step.
-3. Validation: marker on a non-reestablishing channel, on a legacy channel, and
-   with a wrong channel id are rejected without state change.
-4. Crash matrix: persist after Phase 1, drop the runtime flags, re-run
-   reestablishment, assert convergence and no duplicate signing.
-5. Timeout: marker never arrives → no signing, no panic, and the channel is
-   closed by the existing `REESTABLISH_TIMEOUT` path.
-6. Nonce audit: the feature-gated secnonce-reuse assertion
-   (`Musig2SignContext::sign`) must stay clean across the crash schedules.
+1. `tlc_in_commitment` predicate: for every pair of statuses reachable after a
+   reconnect, the set derived from `created_at` matches on both peers while the
+   status-derived set may differ (encode the experiment above as a unit test on
+   the two captured states).
+2. Replay verification uses the canonical set: a CS signed before a status
+   skew still verifies after the skew.
+3. V1 unchanged: existing V1 commitment tests plus the V1 #1561 reproducer keep
+   their current behaviour.
+4. Recovery without a status skew stays byte-identical: no new `commitment_signed`
+   is produced, the persisted request is replayed exactly.
+5. Crash matrix: persist, drop runtime state, rerun reestablishment, converge.
+6. Nonce audit: the feature-gated secnonce-reuse assertion stays clean.
 
-## Why not reuse `ReestablishChannelV2`
+## Open questions
 
-`ReestablishChannelV2 { channel_id, next_commitment_number, next_ack_number,
-next_local_commitment_nonce }` is the natural candidate, because it is already
-the V2 reconnection message. It cannot also delimit the end of the replay:
-
-1. **Order.** It must be the first message: `replay_cs`, `replay_ack` and the
-   nonce checks all read its cursors. The completion signal must be the last
-   message of the replay phase. One message cannot mark both ends of a window.
-2. **Existing semantics.** A repeated handshake is silently ignored today
-   (`if !reestablishing { return Ok(()) }`, and an identical
-   `recovery_peer_v2` returns `Ok`). Reusing it would make "the peer finished
-   its replay" indistinguishable from "the peer retransmitted the handshake",
-   and a forged or stale retransmission would unlock signing early.
-3. **Stale content.** By the time the replay is finished, the sender's cursors
-   may already have advanced from processing the peer's replay, so a second
-   copy of the same message would carry stale numbers and need its own
-   validation rules anyway.
-4. **The commit step must follow the window.** The fix is not to replay the
-   old CS (its signature is over a pre-disconnect view), it is to sign again
-   *after* both replays landed. That requires an explicit end-of-window signal,
-   which is exactly what the first handshake cannot be.
-
-The viable alternative is to extend the existing message with a phase or
-`replay_complete` flag and send it twice. That is also a wire change, and it
-turns a one-shot handshake into a two-phase one, so duplicate/retransmission
-semantics and validation of the completing copy have to be redefined. A separate
-variant keeps those rules untouched, which is why it is proposed instead.
-
-## Alternatives considered
-
-- **Reuse `ChannelReadyV2` as the marker.** Rejected: it is bound to the opening
-  phase (`AwaitingChannelReady`/`AwaitingTxSignatures`, number must be
-  `INITIAL_COMMITMENT_NUMBER + 2`) and stored in `session.remote_ready`, so
-  reusing it would collide with bootstrap validation.
-- **Always abandon and re-sign, never replay.** Nonce-safe, but the fresh CS is
-  still signed at handshake time, before the peer's replayed updates arrive, so
-  the view divergence remains.
-- **Let the receiver detect it.** Impossible without a state digest: the
-  receiver cannot distinguish a stale signer from a malicious one, and the
-  signer cannot detect it either (its own rebuild matches).
-- **Exchange TLC-set digests in the handshake.** Would diagnose the divergence
-  but still needs a reconciliation phase to fix it, so it is strictly more work
-  than the marker.
-
-## Open questions for review
-
-1. Marker as a new message (proposed) versus an explicit third handshake round
-   that reuses `ReestablishChannelV2` with a `complete` flag.
-2. Retransmit the marker from maintenance while parked, or rely solely on
-   `REESTABLISH_TIMEOUT`?
-3. Rollout: is a coordinated V2 rollout acceptable, or does this need a
-   capability bit (no room in the current byte, would need another feature
-   pair)?
+1. Exact predicate and offset for `created_at` (is a TLC created at `(2,2)`
+   included in commitment 2 or 3?), to be pinned by tests against the legacy
+   derived sets so no channel changes contents at upgrade.
+2. Do we still want the `ReestablishReplayCompleteV2` marker as a second step to
+   bound the crash window between "replayed" and "signed"? It is not required
+   for correctness once the content is deterministic.
+3. Whether to also verify against the persisted `settlement` snapshot (stronger,
+   but requires the snapshot in the replayed message or an agreed hash).

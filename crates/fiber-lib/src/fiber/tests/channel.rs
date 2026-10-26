@@ -14208,8 +14208,56 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
         "max_rounds={max_rounds} max_points={max_points} bound={bound} payments={:?}",
         node_a.get_payment_status(_payments[0]).await
     );
+    let statuses = |state: &ChannelActorState| {
+        state
+            .tlc_state
+            .all_tlcs()
+            .map(|tlc| format!("{:?}:{:?}", tlc.tlc_id, tlc.status))
+            .collect::<Vec<_>>()
+    };
     println!("  A {}", describe_1561_v2("final", &final_a));
     println!("  B {}", describe_1561_v2("final", &final_b));
+    println!("  A tlcs {:?}", statuses(&final_a));
+    println!("  B tlcs {:?}", statuses(&final_b));
+
+    // Which TLCs each side would put into a commitment, derived two ways.
+    let set_by_status = |state: &ChannelActorState, for_remote: bool| {
+        state
+            .build_settlement_data(for_remote)
+            .map(|data| {
+                data.tlcs
+                    .iter()
+                    .map(|tlc| format!("{:?}", tlc.tlc_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|err| vec![format!("<error: {err}>")])
+    };
+    let created_at = |state: &ChannelActorState| {
+        state
+            .tlc_state
+            .all_tlcs()
+            .map(|tlc| {
+                format!(
+                    "{:?}@local={}@remote={}",
+                    tlc.tlc_id,
+                    tlc.created_at.get_local(),
+                    tlc.created_at.get_remote()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    println!(
+        "  A set(for B commitment #{} by status) = {:?}",
+        final_a.get_local_commitment_number(),
+        set_by_status(&final_a, true)
+    );
+    println!(
+        "  B set(for B commitment #{} by status) = {:?}",
+        final_b.get_remote_commitment_number(),
+        set_by_status(&final_b, false)
+    );
+    println!("  A created_at {:?}", created_at(&final_a));
+    println!("  B created_at {:?}", created_at(&final_b));
     assert!(
         max_points <= bound,
         "retained remote commitment points reached {max_points} over the {bound} bound"
