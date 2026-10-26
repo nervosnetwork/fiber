@@ -95,3 +95,45 @@ validation use the same encoder.
 Deterministic schema/store samples have three variants: minimal V1, fully
 populated V1, and genuine V2 bootstrap. Each variant has a distinct deterministic
 channel ID so storing one cannot overwrite another.
+
+## Restart recovery for forwarded and settled TLCs
+
+Two durable records outlive the in-memory task that was supposed to finish them,
+and neither is replayed by reestablishment (which only resends offered/removed TLC
+updates). Both are re-driven from the persisted state instead.
+
+A forwarding task (`waiting_forward_tlc_tasks`) is resolved on actor start. The
+peeled onion packet is not persisted, so a forward cannot be re-issued after a
+restart. The downstream link is persisted as `TlcInfo::forwarding_tlc` on the
+offered TLC, which decides the outcome: if the downstream TLC exists, the incoming
+TLC is re-linked to it and the ordinary remove path finishes the flow; otherwise
+no downstream TLC was created, and the incoming TLC is failed back with a
+retryable `RemoveTlc` so the sender can retry. A closed channel is skipped, since
+its TLCs settle on-chain.
+
+A settled V2 removal needs the payment effect (`GetV2PaymentExecution`) before its
+outbox entry becomes durable. The network actor can be busy signing funding
+transactions for many seconds, so the lookup waits up to 30s and, if it still
+fails, leaves the TLC settled but unapplied and
+retries from the maintenance timer and after the next restart. The channel actor
+never panics on this transient lookup, and no outbox entry is written before its
+effect is bound.
+
+## Peer-response deadline versus a partition
+
+The durable `peer_wait_started_at` is persisted so that an unanswered obligation is not
+forgotten by a restart. A restart resets it (local downtime must not consume the peer's
+window), and the same reasoning applies to a live reconnect: the peer could not have
+answered messages that were outstanding while it was unreachable.
+
+* While the peer is away (`ChannelConnectivityState::Offline`) the deadline keeps
+  counting, so a peer that never returns is still force-closed.
+* While a reconnected peer's reestablishment handshake is in flight
+  (`Syncing`) the deadline is suspended, and `refresh_peer_response_wait_v2_after_reestablish`
+  restarts it when the handshake completes (both the `ChannelReady` and the
+  `ShuttingDown` recovery paths).
+
+A peer that keeps reconnecting before each window expires can therefore postpone the
+force close, exactly as with the V1 revocation-nonce watchdog, which also restarts its
+window on reconnect. A reconnect that never completes is still bounded by
+`REESTABLISH_TIMEOUT`.

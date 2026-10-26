@@ -139,6 +139,19 @@ pub const COMMITMENT_CELL_WITNESS_LEN: usize = 16 + 1 + 32 + 64;
 const RETRYABLE_TLC_OPS_INTERVAL: Duration = Duration::from_millis(100);
 const FUNDING_TIMEOUT_CHECK_DELAY_GRACE: Duration = Duration::from_millis(1);
 
+/// How long a channel actor waits for the network actor to hand back the payment effect that a
+/// settled V2 removal has to carry. The network actor can be busy for many seconds while it signs
+/// funding transactions (15-18s was observed while many channels opened at once), so a slow
+/// lookup must defer the removal instead of failing the channel actor.
+#[cfg(not(test))]
+const V2_PAYMENT_EFFECT_LOOKUP_TIMEOUT_MS: u64 = 30_000;
+#[cfg(test)]
+const V2_PAYMENT_EFFECT_LOOKUP_TIMEOUT_MS: u64 = 200;
+
+/// Delay before re-driving settled removals that were deferred because their payment effect could
+/// not be bound yet.
+const V2_SETTLE_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 // if a important TLC operation is not acked in 30 seconds, we will try to disconnect the peer.
 #[cfg(not(any(test, feature = "bench")))]
 pub const PEER_CHANNEL_RESPONSE_TIMEOUT: u64 = 30 * 1000;
@@ -1225,6 +1238,9 @@ where
             | ProcessingChannelError::Musig2SigningError(_)
             | ProcessingChannelError::Musig2VerifyError(_)
             | ProcessingChannelError::CapacityError(_) => TlcErrorCode::TemporaryNodeFailure,
+            ProcessingChannelError::PaymentEffectUnavailable(_) => {
+                TlcErrorCode::TemporaryNodeFailure
+            }
             ProcessingChannelError::InvalidParameter(_) => {
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
             }
@@ -1303,7 +1319,7 @@ where
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         // flush remove tlc for received tlcs after replying ack for peer
-        self.apply_settled_remove_tlcs(state, true).await;
+        self.apply_settled_remove_tlcs(myself, state, true).await;
 
         // when we transfer to shutdown state, we need to build shutdown transaction
         // here `maybe_transfer_to_shutdown` must be called after `apply_settled_remove_tlcs`
@@ -1386,7 +1402,12 @@ where
             .store_pending_commit_diff(&channel_id, &commit_diff);
     }
 
-    async fn apply_settled_remove_tlcs(&self, state: &mut ChannelActorState, inbound: bool) {
+    pub(crate) async fn apply_settled_remove_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        inbound: bool,
+    ) {
         let previous_balance = state.get_local_balance();
         let pending_tlcs = if inbound {
             state.tlc_state.received_tlcs.tlcs.iter()
@@ -1406,10 +1427,33 @@ where
             .map(|tlc| tlc.tlc_id)
             .collect();
 
+        let mut deferred = None;
         for tlc_id in settled_tlcs {
-            self.apply_remove_tlc_operation(state, tlc_id)
-                .await
-                .expect("expect remove tlc success");
+            match self.apply_remove_tlc_operation(state, tlc_id).await {
+                Ok(()) => {}
+                // Binding the payment effect only reads from the network actor, so the TLC stays
+                // settled but unapplied and can be retried. Never panic the channel actor for a
+                // transient lookup failure: that would take every TLC on the channel down with it.
+                Err(ProcessingChannelError::PaymentEffectUnavailable(err)) => {
+                    deferred = Some((tlc_id, err));
+                    break;
+                }
+                Err(err) => {
+                    panic!("expect remove tlc success: {err:?}");
+                }
+            }
+        }
+
+        if let Some((tlc_id, err)) = deferred {
+            warn!(
+                "Deferring settled removal of tlc {:?} on channel {}: {}",
+                tlc_id,
+                state.get_id(),
+                err
+            );
+            myself.send_after(V2_SETTLE_RETRY_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::MaintainChannelTlcs)
+            });
         }
 
         if state.get_local_balance() != previous_balance {
@@ -1485,7 +1529,7 @@ where
         }
 
         // flush outbound tlcs
-        self.apply_settled_remove_tlcs(state, false).await;
+        self.apply_settled_remove_tlcs(myself, state, false).await;
     }
 
     fn try_to_settle_down_tlc_with_invoice(
@@ -2101,11 +2145,12 @@ where
                                 reply
                             )
                         ),
-                        5000
+                        V2_PAYMENT_EFFECT_LOOKUP_TIMEOUT_MS
                     )
                     .map_err(|e| {
-                        ProcessingChannelError::InvalidState(format!(
-                            "Cannot bind V2 payment effect: {e}"
+                        ProcessingChannelError::PaymentEffectUnavailable(format!(
+                            "Cannot bind V2 payment effect for TLC {:?}: {e}",
+                            tlc_id
                         ))
                     })?
                 } else {
@@ -2870,6 +2915,110 @@ where
                 );
             }
         }
+    }
+
+    /// Index every TLC this node created on behalf of a forwarded incoming TLC.
+    ///
+    /// `TlcInfo::forwarding_tlc` of an offered TLC keeps the upstream `(channel_id, tlc_id)` link,
+    /// and it is persisted with the channel, so it survives a restart even though the in-memory
+    /// forwarding task does not.
+    fn forwarded_tlc_index(&self) -> HashMap<(Hash256, u64), (Hash256, u64)> {
+        let mut index = HashMap::new();
+        for (_pubkey, channel_id, _state) in self.store.get_channel_states(None) {
+            let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
+                continue;
+            };
+            for tlc in channel.tlc_state.offered_tlcs.tlcs.iter() {
+                if let Some((prev_channel_id, prev_tlc_id)) = tlc.forwarding_tlc {
+                    index
+                        .entry((prev_channel_id, prev_tlc_id))
+                        .or_insert((channel_id, u64::from(tlc.tlc_id)));
+                }
+            }
+        }
+        index
+    }
+
+    /// Resolve forwarding tasks that were dispatched before a process exit.
+    ///
+    /// `waiting_forward_tlc_tasks` is persisted, but the result only ever arrives in memory, so a
+    /// restart before the downstream `AddTlc` result is delivered used to leave the incoming TLC
+    /// pending forever: reestablishment does not replay a forward, the retry queue only holds
+    /// explicit TLC commands, and expiry handling skips these entries.
+    ///
+    /// The peeled onion packet is not persisted, so an unresolved forward cannot simply be
+    /// re-issued. Instead the persisted downstream link decides the outcome:
+    /// * a downstream TLC already exists: re-link it, the ordinary remove path finishes the flow;
+    /// * otherwise no downstream TLC was created: fail the incoming TLC back to the previous hop
+    ///   so the sender can retry instead of leaving the channel blocked.
+    ///
+    /// Returns whether the channel state changed and must be persisted.
+    pub(crate) fn recover_pending_forward_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> bool {
+        // A closed channel settles its TLCs on-chain; failing a TLC back there would only queue a
+        // removal that can never be committed.
+        if state.waiting_forward_tlc_tasks.is_empty() || state.is_closed() {
+            return false;
+        }
+
+        let pending: Vec<(TLCId, [u8; 32])> = state
+            .waiting_forward_tlc_tasks
+            .iter()
+            .map(|(tlc_id, shared_secret)| (*tlc_id, *shared_secret))
+            .collect();
+        let index = self.forwarded_tlc_index();
+        let channel_id = state.get_id();
+
+        for (tlc_id, _shared_secret) in pending {
+            let Some(tlc) = state.tlc_state.get(&tlc_id) else {
+                state.waiting_forward_tlc_tasks.remove(&tlc_id);
+                continue;
+            };
+            if tlc.removed_reason.is_some() {
+                // The TLC is already resolved; only the stale task record is left over.
+                state.waiting_forward_tlc_tasks.remove(&tlc_id);
+                continue;
+            }
+            let payment_hash = tlc.payment_hash;
+            let tlc_id_u64 = u64::from(tlc_id);
+            let add_tlc_result = match index.get(&(channel_id, tlc_id_u64)) {
+                Some((forwarding_channel_id, forwarding_tlc_id)) => {
+                    debug!(
+                        "Recovered pending forward of tlc {:?} on channel {} to channel {} tlc {}",
+                        tlc_id, channel_id, forwarding_channel_id, forwarding_tlc_id
+                    );
+                    Ok((*forwarding_channel_id, *forwarding_tlc_id))
+                }
+                None => {
+                    warn!(
+                        "Failing back pending forward of tlc {:?} on channel {} after restart: no downstream tlc was created",
+                        tlc_id,
+                        channel_id
+                    );
+                    let tlc_err = TlcErr::new(TlcErrorCode::TemporaryChannelFailure);
+                    Err((
+                        ProcessingChannelError::TlcForwardingError(tlc_err.clone()),
+                        tlc_err,
+                    ))
+                }
+            };
+            self.handle_forward_tlc_result(
+                myself,
+                state,
+                ForwardTlcResult {
+                    channel_id,
+                    payment_hash,
+                    tlc_id: tlc_id_u64,
+                    add_tlc_result,
+                },
+            );
+        }
+
+        self.store.insert_channel_actor_state(state.clone());
+        true
     }
 
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
@@ -4050,6 +4199,13 @@ where
                     return Ok(());
                 }
                 self.replay_remove_effects_v2(state);
+                // A settled removal whose payment effect could not be bound is retried here
+                // (and after a restart). Nothing else re-drives it: the retry queue only holds
+                // explicit TLC commands.
+                if state.session_v2.is_some() {
+                    self.apply_settled_remove_tlcs(myself, state, true).await;
+                    self.apply_settled_remove_tlcs(myself, state, false).await;
+                }
                 let now = now_timestamp_as_millis_u64();
                 if state.is_revocation_nonce_ledger_stalled(now) {
                     error!(
@@ -4087,7 +4243,8 @@ where
             }
             ChannelEvent::OnChainTlcRelayConfirmed(tlc_id, reason) => {
                 if let Some(session) = &mut state.session_v2 {
-                    let before = session.remove_effects.len();
+                    // `retain` removes an entry exactly when this lookup finds one, so the
+                    // payment hash also tells us whether the outbox changed.
                     let payment_hash = session
                         .remove_effects
                         .iter()
@@ -4098,18 +4255,15 @@ where
                     session.remove_effects.retain(|(tlc, _)| {
                         tlc.tlc_id != tlc_id || tlc.removed_reason.as_ref() != Some(&reason)
                     });
-                    if session.remove_effects.len() != before {
+                    if let Some(hash) = payment_hash {
                         self.store.insert_channel_actor_state(state.clone());
-                        if let Some(hash) = payment_hash {
-                            let retain_invoice_preimage = self.store.has_invoice_preimage(&hash)
-                                && self.store.get_invoice_status(&hash)
-                                    == Some(CkbInvoiceStatus::Open);
-                            if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
-                                && !retain_invoice_preimage
-                                && !has_pending_tlc_for_payment_hash(&self.store, state, hash)
-                            {
-                                self.remove_preimage(hash);
-                            }
+                        let retain_invoice_preimage = self.store.has_invoice_preimage(&hash)
+                            && self.store.get_invoice_status(&hash) == Some(CkbInvoiceStatus::Open);
+                        if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
+                            && !retain_invoice_preimage
+                            && !has_pending_tlc_for_payment_hash(&self.store, state, hash)
+                        {
+                            self.remove_preimage(hash);
                         }
                         return Ok(());
                     }
@@ -5012,6 +5166,10 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // A forward dispatched before the process exit has no in-memory result left, and
+        // reestablishment does not replay it. Resolve it from the persisted downstream link.
+        self.recover_pending_forward_tlcs(&myself, state);
+
         // One-shot peer timers disappear on process exit. Restore the durable
         // close/ACK obligation even if the peer never reconnects.
         self.arm_peer_response_v2(state);
@@ -5453,6 +5611,10 @@ pub type ProcessingChannelResult<T = ()> = Result<T, ProcessingChannelError>;
 pub enum ProcessingChannelError {
     #[error("Invalid state: {0}")]
     InvalidState(String),
+    /// The payment effect a settled V2 removal has to carry could not be read back from the
+    /// network actor in time. Nothing has been mutated yet, so the removal can be retried.
+    #[error("Payment effect for settled TLC is not available yet: {0}")]
+    PaymentEffectUnavailable(String),
     #[error("Repeated processing message: {0}")]
     RepeatedProcessing(String),
     #[error("Invalid parameter: {0}")]
@@ -5768,8 +5930,16 @@ impl ChannelActorState {
 
     pub fn peer_does_not_reply_ack_in_time(&self) -> bool {
         if let Some(started) = self.peer_response_wait_v2() {
-            return now_timestamp_as_millis_u64().saturating_sub(started)
-                > PEER_CHANNEL_RESPONSE_TIMEOUT;
+            // The durable V2 deadline keeps counting while the peer is away, so a peer that
+            // never returns is still closed. Judgement is suspended only while a reconnected
+            // peer's reestablishment handshake is in flight: those messages could not have been
+            // answered before the reconnect. `refresh_peer_response_wait_v2_after_reestablish`
+            // restarts the window when the handshake completes (see #1561).
+            let await_reestablish_handshake =
+                self.reestablishing && self.connectivity_state == ChannelConnectivityState::Syncing;
+            return !await_reestablish_handshake
+                && now_timestamp_as_millis_u64().saturating_sub(started)
+                    > PEER_CHANNEL_RESPONSE_TIMEOUT;
         }
         // this check only needed when other peer already shutdown force and we don't know it
         // if we are already got in ShuttingDown, means we already in normal shutdown process
@@ -8982,6 +9152,8 @@ impl ChannelActorState {
         self.reestablishing = false;
         self.reestablish_started_at = None;
         self.connectivity_state = ChannelConnectivityState::Online;
+        // A V2 peer could not answer while we were offline, so it gets a fresh window now.
+        self.refresh_peer_response_wait_v2_after_reestablish();
         self.notify_channel_connectivity(ChannelConnectivityState::Online);
 
         // If the channel is already ready, we should notify the network actor.
