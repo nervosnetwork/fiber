@@ -184,3 +184,6 @@ what is replayed:
 
 Until one of them lands, do not treat a V2 channel that completes
 reestablishment as proof that the crossed-round state was reconciled.
+The concrete proposal for option 2 (an explicit `ReestablishReplayCompleteV2`
+marker plus a two-phase replay) is in
+[`channel-v2-reestablish-replay.md`](./channel-v2-reestablish-replay.md).
