@@ -308,7 +308,7 @@ async fn test_v2_settled_remove_defers_when_payment_effect_lookup_times_out() {
 /// match the payment hash) must not kill the channel actor. The settled state is inconsistent,
 /// so the only safe action is a bounded on-chain close.
 #[tokio::test]
-async fn test_v2_unapplicable_settled_remove_closes_instead_of_panicking() {
+async fn test_v2_inapplicable_settled_remove_closes_instead_of_panicking() {
     use fiber_types::sample::StoreSample;
 
     let payment_hash = gen_rand_sha256_hash();
@@ -377,7 +377,7 @@ async fn test_v2_unapplicable_settled_remove_closes_instead_of_panicking() {
     .unwrap_or(false);
     assert!(
         force_closed,
-        "an unapplicable settled removal must ask for a force close instead of panicking"
+        "an inapplicable settled removal must ask for a force close instead of panicking"
     );
     assert_eq!(
         state.get_local_balance(),
