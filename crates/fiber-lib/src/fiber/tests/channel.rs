@@ -10296,13 +10296,12 @@ async fn test_reestablish_replays_reverse_commitment_for_different_next_nonce() 
 }
 
 // TODO(v2-nonce-rotation): this scenario drives recovery by replaying the ACK captured *before*
-// the reconnect. A reconnect now rotates the verification nonce (`next_local_nonces`) and
-// regenerates the owed commitment, so a pre-rotation ACK can no longer be verified against the
-// live session and the sender never leaves `reestablishing`. The behaviour it covers (cached ACK
-// replay is byte-exact and idempotent, gating defers payment settlement) is exercised by
-// `test_v2_recovery_dual_owed_preserves_both_original_orders` and the reconnect reproducer, so the
-// test needs to be rewritten around the regenerated commitment instead of the stale ACK.
-#[ignore = "encodes the pre-rotation exact-replay contract; see TODO above"]
+// the reconnect, then discards the messages the sender generates afterwards. With nonce rotation
+// the stale ACK can no longer be verified against the regenerated commitment (it is now ignored
+// during recovery, so the channel does reach `reestablishing == false`), but the payment still
+// needs one further ACK round that this test never delivers. Re-drive the test from the regenerated
+// commitment instead of the pre-rotation ACK before re-enabling it.
+#[ignore = "needs re-driving from the regenerated commitment; see TODO above"]
 #[tokio::test]
 async fn test_v2_reestablish_lost_raa_replays_exact_response_and_gates_ready() {
     init_tracing();
