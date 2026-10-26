@@ -6425,6 +6425,11 @@ impl ChannelActorState {
                 let funding_key = self.signer.funding_key.clone();
                 let number = self.get_remote_commitment_number();
                 if let Some(session) = self.session_v2.as_mut() {
+                    // Retire the previous nonce instead of dropping it: a commitment the peer
+                    // signed before it saw the rotation must still verify against the nonce it
+                    // used. Only the newest entries are kept, and they are never signed with
+                    // again, so MuSig2's one-message-per-nonce rule is preserved.
+                    let previous = session.own.clone();
                     session.own = crate::fiber::session_v2::allocate_nonce(
                         channel_id,
                         local_funding_pubkey,
@@ -6432,6 +6437,8 @@ impl ChannelActorState {
                         fiber_types::NoncePurposeV2::Commitment,
                         &funding_key,
                     );
+                    session.own_retired.insert(0, previous);
+                    session.own_retired.truncate(2);
                     session.pending_incoming = None;
                     session.pending_ack = None;
                 }

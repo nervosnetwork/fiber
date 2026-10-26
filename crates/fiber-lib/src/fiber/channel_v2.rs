@@ -241,6 +241,7 @@ impl ChannelActorState {
                 NoncePurposeV2::Commitment,
                 &self.signer.funding_key,
             ),
+            own_retired: Vec::new(),
             bootstrap_remote_nonce: remote_nonce.clone(),
             remote_ready: None,
             remote_nonce,
@@ -515,20 +516,35 @@ impl ChannelActorState {
             *self.get_remote_funding_pubkey(),
         );
         let agg = self.get_deterministic_musig2_agg_context();
-        let nonce = AggNonce::sum([
-            session.own.public_nonce.clone(),
-            request.funding_nonce.clone(),
-        ]);
-        musig2::verify_partial(
-            &agg,
-            request.funding_tx_partial_signature,
-            &nonce,
-            *self.get_remote_funding_pubkey(),
-            &request.funding_nonce,
-            message,
-        )
-        .map_err(|e| invalid(e.to_string()))?;
-        let mut funding = session.own.clone();
+        // The peer may have signed before it learned about a nonce rotation, so accept the active
+        // verification nonce or any recently retired one. The nonce that actually verifies is the
+        // one recorded with the accepted request, and its secret is never reused for a signature.
+        let mut candidates = Vec::with_capacity(1 + session.own_retired.len());
+        candidates.push(session.own.clone());
+        candidates.extend(session.own_retired.iter().cloned());
+        let mut verified = None;
+        for candidate in candidates {
+            let nonce = AggNonce::sum([
+                candidate.public_nonce.clone(),
+                request.funding_nonce.clone(),
+            ]);
+            if musig2::verify_partial(
+                &agg,
+                request.funding_tx_partial_signature,
+                &nonce,
+                *self.get_remote_funding_pubkey(),
+                &request.funding_nonce,
+                message,
+            )
+            .is_ok()
+            {
+                verified = Some((candidate, nonce));
+                break;
+            }
+        }
+        let (mut funding, _) =
+            verified.ok_or_else(|| invalid("failed to verify signature: signature is invalid"))?;
+        let nonce = AggNonce::sum([funding.public_nonce.clone(), request.funding_nonce.clone()]);
         bind_context(&mut funding, keys, &nonce, &message).map_err(invalid)?;
         if initial && session.bootstrap_settlement.is_none() {
             session.bootstrap_settlement = Some(settlement.clone());
