@@ -10678,7 +10678,13 @@ impl ChannelActorState {
             })
             .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
                 match tlc.inbound_status() {
+                    // Not yet folded into a commitment we signed. The peer sees the same update as
+                    // its own `LocalAnnounced`, which is included for `for_remote`, so excluding it
+                    // here keeps the two views equal.
                     InboundTlcStatus::RemoteAnnounced => !for_remote,
+                    // Folded while we still owed an ACK. V2 keeps the commitment directions
+                    // independent, so the owner's commitment can already contain it; the peer's
+                    // view must include it too or the two sides sign different transactions.
                     InboundTlcStatus::AnnounceWaitPrevAck => v2 || !for_remote,
                     InboundTlcStatus::AnnounceWaitAck => true,
                     InboundTlcStatus::Committed => true,
