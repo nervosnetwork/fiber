@@ -137,3 +137,50 @@ A peer that keeps reconnecting before each window expires can therefore postpone
 force close, exactly as with the V1 revocation-nonce watchdog, which also restarts its
 window on reconnect. A reconnect that never completes is still bounded by
 `REESTABLISH_TIMEOUT`.
+
+## Reestablishment cursor reconciliation
+
+The handshake carries `next_commitment_number` = the sender's `session.own.number`
+(= the sender's `remote`, which must equal our `local`), `next_ack_number` = the
+sender's `local` (which must equal our `remote`), and the sender's current
+`own` verification nonce. `validate_recovery_history_v2` keeps
+`session.own.number == remote` and `session.remote_number == local`, so the four
+recovery cases are:
+
+| Observed | Meaning | Action |
+| --- | --- | --- |
+| `peer_own == local`, `peer_local == remote` | aligned | replay our outstanding CS, or answer the peer's replay |
+| `peer_own == local`, `peer_local + 1 == remote` | the peer missed our ACK | replay the exact cached `incoming.response` |
+| `peer_own + 1 == local` | the peer missed our newest round | the peer replays its CS; we answer from the durable `incoming` record |
+| anything else | unreconcilable | reject the handshake |
+
+Replaying a `CommitmentSignedV2` that equals `session.incoming.request` is
+answered from the durable record instead of being re-verified
+(`receive_commitment_v2` does this by commitment number). That is deliberate:
+after a cursor advanced, rebuilding the commitment transaction from the current
+state cannot reproduce the transaction the peer originally signed, so
+re-verification would always fail.
+
+Cursors alone cannot detect the remaining case. When updates cross, each peer
+signs its round from a different `tlc_state`, so both persisted CSs are
+individually consistent with their own signer and both fail verification on the
+peer, which then stays in `reestablishing` until `REESTABLISH_TIMEOUT`. The
+signer cannot see this because rebuilding from its own (unchanged) state still
+matches what it signed. The current code abandons and re-signs only when its own
+rebuild already differs (`outstanding_v2_cs_is_stale`), which covers part of the
+case (measured: 4 of 6 runs converge, 1 of 6 before).
+
+Two candidate fixes, both of which need a design decision because they change
+what is replayed:
+
+1. Never replay a persisted CS after a reconnect; always abandon the session and
+   sign a fresh CS. Nonce-safe (`session_v2::allocate_nonce` uses a fresh random
+   seed per session), but still racy: the fresh CS is also built at handshake
+   time, before the peer's replayed `AddTlc` messages arrive.
+2. Add an explicit "peer replay complete" marker to reestablishment and only
+   sign or replay after it, so both peers apply each other's replayed updates
+   first. This is the only variant that removes the view divergence, and it is a
+   wire-protocol addition.
+
+Until one of them lands, do not treat a V2 channel that completes
+reestablishment as proof that the crossed-round state was reconciled.
