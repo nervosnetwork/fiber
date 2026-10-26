@@ -14134,6 +14134,32 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
     node_a.discard_held_fiber_messages().await;
     disconnect_peers_and_wait_for_channel_offline(&mut node_a, &mut node_b, channel_id, "storm")
         .await;
+    for (tag, node) in [("A pre-reconnect", &node_a), ("B pre-reconnect", &node_b)] {
+        let state = node.get_channel_actor_state(channel_id);
+        let session = state.session_v2.as_ref().expect("v2");
+        let outgoing = session
+            .outgoing
+            .as_ref()
+            .map(|o| {
+                crate::fiber::types::CommitmentSignedV2::try_from(o.request.clone())
+                    .map(|r| r.commitment_number)
+            })
+            .transpose()
+            .expect("outgoing cs");
+        let incoming = session
+            .incoming
+            .as_ref()
+            .and_then(|i| i.response.clone())
+            .map(|r| crate::fiber::types::RevokeAndAckV2::try_from(r).map(|a| a.commitment_number))
+            .transpose()
+            .expect("incoming ack");
+        println!(
+            "{tag}: {} outgoing_cs={outgoing:?} cached_ack={incoming:?} own_number={} remote_number={}",
+            describe_1561_v2("", &state),
+            session.own.number,
+            session.remote_number
+        );
+    }
     node_a.connect_to(&mut node_b).await;
 
     // Rounds that complete in the same instant as the reconnect are part of the repair, so only
@@ -14176,10 +14202,14 @@ async fn test_v2_crossed_rounds_do_not_storm_commitments() {
     }
 
     // The stuck state itself is repaired by replay (A's lost CS), which is a separate fix.
+    let final_a = node_a.get_channel_actor_state(channel_id);
+    let final_b = node_b.get_channel_actor_state(channel_id);
     println!(
         "max_rounds={max_rounds} max_points={max_points} bound={bound} payments={:?}",
         node_a.get_payment_status(_payments[0]).await
     );
+    println!("  A {}", describe_1561_v2("final", &final_a));
+    println!("  B {}", describe_1561_v2("final", &final_b));
     assert!(
         max_points <= bound,
         "retained remote commitment points reached {max_points} over the {bound} bound"
