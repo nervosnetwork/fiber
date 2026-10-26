@@ -2030,6 +2030,23 @@ where
         })?;
         state.check_tlc_expiry(add_tlc.expiry)?;
         let tlc_info = state.create_inbounding_tlc(add_tlc.clone())?;
+        // A reconnect replays the updates we never saw acknowledged, so the peer can resend an
+        // AddTlc that is already applied here. Rejecting the duplicate aborted recovery and wedged
+        // the channel; accept it as a no-op when it describes the same TLC.
+        if let Some(existing) = state.tlc_state.get(&tlc_info.tlc_id) {
+            let identical = existing.amount == tlc_info.amount
+                && existing.payment_hash == tlc_info.payment_hash
+                && existing.expiry == tlc_info.expiry
+                && existing.is_offered() == tlc_info.is_offered();
+            return if identical {
+                Ok(())
+            } else {
+                Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Conflicting replayed tlc {:?}",
+                    tlc_info.tlc_id
+                )))
+            };
+        }
         state.check_insert_tlc(&tlc_info)?;
         state.tlc_state.add_received_tlc(tlc_info);
         state.increment_next_received_tlc_id();
