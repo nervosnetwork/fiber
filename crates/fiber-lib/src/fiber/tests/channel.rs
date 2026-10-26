@@ -13698,3 +13698,305 @@ async fn test_deferred_peer_tlc_updates_do_not_outlive_the_connection() {
         assert!(node.get_triggered_unexpected_events().await.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1561 paired-state reproduction probe.
+//
+// The issue asks for the *two-peer* state around the node2/node3 reconnect:
+// one side has `waiting_ack = true` plus a persisted `CommitDiff`, the other
+// side is idle, and the `CommitmentSigned` that was already sent is lost. The
+// deadlock signature is the complementary missing nonce slots with
+// `waiting_ack = false` on both ends (node3: send=Some/verify=None,
+// node2: send=None/verify=Some), which makes `is_waiting_tlc_ack()` reject
+// every local TLC operation on both peers.
+// ---------------------------------------------------------------------------
+
+fn describe_1561_ledger(tag: &str, state: &ChannelActorState) -> String {
+    format!(
+        "{tag}: waiting_ack={} send={} verify={} next={} waiting_tlc_ack={} reestablishing={} connectivity={:?} commitments={:?}",
+        state.tlc_state.waiting_ack,
+        state.remote_revocation_nonce_for_send.is_some(),
+        state.remote_revocation_nonce_for_verify.is_some(),
+        state.remote_revocation_nonce_for_next.is_some(),
+        state.is_waiting_tlc_ack(),
+        state.reestablishing,
+        state.connectivity_state,
+        state.get_current_commitment_numbers(),
+    )
+}
+
+/// True when the two peers hold the complementary nonce slots that block both
+/// directions, which is the state captured in #1561.
+/// The durable half of the #1561 signature: complementary nonce slots with no outstanding
+/// `CommitmentSigned`, so no message in flight can rebalance either ledger.
+fn has_1561_ledger_split(a: &ChannelActorState, b: &ChannelActorState) -> bool {
+    let a_send = a.remote_revocation_nonce_for_send.is_some();
+    let a_verify = a.remote_revocation_nonce_for_verify.is_some();
+    let b_send = b.remote_revocation_nonce_for_send.is_some();
+    let b_verify = b.remote_revocation_nonce_for_verify.is_some();
+    !a.tlc_state.waiting_ack
+        && !b.tlc_state.waiting_ack
+        && a_send != a_verify
+        && b_send != b_verify
+        && a_send == b_verify
+        && a_verify == b_send
+        && a.is_waiting_tlc_ack()
+        && b.is_waiting_tlc_ack()
+}
+
+/// The split while both channels are online and settled, which is the observed deadlock.
+fn is_1561_deadlock_signature(a: &ChannelActorState, b: &ChannelActorState) -> bool {
+    has_1561_ledger_split(a, b)
+        && !a.reestablishing
+        && !b.reestablishing
+        && a.is_ready()
+        && b.is_ready()
+}
+
+/// One reproduction attempt: hold one outbound message of `holder`, drive traffic,
+/// drop the held message, reconnect (optionally after a full process restart) and
+/// report whether the two ledgers converge, deadlock, or do neither.
+async fn attempt_1561_probe(
+    holder_is_a: bool,
+    kind: TestFiberMessageKind,
+    crossed: bool,
+    restart: bool,
+) -> (String, Vec<String>) {
+    attempt_1561_probe_with_options(holder_is_a, kind, crossed, restart, false).await
+}
+
+async fn attempt_1561_probe_with_options(
+    holder_is_a: bool,
+    kind: TestFiberMessageKind,
+    crossed: bool,
+    restart: bool,
+    check_restart_repair: bool,
+) -> (String, Vec<String>) {
+    let (mut node_a, mut node_b, channel_id) =
+        create_legacy_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    let mut trace: Vec<String> = Vec::new();
+    trace.push(describe_1561_ledger(
+        "A initial",
+        &node_a.get_channel_actor_state(channel_id),
+    ));
+
+    // Hold a message outbound from the chosen side before any TLC exists.
+    if holder_is_a {
+        node_a
+            .hold_next_fiber_messages(node_b.pubkey, channel_id, kind, 1)
+            .await;
+    } else {
+        node_b
+            .hold_next_fiber_messages(node_a.pubkey, channel_id, kind, 1)
+            .await;
+    }
+
+    // Crossed rounds: both peers push updates, so their commitment rounds overlap.
+    // Payer + hash: the payee has no payment session for an incoming keysend.
+    let mut payments: Vec<(bool, Hash256)> = Vec::new();
+    if crossed {
+        let (a_to_b, b_to_a) = tokio::join!(
+            node_a.send_payment_keysend(&node_b, 2000, false),
+            node_b.send_payment_keysend(&node_a, 2000, false),
+        );
+        payments.push((true, a_to_b.expect("a->b keysend").payment_hash));
+        payments.push((false, b_to_a.expect("b->a keysend").payment_hash));
+    } else {
+        payments.push((
+            true,
+            node_a
+                .send_payment_keysend(&node_b, 2000, false)
+                .await
+                .expect("a->b keysend")
+                .payment_hash,
+        ));
+    }
+    let holder = if holder_is_a { &node_a } else { &node_b };
+    holder.wait_for_held_fiber_messages(1).await;
+    trace.push(describe_1561_ledger(
+        "A held",
+        &node_a.get_channel_actor_state(channel_id),
+    ));
+    trace.push(describe_1561_ledger(
+        "B held",
+        &node_b.get_channel_actor_state(channel_id),
+    ));
+
+    // Lose the held message, then partition (and optionally crash both peers).
+    if holder_is_a {
+        node_a.discard_held_fiber_messages().await;
+    } else {
+        node_b.discard_held_fiber_messages().await;
+    }
+    disconnect_peers_and_wait_for_channel_offline(&mut node_a, &mut node_b, channel_id, "probe")
+        .await;
+    trace.push(describe_1561_ledger(
+        "A offline",
+        &node_a.get_channel_actor_state(channel_id),
+    ));
+    trace.push(describe_1561_ledger(
+        "B offline",
+        &node_b.get_channel_actor_state(channel_id),
+    ));
+    if restart {
+        node_a.stop().await;
+        node_b.stop().await;
+        node_a.start().await;
+        node_b.start().await;
+        trace.push(describe_1561_ledger(
+            "A restarted",
+            &node_a.get_channel_actor_state(channel_id),
+        ));
+        trace.push(describe_1561_ledger(
+            "B restarted",
+            &node_b.get_channel_actor_state(channel_id),
+        ));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    node_a.connect_to(&mut node_b).await;
+
+    // Watch both ledgers: converged, deadlocked, or neither.
+    let started = std::time::Instant::now();
+    let mut deadlock_since: Option<std::time::Instant> = None;
+    let mut outcome;
+    let mut a_state;
+    let mut b_state;
+    loop {
+        a_state = node_a.get_channel_actor_state(channel_id);
+        b_state = node_b.get_channel_actor_state(channel_id);
+        let mut statuses = Vec::with_capacity(payments.len());
+        for (paid_by_a, hash) in &payments {
+            let node = if *paid_by_a { &node_a } else { &node_b };
+            statuses.push(node.get_payment_status(*hash).await);
+        }
+        if statuses
+            .iter()
+            .all(|status| matches!(status, PaymentStatus::Success | PaymentStatus::Failed))
+        {
+            outcome = "settled";
+            trace.push(format!("settled with {statuses:?}"));
+            break;
+        }
+        if is_1561_deadlock_signature(&a_state, &b_state) {
+            deadlock_since.get_or_insert_with(std::time::Instant::now);
+            if deadlock_since.is_some_and(|since| since.elapsed() > Duration::from_secs(3)) {
+                outcome = "deadlock";
+                break;
+            }
+        } else {
+            deadlock_since = None;
+        }
+        if started.elapsed() > Duration::from_secs(30) {
+            outcome = "timeout";
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    trace.push(describe_1561_ledger("A final", &a_state));
+    trace.push(describe_1561_ledger("B final", &b_state));
+
+    // #1561 claims the state survives both reconnects and process restarts. Verify that a
+    // second restart + reconnect does not repair it, so the reproducer covers the durability
+    // half of the issue as well.
+    if outcome == "deadlock" && check_restart_repair {
+        node_a.stop().await;
+        node_b.stop().await;
+        node_a.start().await;
+        node_b.start().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        node_a.connect_to(&mut node_b).await;
+        let repair_started = std::time::Instant::now();
+        let mut healed = false;
+        loop {
+            a_state = node_a.get_channel_actor_state(channel_id);
+            b_state = node_b.get_channel_actor_state(channel_id);
+            if !has_1561_ledger_split(&a_state, &b_state) {
+                healed = true;
+                break;
+            }
+            if repair_started.elapsed() > Duration::from_secs(10) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        trace.push(describe_1561_ledger("A after restart", &a_state));
+        trace.push(describe_1561_ledger("B after restart", &b_state));
+        outcome = if healed {
+            "deadlock-healed-by-restart"
+        } else {
+            "deadlock-durable"
+        };
+    }
+    (outcome.to_string(), trace)
+}
+
+/// Minimal reproduction of #1561.
+///
+/// A (the sender) already has a paired ledger (`send = verify = Some`) when it sends a
+/// `CommitmentSigned` that never reaches B. B answers with its own `CommitmentSigned` (which
+/// does reach A) and A acks it, so both peers clear `waiting_ack`. On the reconnect the replayed
+/// exchange advances the commitment numbers by one in each direction while the nonce ledgers end
+/// up complementary:
+///
+/// ```text
+/// A: waiting_ack=false send=None verify=Some next=Some  local=3 remote=4
+/// B: waiting_ack=false send=Some verify=None next=Some  local=4 remote=3
+/// ```
+///
+/// which is exactly the node2/node3 pair from the issue and keeps `is_waiting_tlc_ack()` true on
+/// both peers forever. A further process restart + reconnect reproduces the same two lines, so
+/// the state is durable and neither repair path in the issue helps
+/// (`outcome=deadlock-durable`). Run explicitly with `--run-ignored`; when this bug is fixed the
+/// test should stop being ignored.
+///
+/// The wider matrix in `probe_1561_paired_state_variants` also leaves both peers in
+/// `Syncing` for 30s+ when the lost `CommitmentSigned` is dropped on a crossed-round workload.
+#[tokio::test]
+#[ignore = "reproduces #1561: a lost sender CommitmentSigned leaves complementary missing nonces"]
+async fn probe_1561_lost_sender_commitment_signed_deadlocks() {
+    init_tracing();
+    let (outcome, trace) = attempt_1561_probe_with_options(
+        true,
+        TestFiberMessageKind::CommitmentSigned,
+        false,
+        false,
+        true,
+    )
+    .await;
+    assert_eq!(
+        outcome, "settled",
+        "#1561 reproduced: lost sender CommitmentSigned never converges, outcome={outcome}: {trace:#?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "exploratory matrix for #1561, takes about a minute"]
+async fn probe_1561_paired_state_variants() {
+    init_tracing();
+    let cases: [(bool, TestFiberMessageKind, bool, bool); 8] = [
+        (false, TestFiberMessageKind::CommitmentSigned, false, false),
+        (false, TestFiberMessageKind::CommitmentSigned, true, false),
+        (true, TestFiberMessageKind::CommitmentSigned, false, false),
+        (true, TestFiberMessageKind::CommitmentSigned, true, false),
+        (false, TestFiberMessageKind::CommitmentOrAck, false, false),
+        (false, TestFiberMessageKind::CommitmentOrAck, true, true),
+        (true, TestFiberMessageKind::CommitmentOrAck, false, true),
+        (true, TestFiberMessageKind::CommitmentOrAck, true, true),
+    ];
+    for (holder_is_a, kind, crossed, restart) in cases {
+        let label = format!(
+            "hold={} kind={:?} crossed={} restart={}",
+            if holder_is_a { "A" } else { "B" },
+            kind,
+            crossed,
+            restart
+        );
+        let (outcome, trace) = attempt_1561_probe(holder_is_a, kind, crossed, restart).await;
+        println!("#1561 variant {label}: {outcome}");
+        if outcome != "settled" {
+            for line in &trace {
+                println!("    {line}");
+            }
+        }
+    }
+}
