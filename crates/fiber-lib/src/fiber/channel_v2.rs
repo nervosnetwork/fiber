@@ -2457,6 +2457,121 @@ mod tests {
     /// offline or reestablishing the peer cannot answer, and the window restarts when the
     /// channel is back online (bounded by `REESTABLISH_TIMEOUT` for a reconnect that never
     /// completes).
+    /// A channel actor message sink for tests that only need a valid `ActorRef`.
+    struct NoopChannelActor;
+
+    #[async_trait::async_trait]
+    impl Actor for NoopChannelActor {
+        type Msg = ChannelActorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    /// A peer that never saw our ACK replays the exact `CommitmentSignedV2` we already accepted.
+    /// It must be answered from the durable `incoming` record: re-verifying it against the current
+    /// state cannot reproduce the transaction that was signed and would fail, which used to leave
+    /// the channel reestablishing forever (see the cursor reconciliation note).
+    #[tokio::test]
+    async fn test_v2_replayed_accepted_cs_is_answered_from_durable_record() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state_a = a.get_channel_actor_state(id);
+        let mut state_b = b.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, network_task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state_a.network = Some(network.clone());
+        state_b.network = Some(network.clone());
+        let actor_b = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+        let (b_ref, b_handle) = Actor::spawn(None, NoopChannelActor, ())
+            .await
+            .expect("spawn B no-op channel actor");
+
+        // A signs a CS and B accepts it, so B holds the exact request and its response.
+        let (request, _) = state_a.prepare_outgoing_v2(false).expect("prepare CS");
+        let remote_before = state_b.get_remote_commitment_number();
+        actor_b
+            .receive_commitment_v2(&b_ref, &mut state_b, request.clone())
+            .await
+            .expect("first CS must be accepted");
+        assert_eq!(
+            state_b.get_remote_commitment_number(),
+            remote_before + 1,
+            "accepting the CS advances the peer commitment number"
+        );
+        assert!(
+            state_b
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .incoming
+                .as_ref()
+                .unwrap()
+                .response
+                .is_some(),
+            "the accepted response is durable"
+        );
+        capture_barrier(&network, id).await;
+        captured.lock().unwrap().clear();
+
+        // The reconnect replays the same message because the ACK never arrived.
+        actor_b
+            .receive_commitment_v2(&b_ref, &mut state_b, request)
+            .await
+            .expect("a replayed accepted CS must not fail verification");
+        assert_eq!(
+            state_b.get_remote_commitment_number(),
+            remote_before + 1,
+            "the replay must not be accepted twice"
+        );
+        capture_barrier(&network, id).await;
+
+        let acks = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                        FiberMessageWithTarget {
+                            message: FiberMessage::ChannelNormalOperation(
+                                FiberChannelMessage::RevokeAndAckV2(_)
+                            ),
+                            ..
+                        }
+                    ))
+                )
+            })
+            .count();
+        assert_eq!(
+            acks, 1,
+            "the replay must be answered with the cached ACK exactly once"
+        );
+
+        b_handle.abort();
+        network.stop(None);
+        network_task.await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_v2_partition_suspends_and_then_restarts_peer_response_window() {
         let (a, b, id) =
