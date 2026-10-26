@@ -36,6 +36,21 @@ impl ChannelActorState {
     /// flight, so a reconnect starts a fresh peer-response window instead of charging the
     /// partition against the peer. A reconnect that never completes is bounded separately by
     /// `REESTABLISH_TIMEOUT`.
+    /// True when the persisted outstanding CS was signed over a transaction that no longer
+    /// matches the current TLC state.
+    ///
+    /// Crossed updates make this happen: each peer signed its round from a different view before
+    /// the disconnect, so the receiver can never verify that exact `CommitmentSignedV2`. Such a
+    /// replay used to fail signature verification on both sides and left the channel in
+    /// `reestablishing` forever (see #1561).
+    pub(super) fn outstanding_v2_cs_is_stale(&self) -> ProcessingChannelResult<bool> {
+        let Some(outgoing) = self.session_v2.as_ref().and_then(|s| s.outgoing.as_ref()) else {
+            return Ok(false);
+        };
+        let (transaction, _) = self.build_commitment_tx_and_settlement_data(true)?;
+        Ok(transaction.data().as_slice() != outgoing.transaction.as_slice())
+    }
+
     pub(super) fn refresh_peer_response_wait_v2_after_reestablish(&mut self) {
         if self.session_v2.is_none() {
             return;
@@ -1424,9 +1439,16 @@ where
             super::debug_event!(self.network, "Replayed ChannelReady after reestablishment");
             return Ok(());
         }
+        // The peer has not accepted our outstanding CS (`next_commitment_number == local`), but
+        // the transaction we signed for it no longer matches our TLC state, so replaying it can
+        // only fail verification. Abandon that signing session and sign a fresh CS after
+        // recovery; V2 allocates every session nonce from a fresh random seed, so the burned
+        // nonce is never reused.
+        let mut resign_stale_cs = false;
         let replay_cs = if state.tlc_state.waiting_ack {
             if peer.next_commitment_number == local {
-                true
+                resign_stale_cs = state.outstanding_v2_cs_is_stale()?;
+                !resign_stale_cs
             } else if local.checked_add(1) == Some(peer.next_commitment_number) {
                 false
             } else {
@@ -1479,6 +1501,16 @@ where
             None
         };
         state.recovery_peer_v2 = Some(peer);
+        if resign_stale_cs {
+            if let Some(session) = state.session_v2.as_mut() {
+                session.outgoing = None;
+            }
+            state.set_waiting_ack(myself, false);
+            tracing::debug!(
+                "Channel {} abandoned a stale V2 CommitmentSigned and will sign a fresh one",
+                state.get_id()
+            );
+        }
         self.replay_effects_v2(state);
         self.update_tlc_status_on_ack(myself, state).await;
         self.apply_settled_remove_tlcs(myself, state, true).await;
@@ -1553,6 +1585,10 @@ where
             .await?;
         }
         state.finish_recovery_v2(myself);
+        if resign_stale_cs && !state.reestablishing {
+            // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
+            self.send_commitment_v2(myself, state).await?;
+        }
         if let Some(close) = state.session_v2.as_ref().and_then(|s| s.closing.as_ref()) {
             if !close.superseded_by_force_close {
                 state.send_v2_message(FiberMessage::shutdown_v2(
