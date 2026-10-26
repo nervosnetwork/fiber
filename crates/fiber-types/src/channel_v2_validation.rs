@@ -614,9 +614,13 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             context(rev, key, [remote, local], snapshot.message, peer, true)?;
             let response = incoming.response.as_ref().ok_or("Missing V2 cached ACK")?;
+            // The cached ACK carries the verification nonce advertised when it was produced. A
+            // reconnect rotates `session.own` (`next_local_nonces`), so the cached value is
+            // historical and must not be required to equal the current one; its signature and
+            // counter are still validated below.
             check(
-                response.next_commitment_nonce().as_slice() == session.own.public_nonce.to_bytes(),
-                "V2 cached ACK next nonce mismatch",
+                PubNonce::from_bytes(response.next_commitment_nonce().as_slice()).is_ok(),
+                "V2 cached ACK next nonce malformed",
             )?;
             check(
                 response.channel_id().as_slice() == channel.id.as_ref()
@@ -775,11 +779,11 @@ pub fn validate_channel_v2(channel: &ChannelActorData) -> Result<(), String> {
     if let Some(ack) = &session.last_ack {
         let number: u64 = ack.commitment_number().unpack();
         check(
+            // `last_ack` is historical: its advertised nonce may have been superseded by a
+            // rotation on re-establishment (`next_local_nonces`). Only the counter and channel
+            // identity must still line up.
             ack.channel_id().as_slice() == channel.id.as_ref()
-                && number.checked_add(1) == Some(session.remote_number)
-                && session.remote_nonce.as_ref().is_some_and(|n| {
-                    n.to_bytes().as_slice() == ack.next_commitment_nonce().as_slice()
-                }),
+                && number.checked_add(1) == Some(session.remote_number),
             "V2 accepted ACK active nonce/counter mismatch",
         )?;
     } else {
