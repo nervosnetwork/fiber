@@ -38,6 +38,11 @@ pub trait StorageBackend: Send + Sync {
     /// Create a new batch writer.
     fn batch(&self) -> Self::Batch;
 
+    /// Whether put, delete and batch commit wait for the disk before they return.
+    fn sync_writes(&self) -> bool {
+        false
+    }
+
     /// Collect items from an iterator over the key-value store.
     ///
     /// - `start`: The key to start iterating from (inclusive).

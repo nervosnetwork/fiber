@@ -10,6 +10,9 @@ fiber:
   # announced_node_name: "my-fiber-node"
   # Disable automatic peer reconnect backoff after disconnects.
   # enable_peer_reconnect_backoff: true
+  # Every store write waits for the disk. Slower, but a power loss cannot lose the last writes.
+  # A node that holds others' funds should turn it on.
+  # store_sync_writes: false
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/16.163.7.105/tcp/8228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"

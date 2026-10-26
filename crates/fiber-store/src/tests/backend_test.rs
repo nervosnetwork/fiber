@@ -70,6 +70,34 @@ mod testrocksdb_tests {
     }
 
     #[test]
+    fn test_rocksdb_sync_writes_read_back_after_reopen() {
+        use crate::backend::BatchWriter;
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("rocksdb_sync");
+
+        let mut store = RocksdbStore::open_db(&db_path).unwrap();
+        assert!(!store.sync_writes());
+        store.set_sync_writes(true);
+        assert!(store.sync_writes());
+        assert!(store.clone().sync_writes());
+
+        store.put(b"put", b"1");
+        store.put(b"deleted", b"1");
+        store.delete(b"deleted");
+        let mut batch = store.batch();
+        batch.put(b"batch", b"2");
+        batch.delete(b"put");
+        batch.commit();
+        drop(store);
+
+        let store = RocksdbStore::open_db(&db_path).unwrap();
+        assert_eq!(store.get(b"put"), None);
+        assert_eq!(store.get(b"deleted"), None);
+        assert_eq!(store.get(b"batch").unwrap(), b"2");
+    }
+
+    #[test]
     fn test_perform_key_backup_logic() {
         let dir = tempdir().unwrap();
         let base_dir = dir.path();
@@ -153,6 +181,21 @@ mod sqlite_tests {
         // Verify restored data and sidecar files removal
         let restored_store = SqliteStore::open_db(&db_path).unwrap();
         assert_eq!(restored_store.get(b"sql_key").unwrap(), b"sql_value");
+    }
+
+    #[test]
+    fn test_sqlite_sync_writes_sets_synchronous() {
+        let dir = tempdir().unwrap();
+        let mut store = SqliteStore::open_db(&dir.path().join("sqlite_sync")).unwrap();
+        assert!(!store.sync_writes());
+
+        store.set_sync_writes(true);
+        assert!(store.sync_writes());
+        store.put(b"key", b"value");
+        assert_eq!(store.get(b"key").unwrap(), b"value");
+
+        store.set_sync_writes(false);
+        assert!(!store.sync_writes());
     }
 
     #[test]
