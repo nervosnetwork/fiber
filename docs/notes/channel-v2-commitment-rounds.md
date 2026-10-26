@@ -131,3 +131,25 @@ commitment numbers stored on the TLC (`created_at`, and whatever removed-at mark
 is added), not on the live status ladder; the 15-fixture sweep showed `created_at`
 alone changes the content of 8/10 healthy pairs, which is why a *removed-at*
 marker is required before this can be attempted again.
+
+### Experiment: drop a whole commitment round instead of only the commitment
+
+Hypothesis: the crossed reproducer is an artifact of dropping the commitment while
+delivering the update that belongs to it. Measured by holding two
+`CommitmentOrAck` messages instead of one `CommitmentSigned` and discarding both:
+
+```
+drop CS only        : 4/6 settle
+drop CS + answer    : 0/6 settle
+```
+
+So the hypothesis is wrong, and the result is more useful than the original flaky
+observation: dropping a whole round is **deterministic** (0/6), while dropping only
+the commitment is flaky (4/6). A lost round — the plainest reconnect case, with no
+crossed state and no in-flight updates — now reproduces every time, which is a much
+better target than the probabilistic one.
+
+Next step: debug the 0/6 variant first. It needs no crossing, so the failure should
+reduce to "which of the two owed messages is replayed and in what order" rather than
+to commitment content. Only if that variant turns out to agree on content should the
+content question be revisited.
