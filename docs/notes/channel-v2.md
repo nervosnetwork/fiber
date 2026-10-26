@@ -184,6 +184,11 @@ what is replayed:
 
 Until one of them lands, do not treat a V2 channel that completes
 reestablishment as proof that the crossed-round state was reconciled.
-The concrete proposal for option 2 (an explicit `ReestablishReplayCompleteV2`
-marker plus a two-phase replay) is in
+A minimal experiment on the failing state shows that both peers hold identical
+`TlcInfo.created_at` values while the status-derived commitment sets differ, so
+the fix is to derive commitment membership from the durable counters instead of
+the mutable status ladder. Neither the marker nor "always re-sign" addresses
+that, and MuSig2 forbids re-signing a different message with the same nonce, so
+recovery must make the message reproducible. Details, the experiment output, the
+MuSig2 constraints and the comparison with BOLT 2 retransmission are in
 [`channel-v2-reestablish-replay.md`](./channel-v2-reestablish-replay.md).
