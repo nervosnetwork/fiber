@@ -1931,8 +1931,8 @@ pub struct ChannelActorData {
 
     pub created_at: SystemTime,
 
-    /// TLC updates sent to peer since the last local CommitmentSigned.
-    /// This preserves send order for reestablish replay.
+    /// TLC updates awaiting the next local CommitmentSigned, in wire order.
+    /// V2 publishes them only after the outgoing commitment is stored.
     #[serde(default)]
     pub pending_replay_updates: Vec<TlcReplayUpdate>,
 

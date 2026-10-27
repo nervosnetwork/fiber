@@ -794,6 +794,102 @@ fn test_send_payment_data_trampoline_hops_validation_errors() {
 }
 
 #[tokio::test]
+async fn test_network_shutdown_marks_channels_offline_after_final_child_write() {
+    use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+    use crate::fiber::ChannelConnectivityState;
+    use crate::store::Store;
+    use tokio::sync::oneshot;
+
+    struct FinalChannelWriter;
+    struct FinalWriteState {
+        channel: ractor::ActorCell,
+        store: Store,
+        snapshot: Option<ChannelActorState>,
+        started: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Actor for FinalChannelWriter {
+        type Msg = ();
+        type State = FinalWriteState;
+        type Arguments = FinalWriteState;
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            state: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(state)
+        }
+
+        async fn post_stop(
+            &self,
+            _: ActorRef<Self::Msg>,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            state
+                .channel
+                .wait(Some(Duration::from_secs(5)))
+                .await
+                .unwrap();
+            state.started.take().unwrap().send(()).unwrap();
+            state.release.take().unwrap().await.unwrap();
+            state
+                .store
+                .insert_channel_actor_state(state.snapshot.take().unwrap());
+            Ok(())
+        }
+    }
+
+    let (node, _peer, id) =
+        create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let mut latest = node.get_channel_actor_state(id);
+    assert_eq!(latest.connectivity_state, ChannelConnectivityState::Online);
+    latest.tlc_state.offered_tlcs.next_tlc_id = 1765;
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (_writer, writer_task) = Actor::spawn_linked(
+        None,
+        FinalChannelWriter,
+        FinalWriteState {
+            channel: node.get_channel_actor(id).await.unwrap().get_cell(),
+            store: node.store.clone(),
+            snapshot: Some(latest),
+            started: Some(started_tx),
+            release: Some(release_rx),
+        },
+        node.network_actor.get_cell(),
+    )
+    .await
+    .unwrap();
+    let network = node.network_actor.clone();
+    let shutdown = tokio::spawn(async move { network.stop_and_wait(None, None).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let before_final_write = node.get_channel_actor_state(id);
+    let marked_offline_early =
+        before_final_write.connectivity_state == ChannelConnectivityState::Offline;
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    writer_task.await.unwrap();
+
+    assert!(
+        !marked_offline_early,
+        "do not race the channel's final write"
+    );
+    let stored = node.get_channel_actor_state(id);
+    assert_eq!(stored.tlc_state.offered_tlcs.next_tlc_id, 1765);
+    assert_eq!(stored.connectivity_state, ChannelConnectivityState::Offline);
+    assert!(stored.reestablishing);
+}
+
+#[tokio::test]
 async fn test_save_our_own_node_announcement_to_graph() {
     let mut node = NetworkNode::new().await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;

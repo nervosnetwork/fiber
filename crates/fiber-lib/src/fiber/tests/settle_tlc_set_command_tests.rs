@@ -482,6 +482,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
         pending_remove_effects_v2: 0,
+        replayed_tlc_updates_v2: 0,
         pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),

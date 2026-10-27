@@ -2471,17 +2471,17 @@ where
             onion_packet: command.onion_packet.clone(),
         };
 
-        // Send tlc update message to peer.
-        let msg = FiberMessageWithTarget::new(
-            state.get_remote_pubkey(),
-            FiberMessage::add_tlc(add_tlc.clone()),
-        );
-
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(msg),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if state.session_v2.is_none() {
+            let msg = FiberMessageWithTarget::new(
+                state.get_remote_pubkey(),
+                FiberMessage::add_tlc(add_tlc.clone()),
+            );
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(msg),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
         state.record_pending_replay_update(TlcReplayUpdate::Add(add_tlc));
         Ok(tlc_id.into())
     }
@@ -2520,15 +2520,17 @@ where
             tlc_id: command.id,
             reason,
         };
-        let msg = FiberMessageWithTarget::new(
-            state.get_remote_pubkey(),
-            FiberMessage::remove_tlc(remove_tlc.clone()),
-        );
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(msg),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if state.session_v2.is_none() {
+            let msg = FiberMessageWithTarget::new(
+                state.get_remote_pubkey(),
+                FiberMessage::remove_tlc(remove_tlc.clone()),
+            );
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(msg),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
         state.record_pending_replay_update(TlcReplayUpdate::Remove(remove_tlc));
         Ok(())
     }
@@ -5594,6 +5596,10 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub pending_remove_effects_v2: usize,
 
+    /// Prefix of pending TLC updates already replayed on this connection.
+    #[doc = "skip_store"]
+    pub replayed_tlc_updates_v2: usize,
+
     #[doc = "skip_store"]
     pub ephemeral_config: ChannelEphemeralConfig,
 
@@ -5681,6 +5687,7 @@ impl From<ChannelActorData> for ChannelActorState {
             private_key: None,
             needs_backup: false,
             pending_remove_effects_v2: 0,
+            replayed_tlc_updates_v2: 0,
         };
         state.hydrate_external_funding_runtime();
         state
@@ -6510,6 +6517,7 @@ impl ChannelActorState {
 
     pub(crate) fn mark_reestablishing_offline(&mut self) {
         self.recovery_peer_v2 = None;
+        self.replayed_tlc_updates_v2 = 0;
         self.clear_waiting_peer_response();
         self.reestablishing = true;
         self.reestablish_started_at = Some(now_timestamp_as_millis_u64());
@@ -6844,6 +6852,7 @@ impl ChannelActorState {
             private_key: Some(private_key),
             needs_backup: true,
             pending_remove_effects_v2: 0,
+            replayed_tlc_updates_v2: 0,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -6948,6 +6957,7 @@ impl ChannelActorState {
             private_key: Some(private_key),
             needs_backup: true,
             pending_remove_effects_v2: 0,
+            replayed_tlc_updates_v2: 0,
         };
         state.initialize_session_v2(None);
         state.log_ack_state("[ack] new_outbound_channel");
@@ -7708,7 +7718,7 @@ impl ChannelActorState {
         self.pending_replay_updates.push(update);
     }
 
-    /// Collect pending TLC updates that were actually sent to peer in wire order.
+    /// Collect pending TLC updates in original wire order.
     pub fn collect_pending_tlc_updates(&mut self) -> Vec<TlcReplayUpdate> {
         std::mem::take(&mut self.pending_replay_updates)
     }
@@ -11591,6 +11601,7 @@ mod tests {
             private_key: None,
             needs_backup: false,
             pending_remove_effects_v2: 0,
+            replayed_tlc_updates_v2: 0,
         }
     }
 

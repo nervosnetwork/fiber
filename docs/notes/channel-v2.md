@@ -53,6 +53,18 @@ stored intermediate sessions remain readable and recoverable. Cached closing
 signatures and already-ready closing transactions can be replayed without another
 early save. Ready replay skips its early save only when a previous reconnect
 message has already committed the nonce; a handshake that rotates it still saves.
+Fresh CS/ACK staging passes its verification result directly to acceptance to
+avoid verifying the same partial signature twice. Retained pending records still
+require verification; the result is never persisted. Orderly network shutdown
+waits for channel writers to stop before re-reading and marking their latest
+stored state Offline, so an older shutdown snapshot cannot overwrite progress.
+
+V2 Add/Remove updates stay pending until the outgoing CS save records their TLC
+IDs, contents, counters and replay log together. They are then sent in FIFO order
+before the CS, with no extra per-TLC save. Reestablishment replays the durable log
+in its original order; a runtime prefix prevents those updates being published
+again when the CS is regenerated. Unsent persisted updates request a CS instead
+of using the V1 raw-TLC resend path. V1 keeps its immediate update publication.
 
 Offered TLC removals bind their execution and append an in-memory outbox intent
 before applying balances and flags. The normal actor message-tail save commits
