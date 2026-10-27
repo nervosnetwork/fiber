@@ -1103,6 +1103,8 @@ where
         {
             return Ok(());
         }
+        let was_waiting_confirmation = matches!(state.state, ChannelState::ShuttingDown(flags)
+            if flags == fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION);
         let Some(close) = state.session_v2.as_ref().and_then(|s| s.closing.as_ref()) else {
             return Ok(());
         };
@@ -1159,8 +1161,8 @@ where
             .as_mut()
             .expect("shutdown")
             .signature = Some(signature);
-        self.store.insert_channel_actor_state(state.clone());
         if first {
+            self.store.insert_channel_actor_state(state.clone());
             self.arm_peer_response_v2(state);
             state.send_v2_message(FiberMessage::closing_signed_v2(response));
         }
@@ -1184,7 +1186,9 @@ where
                 fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
             ));
             state.clear_waiting_peer_response();
-            self.store.insert_channel_actor_state(state.clone());
+            if first || !was_waiting_confirmation {
+                self.store.insert_channel_actor_state(state.clone());
+            }
             state
                 .network()
                 .send_message(NetworkActorMessage::new_event(
@@ -1286,6 +1290,9 @@ where
             }
             return Ok(());
         }
+        // Syncing can only precede this handler after a committed reconnect message.
+        let nonce_already_persisted =
+            state.connectivity_state == fiber_types::ChannelConnectivityState::Syncing;
         state.on_peer_reconnected();
         myself.send_after(
             std::time::Duration::from_millis(super::REESTABLISH_TIMEOUT + 1),
@@ -1423,7 +1430,9 @@ where
             state.recovery_peer_v2 = Some(peer);
             self.replay_effects_v2(state);
             let ready = state.ready_wire_message()?;
-            self.store.insert_channel_actor_state(state.clone());
+            if !nonce_already_persisted {
+                self.store.insert_channel_actor_state(state.clone());
+            }
             state.send_v2_message(ready);
             state.finish_recovery_v2(myself);
             super::debug_event!(self.network, "Replayed ChannelReady after reestablishment");
@@ -2158,7 +2167,8 @@ mod tests {
             create_nodes_with_established_channel(100000000000, 11800000000, false).await;
         let mut sa = a.get_channel_actor_state(id);
         let mut sb = b.get_channel_actor_state(id);
-        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
             .await
             .unwrap();
         sa.network = Some(network.clone());
@@ -2196,6 +2206,15 @@ mod tests {
             .unwrap();
         assert_eq!(actor_b.store.channel_state_writes.get(), 2,
             "commit the nonce advertisement and then the signature, without unsigned staging writes");
+        let before = bincode::serialize(&sb.core).unwrap();
+        actor_b.store.channel_state_writes.set(0);
+        capture_barrier(&network, id).await;
+        captured.lock().unwrap().clear();
+        actor_b.progress_close_v2(&mut sb).await.unwrap();
+        assert_eq!(bincode::serialize(&sb.core).unwrap(), before);
+        assert_eq!(actor_b.store.channel_state_writes.get(), 0);
+        capture_barrier(&network, id).await;
+        assert!(captured.lock().unwrap().is_empty());
         let stored = actor_b.store.get_channel_actor_state(&id).unwrap();
         stored.validate_session_v2().unwrap();
         let close_b = stored
@@ -2218,8 +2237,22 @@ mod tests {
             .receive_closing_v2(&mut sa, signature_b)
             .await
             .unwrap();
-        assert_eq!(actor_a.store.channel_state_writes.get(), 2,
-            "retain the response and transaction-publication boundaries, not receive/sign staging writes");
+        assert_eq!(actor_a.store.channel_state_writes.get(), 1,
+            "only the first transaction publication needs another commit; the response is already durable");
+        let before = bincode::serialize(&sa.core).unwrap();
+        actor_a.store.channel_state_writes.set(0);
+        capture_barrier(&network, id).await;
+        captured.lock().unwrap().clear();
+        actor_a.progress_close_v2(&mut sa).await.unwrap();
+        assert_eq!(bincode::serialize(&sa.core).unwrap(), before);
+        assert_eq!(actor_a.store.channel_state_writes.get(), 0);
+        capture_barrier(&network, id).await;
+        assert!(matches!(
+            captured.lock().unwrap().as_slice(),
+            [NetworkActorMessage::Event(
+                NetworkActorEvent::ClosingTransactionPending(..)
+            )]
+        ));
         let stored = actor_a.store.get_channel_actor_state(&id).unwrap();
         stored.validate_session_v2().unwrap();
         assert!(
@@ -2525,6 +2558,220 @@ mod tests {
             ],
             "publish only successful removals, before the close that can supersede their outbox"
         );
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_ready_replay_persists_only_a_new_reconnect_nonce() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        for prior_reconnect_event in [false, true] {
+            let mut state = a.get_channel_actor_state(id);
+            state.network = Some(network.clone());
+            state.mark_reestablishing_offline();
+            let actor =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+            if prior_reconnect_event {
+                state.on_peer_reconnected();
+            }
+            actor.store.insert_channel_actor_state(state.clone());
+            actor.store.channel_state_writes.set(0);
+            let before = bincode::serialize(&state.core).unwrap();
+            let old_nonce = state.session_v2.as_ref().unwrap().own.public_nonce.clone();
+            let mut peer = b.get_channel_actor_state(id).reestablish_message_v2();
+            peer.next_ack_number = INITIAL_COMMITMENT_NUMBER + 1;
+            actor
+                .handle_peer_message(
+                    &myself,
+                    &mut state,
+                    FiberChannelMessage::ReestablishChannelV2(peer),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                actor.store.channel_state_writes.get(),
+                if prior_reconnect_event { 0 } else { 1 }
+            );
+            let stored = actor.store.get_channel_actor_state(&id).unwrap();
+            let nonce = &stored.session_v2.as_ref().unwrap().own.public_nonce;
+            assert_eq!(nonce, &state.session_v2.as_ref().unwrap().own.public_nonce);
+            assert_eq!(*nonce == old_nonce, prior_reconnect_event);
+            if prior_reconnect_event {
+                assert_eq!(bincode::serialize(&stored.core).unwrap(), before);
+            }
+            state.validate_session_v2().unwrap();
+            capture_barrier(&network, id).await;
+            let messages = captured.lock().unwrap();
+            assert!(messages.iter().any(|message| matches!(message,
+                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget {
+                    message: FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(ready)), ..
+                })) if &ready.next_commitment_nonce == nonce)));
+            drop(messages);
+            captured.lock().unwrap().clear();
+        }
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pending_forward_recovery_only_saves_changed_ownership() {
+        let upstream = fiber_types::Hash256::from([71; 32]);
+        let downstream = fiber_types::Hash256::from([72; 32]);
+        let hash = fiber_types::Hash256::from([73; 32]);
+        let mut incoming =
+            crate::fiber::tests::create_test_channel_state_with_tlc(upstream, 0, 1000, hash, None);
+        incoming
+            .waiting_forward_tlc_tasks
+            .insert(fiber_types::TLCId::Received(0), [7; 32]);
+        let mut outgoing = crate::fiber::tests::create_test_channel_state_with_tlc(
+            downstream, 0, 1000, hash, None,
+        );
+        outgoing.tlc_state = Default::default();
+        let mut add = retry_batch_add(73, 900);
+        add.previous_tlc = Some(fiber_types::PrevTlcInfo::new_with_shared_secret(
+            upstream, 0, 100, [7; 32],
+        ));
+        outgoing
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::AddTlc(add.clone()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+            .await
+            .unwrap();
+        incoming.network = Some(network.clone());
+        let actor = ChannelActor::new(
+            incoming.get_local_pubkey(),
+            incoming.get_remote_pubkey(),
+            network.clone(),
+            MockStore::new(),
+            None,
+        );
+        actor.store.insert_channel_actor_state(incoming.clone());
+        actor.store.insert_channel_actor_state(outgoing.clone());
+        actor.store.channel_state_writes.set(0);
+        let before = bincode::serialize(&incoming.core).unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        assert!(actor.recover_pending_forward_tlcs(&myself, &mut incoming));
+        assert_eq!(bincode::serialize(&incoming.core).unwrap(), before);
+        assert_eq!(actor.store.channel_state_writes.get(), 0);
+
+        outgoing.retryable_tlc_operations.clear();
+        let tlc = outgoing.create_outbounding_tlc(&add);
+        outgoing.tlc_state.add_offered_tlc(tlc);
+        actor.store.insert_channel_actor_state(outgoing);
+        actor.store.channel_state_writes.set(0);
+        assert!(actor.recover_pending_forward_tlcs(&myself, &mut incoming));
+        assert_eq!(actor.store.channel_state_writes.get(), 1);
+        let stored = actor.store.get_channel_actor_state(&upstream).unwrap();
+        assert!(stored.waiting_forward_tlc_tasks.is_empty());
+        assert_eq!(
+            stored
+                .tlc_state
+                .get(&fiber_types::TLCId::Received(0))
+                .unwrap()
+                .forwarding_tlc,
+            Some((downstream, 0))
+        );
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_receipt_only_saves_early_before_preimage_cleanup() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        for (fulfill, retain, early_writes) in
+            [(false, false, 0), (true, true, 0), (true, false, 1)]
+        {
+            let mut state = a.get_channel_actor_state(id);
+            state.network = Some(network.clone());
+            let preimage = fiber_types::Hash256::from([74; 32]);
+            let mut add = retry_batch_add(74, 1000);
+            add.payment_hash = add.hash_algorithm.hash(preimage).into();
+            let reason = if fulfill {
+                fiber_types::RemoveTlcReason::RemoveTlcFulfill(fiber_types::RemoveTlcFulfill {
+                    payment_preimage: preimage,
+                })
+            } else {
+                fiber_types::RemoveTlcReason::RemoveTlcFail(fiber_types::TlcErrPacket::new(
+                    fiber_types::TlcErr::new(fiber_types::TlcErrorCode::HoldTlcTimeout),
+                    &[0; 32],
+                ))
+            };
+            let mut tlc = state.create_outbounding_tlc(&add);
+            tlc.status = fiber_types::TlcStatus::Outbound(
+                fiber_types::OutboundTlcStatus::RemoveAckConfirmed,
+            );
+            tlc.removed_reason = Some(reason.clone());
+            let tlc_id = tlc.tlc_id;
+            state
+                .session_v2
+                .as_mut()
+                .unwrap()
+                .remove_effects
+                .push((tlc.clone(), None));
+            if retain {
+                tlc.tlc_id = fiber_types::TLCId::Offered(1);
+                state
+                    .session_v2
+                    .as_mut()
+                    .unwrap()
+                    .remove_effects
+                    .push((tlc, None));
+            }
+            let store = MockStore::new().with_preimage(add.payment_hash, preimage);
+            let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), store, None);
+            actor.store.insert_channel_actor_state(state.clone());
+            actor.store.channel_state_writes.set(0);
+            actor
+                .handle_event(
+                    &myself,
+                    &mut state,
+                    super::super::ChannelEvent::OnChainTlcRelayConfirmed(tlc_id, reason),
+                )
+                .await
+                .unwrap();
+            assert_eq!(actor.store.channel_state_writes.get(), early_writes);
+            assert_eq!(
+                actor.store.get_preimage(&add.payment_hash).is_none(),
+                fulfill && !retain
+            );
+            assert_eq!(
+                *actor.store.preimage_removal_writes.borrow(),
+                if fulfill && !retain { vec![1] } else { vec![] }
+            );
+            capture_barrier(&network, id).await;
+            assert_eq!(captured.lock().unwrap().iter().filter(|message| matches!(message,
+                NetworkActorMessage::Notification(NetworkServiceEvent::PreimageRemoved(hash)) if *hash == add.payment_hash)).count(), if fulfill && !retain { 1 } else { 0 });
+            captured.lock().unwrap().clear();
+            actor.persist_state_and_publish_pending_effects(&mut state);
+            assert_eq!(actor.store.channel_state_writes.get(), early_writes + 1);
+            assert_eq!(
+                actor
+                    .store
+                    .get_channel_actor_state(&id)
+                    .unwrap()
+                    .session_v2
+                    .as_ref()
+                    .unwrap()
+                    .remove_effects
+                    .len(),
+                usize::from(retain)
+            );
+        }
         handle.abort();
         network.stop(None);
         task.await.unwrap();
@@ -4838,9 +5085,8 @@ mod tests {
         );
     }
 
-    /// The relay confirmation for an on-chain settlement drops the matching durable remove
-    /// effect and persists that removal. The effect lookup already proves that a removal
-    /// happened, so the persisted write must not depend on a separate length comparison.
+    /// Relay confirmation drops the matching durable remove effect; the normal message-tail
+    /// commit persists that removal when no preimage cleanup requires an earlier boundary.
     #[tokio::test]
     async fn test_v2_onchain_relay_confirmation_drops_matching_remove_effect() {
         let (a, b, id) =
@@ -4903,6 +5149,7 @@ mod tests {
             state.session_v2.as_ref().unwrap().remove_effects.is_empty(),
             "the matching remove effect must be dropped"
         );
+        actor.persist_state_and_publish_pending_effects(&mut state);
         assert!(
             a.store
                 .get_channel_actor_state(&id)

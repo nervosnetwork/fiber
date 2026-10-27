@@ -49,7 +49,10 @@ Nonce advertisements, signed responses, usable transactions and signing-acceptan
 notifications are published only after their session/replay state is stored.
 Staging, context binding and signing can run together in memory: when nothing is
 published between them, one save of the accepted state is sufficient. Previously
-stored intermediate sessions remain readable and recoverable.
+stored intermediate sessions remain readable and recoverable. Cached closing
+signatures and already-ready closing transactions can be replayed without another
+early save. Ready replay skips its early save only when a previous reconnect
+message has already committed the nonce; a handshake that rotates it still saves.
 
 For offered TLC removals, the first save records the TLC and bound execution in
 the durable effect outbox. That intent authorizes delivery even if source balance
@@ -67,6 +70,8 @@ close supersession cannot overtake them. Startup replays the durable outbox even
 though runtime publication markers are not restored. Startup and offline-owner
 updates keep explicit saves because they do not pass through the message tail.
 CS/ACK signing and RPC ownership-handoff boundaries retain their existing saves.
+Forward-owner recovery saves only when it changes channel state. Outbox receipts
+use the normal tail commit unless actual preimage deletion needs an earlier save.
 
 ## Backup restoration and ordinary crash recovery
 

@@ -38,6 +38,7 @@ pub(crate) struct MockStore {
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
     pub(crate) channel_state_writes: Cell<usize>,
+    pub(crate) preimage_removal_writes: RefCell<Vec<usize>>,
     pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
     pub(crate) shutdown_settlements: RefCell<HashMap<Hash256, ShutdownSettlementRecord>>,
     pub(crate) watch_channels: RefCell<HashMap<Hash256, fiber_types::ChannelData>>,
@@ -52,6 +53,7 @@ impl MockStore {
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
             channel_state_writes: Cell::new(0),
+            preimage_removal_writes: RefCell::new(Vec::new()),
             onchain_settlements: RefCell::new(HashMap::new()),
             shutdown_settlements: RefCell::new(HashMap::new()),
             watch_channels: RefCell::new(HashMap::new()),
@@ -217,6 +219,9 @@ impl PreimageStore for MockStore {
     }
 
     fn remove_preimage(&self, payment_hash: &Hash256) {
+        self.preimage_removal_writes
+            .borrow_mut()
+            .push(self.channel_state_writes.get());
         self.preimages.borrow_mut().remove(payment_hash);
     }
 

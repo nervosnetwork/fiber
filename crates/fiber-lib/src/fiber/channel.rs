@@ -571,7 +571,6 @@ where
         if state.reestablishing {
             if expects_v2 {
                 if let FiberChannelMessage::ReestablishChannelV2(reestablish) = message {
-                    state.on_peer_reconnected();
                     return self.reestablish_v2(myself, state, reestablish).await;
                 }
                 // No replay or update traffic is allowed until our handshake has been
@@ -3057,6 +3056,7 @@ where
             .iter()
             .map(|(tlc_id, shared_secret)| (*tlc_id, *shared_secret))
             .collect();
+        let pending_count = pending.len();
         let index = self.forwarded_tlc_index();
         let channel_id = state.get_id();
 
@@ -3121,7 +3121,10 @@ where
             );
         }
 
-        self.store.insert_channel_actor_state(state.clone());
+        // Every mutating recovery branch removes its waiting task; owner-only retries do not.
+        if state.waiting_forward_tlc_tasks.len() != pending_count {
+            self.store.insert_channel_actor_state(state.clone());
+        }
         true
     }
 
@@ -4360,13 +4363,13 @@ where
                         tlc.tlc_id != tlc_id || tlc.removed_reason.as_ref() != Some(&reason)
                     });
                     if let Some(hash) = payment_hash {
-                        self.store.insert_channel_actor_state(state.clone());
                         let retain_invoice_preimage = self.store.has_invoice_preimage(&hash)
                             && self.store.get_invoice_status(&hash) == Some(CkbInvoiceStatus::Open);
                         if matches!(reason, RemoveTlcReason::RemoveTlcFulfill(_))
                             && !retain_invoice_preimage
                             && !has_pending_tlc_for_payment_hash(&self.store, state, hash)
                         {
+                            self.store.insert_channel_actor_state(state.clone());
                             self.remove_preimage(hash);
                         }
                         return Ok(());
