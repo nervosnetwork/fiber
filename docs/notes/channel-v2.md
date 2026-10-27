@@ -54,14 +54,15 @@ signatures and already-ready closing transactions can be replayed without anothe
 early save. Ready replay skips its early save only when a previous reconnect
 message has already committed the nonce; a handshake that rotates it still saves.
 
-For offered TLC removals, the first save records the TLC and bound execution in
-the durable effect outbox. That intent authorizes delivery even if source balance
-application has not yet been saved; receipt/replay recovery handles this partial
-state. The normal actor message-tail save records the applied balance and flags,
-then publishes the ready outbox prefix once, without a second per-TLC application
-save or a replay after every TLC. Maintenance and reestablishment also request
-publication at that boundary. A later execution-lookup failure leaves earlier
-successes ready for publication and the unbound TLC unapplied for retry.
+Offered TLC removals bind their execution and append an in-memory outbox intent
+before applying balances and flags. The normal actor message-tail save commits
+both together, then publishes the ready outbox prefix once, without per-TLC saves
+or replays. Before that commit, the original durable TLCs remain available for
+reapplication after restart; after it, the durable outbox authorizes replay.
+Older intent-only snapshots remain recoverable too. Maintenance and
+reestablishment also request publication at that boundary. A later execution-lookup
+failure leaves earlier successes ready for publication and the unbound TLC
+unapplied for retry.
 
 The runtime prefix ends at the last successful application, excluding a later
 intent whose application fails. Before requesting force close for such a failure,
