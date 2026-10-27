@@ -10747,8 +10747,10 @@ async fn test_payments_finish_after_lost_commitment_and_two_rapid_reconnects() {
 #[tokio::test]
 async fn test_revocation_nonce_stall_is_force_closed_after_peer_response_timeout() {
     init_tracing();
+    // The V1 per-round revocation nonce ledger is what goes unbalanced here; a V2 channel does not
+    // use it and must not be force-closed by this watchdog.
     let (mut node_a, mut node_b, channel_id) =
-        create_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
+        create_legacy_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
 
     node_a
         .hold_next_fiber_messages(
