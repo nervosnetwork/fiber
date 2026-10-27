@@ -112,13 +112,17 @@ Two durable records outlive the in-memory task that was supposed to finish them,
 and neither is replayed by reestablishment (which only resends offered/removed TLC
 updates). Both are re-driven from the persisted state instead.
 
-A forwarding task (`waiting_forward_tlc_tasks`) is resolved on actor start. The
-peeled onion packet is not persisted, so a forward cannot be re-issued after a
-restart. The downstream link is persisted as `TlcInfo::forwarding_tlc` on the
-offered TLC, which decides the outcome: if the downstream TLC exists, the incoming
-TLC is re-linked to it and the ordinary remove path finishes the flow; otherwise
-no downstream TLC was created, and the incoming TLC is failed back with a
-retryable `RemoveTlc` so the sender can retry. Trampoline forwards are different:
+A forwarding task (`waiting_forward_tlc_tasks`) is reconciled on actor start. An
+already-created downstream TLC carries its upstream link in
+`TlcInfo::forwarding_tlc`; recovery re-links the incoming TLC to it. A downstream
+`AddTlc` can instead still be in `retryable_tlc_operations`, with its peeled onion
+and `previous_tlc` preserved but no outgoing TLC id assigned yet. Recovery matches
+the payment hash and exact upstream channel/TLC identity in either representation,
+and retains the waiting guard for a queued Add until its execution reports a
+result. Only when neither durable representation exists may recovery fail the
+incoming TLC back for retry. Before a queued Add is published, its upstream TLC
+must still exist, match the payment hash and hash algorithm, and have neither a
+selected/queued removal nor an existing downstream link. Trampoline forwards are different:
 their durable owner is the payment session's `TrampolineContext.previous_tlcs`,
 not a downstream channel's `forwarding_tlc`. Recovery matches the payment hash and
 exact upstream channel/TLC identity, retains the pending-forward guard against

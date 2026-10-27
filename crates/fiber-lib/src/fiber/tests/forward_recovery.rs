@@ -248,6 +248,179 @@ async fn test_pending_forward_without_downstream_tlc_is_failed_back() {
     );
 }
 
+fn queued_forward_add(upstream: Hash256, hash: Hash256) -> fiber_types::AddTlcCommand {
+    let expiry = crate::now_timestamp_as_millis_u64() + 86_400_000;
+    let packet = fiber_types::PeeledPaymentOnionPacket::create(
+        crate::tests::gen_utils::gen_rand_fiber_private_key(),
+        vec![
+            fiber_types::PaymentHopData {
+                amount: 1000,
+                expiry,
+                next_hop: Some(gen_rand_fiber_public_key()),
+                hash_algorithm: HashAlgorithm::CkbHash,
+                ..Default::default()
+            },
+            fiber_types::PaymentHopData {
+                amount: 1000,
+                expiry,
+                hash_algorithm: HashAlgorithm::CkbHash,
+                ..Default::default()
+            },
+        ],
+        Some(hash.as_ref().to_vec()),
+        &secp256k1::Secp256k1::new(),
+    )
+    .unwrap();
+    fiber_types::AddTlcCommand {
+        amount: 1000,
+        payment_hash: hash,
+        attempt_id: None,
+        expiry,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        onion_packet: packet.next,
+        shared_secret: packet.shared_secret,
+        is_trampoline_hop: false,
+        previous_tlc: Some(fiber_types::PrevTlcInfo::new_with_shared_secret(
+            upstream,
+            0,
+            0,
+            TEST_SHARED_SECRET,
+        )),
+    }
+}
+
+#[tokio::test]
+async fn test_pending_forward_queue_survives_recovery_and_relinks_after_creation() {
+    for downstream_first in [false, true] {
+        let upstream = gen_rand_sha256_hash();
+        let downstream = gen_rand_sha256_hash();
+        let hash = gen_rand_sha256_hash();
+        let mut incoming = create_test_channel_state_with_tlc(upstream, 0, 1000, hash, None);
+        incoming
+            .waiting_forward_tlc_tasks
+            .insert(TLCId::Received(0), TEST_SHARED_SECRET);
+        let mut outgoing = create_test_channel_state_with_tlc(downstream, 0, 1000, hash, None);
+        outgoing.tlc_state = Default::default();
+        outgoing
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::AddTlc(queued_forward_add(
+                upstream, hash,
+            )));
+        let (store, _dir) = crate::tests::test_utils::generate_store();
+        store.insert_channel_actor_state(incoming);
+        store.insert_channel_actor_state(outgoing);
+        let (network, task) = Actor::spawn(None, SilentNetworkActor, Default::default())
+            .await
+            .unwrap();
+        let myself = spawn_null_channel_actor().await;
+        let actor = ChannelActor::new(
+            gen_rand_fiber_public_key(),
+            gen_rand_fiber_public_key(),
+            network.clone(),
+            store.clone(),
+            None,
+        );
+        let mut incoming = store.get_channel_actor_state(&upstream).unwrap();
+        if !downstream_first {
+            for _ in 0..2 {
+                actor.recover_pending_forward_tlcs(&myself, &mut incoming);
+                assert!(
+                    incoming.retryable_tlc_operations.is_empty(),
+                    "a durable queued forward must not be failed back"
+                );
+                assert!(incoming.is_waiting_forward_result_for_received_tlc(TLCId::Received(0)));
+                assert!(
+                    incoming
+                        .tlc_state
+                        .get(&TLCId::Received(0))
+                        .unwrap()
+                        .forwarding_tlc
+                        .is_none(),
+                    "a queued Add has no downstream TLC id yet"
+                );
+                assert_eq!(
+                    store
+                        .get_channel_actor_state(&downstream)
+                        .unwrap()
+                        .retryable_tlc_operations
+                        .len(),
+                    1
+                );
+            }
+        }
+        // Model the downstream actor's durable queue-to-TLC handoff before its result arrives.
+        let mut outgoing = store.get_channel_actor_state(&downstream).unwrap();
+        outgoing.retryable_tlc_operations.clear();
+        let mut created = offered_tlc(3, 1000, hash, None);
+        created.forwarding_tlc = Some((upstream, 0));
+        outgoing.tlc_state.offered_tlcs.tlcs.push(created);
+        store.insert_channel_actor_state(outgoing);
+        actor.recover_pending_forward_tlcs(&myself, &mut incoming);
+        assert!(incoming.waiting_forward_tlc_tasks.is_empty());
+        assert!(incoming.retryable_tlc_operations.is_empty());
+        assert_eq!(
+            incoming
+                .tlc_state
+                .get(&TLCId::Received(0))
+                .unwrap()
+                .forwarding_tlc,
+            Some((downstream, 3))
+        );
+        myself.stop(None);
+        network.stop(None);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_pending_forward_queue_must_match_upstream_identity_and_hash() {
+    for mismatch in ["hash", "channel", "tlc"] {
+        let upstream = gen_rand_sha256_hash();
+        let downstream = gen_rand_sha256_hash();
+        let hash = gen_rand_sha256_hash();
+        let mut incoming = create_test_channel_state_with_tlc(upstream, 0, 1000, hash, None);
+        incoming
+            .waiting_forward_tlc_tasks
+            .insert(TLCId::Received(0), TEST_SHARED_SECRET);
+        let mut outgoing = create_test_channel_state_with_tlc(downstream, 0, 1000, hash, None);
+        outgoing.tlc_state = Default::default();
+        let mut command = queued_forward_add(upstream, hash);
+        match mismatch {
+            "hash" => command.payment_hash = gen_rand_sha256_hash(),
+            "channel" => {
+                command.previous_tlc.as_mut().unwrap().prev_channel_id = gen_rand_sha256_hash()
+            }
+            "tlc" => command.previous_tlc.as_mut().unwrap().prev_tlc_id = 1,
+            _ => unreachable!(),
+        }
+        outgoing
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::AddTlc(command));
+        let store = MockStore::new();
+        store.insert_channel_actor_state(incoming.clone());
+        store.insert_channel_actor_state(outgoing);
+        let (network, task) = Actor::spawn(None, SilentNetworkActor, Default::default())
+            .await
+            .unwrap();
+        let myself = spawn_null_channel_actor().await;
+        let actor = ChannelActor::new(
+            gen_rand_fiber_public_key(),
+            gen_rand_fiber_public_key(),
+            network.clone(),
+            store,
+            None,
+        );
+        actor.recover_pending_forward_tlcs(&myself, &mut incoming);
+        assert!(
+            !incoming.retryable_tlc_operations.is_empty(),
+            "unrelated queue must not claim this incoming TLC: {mismatch}"
+        );
+        myself.stop(None);
+        network.stop(None);
+        task.await.unwrap();
+    }
+}
+
 /// Trampoline payments own their upstream TLC through the persisted payment context, not a
 /// downstream channel's `forwarding_tlc` link. Recovery must match the full TLC identity.
 #[tokio::test]

@@ -1520,6 +1520,134 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
 }
 
 #[tokio::test]
+async fn test_forward_queued_add_restart_keeps_settlements_balanced() {
+    init_tracing();
+    for (keysend, fulfill) in [(true, true), (false, true), (false, false)] {
+        let funding = MIN_RESERVED_CKB + 1_000_000_000;
+        let (nodes, channels) = create_n_nodes_network_with_params(
+            &[
+                (
+                    (0, 1),
+                    ChannelParameters {
+                        public: true,
+                        node_a_funding_amount: funding,
+                        node_b_funding_amount: funding,
+                        a_tlc_fee_proportional_millionths: Some(0),
+                        b_tlc_fee_proportional_millionths: Some(0),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    (1, 2),
+                    ChannelParameters {
+                        public: true,
+                        node_a_funding_amount: funding,
+                        node_b_funding_amount: funding,
+                        a_tlc_fee_proportional_millionths: Some(0),
+                        b_tlc_fee_proportional_millionths: Some(0),
+                        ..Default::default()
+                    },
+                ),
+            ],
+            3,
+            None,
+        )
+        .await;
+        let [a, mut b, c] = nodes.try_into().expect("3 nodes");
+        let before = [
+            a.get_local_balance_from_channel(channels[0]),
+            b.get_local_balance_from_channel(channels[0]),
+            b.get_local_balance_from_channel(channels[1]),
+            c.get_local_balance_from_channel(channels[1]),
+        ];
+        c.hold_next_fiber_messages(
+            b.pubkey,
+            channels[1],
+            TestFiberMessageKind::CommitmentOrAck,
+            1,
+        )
+        .await;
+        b.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: channels[1],
+                    command: ChannelCommand::CommitmentSigned(None),
+                }),
+            ))
+            .unwrap();
+        c.wait_for_held_fiber_messages(1).await;
+        let amount = 1000;
+        let preimage = gen_rand_sha256_hash();
+        let result = if keysend {
+            a.send_payment_keysend(&c, amount, false).await.unwrap()
+        } else {
+            let invoice = InvoiceBuilder::new(Currency::Fibd)
+                .amount(Some(amount))
+                .payment_preimage(preimage)
+                .payee_pub_key(c.pubkey.into())
+                .expiry_time(Duration::from_secs(3600))
+                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &c.private_key.0))
+                .unwrap();
+            c.insert_invoice(invoice.clone(), None);
+            a.send_payment(SendPaymentCommand {
+                invoice: Some(invoice.to_string()),
+                max_parts: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+        };
+        let hash = result.payment_hash;
+        wait_until_timeout(5000, || {
+            b.get_channel_actor_state(channels[0]).waiting_forward_tlc_tasks.contains_key(&TLCId::Received(0))
+                && b.get_channel_actor_state(channels[1]).retryable_tlc_operations.iter().any(|op| matches!(op,
+                    RetryableTlcOperation::AddTlc(add) if add.payment_hash == hash && add.previous_tlc.is_some_and(|prev| prev.prev_channel_id == channels[0])))
+        }).await;
+        assert!(b
+            .get_channel_actor_state(channels[1])
+            .tlc_state
+            .offered_tlcs
+            .tlcs
+            .is_empty());
+        // Lose the old ACK; reconnect must recover both it and the persisted queued forward.
+        c.discard_held_fiber_messages().await;
+        b.restart().await;
+        if !keysend {
+            wait_until_timeout(10000, || !c.store.get_payment_hold_tlcs(hash).is_empty()).await;
+            assert!(b
+                .get_channel_actor_state(channels[0])
+                .tlc_state
+                .get(&TLCId::Received(0))
+                .expect("upstream stays locked while downstream is held")
+                .removed_reason
+                .is_none());
+            if fulfill {
+                c.settle_invoice(&hash, preimage).await.unwrap();
+            } else {
+                c.cancel_invoice(&hash);
+            }
+        }
+        if fulfill {
+            a.wait_until_success(hash).await;
+        } else {
+            a.wait_until_failed(hash).await;
+        }
+        let paid = if fulfill { amount } else { 0 };
+        wait_until_timeout(10000, || {
+            a.get_local_balance_from_channel(channels[0]) == before[0] - paid
+                && b.get_local_balance_from_channel(channels[0]) == before[1] + paid
+                && b.get_local_balance_from_channel(channels[1]) == before[2] - paid
+                && c.get_local_balance_from_channel(channels[1]) == before[3] + paid
+                && channels.iter().all(|id| {
+                    let state = b.get_channel_actor_state(*id);
+                    !state.any_tlc_pending() && state.retryable_tlc_operations.is_empty()
+                })
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn test_v2_retry_queue_batch_settles_payments() {
     init_tracing();
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
