@@ -506,6 +506,7 @@ where
     fn persist_state_and_publish_pending_effects(&self, state: &mut ChannelActorState) {
         let count = std::mem::take(&mut state.pending_remove_effects_v2);
         self.store.insert_channel_actor_state(state.clone());
+        self.publish_force_closing_removes_v2(state);
         if let Some(session) = &state.session_v2 {
             self.publish_remove_effects_v2(
                 state.id,
@@ -2493,6 +2494,12 @@ where
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
         self.remove_tlc_update(state, command)?;
+        if state.session_v2.is_some()
+            && matches!(state.state, ChannelState::ShuttingDown(flags) if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+        {
+            // The published close transaction precludes a new CS; notify after the next save.
+            return Ok(());
+        }
         state.maybe_transfer_to_shutdown().await?;
         self.handle_commitment_signed_command(myself, state).await?;
         Ok(())
@@ -3273,7 +3280,7 @@ where
                         // Persist before acking: on-chain relay callers treat this reply as
                         // proof that the upstream removal is durable. The handler-end persist
                         // would leave a crash window between reply and disk.
-                        self.store.insert_channel_actor_state(state.clone());
+                        self.persist_state_and_publish_pending_effects(state);
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
@@ -5596,7 +5603,7 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub pending_remove_effects_v2: usize,
 
-    /// Prefix of pending TLC updates already replayed on this connection.
+    /// Prefix of pending TLC updates already published on this connection.
     #[doc = "skip_store"]
     pub replayed_tlc_updates_v2: usize,
 
@@ -6528,6 +6535,7 @@ impl ChannelActorState {
     }
 
     pub(crate) fn mark_watching_chain_offline(&mut self) {
+        self.replayed_tlc_updates_v2 = 0;
         self.clear_waiting_peer_response();
         self.reestablishing = false;
         self.reestablish_started_at = None;

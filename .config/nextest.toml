@@ -11,6 +11,11 @@ threads-required = 2
 filter = 'test(/^(fiber::)?tests::channel::/)'
 threads-required = 2
 
+# four-node restart regression
+[[profile.default.overrides]]
+filter = 'test(test_zero_fee_ring_restart_preserves_each_nodes_balance)'
+threads-required = 2
+
 # payment tests
 [[profile.default.overrides]]
 filter = 'test(/^(fiber::)?tests::payment::/)'
