@@ -976,6 +976,21 @@ impl NetworkActorStateStore for Store {
 }
 
 impl ChannelActorStateStore for Store {
+    fn has_trampoline_payment_for_tlc(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+    ) -> bool {
+        self.get_payment_session(payment_hash)
+            .and_then(|session| session.request.trampoline_context)
+            .is_some_and(|context| {
+                context.previous_tlcs.iter().any(|previous| {
+                    previous.prev_channel_id == channel_id && previous.prev_tlc_id == tlc_id
+                })
+            })
+    }
+
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
         self.get(key).map(|v| deserialize_channel_state(v.as_ref()))

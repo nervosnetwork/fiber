@@ -13,7 +13,9 @@ use ractor::{Actor, ActorProcessingErr, ActorRef};
 use crate::fiber::channel::{
     ChannelActor, ChannelActorMessage, ChannelActorState, ChannelActorStateStore,
 };
-use crate::fiber::network::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::network::{NetworkActorCommand, NetworkActorEvent, NetworkActorMessage};
+use crate::fiber::payment::{PaymentSessionExt, SendPaymentDataBuilder};
 use crate::fiber::tests::settle_tlc_set_command_tests::{
     create_test_channel_state_with_tlc, MockStore,
 };
@@ -244,6 +246,116 @@ async fn test_pending_forward_without_downstream_tlc_is_failed_back() {
         "the lost forward must be queued as a retryable failure, got {:?}",
         state.retryable_tlc_operations
     );
+}
+
+/// Trampoline payments own their upstream TLC through the persisted payment context, not a
+/// downstream channel's `forwarding_tlc` link. Recovery must match the full TLC identity.
+#[tokio::test]
+async fn test_pending_trampoline_forward_is_resumed_only_for_matching_tlc() {
+    for mismatch in [
+        None,
+        Some("hash"),
+        Some("channel"),
+        Some("tlc"),
+        Some("context"),
+    ] {
+        let upstream_channel_id = gen_rand_sha256_hash();
+        let payment_hash = gen_rand_sha256_hash();
+        let mut state =
+            create_test_channel_state_with_tlc(upstream_channel_id, 0, 1000, payment_hash, None);
+        state.id = upstream_channel_id;
+        state
+            .waiting_forward_tlc_tasks
+            .insert(TLCId::Received(0), TEST_SHARED_SECRET);
+        let (store, _dir) = crate::tests::test_utils::generate_store();
+        store.insert_channel_actor_state(state.clone());
+        let request = SendPaymentDataBuilder::new(
+            gen_rand_fiber_public_key(),
+            900,
+            if mismatch == Some("hash") {
+                gen_rand_sha256_hash()
+            } else {
+                payment_hash
+            },
+        )
+        .max_fee_amount(Some(100))
+        .trampoline_context(
+            (mismatch != Some("context")).then(|| fiber_types::TrampolineContext {
+                remaining_trampoline_onion: vec![],
+                previous_tlcs: vec![fiber_types::PrevTlcInfo::new_with_shared_secret(
+                    if mismatch == Some("channel") {
+                        gen_rand_sha256_hash()
+                    } else {
+                        upstream_channel_id
+                    },
+                    if mismatch == Some("tlc") { 1 } else { 0 },
+                    100,
+                    TEST_SHARED_SECRET,
+                )],
+                hash_algorithm: HashAlgorithm::CkbHash,
+                max_outgoing_tlc_expiry: None,
+            }),
+        )
+        .build()
+        .unwrap();
+        store.insert_payment_session(fiber_types::PaymentSession::new_session(&store, request, 3));
+
+        let captured = SilentNetworkState::default();
+        let (network, handle) = Actor::spawn(None, SilentNetworkActor, captured.clone())
+            .await
+            .unwrap();
+        let myself = spawn_null_channel_actor().await;
+        let actor = ChannelActor::new(
+            gen_rand_fiber_public_key(),
+            gen_rand_fiber_public_key(),
+            network.clone(),
+            store,
+            None,
+        );
+        actor.recover_pending_forward_tlcs(&myself, &mut state);
+        if mismatch.is_none() {
+            assert!(
+                state.retryable_tlc_operations.is_empty(),
+                "a persisted trampoline payment must not be failed back"
+            );
+            assert!(
+                state.is_waiting_forward_result_for_received_tlc(TLCId::Received(0)),
+                "keep the guard against local auto-fulfillment while the payment owns this TLC"
+            );
+            assert!(state
+                .tlc_state
+                .get(&TLCId::Received(0))
+                .unwrap()
+                .removed_reason
+                .is_none());
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while captured.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                matches!(captured.lock().unwrap().as_slice(), [NetworkActorMessage::Event(NetworkActorEvent::RetrySendPayment(hash, None))] if *hash == payment_hash),
+                "re-drive the payment owner, including its terminal outcome replay"
+            );
+        } else {
+            assert!(
+                state.waiting_forward_tlc_tasks.is_empty(),
+                "an unrelated payment must not claim this forward: {mismatch:?}"
+            );
+            assert!(matches!(
+                state.retryable_tlc_operations.front(),
+                Some(RetryableTlcOperation::RemoveTlc(
+                    TLCId::Received(0),
+                    RemoveTlcReason::RemoveTlcFail(_)
+                ))
+            ));
+        }
+        myself.stop(None);
+        network.stop(None);
+        handle.await.unwrap();
+    }
 }
 
 /// A payment-effect lookup that times out must defer the settled removal instead of panicking

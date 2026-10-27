@@ -224,6 +224,15 @@ impl PreimageStore for MockStore {
 }
 
 impl ChannelActorStateStore for MockStore {
+    fn has_trampoline_payment_for_tlc(
+        &self,
+        _payment_hash: Hash256,
+        _channel_id: Hash256,
+        _tlc_id: u64,
+    ) -> bool {
+        false
+    }
+
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         self.channel_states.borrow().get(id).cloned()
     }
