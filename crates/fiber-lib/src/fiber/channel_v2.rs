@@ -1734,6 +1734,26 @@ where
         }
     }
 
+    /// Publish saved removal hints without signing after the closing transaction is published.
+    pub(super) fn publish_force_closing_removes_v2(&self, state: &mut ChannelActorState) {
+        if state.session_v2.is_none()
+            || !matches!(state.state, ChannelState::ShuttingDown(flags)
+                if flags.contains(fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION))
+        {
+            return;
+        }
+        for update in state
+            .pending_replay_updates
+            .iter()
+            .skip(state.replayed_tlc_updates_v2)
+        {
+            if let fiber_types::TlcReplayUpdate::Remove(remove) = update {
+                state.send_v2_message(FiberMessage::remove_tlc(remove.clone()));
+            }
+        }
+        state.replayed_tlc_updates_v2 = state.pending_replay_updates.len();
+    }
+
     pub(super) fn replay_remove_effects_v2(&self, state: &ChannelActorState) {
         if let Some(session) = &state.session_v2 {
             self.publish_remove_effects_v2(state.id, &session.remove_effects);
@@ -3250,6 +3270,191 @@ mod tests {
         handle.await.unwrap();
         network.stop(None);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_force_closing_removal_is_committed_and_published_without_cs() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let preimage = crate::gen_rand_sha256_hash();
+        let invoice = crate::invoice::InvoiceBuilder::new(crate::invoice::Currency::Fibd)
+            .amount(Some(1000))
+            .payment_preimage(preimage)
+            .payee_pub_key(b.pubkey.into())
+            .expiry_time(std::time::Duration::from_secs(3600))
+            .build_with_sign(|hash| {
+                secp256k1::SECP256K1.sign_ecdsa_recoverable(hash, &b.private_key.0)
+            })
+            .unwrap();
+        let hash = *invoice.payment_hash();
+        b.insert_invoice(invoice.clone(), None);
+        a.send_payment(crate::fiber::payment::SendPaymentCommand {
+            invoice: Some(invoice.to_string()),
+            max_parts: Some(1),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        crate::tests::test_utils::wait_until_timeout(10000, || {
+            !b.store.get_payment_hold_tlcs(hash).is_empty()
+        })
+        .await;
+        let payer = a.get_channel_actor_state(id);
+        let forwarder = b.get_channel_actor_state(id);
+        let received = forwarder
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .find(|tlc| tlc.payment_hash == hash)
+            .unwrap();
+        assert_eq!(
+            received.inbound_status(),
+            fiber_types::InboundTlcStatus::Committed
+        );
+        let tlc_id = received.id();
+        b.stop().await;
+        a.stop().await;
+
+        for rpc in [false, true] {
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+                .await
+                .unwrap();
+            let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+            let actor =
+                ChannelActor::new(b.pubkey, a.pubkey, network.clone(), MockStore::new(), None);
+            let mut state = forwarder.clone();
+            state.network = Some(network.clone());
+            // Force close must not publish an Add left over from an unsigned batch.
+            actor
+                .add_tlc_update(&mut state, &retry_batch_add(200, 1))
+                .unwrap();
+            state.state = ChannelState::ShuttingDown(
+                fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+            );
+            actor.store.insert_channel_actor_state(state.clone());
+            actor.store.channel_state_writes.set(0);
+            let old_outgoing = state
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .outgoing
+                .as_ref()
+                .unwrap()
+                .request
+                .clone();
+            let balances = (state.to_local_amount, state.to_remote_amount);
+            let command = RemoveTlcCommand {
+                id: tlc_id,
+                reason: fiber_types::RemoveTlcReason::RemoveTlcFulfill(
+                    fiber_types::RemoveTlcFulfill {
+                        payment_preimage: preimage,
+                    },
+                ),
+            };
+            if rpc {
+                let (reply, response) = tokio::sync::oneshot::channel();
+                actor
+                    .handle_command(
+                        &myself,
+                        &mut state,
+                        super::super::ChannelCommand::RemoveTlc(command, reply.into()),
+                    )
+                    .await
+                    .unwrap();
+                response.await.unwrap().unwrap();
+            } else {
+                actor
+                    .handle_remove_tlc_command(&myself, &mut state, command)
+                    .await
+                    .unwrap();
+                capture_barrier(&network, id).await;
+                assert!(take_wire_messages(&captured).is_empty());
+                assert_eq!(actor.store.channel_state_writes.get(), 0);
+                actor.persist_state_and_publish_pending_effects(&mut state);
+            }
+            capture_barrier(&network, id).await;
+            let wire = take_wire_messages(&captured);
+            assert_eq!(
+                wire.len(),
+                1,
+                "publish only the terminal RemoveTlc, never Add or CS"
+            );
+            assert_eq!(actor.store.channel_state_writes.get(), 1);
+            let durable = actor.store.get_channel_actor_state(&id).unwrap();
+            let tlc = durable
+                .tlc_state
+                .get(&fiber_types::TLCId::Received(tlc_id))
+                .unwrap();
+            assert_eq!(
+                tlc.inbound_status(),
+                fiber_types::InboundTlcStatus::LocalRemoved
+            );
+            assert!(matches!(
+                tlc.removed_reason,
+                Some(fiber_types::RemoveTlcReason::RemoveTlcFulfill(_))
+            ));
+            assert_eq!(
+                durable
+                    .session_v2
+                    .as_ref()
+                    .unwrap()
+                    .outgoing
+                    .as_ref()
+                    .unwrap()
+                    .request
+                    .as_slice(),
+                old_outgoing.as_slice()
+            );
+            assert_eq!(
+                (durable.to_local_amount, durable.to_remote_amount),
+                balances
+            );
+            let FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(remove)) =
+                &wire[0].message
+            else {
+                panic!("expected only a removal notification")
+            };
+            let mut payer = payer.clone();
+            payer.network = Some(network.clone());
+            let peer =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+            peer.handle_remove_tlc_peer_message(&mut payer, remove.clone())
+                .unwrap();
+            assert_eq!(
+                payer
+                    .tlc_state
+                    .get(&fiber_types::TLCId::Offered(tlc_id))
+                    .unwrap()
+                    .outbound_status(),
+                fiber_types::OutboundTlcStatus::RemoteRemoved
+            );
+            actor.persist_state_and_publish_pending_effects(&mut state);
+            capture_barrier(&network, id).await;
+            assert!(
+                take_wire_messages(&captured).is_empty(),
+                "do not republish on every message tail"
+            );
+            let mut restored = ChannelActorState::from(durable.core);
+            restored.network = Some(network.clone());
+            actor.persist_state_and_publish_pending_effects(&mut restored);
+            capture_barrier(&network, id).await;
+            let replayed = take_wire_messages(&captured);
+            assert_eq!(replayed.len(), 1);
+            assert_eq!(
+                replayed[0].message.clone().to_molecule_bytes(),
+                wire[0].message.clone().to_molecule_bytes()
+            );
+            assert_eq!(
+                a.get_payment_session(hash).unwrap().status,
+                fiber_types::PaymentStatus::Inflight
+            );
+            myself.stop(None);
+            handle.await.unwrap();
+            network.stop(None);
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

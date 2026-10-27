@@ -148,17 +148,17 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
         let (left, right) = nodes.split_at_mut(j);
         left[i].connect_to_nonblocking(&right[0]).await;
     }
-    wait_until_timeout(30000, || {
-        let terminal = payments.iter().all(|(i, hash)| {
-            nodes[*i].get_payment_session(*hash).is_some_and(|session| {
-                matches!(
-                    session.status,
-                    PaymentStatus::Success | PaymentStatus::Failed
-                )
-            })
-        });
-        terminal
-            && nodes.iter().enumerate().all(|(i, node)| {
+    let settled = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let terminal = payments.iter().all(|(i, hash)| {
+                nodes[*i].get_payment_session(*hash).is_some_and(|session| {
+                    matches!(
+                        session.status,
+                        PaymentStatus::Success | PaymentStatus::Failed
+                    )
+                })
+            });
+            let drained = nodes.iter().enumerate().all(|(i, node)| {
                 owned[i].iter().all(|id| {
                     let state = node.get_channel_actor_state(*id);
                     state.state == ChannelState::ChannelReady
@@ -166,9 +166,49 @@ async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
                         && !state.tlc_state.waiting_ack
                         && state.tlc_state.all_tlcs().next().is_none()
                 })
-            })
+            });
+            if terminal && drained {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     })
     .await;
+    if settled.is_err() {
+        let pending_payments: Vec<_> = payments
+            .iter()
+            .filter_map(|(i, hash)| {
+                let status = nodes[*i]
+                    .get_payment_session(*hash)
+                    .map(|session| session.status);
+                (!matches!(status, Some(PaymentStatus::Success | PaymentStatus::Failed)))
+                    .then_some((*i, *hash, status))
+            })
+            .collect();
+        let channels: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, node)| {
+                owned[i].iter().map(move |id| {
+                    let state = node.get_channel_actor_state(*id);
+                    (
+                        i,
+                        *id,
+                        state.state,
+                        state.reestablishing,
+                        state.tlc_state.waiting_ack,
+                        state.retryable_tlc_operations.len(),
+                        state
+                            .tlc_state
+                            .all_tlcs()
+                            .map(|tlc| (tlc.tlc_id, tlc.status.clone(), tlc.payment_hash))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            })
+            .collect();
+        panic!("ring did not settle within 120s; pending payments={pending_payments:?}; channel state/reestablishing/waiting_ack/retries/TLCs={channels:?}");
+    }
     for (i, node) in nodes.iter().enumerate() {
         for (offset, id) in owned[i].iter().enumerate() {
             let state = node.get_channel_actor_state(*id);
