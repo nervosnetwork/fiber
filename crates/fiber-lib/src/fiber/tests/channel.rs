@@ -10830,8 +10830,14 @@ async fn test_revocation_nonce_stall_is_force_closed_after_peer_response_timeout
 #[tokio::test]
 async fn test_revocation_nonce_watchdog_keeps_healthy_idle_channel_open() {
     init_tracing();
+    // This exercises the V1 per-round revocation nonce ledger, which a V2 channel does not use.
     let (node_a, node_b, channel_id) =
-        create_nodes_with_established_channel(50_000_000_000, 50_000_000_000, true).await;
+        crate::tests::test_utils::create_legacy_nodes_with_established_channel(
+            50_000_000_000,
+            50_000_000_000,
+            true,
+        )
+        .await;
 
     for _ in 0..3 {
         let a_to_b = node_a
@@ -13731,8 +13737,14 @@ fn settlement_tlc_to_witness_matches_commitment_contract_layout() {
 #[tokio::test]
 async fn test_deferred_peer_tlc_updates_do_not_outlive_the_connection() {
     init_tracing();
+    // Settling is asserted through the V1 revocation nonce ledger, so use a legacy channel.
     let (mut node_a, mut node_b, channel_id) =
-        create_nodes_with_established_channel(50_000_000_000, 50_000_000_000, true).await;
+        crate::tests::test_utils::create_legacy_nodes_with_established_channel(
+            50_000_000_000,
+            50_000_000_000,
+            true,
+        )
+        .await;
     for node in [&node_a, &node_b] {
         node.add_unexpected_events(vec!["is not the expected next id".to_string()])
             .await;

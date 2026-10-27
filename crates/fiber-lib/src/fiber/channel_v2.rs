@@ -1456,16 +1456,29 @@ where
                 return Err(invalid("Incompatible V2 incoming CS history"));
             }
         } else {
-            if peer.next_commitment_number != local {
+            // One step behind is the "missed our latest commitment" case, for example a peer that
+            // never saw our `ChannelReadyV2`. Nothing is owed and nothing is replayed except that
+            // Ready, so accept it instead of failing the handshake.
+            if peer.next_commitment_number != local
+                && peer.next_commitment_number.checked_add(1) != Some(local)
+            {
                 return Err(invalid("Incompatible V2 completed outgoing history"));
             }
             false
         };
 
+        let has_cached_ack = state
+            .session_v2
+            .as_ref()
+            .and_then(|session| session.incoming.as_ref())
+            .and_then(|incoming| incoming.response.as_ref())
+            .is_some();
         let replay_ack = if peer.next_ack_number == remote {
             false
         } else if peer.next_ack_number.checked_add(1) == Some(remote) {
-            true
+            // Only a real owed ACK is replayed. Without a cached ACK the peer is simply one
+            // commitment behind (it missed our `ChannelReadyV2`), which the Ready replay repairs.
+            has_cached_ack
         } else {
             return Err(invalid("Incompatible V2 incoming ACK history"));
         };
@@ -1597,6 +1610,24 @@ where
             .await?;
         }
         state.finish_recovery_v2(myself);
+        // A peer that missed our `ChannelReadyV2` (the connection dropped right after the funding
+        // round) is still one commitment behind. Replay ours so it can finish opening; the gate
+        // mirrors the V1 replay and cannot fire once both sides are caught up.
+        if state.state == ChannelState::ChannelReady
+            && state.funding_tx_confirmed_at.is_some()
+            && state.recovery_peer_v2.as_ref().is_some_and(|peer| {
+                peer.next_ack_number.checked_add(1) == Some(state.get_local_commitment_number())
+            })
+            && !state.tlc_state.waiting_ack
+            && state.tlc_state.all_tlcs().next().is_none()
+        {
+            let ready = state.ready_wire_message()?;
+            state.send_v2_message(ready);
+            super::debug_event!(
+                state.network(),
+                "Replayed ChannelReadyV2 after reestablishment"
+            );
+        }
         if resign_outstanding_cs && !state.reestablishing {
             // Recovery no longer owes an ACK, so this is an ordinary CS exchange again.
             self.send_commitment_v2(myself, state).await?;
