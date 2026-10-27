@@ -8308,8 +8308,6 @@ where
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state.persist_live_channels_offline_for_shutdown();
-
         // Cancel the onion service background task if running
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(token) = state.onion_service_token.take() {
@@ -8320,6 +8318,9 @@ where
             .get_cell()
             .stop_children_and_wait(Some("Network actor stopped".to_string()), None)
             .await;
+
+        // Re-read only after channel writers stop, so an older snapshot cannot overwrite progress.
+        state.persist_live_channels_offline_for_shutdown();
 
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);

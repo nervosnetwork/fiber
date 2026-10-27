@@ -1376,6 +1376,7 @@ fn test_channel_actor_state_store() {
         private_key: None,
         needs_backup: false,
         pending_remove_effects_v2: 0,
+        replayed_tlc_updates_v2: 0,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1522,6 +1523,7 @@ fn sample_channel_actor_state(
         private_key: None,
         needs_backup: false,
         pending_remove_effects_v2: 0,
+        replayed_tlc_updates_v2: 0,
     }
 }
 

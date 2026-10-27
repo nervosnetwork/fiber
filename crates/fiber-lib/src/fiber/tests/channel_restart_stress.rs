@@ -8,6 +8,201 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, error};
 
+#[tokio::test]
+async fn test_zero_fee_ring_restart_preserves_each_nodes_balance() {
+    use crate::fiber::network::{PeerDisconnectReason, TestFiberMessageKind};
+    use crate::fiber::payment::SendPaymentCommand;
+    use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
+    use crate::invoice::{Currency, InvoiceBuilder};
+    use crate::tests::test_utils::{
+        create_n_nodes_network_with_params, wait_until_timeout, ChannelParameters,
+    };
+    use fiber_types::{ChannelConnectivityState, ChannelState};
+    use secp256k1::SECP256K1;
+
+    init_tracing();
+    let edges = [(0, 1), (1, 2), (2, 3), (3, 0)];
+    let params = edges.map(|edge| {
+        (
+            edge,
+            ChannelParameters {
+                public: true,
+                node_a_funding_amount: HUGE_CKB_AMOUNT,
+                node_b_funding_amount: HUGE_CKB_AMOUNT,
+                a_tlc_fee_proportional_millionths: Some(0),
+                b_tlc_fee_proportional_millionths: Some(0),
+                ..Default::default()
+            },
+        )
+    });
+    let (nodes, channels) = create_n_nodes_network_with_params(&params, 4, None).await;
+    let mut nodes: [NetworkNode; 4] = nodes.try_into().expect("four nodes");
+    let owned = [
+        [channels[0], channels[3]],
+        [channels[0], channels[1]],
+        [channels[1], channels[2]],
+        [channels[2], channels[3]],
+    ];
+    for node in &nodes {
+        let payment = node.send_payment_keysend_to_self(1, false).await.unwrap();
+        assert_eq!(payment.fee, 0);
+        node.wait_until_success(payment.payment_hash).await;
+    }
+    wait_until_timeout(10000, || {
+        nodes.iter().enumerate().all(|(i, node)| {
+            owned[i].iter().all(|id| {
+                node.get_channel_actor_state(*id)
+                    .tlc_state
+                    .all_tlcs()
+                    .next()
+                    .is_none()
+            })
+        })
+    })
+    .await;
+    let initial: [u128; 4] = std::array::from_fn(|i| {
+        owned[i]
+            .iter()
+            .map(|id| nodes[i].get_local_balance_from_channel(*id))
+            .sum()
+    });
+    nodes[0]
+        .hold_next_fiber_messages(
+            nodes[1].pubkey,
+            channels[0],
+            TestFiberMessageKind::CommitmentOrAck,
+            1,
+        )
+        .await;
+    nodes[3]
+        .hold_next_fiber_messages(
+            nodes[2].pubkey,
+            channels[2],
+            TestFiberMessageKind::CommitmentOrAck,
+            1,
+        )
+        .await;
+    let mut payments = Vec::new();
+    for _ in 0..3 {
+        for (index, node) in nodes.iter().enumerate() {
+            let keysend = node.send_payment_keysend_to_self(1, false).await.unwrap();
+            assert_eq!(keysend.fee, 0);
+            payments.push((index, keysend.payment_hash));
+            let preimage = crate::gen_rand_sha256_hash();
+            let invoice = InvoiceBuilder::new(Currency::Fibd)
+                .amount(Some(1))
+                .payment_preimage(preimage)
+                .payment_secret(crate::gen_rand_sha256_hash())
+                .allow_mpp(true)
+                .payee_pub_key(node.pubkey.into())
+                .expiry_time(Duration::from_secs(3600))
+                .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node.private_key.0))
+                .unwrap();
+            node.insert_invoice(invoice.clone(), Some(preimage));
+            let payment = node
+                .send_payment(SendPaymentCommand {
+                    invoice: Some(invoice.to_string()),
+                    allow_self_payment: true,
+                    max_parts: Some(12),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(payment.fee, 0);
+            payments.push((index, payment.payment_hash));
+        }
+    }
+    nodes[0].wait_for_held_fiber_messages(1).await;
+    nodes[3].wait_for_held_fiber_messages(1).await;
+    let before: [[(u64, u64); 2]; 4] = std::array::from_fn(|i| {
+        owned[i].map(|id| {
+            let state = nodes[i].get_channel_actor_state(id);
+            (
+                state.tlc_state.offered_tlcs.next_tlc_id,
+                state.tlc_state.received_tlcs.next_tlc_id,
+            )
+        })
+    });
+    nodes[0].stop().await;
+    let disconnected_peer = nodes[2].pubkey;
+    ractor::call!(nodes[1].network_actor, |reply| {
+        NetworkActorMessage::new_command(NetworkActorCommand::DisconnectPeer(
+            disconnected_peer,
+            PeerDisconnectReason::Requested,
+            Some(reply),
+        ))
+    })
+    .unwrap()
+    .unwrap();
+    wait_until_timeout(5000, || {
+        nodes[1]
+            .get_channel_actor_state(channels[1])
+            .connectivity_state
+            == ChannelConnectivityState::Offline
+    })
+    .await;
+    nodes[3].stop().await;
+    nodes[3].start().await;
+    nodes[0].start().await;
+    for (i, j) in [(0, 1), (0, 3), (1, 2), (2, 3)] {
+        let (left, right) = nodes.split_at_mut(j);
+        left[i].connect_to_nonblocking(&right[0]).await;
+    }
+    wait_until_timeout(30000, || {
+        let terminal = payments.iter().all(|(i, hash)| {
+            nodes[*i].get_payment_session(*hash).is_some_and(|session| {
+                matches!(
+                    session.status,
+                    PaymentStatus::Success | PaymentStatus::Failed
+                )
+            })
+        });
+        terminal
+            && nodes.iter().enumerate().all(|(i, node)| {
+                owned[i].iter().all(|id| {
+                    let state = node.get_channel_actor_state(*id);
+                    state.state == ChannelState::ChannelReady
+                        && !state.reestablishing
+                        && !state.tlc_state.waiting_ack
+                        && state.tlc_state.all_tlcs().next().is_none()
+                })
+            })
+    })
+    .await;
+    for (i, node) in nodes.iter().enumerate() {
+        for (offset, id) in owned[i].iter().enumerate() {
+            let state = node.get_channel_actor_state(*id);
+            assert!(state.tlc_state.offered_tlcs.next_tlc_id >= before[i][offset].0);
+            assert!(state.tlc_state.received_tlcs.next_tlc_id >= before[i][offset].1);
+        }
+        let after: u128 = owned[i]
+            .iter()
+            .map(|id| node.get_local_balance_from_channel(*id))
+            .sum();
+        assert_eq!(
+            after, initial[i],
+            "zero-fee intermediary {i} lost backing during restart"
+        );
+    }
+    for (index, (i, j)) in edges.iter().enumerate() {
+        let a = nodes[*i].get_channel_actor_state(channels[index]);
+        let b = nodes[*j].get_channel_actor_state(channels[index]);
+        assert_eq!(
+            a.tlc_state.offered_tlcs.next_tlc_id,
+            b.tlc_state.received_tlcs.next_tlc_id
+        );
+        assert_eq!(
+            b.tlc_state.offered_tlcs.next_tlc_id,
+            a.tlc_state.received_tlcs.next_tlc_id
+        );
+    }
+    for node in &nodes {
+        let probe = node.send_payment_keysend_to_self(1, false).await.unwrap();
+        assert_eq!(probe.fee, 0);
+        node.wait_until_success(probe.payment_hash).await;
+    }
+}
+
 /// Restart stress reproducer.
 /// Runs repeated payment bursts with node restart and checks unexpected events.
 #[tokio::test]
