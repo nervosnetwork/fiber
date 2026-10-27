@@ -1520,6 +1520,65 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
 }
 
 #[tokio::test]
+async fn test_v2_retry_queue_batch_settles_payments() {
+    init_tracing();
+    let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+    let balance = a.get_local_balance_from_channel(id);
+    // Hold CS/RAA together so the test delays traffic without reordering signing contexts.
+    b.hold_next_fiber_messages(a.pubkey, id, TestFiberMessageKind::CommitmentOrAck, 2)
+        .await;
+    let first = a.send_payment_keysend(&b, 1000, false).await.unwrap();
+    b.wait_for_held_fiber_messages(2).await;
+    a.hold_next_fiber_messages(b.pubkey, id, TestFiberMessageKind::CommitmentOrAck, 2)
+        .await;
+    let mut payments = vec![first.payment_hash];
+    for amount in [2000, 3000, 4000] {
+        payments.push(
+            a.send_payment_keysend(&b, amount, false)
+                .await
+                .unwrap()
+                .payment_hash,
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while a.get_channel_actor_state(id).retryable_tlc_operations.len() != 3 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    b.release_held_fiber_messages().await;
+    a.wait_for_held_fiber_messages(2).await;
+    let state = a.get_channel_actor_state(id);
+    assert!(state.retryable_tlc_operations.is_empty());
+    let outgoing = state
+        .session_v2
+        .as_ref()
+        .unwrap()
+        .outgoing
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        outgoing
+            .updates
+            .iter()
+            .filter(|update| matches!(update, fiber_types::TlcReplayUpdate::Add(_)))
+            .count(),
+        3,
+        "all three queued payments must share the next commitment"
+    );
+    a.release_held_fiber_messages().await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for hash in payments {
+            a.wait_until_success(hash).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(a.get_local_balance_from_channel(id), balance - 10000);
+}
+
+#[tokio::test]
 async fn test_v2_paired_concurrent_updates() {
     let (a, b, id) = create_nodes_with_established_channel(100000000000, 11800000000, false).await;
     let balance = a.get_local_balance_from_channel(id);

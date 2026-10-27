@@ -96,6 +96,16 @@ Deterministic schema/store samples have three variants: minimal V1, fully
 populated V1, and genuine V2 bootstrap. Each variant has a distinct deterministic
 channel ID so storing one cannot overwrite another.
 
+## Queued TLC updates
+
+V2 keeps one outgoing commitment outstanding per direction. Local TLC operations
+received while waiting for its ACK stay in the existing retry queue; the ACK does
+not confirm those queued updates. Once unblocked, the actor drains the queue in
+order, checks each operation against the updated channel limits, and signs the
+successful updates in one commitment. Successful add results are notified only
+after that commitment intent is stored. Peer updates already awaiting a follow-up
+commitment share this round. V1 retains its single-success retry behavior.
+
 ## Restart recovery for forwarded and settled TLCs
 
 Two durable records outlive the in-memory task that was supposed to finish them,

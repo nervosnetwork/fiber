@@ -2419,6 +2419,16 @@ where
         state: &mut ChannelActorState,
         command: &AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
+        let tlc_id = self.add_tlc_update(state, command)?;
+        self.handle_commitment_signed_command(myself, state).await?;
+        Ok(tlc_id)
+    }
+
+    fn add_tlc_update(
+        &self,
+        state: &mut ChannelActorState,
+        command: &AddTlcCommand,
+    ) -> Result<u64, ProcessingChannelError> {
         state.check_for_tlc_update(TlcUpdateAction::AddTlcCommand {
             amount: command.amount,
         })?;
@@ -2457,14 +2467,23 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.record_pending_replay_update(TlcReplayUpdate::Add(add_tlc));
-
-        self.handle_commitment_signed_command(myself, state).await?;
         Ok(tlc_id.into())
     }
 
     pub async fn handle_remove_tlc_command(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        command: RemoveTlcCommand,
+    ) -> ProcessingChannelResult {
+        self.remove_tlc_update(state, command)?;
+        state.maybe_transfer_to_shutdown().await?;
+        self.handle_commitment_signed_command(myself, state).await?;
+        Ok(())
+    }
+
+    fn remove_tlc_update(
+        &self,
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
@@ -2495,9 +2514,6 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.record_pending_replay_update(TlcReplayUpdate::Remove(remove_tlc));
-
-        state.maybe_transfer_to_shutdown().await?;
-        self.handle_commitment_signed_command(myself, state).await?;
         Ok(())
     }
 
@@ -2831,6 +2847,11 @@ where
         state: &mut ChannelActorState,
         trigger_next: bool,
     ) {
+        if state.session_v2.is_some() {
+            self.apply_retryable_tlc_operations_v2(myself, state, trigger_next)
+                .await;
+            return;
+        }
         debug!(
             "apply_retryable_tlc_operations start: remained_ops={} waiting_tlc_ack={} reestablishing={}",
             state.retryable_tlc_operations.len(),

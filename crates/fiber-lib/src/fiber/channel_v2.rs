@@ -3,6 +3,7 @@ use super::{
     blake2b_256, checked_calculate_commitment_tx_fee, checked_sub_u64, compute_tx_message,
     create_witness_for_funding_cell, is_tlc_key_derivation_safe, ChannelActor, ChannelActorMessage,
     ChannelActorState, ChannelActorStateStore, ProcessingChannelError, ProcessingChannelResult,
+    RemoveTlcCommand,
 };
 use crate::fiber::network::{
     FiberMessageWithTarget, NetworkActorCommand, NetworkActorMessage, NetworkServiceEvent,
@@ -21,8 +22,8 @@ use ckb_types::{
 };
 use fiber_types::{
     ChannelSessionV2, ChannelState, CollaboratingFundingTxFlags, IncomingCommitmentV2,
-    NegotiatingFundingFlags, NoncePurposeV2, OutgoingCommitmentV2, RevocationData, SettlementData,
-    SigningCommitmentFlags, INITIAL_COMMITMENT_NUMBER,
+    NegotiatingFundingFlags, NoncePurposeV2, OutgoingCommitmentV2, RetryableTlcOperation,
+    RevocationData, SettlementData, SigningCommitmentFlags, INITIAL_COMMITMENT_NUMBER,
 };
 use musig2::{secp::Point, AggNonce, CompactSignature, PubNonce};
 use ractor::ActorRef;
@@ -1962,14 +1963,65 @@ where
                     )
             )
         });
-        if needs_cs {
-            self.send_commitment_v2(myself, state).await?;
-        }
         if !state.is_waiting_tlc_ack() {
             self.apply_retryable_tlc_operations(myself, state, false)
                 .await;
         }
+        if needs_cs && !state.tlc_state.waiting_ack {
+            self.send_commitment_v2(myself, state).await?;
+        }
         Ok(())
+    }
+
+    pub(super) async fn apply_retryable_tlc_operations_v2(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        trigger_next: bool,
+    ) {
+        let mut changed = false;
+        let mut add_results = Vec::new();
+        while !state.is_waiting_tlc_ack() && !state.reestablishing {
+            let Some(operation) = state.retryable_tlc_operations.pop_front() else {
+                break;
+            };
+            match operation {
+                RetryableTlcOperation::AddTlc(command) => {
+                    let result = self.add_tlc_update(state, &command);
+                    changed |= result.is_ok();
+                    add_results.push((command, result));
+                }
+                RetryableTlcOperation::RemoveTlc(tlc_id, reason) => {
+                    changed |= self
+                        .remove_tlc_update(
+                            state,
+                            RemoveTlcCommand {
+                                id: u64::from(tlc_id),
+                                reason,
+                            },
+                        )
+                        .is_ok();
+                }
+            }
+        }
+        if changed {
+            // Persist/sign the whole batch before reporting successful additions.
+            if let Err(error) = self.send_commitment_v2(myself, state).await {
+                tracing::error!(?error, channel_id = ?state.id, "Unable to sign V2 TLC batch");
+                self.store.insert_channel_actor_state(state.clone());
+                for (_, result) in &mut add_results {
+                    if result.is_ok() {
+                        *result = Err(error.clone());
+                    }
+                }
+            }
+        }
+        for (command, result) in add_results {
+            self.post_add_tlc_command(myself, state, command, &result);
+        }
+        if trigger_next && !state.reestablishing && !state.retryable_tlc_operations.is_empty() {
+            state.schedule_next_retry_task(myself);
+        }
     }
 }
 
@@ -1990,6 +2042,7 @@ impl ChannelActorState {
 mod tests {
     use super::*;
     use crate::fiber::graph::NetworkGraphStateStore;
+    use crate::fiber::network::NetworkActorEvent;
     use crate::tests::test_utils::create_nodes_with_established_channel;
     use fiber_store::StorageBackend;
     use ractor::{Actor, ActorProcessingErr};
@@ -2043,6 +2096,354 @@ mod tests {
             5000
         )
         .unwrap();
+    }
+
+    fn retry_batch_add(tag: u8, amount: u128) -> fiber_types::AddTlcCommand {
+        fiber_types::AddTlcCommand {
+            amount,
+            payment_hash: [tag; 32].into(),
+            attempt_id: None,
+            expiry: crate::now_timestamp_as_millis_u64() + 86_400_000,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            onion_packet: None,
+            shared_secret: [0; 32],
+            is_trampoline_hop: false,
+            previous_tlc: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_v2_retry_queue_batches_after_ack() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let mut peer = b.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+
+        actor.send_commitment_v2(&myself, &mut state).await.unwrap();
+        let request = CommitmentSignedV2::try_from(
+            state
+                .session_v2
+                .as_ref()
+                .unwrap()
+                .outgoing
+                .as_ref()
+                .unwrap()
+                .request
+                .clone(),
+        )
+        .unwrap();
+        peer.stage_incoming_v2(&request, false).unwrap();
+        let (_, _, ack) = peer.accept_commitment_v2(&request, false).unwrap();
+
+        // A peer update folded while awaiting ACK also needs the next CS, not a separate one.
+        let command = retry_batch_add(3, 1000);
+        let mut received = state
+            .create_inbounding_tlc(fiber_types::AddTlc {
+                channel_id: id,
+                tlc_id: 0,
+                amount: command.amount,
+                payment_hash: command.payment_hash,
+                expiry: command.expiry,
+                hash_algorithm: command.hash_algorithm,
+                onion_packet: None,
+            })
+            .unwrap();
+        received.status =
+            fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::AnnounceWaitPrevAck);
+        state.tlc_state.add_received_tlc(received.clone());
+        state.increment_next_received_tlc_id();
+        received.flip_mut();
+        received.status =
+            fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::Committed);
+        peer.tlc_state.add_offered_tlc(received);
+        peer.increment_next_offered_tlc_id();
+        let peer_actor =
+            ChannelActor::new(b.pubkey, a.pubkey, network.clone(), b.store.clone(), None);
+
+        actor.register_retryable_tlc_add(&myself, &mut state, retry_batch_add(1, 2000));
+        actor.register_retryable_tlc_add(&myself, &mut state, retry_batch_add(2, 3000));
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut state, false)
+            .await;
+        assert_eq!(state.retryable_tlc_operations.len(), 2);
+        assert_eq!(
+            state
+                .tlc_state
+                .all_tlcs()
+                .filter(|tlc| tlc.is_offered())
+                .count(),
+            0
+        );
+        capture_barrier(&network, id).await;
+        captured.lock().unwrap().clear();
+
+        actor
+            .receive_ack_v2(&myself, &mut state, ack.unwrap())
+            .await
+            .unwrap();
+        assert!(
+            state.retryable_tlc_operations.is_empty(),
+            "one ACK must release the whole queued batch"
+        );
+        assert!(state.tlc_state.waiting_ack);
+        for tlc in state.tlc_state.all_tlcs().filter(|tlc| tlc.is_offered()) {
+            assert_eq!(
+                tlc.status,
+                fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::LocalAnnounced),
+                "the previous ACK must not confirm a new batch"
+            );
+        }
+        let outgoing = state
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .unwrap();
+        assert_eq!(outgoing.updates.len(), 2);
+        assert_eq!(outgoing.settlement.tlcs.len(), 3);
+        capture_barrier(&network, id).await;
+        let wire = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(message)) => {
+                    Some(message.message.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                wire.as_slice(),
+                [
+                    FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(_)),
+                    FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(_)),
+                    FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSignedV2(
+                        _
+                    )),
+                ]
+            ),
+            "updates must precede a single CS: {wire:?}"
+        );
+        let restored = a.store.get_channel_actor_state(&id).unwrap();
+        restored.validate_session_v2().unwrap();
+        let restored_outgoing = restored
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .unwrap();
+        assert_eq!(restored_outgoing.updates.len(), 2);
+        for update in &restored_outgoing.updates {
+            let fiber_types::TlcReplayUpdate::Add(add) = update else {
+                panic!("expected AddTlc")
+            };
+            peer_actor
+                .handle_add_tlc_peer_message(&mut peer, add.clone())
+                .unwrap();
+        }
+        let request = CommitmentSignedV2::try_from(restored_outgoing.request.clone()).unwrap();
+        peer.stage_incoming_v2(&request, false).unwrap();
+        let (_, _, ack) = peer.accept_commitment_v2(&request, false).unwrap();
+        state.stage_ack_v2(ack.as_ref().unwrap()).unwrap();
+        state.accept_ack_v2(&myself, &ack.unwrap()).unwrap();
+        assert!(state
+            .tlc_state
+            .all_tlcs()
+            .filter(|tlc| tlc.is_offered())
+            .all(|tlc| tlc.status
+                == fiber_types::TlcStatus::Outbound(fiber_types::OutboundTlcStatus::Committed)));
+
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_retry_queue_checks_limits_and_reports_results() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let initial = a.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        for (value_limit, count_limit, balance_limit, accepted) in [
+            (5000, 10, false, vec![1u8, 3]),
+            (10000, 2, false, vec![1, 2]),
+            (10000, 10, true, vec![1, 3]),
+            (10000, 0, false, vec![]),
+        ] {
+            let mut state = initial.clone();
+            state.network = Some(network.clone());
+            state.remote_constraints.max_tlc_value_in_flight = value_limit;
+            state.remote_constraints.max_tlc_number_in_flight = count_limit;
+            if balance_limit {
+                state.to_remote_amount += state.to_local_amount - 5000;
+                state.to_local_amount = 5000;
+            }
+            let mut expired = retry_batch_add(0, 1000);
+            expired.expiry = 0;
+            for command in [
+                expired,
+                retry_batch_add(1, 2000),
+                retry_batch_add(2, 4000),
+                retry_batch_add(3, 3000),
+            ] {
+                actor.register_retryable_tlc_add(&myself, &mut state, command);
+            }
+            actor
+                .apply_retryable_tlc_operations(&myself, &mut state, false)
+                .await;
+            assert!(state.retryable_tlc_operations.is_empty());
+            let hashes = state
+                .tlc_state
+                .all_tlcs()
+                .map(|tlc| tlc.payment_hash)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hashes,
+                accepted
+                    .iter()
+                    .map(|tag| fiber_types::Hash256::from([*tag; 32]))
+                    .collect::<Vec<_>>()
+            );
+            capture_barrier(&network, id).await;
+            let messages = std::mem::take(&mut *captured.lock().unwrap());
+            let results = messages
+                .iter()
+                .filter_map(|message| match message {
+                    NetworkActorMessage::Event(NetworkActorEvent::AddTlcResult(
+                        hash,
+                        _,
+                        result,
+                        _,
+                    )) => Some((*hash, result.is_ok())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                results,
+                (0..4)
+                    .map(|tag| (
+                        fiber_types::Hash256::from([tag; 32]),
+                        accepted.contains(&tag)
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let cs_count = messages
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                            FiberMessageWithTarget {
+                                message: FiberMessage::ChannelNormalOperation(
+                                    FiberChannelMessage::CommitmentSignedV2(_)
+                                ),
+                                ..
+                            }
+                        ))
+                    )
+                })
+                .count();
+            assert_eq!(cs_count, usize::from(!accepted.is_empty()));
+        }
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_retry_queue_preserves_mixed_update_replay() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let preimage = fiber_types::Hash256::from([42; 32]);
+        let payment_hash = fiber_types::HashAlgorithm::CkbHash.hash(preimage).into();
+        let mut received = state
+            .create_inbounding_tlc(fiber_types::AddTlc {
+                channel_id: id,
+                tlc_id: 0,
+                amount: 1000,
+                payment_hash,
+                expiry: crate::now_timestamp_as_millis_u64() + 86_400_000,
+                hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+                onion_packet: None,
+            })
+            .unwrap();
+        received.status = fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::Committed);
+        state.tlc_state.add_received_tlc(received);
+        state.increment_next_received_tlc_id();
+        let balances = (state.to_local_amount, state.to_remote_amount);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        actor.register_retryable_tlc_add(&myself, &mut state, retry_batch_add(1, 2000));
+        actor.register_retryable_tlc_remove(
+            &myself,
+            &mut state,
+            fiber_types::TLCId::Received(0),
+            fiber_types::RemoveTlcReason::RemoveTlcFulfill(fiber_types::RemoveTlcFulfill {
+                payment_preimage: preimage,
+            }),
+        );
+        actor.register_retryable_tlc_add(&myself, &mut state, retry_batch_add(2, 3000));
+        actor
+            .apply_retryable_tlc_operations(&myself, &mut state, false)
+            .await;
+        assert!(state.retryable_tlc_operations.is_empty());
+        assert_eq!(
+            (state.to_local_amount, state.to_remote_amount),
+            balances,
+            "removal must not settle before its ACK"
+        );
+        assert_eq!(a.store.get_preimage(&payment_hash), Some(preimage));
+        let restored = a.store.get_channel_actor_state(&id).unwrap();
+        restored.validate_session_v2().unwrap();
+        let outgoing = restored
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .unwrap();
+        assert!(matches!(
+            outgoing.updates.as_slice(),
+            [
+                fiber_types::TlcReplayUpdate::Add(_),
+                fiber_types::TlcReplayUpdate::Remove(_),
+                fiber_types::TlcReplayUpdate::Add(_)
+            ]
+        ));
+        assert_eq!(outgoing.settlement.tlcs.len(), 2);
+        assert_eq!(
+            restored
+                .tlc_state
+                .get(&fiber_types::TLCId::Received(0))
+                .unwrap()
+                .status,
+            fiber_types::TlcStatus::Inbound(fiber_types::InboundTlcStatus::LocalRemoved)
+        );
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
     }
 
     #[tokio::test]
