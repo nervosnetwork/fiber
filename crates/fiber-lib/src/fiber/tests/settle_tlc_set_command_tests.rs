@@ -25,7 +25,7 @@ use fiber_types::{
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrorCode};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 const TEST_SHARED_SECRET: [u8; 32] = [42u8; 32];
@@ -37,6 +37,7 @@ pub(crate) struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
+    pub(crate) channel_state_writes: Cell<usize>,
     pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
     pub(crate) shutdown_settlements: RefCell<HashMap<Hash256, ShutdownSettlementRecord>>,
     pub(crate) watch_channels: RefCell<HashMap<Hash256, fiber_types::ChannelData>>,
@@ -50,6 +51,7 @@ impl MockStore {
             preimages: RefCell::new(HashMap::new()),
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
+            channel_state_writes: Cell::new(0),
             onchain_settlements: RefCell::new(HashMap::new()),
             shutdown_settlements: RefCell::new(HashMap::new()),
             watch_channels: RefCell::new(HashMap::new()),
@@ -238,6 +240,8 @@ impl ChannelActorStateStore for MockStore {
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
+        self.channel_state_writes
+            .set(self.channel_state_writes.get() + 1);
         let channel_id = state.id;
         self.channel_states.borrow_mut().insert(channel_id, state);
     }
@@ -472,6 +476,7 @@ pub(crate) fn create_test_channel_state_with_tlc(
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_remove_effects_v2: 0,
         pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),

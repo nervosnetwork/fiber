@@ -503,6 +503,17 @@ where
         self.remote_pubkey
     }
 
+    fn persist_state_and_publish_pending_effects(&self, state: &mut ChannelActorState) {
+        let count = std::mem::take(&mut state.pending_remove_effects_v2);
+        self.store.insert_channel_actor_state(state.clone());
+        if let Some(session) = &state.session_v2 {
+            self.publish_remove_effects_v2(
+                state.id,
+                &session.remove_effects[..count.min(session.remove_effects.len())],
+            );
+        }
+    }
+
     pub async fn handle_peer_message(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
@@ -1454,6 +1465,10 @@ where
                         state.get_id(),
                         err
                     );
+                    if state.pending_remove_effects_v2 > 0 {
+                        // Publish earlier successes before force close can supersede their outbox.
+                        self.persist_state_and_publish_pending_effects(state);
+                    }
                     self.notify_network_actor_shutdown_me(state);
                     break;
                 }
@@ -2226,9 +2241,9 @@ where
         }
 
         if tlc_info.is_offered() {
-            if state.session_v2.is_some() {
-                self.store.insert_channel_actor_state(state.clone());
-                self.replay_remove_effects_v2(state);
+            if let Some(session) = &state.session_v2 {
+                // Do not include a later intent whose local application may fail.
+                state.pending_remove_effects_v2 = session.remove_effects.len();
                 return Ok(());
             }
             if let Some((previous_channel_id, previous_tlc_id)) = tlc_info.forwarding_tlc {
@@ -4287,11 +4302,11 @@ where
                     self.notify_network_actor_shutdown_me(state);
                     return Ok(());
                 }
-                self.replay_remove_effects_v2(state);
                 // A settled removal whose payment effect could not be bound is retried here
                 // (and after a restart). Nothing else re-drives it: the retry queue only holds
                 // explicit TLC commands.
-                if state.session_v2.is_some() {
+                if let Some(session) = &state.session_v2 {
+                    state.pending_remove_effects_v2 = session.remove_effects.len();
                     self.apply_settled_remove_tlcs(myself, state, true).await;
                     self.apply_settled_remove_tlcs(myself, state, false).await;
                 }
@@ -5220,7 +5235,7 @@ where
         if state.ephemeral_config.external_funding.enabled {
             state.persist_external_funding_state();
         }
-        self.store.insert_channel_actor_state(state.clone());
+        self.persist_state_and_publish_pending_effects(state);
 
         if state.needs_backup {
             if let Some(ref store_actor) = self.store_actor {
@@ -5575,6 +5590,10 @@ pub struct ChannelActorState {
     #[doc = "skip_store"]
     pub pending_notify_settle_tlcs: Vec<PendingNotifySettleTlc>,
 
+    /// Ready outbox prefix to publish after saving; excludes later failed application intents.
+    #[doc = "skip_store"]
+    pub pending_remove_effects_v2: usize,
+
     #[doc = "skip_store"]
     pub ephemeral_config: ChannelEphemeralConfig,
 
@@ -5661,6 +5680,7 @@ impl From<ChannelActorData> for ChannelActorState {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            pending_remove_effects_v2: 0,
         };
         state.hydrate_external_funding_runtime();
         state
@@ -6823,6 +6843,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: Some(private_key),
             needs_backup: true,
+            pending_remove_effects_v2: 0,
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
             state.update_remote_channel_announcement_nonce(&nonce);
@@ -6926,6 +6947,7 @@ impl ChannelActorState {
             funding_abort_detail: None,
             private_key: Some(private_key),
             needs_backup: true,
+            pending_remove_effects_v2: 0,
         };
         state.initialize_session_v2(None);
         state.log_ack_state("[ack] new_outbound_channel");
@@ -11568,6 +11590,7 @@ mod tests {
             funding_abort_detail: None,
             private_key: None,
             needs_backup: false,
+            pending_remove_effects_v2: 0,
         }
     }
 

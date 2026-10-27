@@ -595,7 +595,7 @@ impl ChannelActorState {
         let pending = session
             .pending_incoming
             .as_ref()
-            .ok_or_else(|| invalid("V2 incoming CS was not durably staged"))?;
+            .ok_or_else(|| invalid("V2 incoming CS was not staged"))?;
         let packed: fiber_types::gen::fiber::CommitmentSignedV2 = request.clone().into();
         if pending.request.as_slice() != packed.as_slice() {
             return Err(invalid("Conflicting staged V2 CS"));
@@ -813,7 +813,7 @@ impl ChannelActorState {
             return Err(invalid("Unexpected V2 ACK number/channel"));
         }
         if session.pending_ack.as_ref().map(Entity::as_slice) != Some(packed.as_slice()) {
-            return Err(invalid("V2 ACK was not durably staged"));
+            return Err(invalid("V2 ACK was not staged"));
         }
         if !is_tlc_key_derivation_safe(
             &self.get_remote_channel_public_keys().tlc_base_key,
@@ -1089,7 +1089,6 @@ where
         state.update_state(ChannelState::ShuttingDown(
             fiber_types::ShuttingDownFlags::AWAITING_PENDING_TLCS,
         ));
-        self.store.insert_channel_actor_state(state.clone());
         self.progress_close_v2(state).await
     }
 
@@ -1146,14 +1145,6 @@ where
             .expect("closing");
         close.transaction = Some(tx.data());
         bind_context(&mut close.own, keys, &nonce, &message).map_err(invalid)?;
-        self.store.insert_channel_actor_state(state.clone());
-        let close = state
-            .session_v2
-            .as_mut()
-            .expect("V2")
-            .closing
-            .as_mut()
-            .expect("closing");
         let signature = guarded_sign(&mut close.own, &key, keys, &aggregate, &nonce, &message)
             .map_err(invalid)?;
         let first = close.response.is_none();
@@ -1271,7 +1262,6 @@ where
             .as_mut()
             .expect("shutdown")
             .signature = Some(message.partial_signature);
-        self.store.insert_channel_actor_state(state.clone());
         self.progress_close_v2(state).await
     }
 
@@ -1541,9 +1531,10 @@ where
             );
         }
         self.replay_effects_v2(state);
+        state.pending_remove_effects_v2 =
+            state.session_v2.as_ref().expect("V2").remove_effects.len();
         self.update_tlc_status_on_ack(myself, state).await;
         self.apply_settled_remove_tlcs(myself, state, true).await;
-        self.replay_remove_effects_v2(state);
         if !matches!(state.state, ChannelState::ShuttingDown(_)) {
             state.set_waiting_peer_response();
         }
@@ -1714,17 +1705,25 @@ where
 
     pub(super) fn replay_remove_effects_v2(&self, state: &ChannelActorState) {
         if let Some(session) = &state.session_v2 {
-            for (tlc, execution) in &session.remove_effects {
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::RelayV2RemoveEffect {
-                            channel_id: state.id,
-                            tlc: Box::new(tlc.clone()),
-                            execution: *execution,
-                        },
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
+            self.publish_remove_effects_v2(state.id, &session.remove_effects);
+        }
+    }
+
+    pub(super) fn publish_remove_effects_v2(
+        &self,
+        channel_id: fiber_types::Hash256,
+        effects: &[(fiber_types::TlcInfo, Option<u32>)],
+    ) {
+        for (tlc, execution) in effects {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::RelayV2RemoveEffect {
+                        channel_id,
+                        tlc: Box::new(tlc.clone()),
+                        execution: *execution,
+                    },
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
     }
 
@@ -1836,7 +1835,6 @@ where
             self.flush_deferred_peer_tlc_updates(state)?;
         }
         state.stage_incoming_v2(&request, flags.is_some())?;
-        self.store.insert_channel_actor_state(state.clone());
         let (transaction, settlement, response) =
             state.accept_commitment_v2(&request, flags.is_some())?;
         if let Some(flags) = flags {
@@ -1846,6 +1844,7 @@ where
         }
         let needs_cs = state.tlc_state.update_for_commitment_signed();
         state.last_was_revoke = response.is_some();
+        // Staging/signing is local; commit the accepted session before publishing its results.
         self.store.insert_channel_actor_state(state.clone());
         self.network
             .send_message(NetworkActorMessage::new_notification(
@@ -1918,7 +1917,6 @@ where
             );
         }
         state.stage_ack_v2(&ack)?;
-        self.store.insert_channel_actor_state(state.clone());
         // A reconnect abandons the outstanding commitment and re-signs it with a fresh nonce, so
         // the peer may still answer the *previous* round with an ACK that can no longer be
         // verified. Such an ACK is stale by construction: the peer answers the regenerated
@@ -2043,6 +2041,7 @@ mod tests {
     use super::*;
     use crate::fiber::graph::NetworkGraphStateStore;
     use crate::fiber::network::NetworkActorEvent;
+    use crate::fiber::tests::MockStore;
     use crate::tests::test_utils::create_nodes_with_established_channel;
     use fiber_store::StorageBackend;
     use ractor::{Actor, ActorProcessingErr};
@@ -2096,6 +2095,439 @@ mod tests {
             5000
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_commitment_acceptance_commits_once_before_publication() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sender = a.get_channel_actor_state(id);
+        let mut owner = b.get_channel_actor_state(id);
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+            .await
+            .unwrap();
+        sender.network = Some(network.clone());
+        owner.network = Some(network.clone());
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
+        sender.tlc_state.waiting_ack = true;
+        let owner_actor =
+            ChannelActor::new(b.pubkey, a.pubkey, network.clone(), MockStore::new(), None);
+        owner_actor
+            .receive_commitment_v2(&myself, &mut owner, request)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner_actor.store.channel_state_writes.get(),
+            1,
+            "persist the accepted CS, not an extra intermediate unsigned context"
+        );
+        let stored = owner_actor.store.get_channel_actor_state(&id).unwrap();
+        stored.validate_session_v2().unwrap();
+        let session = stored.session_v2.as_ref().unwrap();
+        assert!(session.pending_incoming.is_none());
+        let ack =
+            RevokeAndAckV2::try_from(session.incoming.as_ref().unwrap().response.clone().unwrap())
+                .unwrap();
+        assert!(stored.latest_commitment_transaction.is_some());
+
+        let sender_actor =
+            ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+        sender_actor
+            .receive_ack_v2(&myself, &mut sender, ack)
+            .await
+            .unwrap();
+        assert_eq!(
+            sender_actor.store.channel_state_writes.get(),
+            1,
+            "persist the accepted ACK before its effects, without an intermediate write"
+        );
+        let stored = sender_actor.store.get_channel_actor_state(&id).unwrap();
+        stored.validate_session_v2().unwrap();
+        assert!(!stored.tlc_state.waiting_ack);
+        assert!(stored.session_v2.as_ref().unwrap().pending_ack.is_none());
+        assert!(stored.session_v2.as_ref().unwrap().last_ack.is_some());
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_closing_commits_only_at_publication_boundaries() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sa = a.get_channel_actor_state(id);
+        let mut sb = b.get_channel_actor_state(id);
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+            .await
+            .unwrap();
+        sa.network = Some(network.clone());
+        sb.network = Some(network.clone());
+        let actor_a =
+            ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+        let actor_b =
+            ChannelActor::new(b.pubkey, a.pubkey, network.clone(), MockStore::new(), None);
+        actor_a
+            .shutdown_v2(
+                &mut sa,
+                super::super::ShutdownCommand {
+                    force: false,
+                    close_script: None,
+                    fee_rate: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(actor_a.store.channel_state_writes.get(), 1);
+        let shutdown = ShutdownV2::try_from(
+            sa.session_v2
+                .as_ref()
+                .unwrap()
+                .closing
+                .as_ref()
+                .unwrap()
+                .shutdown
+                .clone(),
+        )
+        .unwrap();
+        actor_b
+            .receive_shutdown_v2(&mut sb, shutdown)
+            .await
+            .unwrap();
+        assert_eq!(actor_b.store.channel_state_writes.get(), 2,
+            "commit the nonce advertisement and then the signature, without unsigned staging writes");
+        let stored = actor_b.store.get_channel_actor_state(&id).unwrap();
+        stored.validate_session_v2().unwrap();
+        let close_b = stored
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .closing
+            .as_ref()
+            .unwrap();
+        let shutdown_b = ShutdownV2::try_from(close_b.shutdown.clone()).unwrap();
+        let signature_b = ClosingSignedV2::try_from(close_b.response.clone().unwrap()).unwrap();
+        actor_a.store.channel_state_writes.set(0);
+        actor_a
+            .receive_shutdown_v2(&mut sa, shutdown_b)
+            .await
+            .unwrap();
+        assert_eq!(actor_a.store.channel_state_writes.get(), 1);
+        actor_a.store.channel_state_writes.set(0);
+        actor_a
+            .receive_closing_v2(&mut sa, signature_b)
+            .await
+            .unwrap();
+        assert_eq!(actor_a.store.channel_state_writes.get(), 2,
+            "retain the response and transaction-publication boundaries, not receive/sign staging writes");
+        let stored = actor_a.store.get_channel_actor_state(&id).unwrap();
+        stored.validate_session_v2().unwrap();
+        assert!(
+            matches!(stored.state, ChannelState::ShuttingDown(flags) if flags == fiber_types::ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        );
+        assert!(stored
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .closing
+            .as_ref()
+            .unwrap()
+            .remote_response
+            .is_some());
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_remove_effects_wait_for_message_tail_even_after_partial_lookup_failure() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        for defer_last in [false, true] {
+            let mut state = a.get_channel_actor_state(id);
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+                .await
+                .unwrap();
+            state.network = Some(network.clone());
+            let balances = (state.to_local_amount, state.to_remote_amount);
+            for tag in 0..3 {
+                let preimage = fiber_types::Hash256::from([tag; 32]);
+                let mut add = retry_batch_add(tag, 1000);
+                add.payment_hash = add.hash_algorithm.hash(preimage).into();
+                if defer_last && tag == 2 {
+                    add.attempt_id = Some(42);
+                }
+                let mut tlc = state.create_outbounding_tlc(&add);
+                tlc.status = fiber_types::TlcStatus::Outbound(
+                    fiber_types::OutboundTlcStatus::RemoveAckConfirmed,
+                );
+                tlc.removed_confirmed_at = Some(state.get_local_commitment_number());
+                tlc.removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFulfill(
+                    fiber_types::RemoveTlcFulfill {
+                        payment_preimage: preimage,
+                    },
+                ));
+                state.tlc_state.add_offered_tlc(tlc);
+                state.increment_next_offered_tlc_id();
+            }
+            let actor =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+            actor
+                .apply_settled_remove_tlcs(&myself, &mut state, false)
+                .await;
+            let applied = if defer_last { 2 } else { 3 };
+            assert_eq!(actor.store.channel_state_writes.get(), applied);
+            let stored = actor.store.get_channel_actor_state(&id).unwrap();
+            assert_eq!(
+                stored.session_v2.as_ref().unwrap().remove_effects.len(),
+                applied
+            );
+            assert!(!stored
+                .tlc_state
+                .get(&fiber_types::TLCId::Offered(applied as u64 - 1))
+                .unwrap()
+                .applied_flags
+                .contains(fiber_types::AppliedFlags::REMOVE));
+            assert_eq!(
+                (stored.to_local_amount, stored.to_remote_amount),
+                (
+                    balances.0 - (applied as u128 - 1) * 1000,
+                    balances.1 + (applied as u128 - 1) * 1000
+                )
+            );
+            assert_eq!(
+                (state.to_local_amount, state.to_remote_amount),
+                (
+                    balances.0 - applied as u128 * 1000,
+                    balances.1 + applied as u128 * 1000
+                )
+            );
+            if defer_last {
+                let pending = state
+                    .tlc_state
+                    .get(&fiber_types::TLCId::Offered(2))
+                    .unwrap();
+                assert!(!pending
+                    .applied_flags
+                    .contains(fiber_types::AppliedFlags::REMOVE));
+            } else {
+                assert!(state.tlc_state.offered_tlcs.tlcs.is_empty());
+            }
+            capture_barrier(&network, id).await;
+            assert_eq!(
+                captured
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        NetworkActorMessage::Command(
+                            NetworkActorCommand::RelayV2RemoveEffect { .. }
+                        )
+                    ))
+                    .count(),
+                0,
+                "do not publish any batch member before the message-tail commit"
+            );
+            // A crash before the tail loses the runtime flag, not the durable replay intent.
+            let restored = ChannelActorState::from(stored.core);
+            assert_eq!(restored.pending_remove_effects_v2, 0);
+            actor.replay_remove_effects_v2(&restored);
+            capture_barrier(&network, id).await;
+            assert_eq!(
+                captured
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        NetworkActorMessage::Command(
+                            NetworkActorCommand::RelayV2RemoveEffect { .. }
+                        )
+                    ))
+                    .count(),
+                applied
+            );
+            captured.lock().unwrap().clear();
+            actor.persist_state_and_publish_pending_effects(&mut state);
+            assert_eq!(actor.store.channel_state_writes.get(), applied + 1);
+            let stored = actor.store.get_channel_actor_state(&id).unwrap();
+            assert_eq!(
+                (stored.to_local_amount, stored.to_remote_amount),
+                (state.to_local_amount, state.to_remote_amount)
+            );
+            assert_eq!(
+                stored.session_v2.as_ref().unwrap().remove_effects.len(),
+                applied
+            );
+            capture_barrier(&network, id).await;
+            let relayed: Vec<_> = captured
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|message| match message {
+                    NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect {
+                        tlc,
+                        ..
+                    }) => Some(tlc.tlc_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                relayed,
+                if defer_last {
+                    vec![
+                        fiber_types::TLCId::Offered(0),
+                        fiber_types::TLCId::Offered(1),
+                    ]
+                } else {
+                    vec![
+                        fiber_types::TLCId::Offered(0),
+                        fiber_types::TLCId::Offered(1),
+                        fiber_types::TLCId::Offered(2),
+                    ]
+                }
+            );
+            actor.persist_state_and_publish_pending_effects(&mut state);
+            capture_barrier(&network, id).await;
+            assert_eq!(
+                captured
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        NetworkActorMessage::Command(
+                            NetworkActorCommand::RelayV2RemoveEffect { .. }
+                        )
+                    ))
+                    .count(),
+                applied,
+                "an unrelated message must not replay the outbox again"
+            );
+            if !defer_last {
+                actor
+                    .handle_event(
+                        &myself,
+                        &mut state,
+                        super::super::ChannelEvent::MaintainChannelTlcs,
+                    )
+                    .await
+                    .unwrap();
+                capture_barrier(&network, id).await;
+                assert_eq!(
+                    captured
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|message| matches!(
+                            message,
+                            NetworkActorMessage::Command(
+                                NetworkActorCommand::RelayV2RemoveEffect { .. }
+                            )
+                        ))
+                        .count(),
+                    applied
+                );
+                actor.persist_state_and_publish_pending_effects(&mut state);
+                capture_barrier(&network, id).await;
+                assert_eq!(
+                    captured
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|message| matches!(
+                            message,
+                            NetworkActorMessage::Command(
+                                NetworkActorCommand::RelayV2RemoveEffect { .. }
+                            )
+                        ))
+                        .count(),
+                    applied * 2,
+                    "maintenance must still retry unconfirmed durable effects, after its commit"
+                );
+            }
+            network.stop(None);
+            task.await.unwrap();
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_v2_remove_effects_precede_force_close_without_publishing_failed_removal() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        state.network = Some(network.clone());
+        let balances = (state.to_local_amount, state.to_remote_amount);
+        for tag in 0..3 {
+            let preimage = fiber_types::Hash256::from([tag; 32]);
+            let mut add = retry_batch_add(tag, 1000);
+            add.payment_hash = add.hash_algorithm.hash(preimage).into();
+            let mut tlc = state.create_outbounding_tlc(&add);
+            tlc.status = fiber_types::TlcStatus::Outbound(
+                fiber_types::OutboundTlcStatus::RemoveAckConfirmed,
+            );
+            tlc.removed_confirmed_at = Some(state.get_local_commitment_number());
+            tlc.removed_reason = Some(fiber_types::RemoveTlcReason::RemoveTlcFulfill(
+                fiber_types::RemoveTlcFulfill {
+                    payment_preimage: if tag == 2 { [99; 32].into() } else { preimage },
+                },
+            ));
+            state.tlc_state.add_offered_tlc(tlc);
+            state.increment_next_offered_tlc_id();
+        }
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        actor
+            .apply_settled_remove_tlcs(&myself, &mut state, false)
+            .await;
+        actor.persist_state_and_publish_pending_effects(&mut state);
+        assert_eq!(
+            (state.to_local_amount, state.to_remote_amount),
+            (balances.0 - 2000, balances.1 + 2000)
+        );
+        let stored = actor.store.get_channel_actor_state(&id).unwrap();
+        assert_eq!(
+            (stored.to_local_amount, stored.to_remote_amount),
+            (state.to_local_amount, state.to_remote_amount)
+        );
+        capture_barrier(&network, id).await;
+        let publications: Vec<_> = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|message| match message {
+                NetworkActorMessage::Command(NetworkActorCommand::RelayV2RemoveEffect {
+                    tlc,
+                    ..
+                }) => Some(Some(tlc.tlc_id)),
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                    super::super::ChannelCommandWithId {
+                        command: super::super::ChannelCommand::Shutdown(command, _),
+                        ..
+                    },
+                )) if command.force => Some(None),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            publications,
+            vec![
+                Some(fiber_types::TLCId::Offered(0)),
+                Some(fiber_types::TLCId::Offered(1)),
+                None
+            ],
+            "publish only successful removals, before the close that can supersede their outbox"
+        );
+        handle.abort();
+        network.stop(None);
+        task.await.unwrap();
     }
 
     fn retry_batch_add(tag: u8, amount: u128) -> fiber_types::AddTlcCommand {

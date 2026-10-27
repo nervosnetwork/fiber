@@ -43,6 +43,31 @@ reconciliation do not replace these durable timestamps. Quarantined V2 Stale,
 local-only signing/draining, and both-signature on-chain waits do not authorize a
 peer-timeout publication.
 
+## Persistence boundaries
+
+Nonce advertisements, signed responses, usable transactions and signing-acceptance
+notifications are published only after their session/replay state is stored.
+Staging, context binding and signing can run together in memory: when nothing is
+published between them, one save of the accepted state is sufficient. Previously
+stored intermediate sessions remain readable and recoverable.
+
+For offered TLC removals, the first save records the TLC and bound execution in
+the durable effect outbox. That intent authorizes delivery even if source balance
+application has not yet been saved; receipt/replay recovery handles this partial
+state. The normal actor message-tail save records the applied balance and flags,
+then publishes the ready outbox prefix once, without a second per-TLC application
+save or a replay after every TLC. Maintenance and reestablishment also request
+publication at that boundary. A later execution-lookup failure leaves earlier
+successes ready for publication and the unbound TLC unapplied for retry.
+
+The runtime prefix ends at the last successful application, excluding a later
+intent whose application fails. Before requesting force close for such a failure,
+the actor uses the same commit/publish boundary to release earlier successes, so
+close supersession cannot overtake them. Startup replays the durable outbox even
+though runtime publication markers are not restored. Startup and offline-owner
+updates keep explicit saves because they do not pass through the message tail.
+CS/ACK signing and RPC ownership-handoff boundaries retain their existing saves.
+
 ## Backup restoration and ordinary crash recovery
 
 Actual database backup restoration marks penalty-risk channels `Stale`. A V2

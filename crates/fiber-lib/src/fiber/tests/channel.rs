@@ -13600,6 +13600,7 @@ mod udt_funding_cell_capacity {
             network: None,
             scheduled_channel_update_handle: None,
             pending_notify_settle_tlcs: vec![],
+            pending_remove_effects_v2: 0,
             pending_reestablish_channel_ready: false,
             defer_peer_tlc_updates: false,
             deferred_peer_tlc_updates: VecDeque::new(),
