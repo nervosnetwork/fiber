@@ -2209,9 +2209,6 @@ where
                     .expect("V2 session")
                     .remove_effects
                     .push((tlc, execution));
-                // Persist the outbox before changing balances/applied flags or enqueueing
-                // anything. The receiver acknowledges only after its own durable write.
-                self.store.insert_channel_actor_state(state.clone());
             }
         }
         let tlc = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");

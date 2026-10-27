@@ -2306,29 +2306,33 @@ mod tests {
             }
             let actor =
                 ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+            actor.store.insert_channel_actor_state(state.clone());
+            actor.store.channel_state_writes.set(0);
+            for tlc in state.tlc_state.offered_tlcs.tlcs.iter() {
+                if let Some(fiber_types::RemoveTlcReason::RemoveTlcFulfill(fulfill)) =
+                    &tlc.removed_reason
+                {
+                    actor
+                        .store
+                        .insert_preimage(tlc.payment_hash, fulfill.payment_preimage);
+                }
+            }
+            let durable_before = bincode::serialize(&state.core).unwrap();
             actor
                 .apply_settled_remove_tlcs(&myself, &mut state, false)
                 .await;
             let applied = if defer_last { 2 } else { 3 };
-            assert_eq!(actor.store.channel_state_writes.get(), applied);
+            assert_eq!(actor.store.channel_state_writes.get(), 0);
             let stored = actor.store.get_channel_actor_state(&id).unwrap();
-            assert_eq!(
-                stored.session_v2.as_ref().unwrap().remove_effects.len(),
-                applied
-            );
-            assert!(!stored
-                .tlc_state
-                .get(&fiber_types::TLCId::Offered(applied as u64 - 1))
+            assert_eq!(bincode::serialize(&stored.core).unwrap(), durable_before);
+            assert!(stored
+                .session_v2
+                .as_ref()
                 .unwrap()
-                .applied_flags
-                .contains(fiber_types::AppliedFlags::REMOVE));
-            assert_eq!(
-                (stored.to_local_amount, stored.to_remote_amount),
-                (
-                    balances.0 - (applied as u128 - 1) * 1000,
-                    balances.1 + (applied as u128 - 1) * 1000
-                )
-            );
+                .remove_effects
+                .is_empty());
+            assert!(actor.store.preimage_removal_writes.borrow().is_empty());
+            assert_eq!((stored.to_local_amount, stored.to_remote_amount), balances);
             assert_eq!(
                 (state.to_local_amount, state.to_remote_amount),
                 (
@@ -2363,8 +2367,9 @@ mod tests {
                 0,
                 "do not publish any batch member before the message-tail commit"
             );
-            // A crash before the tail loses the runtime flag, not the durable replay intent.
-            let restored = ChannelActorState::from(stored.core);
+            // Before commit, recovery reapplies removals from the original durable TLCs.
+            let mut restored = ChannelActorState::from(stored.core);
+            restored.network = Some(network.clone());
             assert_eq!(restored.pending_remove_effects_v2, 0);
             actor.replay_remove_effects_v2(&restored);
             capture_barrier(&network, id).await;
@@ -2380,11 +2385,24 @@ mod tests {
                         )
                     ))
                     .count(),
+                0
+            );
+            actor
+                .apply_settled_remove_tlcs(&myself, &mut restored, false)
+                .await;
+            assert_eq!(
+                (restored.to_local_amount, restored.to_remote_amount),
+                (state.to_local_amount, state.to_remote_amount)
+            );
+            assert_eq!(
+                restored.session_v2.as_ref().unwrap().remove_effects.len(),
                 applied
             );
+            assert_eq!(actor.store.channel_state_writes.get(), 0);
+            assert!(actor.store.preimage_removal_writes.borrow().is_empty());
             captured.lock().unwrap().clear();
             actor.persist_state_and_publish_pending_effects(&mut state);
-            assert_eq!(actor.store.channel_state_writes.get(), applied + 1);
+            assert_eq!(actor.store.channel_state_writes.get(), 1);
             let stored = actor.store.get_channel_actor_state(&id).unwrap();
             assert_eq!(
                 (stored.to_local_amount, stored.to_remote_amount),
