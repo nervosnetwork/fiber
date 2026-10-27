@@ -4017,6 +4017,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_v2_channel_ignores_v1_revocation_nonce_watchdog() {
+        // A V2 channel never advances the V1 revocation nonce ledger, so an idle V2 channel used to
+        // look permanently unbalanced and was force-closed after one response timeout.
+        let (a, _, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut state = a.get_channel_actor_state(id);
+        assert!(state.session_v2.is_some(), "expected a V2 channel");
+        state.remote_revocation_nonce_for_send = None;
+        state.remote_revocation_nonce_for_verify = None;
+        state.revocation_nonce_unbalanced_since = Some(0);
+        assert!(!state.is_revocation_nonce_ledger_stalled(crate::now_timestamp_as_millis_u64()));
+        state.refresh_revocation_nonce_watchdog();
+        assert!(state.revocation_nonce_unbalanced_since.is_none());
+    }
+
+    #[tokio::test]
     async fn test_v2_settlement_accounts_for_prev_ack_updates() {
         use fiber_types::{
             InboundTlcStatus, OutboundTlcStatus, RemoveTlcFulfill, RemoveTlcReason, TlcStatus,

@@ -5990,7 +5990,11 @@ impl ChannelActorState {
     /// peer's next CommitmentSigned or RevokeAndAck rebalances the ledger. In a healthy round
     /// that takes one round trip; `waiting_peer_response` already covers `waiting_ack`.
     fn is_revocation_nonce_ledger_unbalanced(&self) -> bool {
-        self.is_ready()
+        // These fields are the V1 per-round revocation nonce ledger. A V2 channel keeps its nonces
+        // in `session_v2` and never advances this ledger, so it must not arm the V1 watchdog; V2
+        // staleness is bounded by `peer_response_wait_v2` and `ack_peer_wait_v2` instead.
+        self.session_v2.is_none()
+            && self.is_ready()
             && !self.reestablishing
             && !self.tlc_state.waiting_ack
             && (self.remote_revocation_nonce_for_send.is_none()
