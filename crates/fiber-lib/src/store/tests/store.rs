@@ -1375,6 +1375,7 @@ fn test_channel_actor_state_store() {
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_remove_effects_v2: 0,
     };
 
     let bincode_encoded = bincode::serialize(&state).unwrap();
@@ -1520,6 +1521,7 @@ fn sample_channel_actor_state(
         funding_abort_detail: None,
         private_key: None,
         needs_backup: false,
+        pending_remove_effects_v2: 0,
     }
 }
 
@@ -1540,12 +1542,13 @@ fn test_serde_channel_actor_state_ciborium() {
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 fn test_closed_onchain_settlement_state_round_trips() {
-    let state = sample_channel_actor_state(
+    let mut state = sample_channel_actor_state(
         ChannelState::Closed(
             CloseFlags::UNCOOPERATIVE_LOCAL | CloseFlags::WAITING_ONCHAIN_SETTLEMENT,
         ),
         Some(H256::default()),
     );
+    state.pending_remove_effects_v2 = 1;
     let (store, _dir) = generate_store();
 
     store.insert_channel_actor_state(state.clone());
@@ -1567,6 +1570,7 @@ fn test_closed_onchain_settlement_state_round_trips() {
     assert!(restored.network.is_none());
     assert!(restored.scheduled_channel_update_handle.is_none());
     assert!(restored.pending_notify_settle_tlcs.is_empty());
+    assert_eq!(restored.pending_remove_effects_v2, 0);
     assert!(!restored.pending_reestablish_channel_ready);
     assert!(!restored.defer_peer_tlc_updates);
     assert!(restored.deferred_peer_tlc_updates.is_empty());
