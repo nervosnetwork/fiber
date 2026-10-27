@@ -2996,7 +2996,9 @@ where
     /// explicit TLC commands, and expiry handling skips these entries.
     ///
     /// The peeled onion packet is not persisted, so an unresolved forward cannot simply be
-    /// re-issued. Instead the persisted downstream link decides the outcome:
+    /// re-issued. A persisted trampoline payment owns its upstream TLC until its payment result
+    /// is relayed, so resume that owner without clearing the local auto-fulfillment guard.
+    /// Otherwise the persisted downstream link decides the outcome:
     /// * a downstream TLC already exists: re-link it, the ordinary remove path finishes the flow;
     /// * otherwise no downstream TLC was created: fail the incoming TLC back to the previous hop
     ///   so the sender can retry instead of leaving the channel blocked.
@@ -3033,6 +3035,18 @@ where
             }
             let payment_hash = tlc.payment_hash;
             let tlc_id_u64 = u64::from(tlc_id);
+            if self
+                .store
+                .has_trampoline_payment_for_tlc(payment_hash, channel_id, tlc_id_u64)
+            {
+                // RetrySendPayment also replays a terminal payment's upstream result.
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::RetrySendPayment(payment_hash, None),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                continue;
+            }
             let add_tlc_result = match index.get(&(channel_id, tlc_id_u64)) {
                 Some((forwarding_channel_id, forwarding_tlc_id)) => {
                     debug!(
@@ -11141,6 +11155,13 @@ where
 }
 
 pub trait ChannelActorStateStore {
+    /// Whether a persisted trampoline payment owns this exact upstream TLC.
+    fn has_trampoline_payment_for_tlc(
+        &self,
+        payment_hash: Hash256,
+        channel_id: Hash256,
+        tlc_id: u64,
+    ) -> bool;
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
     fn insert_channel_actor_state_with_pending_commit_diff(

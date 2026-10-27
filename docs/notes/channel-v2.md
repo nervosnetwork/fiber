@@ -118,8 +118,13 @@ restart. The downstream link is persisted as `TlcInfo::forwarding_tlc` on the
 offered TLC, which decides the outcome: if the downstream TLC exists, the incoming
 TLC is re-linked to it and the ordinary remove path finishes the flow; otherwise
 no downstream TLC was created, and the incoming TLC is failed back with a
-retryable `RemoveTlc` so the sender can retry. A closed channel is skipped, since
-its TLCs settle on-chain.
+retryable `RemoveTlc` so the sender can retry. Trampoline forwards are different:
+their durable owner is the payment session's `TrampolineContext.previous_tlcs`,
+not a downstream channel's `forwarding_tlc`. Recovery matches the payment hash and
+exact upstream channel/TLC identity, retains the pending-forward guard against
+local auto-fulfillment, and resumes the payment owner via `RetrySendPayment`.
+That path also replays the upstream result when the session is already terminal.
+A closed channel is skipped, since its TLCs settle on-chain.
 
 A settled V2 removal needs the payment effect (`GetV2PaymentExecution`) before its
 outbox entry becomes durable. The network actor can be busy signing funding
