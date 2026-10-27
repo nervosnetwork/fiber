@@ -12960,6 +12960,62 @@ mod udt_funding_cell_capacity {
     }
 
     #[test]
+    fn test_failed_tlc_pruning_only_drops_confirmed_forward_markers() {
+        let mut state = minimal_udt_channel_state();
+
+        // TLC 4 is confirmed by both parties and safe to prune; TLC 5 is still
+        // waiting for remote confirmation, so it must keep its marker.
+        let mut confirmed = committed_received_tlc(TLCId::Received(4));
+        confirmed.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
+        confirmed.removed_confirmed_at = Some(2);
+        confirmed.applied_flags = AppliedFlags::REMOVE;
+        state.tlc_state.received_tlcs.tlcs.push(confirmed);
+
+        let mut pending = committed_received_tlc(TLCId::Received(5));
+        pending.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
+        pending.removed_confirmed_at = None;
+        pending.applied_flags = AppliedFlags::REMOVE;
+        state.tlc_state.received_tlcs.tlcs.push(pending);
+
+        state
+            .waiting_forward_tlc_tasks
+            .insert(TLCId::Received(4), NO_SHARED_SECRET);
+        state
+            .waiting_forward_tlc_tasks
+            .insert(TLCId::Received(5), NO_SHARED_SECRET);
+
+        state.clean_up_failed_tlcs();
+
+        assert!(state.tlc_state.get(&TLCId::Received(4)).is_none());
+        assert!(!state.is_waiting_forward_result_for_received_tlc(TLCId::Received(4)));
+        assert!(state.tlc_state.get(&TLCId::Received(5)).is_some());
+        assert!(state.is_waiting_forward_result_for_received_tlc(TLCId::Received(5)));
+    }
+
+    #[test]
+    fn test_channel_restore_prunes_orphan_forward_markers() {
+        let mut state = minimal_udt_channel_state();
+        for tlc_id in [TLCId::Received(1), TLCId::Received(3)] {
+            state
+                .tlc_state
+                .received_tlcs
+                .tlcs
+                .push(committed_received_tlc(tlc_id));
+        }
+        for tlc_id in [TLCId::Received(1), TLCId::Received(2), TLCId::Received(3)] {
+            state
+                .waiting_forward_tlc_tasks
+                .insert(tlc_id, NO_SHARED_SECRET);
+        }
+
+        state.drop_stale_waiting_forward_tlc_tasks();
+
+        let mut remaining: Vec<_> = state.waiting_forward_tlc_tasks.keys().copied().collect();
+        remaining.sort();
+        assert_eq!(remaining, vec![TLCId::Received(1), TLCId::Received(3)]);
+    }
+
+    #[test]
     fn only_final_received_tlc_can_be_auto_fulfilled_from_local_preimage() {
         let mut state = minimal_udt_channel_state();
         let tlc_id = TLCId::Received(0);
