@@ -4498,3 +4498,177 @@ async fn test_trampoline_routing_with_self_payment_should_fail() {
         err_msg
     );
 }
+
+#[tokio::test]
+async fn test_trampoline_forward_marker_lifecycle() {
+    init_tracing();
+
+    // A --(public)--> T --(public)--> C; B is isolated.
+    // T must release the forward marker for both a successful forward to C
+    // and a failed forward to B.
+    let (nodes, channels) = create_n_nodes_network_with_params(
+        &[
+            (
+                (0, 1),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+            (
+                (1, 2),
+                ChannelParameters {
+                    public: true,
+                    node_a_funding_amount: HUGE_CKB_AMOUNT,
+                    node_b_funding_amount: HUGE_CKB_AMOUNT,
+                    ..Default::default()
+                },
+            ),
+        ],
+        4,
+        None,
+    )
+    .await;
+    let channel_at = channels[0];
+    let [node_a, node_t, node_c, node_b] = nodes.try_into().expect("4 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_t).await;
+
+    let (invoice_to_c, _) = node_c.gen_basic_invoice(1000);
+    let success = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_to_c.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send successful trampoline payment");
+    node_a.wait_until_success(success.payment_hash).await;
+
+    let (invoice_to_b, _) = node_b.gen_basic_invoice(1000);
+    let failure = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(invoice_to_b.to_string()),
+            max_fee_amount: Some(1000),
+            trampoline_hops: Some(vec![node_t.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send failing trampoline payment");
+    node_a.wait_until_failed(failure.payment_hash).await;
+
+    // The successful forward leaves the channel on fulfillment. Any failed
+    // TLC that has already been pruned must have released its marker too.
+    wait_until(|| {
+        node_t
+            .get_channel_actor_state(channel_at)
+            .tlc_state
+            .received_tlcs
+            .tlcs
+            .iter()
+            .all(|tlc| tlc.payment_hash != success.payment_hash)
+    })
+    .await;
+    let state = node_t.get_channel_actor_state(channel_at);
+    let stale: Vec<_> = state
+        .waiting_forward_tlc_tasks
+        .keys()
+        .filter(|tlc_id| state.tlc_state.get(tlc_id).is_none())
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "removed trampoline forwards must release markers: {stale:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_trampoline_fulfill_does_not_settle_forwarder_invoice() {
+    init_tracing();
+
+    // A --(public)--> B --(private)--> C; B is the trampoline hop.
+    let (nodes, channels) = create_n_nodes_network_with_visibility(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), true),
+            ((1, 2), (MIN_RESERVED_CKB + 100000, HUGE_CKB_AMOUNT), false),
+        ],
+        3,
+    )
+    .await;
+    let channel_ab = channels[0];
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    wait_until_node_supports_trampoline_routing(&node_a, &node_b).await;
+
+    // Negative control: a forwarded TLC must not settle B's own invoice.
+    let amount: u128 = 1000;
+    let preimage = gen_rand_sha256_hash();
+    let forwarded_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_preimage(preimage)
+        .allow_trampoline_routing(true)
+        .payee_pub_key(node_c.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_c.private_key.0))
+        .expect("build forwarded invoice");
+    node_c.insert_invoice(forwarded_invoice.clone(), None);
+    let forwarded_hash = *forwarded_invoice.payment_hash();
+
+    node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(forwarded_invoice.to_string()),
+            max_fee_amount: Some(500),
+            trampoline_hops: Some(vec![node_b.get_public_key()]),
+            ..Default::default()
+        })
+        .await
+        .expect("send trampoline payment");
+    wait_until(|| node_c.store.get_payment_hold_tlcs(forwarded_hash).len() == 1).await;
+
+    let local_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(amount))
+        .payment_hash(forwarded_hash)
+        .payee_pub_key(node_b.get_public_key().into())
+        .expiry_time(Duration::from_secs(3600))
+        .build_with_sign(|hash| SECP256K1.sign_ecdsa_recoverable(hash, &node_b.private_key.0))
+        .expect("build local invoice");
+    node_b.insert_invoice(local_invoice, None);
+
+    node_c
+        .settle_invoice(&forwarded_hash, preimage)
+        .await
+        .expect("settle forwarded invoice");
+    node_a.wait_until_success(forwarded_hash).await;
+    wait_for_tlc_sync(&node_a, &node_b, channel_ab, 0).await;
+
+    assert_eq!(
+        node_b.get_invoice_status(&forwarded_hash),
+        Some(crate::invoice::CkbInvoiceStatus::Open),
+        "a forwarded TLC must not settle B's own invoice"
+    );
+    assert!(
+        node_b
+            .get_channel_actor_state(channel_ab)
+            .waiting_forward_tlc_tasks
+            .is_empty(),
+        "settled trampoline forward must drop its marker"
+    );
+
+    // Positive control: a direct final-hop payment still settles B's invoice.
+    let (direct_invoice, _) = node_b.gen_basic_invoice(1000);
+    let direct_hash = *direct_invoice.payment_hash();
+    let direct = node_a
+        .send_payment(SendPaymentCommand {
+            invoice: Some(direct_invoice.to_string()),
+            max_fee_amount: Some(500),
+            ..Default::default()
+        })
+        .await
+        .expect("send direct payment");
+    node_a.wait_until_success(direct.payment_hash).await;
+    assert_eq!(
+        node_b.get_invoice_status(&direct_hash),
+        Some(crate::invoice::CkbInvoiceStatus::Paid),
+        "a direct final-hop payment must still settle B's invoice"
+    );
+}

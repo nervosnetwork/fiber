@@ -1921,15 +1921,20 @@ where
         state: &mut ChannelActorState,
         tlc_id: TLCId,
     ) -> ProcessingChannelResult {
-        let tlc = state.tlc_state.get_mut(&tlc_id).expect("expect tlc");
-        tlc.applied_flags |= AppliedFlags::REMOVE;
-
+        let was_waiting_forward = state.is_waiting_forward_result_for_received_tlc(tlc_id);
         let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
+
+        // The removal succeeded. A failed TLC stays in `tlc_state` until it is
+        // cleaned up, so mark it applied to keep `apply_settled_remove_tlcs`
+        // from processing it again. A fulfilled TLC has already left the state.
+        if let Some(tlc) = state.tlc_state.get_mut(&tlc_id) {
+            tlc.applied_flags |= AppliedFlags::REMOVE;
+        }
 
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
             if tlc_info.is_received()
                 && tlc_info.forwarding_tlc.is_none()
-                && !state.is_waiting_forward_result_for_received_tlc(tlc_id)
+                && !was_waiting_forward
                 && self.store.get_invoice(&tlc_info.payment_hash).is_some()
             {
                 self.store
@@ -4408,6 +4413,7 @@ where
                 channel.network = Some(self.network.clone());
                 channel.ephemeral_config = args.ephemeral_config.clone();
                 channel.hydrate_external_funding_runtime();
+                channel.drop_stale_waiting_forward_tlc_tasks();
                 channel.private_key = Some(args.private_key.clone());
                 self.store.insert_channel_actor_state(channel.clone());
 
@@ -7171,6 +7177,9 @@ impl ChannelActorState {
 
     fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
         self.tlc_state.apply_remove_tlc(tlc_id);
+        // Trampoline forwards never receive a `ForwardTlcResult`; their marker
+        // leaves with the received TLC.
+        self.waiting_forward_tlc_tasks.remove(&tlc_id);
 
         let points: HashSet<u64> = self
             .tlc_state
@@ -7182,6 +7191,17 @@ impl ChannelActorState {
 
         self.remote_commitment_points
             .retain(|(number, _)| points.contains(number));
+    }
+
+    /// Drops forward markers whose received TLC is no longer present.
+    ///
+    /// Older versions kept `waiting_forward_tlc_tasks` entries for trampoline
+    /// forwards after the TLC had been removed. Clean them up on restore.
+    pub fn drop_stale_waiting_forward_tlc_tasks(&mut self) {
+        let tlc_state = &self.core.tlc_state;
+        self.core
+            .waiting_forward_tlc_tasks
+            .retain(|tlc_id, _| tlc_state.get(tlc_id).is_some());
     }
 
     pub fn clean_up_failed_tlcs(&mut self) {
