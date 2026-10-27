@@ -462,6 +462,11 @@ pub enum OfflineChannelRestoreMode {
     WatchChain,
 }
 
+enum ForwardTlcRecovery {
+    Created { channel_id: Hash256, tlc_id: u64 },
+    Queued,
+}
+
 pub struct ChannelActor<S> {
     local_pubkey: Pubkey,
     remote_pubkey: Pubkey,
@@ -2966,12 +2971,8 @@ where
         }
     }
 
-    /// Index every TLC this node created on behalf of a forwarded incoming TLC.
-    ///
-    /// `TlcInfo::forwarding_tlc` of an offered TLC keeps the upstream `(channel_id, tlc_id)` link,
-    /// and it is persisted with the channel, so it survives a restart even though the in-memory
-    /// forwarding task does not.
-    fn forwarded_tlc_index(&self) -> HashMap<(Hash256, u64), (Hash256, u64)> {
+    /// Index durable forwarding work, including queued Adds that have no outgoing TLC id yet.
+    fn forwarded_tlc_index(&self) -> HashMap<(Hash256, u64, Hash256), ForwardTlcRecovery> {
         let mut index = HashMap::new();
         for (_pubkey, channel_id, _state) in self.store.get_channel_states(None) {
             let Some(channel) = self.store.get_channel_actor_state(&channel_id) else {
@@ -2979,9 +2980,29 @@ where
             };
             for tlc in channel.tlc_state.offered_tlcs.tlcs.iter() {
                 if let Some((prev_channel_id, prev_tlc_id)) = tlc.forwarding_tlc {
-                    index
-                        .entry((prev_channel_id, prev_tlc_id))
-                        .or_insert((channel_id, u64::from(tlc.tlc_id)));
+                    // A created TLC takes precedence over any duplicate queued command.
+                    index.insert(
+                        (prev_channel_id, prev_tlc_id, tlc.payment_hash),
+                        ForwardTlcRecovery::Created {
+                            channel_id,
+                            tlc_id: u64::from(tlc.tlc_id),
+                        },
+                    );
+                }
+            }
+            if !channel.is_closed() {
+                for operation in &channel.retryable_tlc_operations {
+                    if let RetryableTlcOperation::AddTlc(command) = operation {
+                        if let Some(previous) = command.previous_tlc {
+                            index
+                                .entry((
+                                    previous.prev_channel_id,
+                                    previous.prev_tlc_id,
+                                    command.payment_hash,
+                                ))
+                                .or_insert(ForwardTlcRecovery::Queued);
+                        }
+                    }
                 }
             }
         }
@@ -2998,9 +3019,10 @@ where
     /// The peeled onion packet is not persisted, so an unresolved forward cannot simply be
     /// re-issued. A persisted trampoline payment owns its upstream TLC until its payment result
     /// is relayed, so resume that owner without clearing the local auto-fulfillment guard.
-    /// Otherwise the persisted downstream link decides the outcome:
+    /// Otherwise the persisted downstream work decides the outcome:
     /// * a downstream TLC already exists: re-link it, the ordinary remove path finishes the flow;
-    /// * otherwise no downstream TLC was created: fail the incoming TLC back to the previous hop
+    /// * an Add is queued: retain the waiting guard until its execution reports the result;
+    /// * no durable downstream work exists: fail the incoming TLC back to the previous hop
     ///   so the sender can retry instead of leaving the channel blocked.
     ///
     /// Returns whether the channel state changed and must be persisted.
@@ -3047,8 +3069,12 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 continue;
             }
-            let add_tlc_result = match index.get(&(channel_id, tlc_id_u64)) {
-                Some((forwarding_channel_id, forwarding_tlc_id)) => {
+            let add_tlc_result = match index.get(&(channel_id, tlc_id_u64, payment_hash)) {
+                Some(ForwardTlcRecovery::Queued) => continue,
+                Some(ForwardTlcRecovery::Created {
+                    channel_id: forwarding_channel_id,
+                    tlc_id: forwarding_tlc_id,
+                }) => {
                     debug!(
                         "Recovered pending forward of tlc {:?} on channel {} to channel {} tlc {}",
                         tlc_id, channel_id, forwarding_channel_id, forwarding_tlc_id
@@ -4489,14 +4515,48 @@ where
         current_state: &ChannelActorState,
     ) -> ProcessingChannelResult {
         if let Some(prev_tlc_info) = command.previous_tlc {
-            let prev_state = self
+            let stored_prev_state = self
                 .store
                 .get_channel_actor_state(&prev_tlc_info.prev_channel_id)
-                .expect("prev_state error");
+                .ok_or_else(|| {
+                    ProcessingChannelError::InvalidParameter(
+                        "Previous forwarding channel not found".to_string(),
+                    )
+                })?;
+            let prev_state = if prev_tlc_info.prev_channel_id == current_state.id {
+                current_state
+            } else {
+                &stored_prev_state
+            };
             if prev_state.funding_udt_type_script != current_state.funding_udt_type_script {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "Previous forwarding channel is with different UDT type".to_string(),
                 ));
+            }
+            let prev_id = TLCId::Received(prev_tlc_info.prev_tlc_id);
+            let backed = prev_state.tlc_state.get(&prev_id).is_some_and(|tlc| {
+                tlc.payment_hash == command.payment_hash
+                    && tlc.hash_algorithm == command.hash_algorithm
+                    && tlc.removed_reason.is_none()
+                    && tlc.forwarding_tlc.is_none()
+            });
+            if !matches!(
+                prev_state.state,
+                ChannelState::ChannelReady | ChannelState::ShuttingDown(_)
+            ) || !backed
+                || current_state.tlc_state.offered_tlcs.tlcs.iter().any(|tlc| {
+                    tlc.forwarding_tlc
+                        == Some((prev_tlc_info.prev_channel_id, prev_tlc_info.prev_tlc_id))
+                })
+                || prev_state.retryable_tlc_operations.iter().any(|operation| {
+                    matches!(operation,
+                    RetryableTlcOperation::RemoveTlc(id, _) if *id == prev_id)
+                })
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Previous TLC {:?} on channel {} no longer backs this forward",
+                    prev_id, prev_state.id
+                )));
             }
         }
         Ok(())

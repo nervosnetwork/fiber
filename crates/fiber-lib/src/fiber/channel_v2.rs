@@ -2113,6 +2113,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_forward_add_rejects_unbacked_or_already_forwarded_upstream() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let initial = a.get_channel_actor_state(id);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), a.store.clone(), None);
+        for case in [
+            "removed",
+            "queued_remove",
+            "missing_tlc",
+            "hash",
+            "algorithm",
+            "closed",
+            "already_forwarded",
+            "already_offered",
+            "missing_channel",
+            "same_channel_queued_remove",
+            "valid",
+        ] {
+            let mut state = initial.clone();
+            state.network = Some(network.clone());
+            let mut command = retry_batch_add(42, 1000);
+            let upstream_id = if case == "same_channel_queued_remove" {
+                id
+            } else {
+                crate::gen_rand_sha256_hash()
+            };
+            command.previous_tlc = Some(fiber_types::PrevTlcInfo::new_with_shared_secret(
+                upstream_id,
+                0,
+                100,
+                [7; 32],
+            ));
+            let mut upstream = crate::fiber::tests::create_test_channel_state_with_tlc(
+                upstream_id,
+                0,
+                1100,
+                command.payment_hash,
+                None,
+            );
+            let reason =
+                fiber_types::RemoveTlcReason::RemoveTlcFail(fiber_types::TlcErrPacket::new(
+                    fiber_types::TlcErr::new(fiber_types::TlcErrorCode::TemporaryChannelFailure),
+                    &[7; 32],
+                ));
+            match case {
+                "removed" => {
+                    upstream
+                        .tlc_state
+                        .get_mut(&fiber_types::TLCId::Received(0))
+                        .unwrap()
+                        .removed_reason = Some(reason.clone())
+                }
+                "queued_remove" => upstream.retryable_tlc_operations.push_back(
+                    fiber_types::RetryableTlcOperation::RemoveTlc(
+                        fiber_types::TLCId::Received(0),
+                        reason.clone(),
+                    ),
+                ),
+                "missing_tlc" => upstream.tlc_state.received_tlcs.tlcs.clear(),
+                "hash" => {
+                    upstream
+                        .tlc_state
+                        .get_mut(&fiber_types::TLCId::Received(0))
+                        .unwrap()
+                        .payment_hash = [43; 32].into()
+                }
+                "algorithm" => {
+                    upstream
+                        .tlc_state
+                        .get_mut(&fiber_types::TLCId::Received(0))
+                        .unwrap()
+                        .hash_algorithm = fiber_types::HashAlgorithm::Sha256
+                }
+                "closed" => upstream.state = ChannelState::Closed(fiber_types::CloseFlags::empty()),
+                "already_forwarded" => {
+                    upstream
+                        .tlc_state
+                        .get_mut(&fiber_types::TLCId::Received(0))
+                        .unwrap()
+                        .forwarding_tlc = Some((id, 0))
+                }
+                "already_offered" => {
+                    let existing = state.create_outbounding_tlc(&command);
+                    state.tlc_state.add_offered_tlc(existing);
+                    state.increment_next_offered_tlc_id();
+                }
+                "same_channel_queued_remove" => {
+                    state.tlc_state.received_tlcs = upstream.tlc_state.received_tlcs.clone();
+                    state.retryable_tlc_operations.push_back(
+                        fiber_types::RetryableTlcOperation::RemoveTlc(
+                            fiber_types::TLCId::Received(0),
+                            reason.clone(),
+                        ),
+                    );
+                }
+                _ => {}
+            }
+            if case != "missing_channel" && case != "same_channel_queued_remove" {
+                a.store.insert_channel_actor_state(upstream);
+            }
+            captured.lock().unwrap().clear();
+            let offered_before = state.tlc_state.offered_tlcs.tlcs.len();
+            let result = actor.add_tlc_update(&mut state, &command);
+            assert_eq!(result.is_ok(), case == "valid", "{case}: {result:?}");
+            assert_eq!(
+                state.tlc_state.offered_tlcs.tlcs.len(),
+                offered_before + usize::from(case == "valid"),
+                "reject before allocating an outgoing TLC: {case}"
+            );
+            capture_barrier(&network, id).await;
+            let sent = captured.lock().unwrap().iter().any(|message| {
+                matches!(
+                    message,
+                    NetworkActorMessage::Command(NetworkActorCommand::SendFiberMessage(
+                        FiberMessageWithTarget {
+                            message: FiberMessage::ChannelNormalOperation(
+                                FiberChannelMessage::AddTlc(_)
+                            ),
+                            ..
+                        }
+                    ))
+                )
+            });
+            assert_eq!(
+                sent,
+                case == "valid",
+                "never publish an unbacked forward: {case}"
+            );
+        }
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_v2_retry_queue_batches_after_ack() {
         let (a, b, id) =
             create_nodes_with_established_channel(100000000000, 11800000000, false).await;
