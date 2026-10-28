@@ -148,6 +148,11 @@ impl Store {
         self.watcher = Some(watcher);
     }
 
+    /// Whether every write waits for the disk, see `FiberConfig::store_sync_writes`.
+    pub fn sync_writes(&self) -> bool {
+        self.inner.sync_writes()
+    }
+
     fn notify(&self, change: StoreChange) {
         if let Some(ref watcher) = self.watcher {
             watcher(change);
@@ -220,6 +225,10 @@ impl BatchWriter for StoreBatch {
 
 impl StorageBackend for Store {
     type Batch = StoreBatch;
+
+    fn sync_writes(&self) -> bool {
+        self.inner.sync_writes()
+    }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         self.inner.get(self.physical_key(key.as_ref()))
@@ -306,18 +315,42 @@ where
 /// Open a store at `path`, running auto-migration with auto-confirm.
 /// Use this when no user interaction is needed (e.g. tests, simple setups).
 pub fn open_store<P: AsRef<Path>>(path: P) -> Result<Store, String> {
-    open_store_with_migration(path, Box::new(|_| true), Box::new(|_| {}))
+    open_store_with_migration(path, false, Box::new(|_| true), Box::new(|_| {}))
 }
 
 /// Open a store at `path`, running auto-migration with custom confirm/progress callbacks.
 /// Use this when user interaction is required (e.g. CLI, WASM).
+///
+/// `sync_writes` (`FiberConfig::store_sync_writes`) is set before the migrations run, so their
+/// writes wait for the disk too. The browser store has no such setting and ignores it.
 pub fn open_store_with_migration<P: AsRef<Path>>(
     path: P,
+    sync_writes: bool,
     confirm_fn: MigrateConfirmFn,
     progress_fn: MigrateProgressFn,
 ) -> Result<Store, String> {
-    let db = fiber_store::Store::open_db(path.as_ref())?;
-    run_auto_migrate(&db, confirm_fn, progress_fn)?;
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    open_store_with_migrations(path, sync_writes, migrate, confirm_fn, progress_fn)
+}
+
+/// `open_store_with_migration` with the migrations given, for tests.
+pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
+    path: P,
+    sync_writes: bool,
+    migrate: DbMigrate,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<Store, String> {
+    #[allow(unused_mut)]
+    let mut db = fiber_store::Store::open_db(path.as_ref())?;
+    #[cfg(not(target_arch = "wasm32"))]
+    db.set_sync_writes(sync_writes);
+    #[cfg(target_arch = "wasm32")]
+    let _ = sync_writes;
+    migrate
+        .auto_migrate(&db, confirm_fn, progress_fn)
+        .map_err(|e| e.to_string())?;
     Ok(Store {
         inner: db,
         namespace: None,

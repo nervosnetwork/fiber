@@ -25,6 +25,8 @@ mod peer_reconnect_stress;
 mod rpc;
 mod serde_utils;
 mod settle_tlc_set_command_tests;
+#[cfg(not(target_arch = "wasm32"))]
+mod store_sync_writes;
 mod tlc_op;
 #[cfg(not(target_arch = "wasm32"))]
 mod trampoline;

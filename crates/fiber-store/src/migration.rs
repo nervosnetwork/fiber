@@ -15,11 +15,18 @@ pub trait MigrationStore {
 
     /// Collect all key-value pairs whose keys start with the given prefix.
     fn collect_prefix(&self, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)>;
+
+    /// Whether this store's writes wait for the disk before they return.
+    fn sync_writes(&self) -> bool;
 }
 
 impl<T: StorageBackend + ?Sized> MigrationStore for T {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         StorageBackend::get(self, key)
+    }
+
+    fn sync_writes(&self) -> bool {
+        StorageBackend::sync_writes(self)
     }
 
     fn put(&self, key: &[u8], value: &[u8]) {

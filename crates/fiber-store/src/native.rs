@@ -12,9 +12,23 @@ use tracing::{info, warn};
 #[derive(Clone, Debug)]
 pub struct Store {
     pub(crate) db: Arc<DB>,
+    sync_writes: bool,
+}
+
+/// With `sync`, a write returns only once it is on disk, so it survives a power loss or a
+/// hard reboot, not only a crash of the process.
+fn write_options(sync: bool) -> WriteOptions {
+    let mut options = WriteOptions::default();
+    options.set_sync(sync);
+    options
 }
 
 impl Store {
+    /// Whether put, delete and batch commit wait for the disk. Off when opened.
+    pub fn set_sync_writes(&mut self, sync_writes: bool) {
+        self.sync_writes = sync_writes;
+    }
+
     /// Open a store (without migration check — use `check_migrate` or `DbMigrate` for that)
     pub fn open_db(path: &Path) -> Result<Self, String> {
         let mut options = Options::default();
@@ -34,12 +48,19 @@ impl Store {
                 }
             }
         }
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            sync_writes: false,
+        })
     }
 }
 
 impl StorageBackend for Store {
     type Batch = Batch;
+
+    fn sync_writes(&self) -> bool {
+        self.sync_writes
+    }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
         self.db
@@ -49,17 +70,22 @@ impl StorageBackend for Store {
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.db.put(key, value).expect("put should be ok");
+        self.db
+            .put_opt(key, value, &write_options(self.sync_writes))
+            .expect("put should be ok");
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.db.delete(key).expect("Unexpected error from delete");
+        self.db
+            .delete_opt(key, &write_options(self.sync_writes))
+            .expect("Unexpected error from delete");
     }
 
     fn batch(&self) -> Self::Batch {
         Batch {
             db: Arc::clone(&self.db),
             wb: WriteBatch::default(),
+            sync_writes: self.sync_writes,
         }
     }
 
@@ -220,6 +246,7 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 pub struct Batch {
     db: Arc<DB>,
     wb: WriteBatch,
+    sync_writes: bool,
 }
 
 impl BatchWriter for Batch {
@@ -232,6 +259,8 @@ impl BatchWriter for Batch {
     }
 
     fn commit(self) {
-        self.db.write(&self.wb).expect("commit should be OK");
+        self.db
+            .write_opt(&self.wb, &write_options(self.sync_writes))
+            .expect("commit should be OK");
     }
 }

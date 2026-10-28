@@ -148,9 +148,14 @@ pub async fn fiber(
         })?
         .store_path();
 
-    let store =
-        open_store_with_migration(store_path, Box::new(wasm_confirm), Box::new(wasm_progress))
-            .map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
+    // The browser store has no sync setting.
+    let store = open_store_with_migration(
+        store_path,
+        false,
+        Box::new(wasm_confirm),
+        Box::new(wasm_progress),
+    )
+    .map_err(|err| exit_to_js(ExitMessage(err.to_string())))?;
     debug!("Store initialized");
     STORE.set(store.clone()).expect("Store already initialized");
     let tracker = new_tokio_task_tracker();

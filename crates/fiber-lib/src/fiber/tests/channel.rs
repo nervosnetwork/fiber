@@ -8,7 +8,7 @@ use crate::fiber::channel::{
     ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint,
     TestPendingMessages, UpdateCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
     DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
-    MIN_COMMITMENT_DELAY_EPOCHS, XUDT_COMPATIBLE_WITNESS,
+    MIN_COMMITMENT_DELAY_EPOCHS, PEER_CHANNEL_RESPONSE_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -12174,6 +12174,121 @@ async fn test_payments_finish_after_lost_commitment_and_two_rapid_reconnects() {
     }
 }
 
+/// A lost CommitmentSigned may be recovered by reestablishment on this branch.
+/// Exercise a genuinely stalled ledger directly, independently of replay recovery,
+/// and verify that maintenance requests a force close through the network actor.
+#[tokio::test]
+async fn test_revocation_nonce_stall_is_force_closed_after_peer_response_timeout() {
+    init_tracing();
+    let (node_a, _node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    let network = FiberActorRef::from_network(&node_a.network_actor);
+    state.network = Some(network.clone());
+    state.remote_revocation_nonce_for_verify = None;
+    state.tlc_state.waiting_ack = false;
+    state.reestablishing = false;
+    state.refresh_revocation_nonce_watchdog();
+    let since = state
+        .revocation_nonce_unbalanced_since
+        .expect("unbalanced ledger arms the watchdog");
+    assert!(!state.is_revocation_nonce_ledger_stalled(since + PEER_CHANNEL_RESPONSE_TIMEOUT));
+    state.revocation_nonce_unbalanced_since =
+        Some(now_timestamp_as_millis_u64().saturating_sub(PEER_CHANNEL_RESPONSE_TIMEOUT + 1));
+    assert!(state.is_revocation_nonce_ledger_stalled(now_timestamp_as_millis_u64()));
+
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        state.get_remote_pubkey(),
+        network,
+        node_a.store.clone(),
+        None,
+    );
+    let (channel_ref, channel_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn no-op channel actor");
+    channel
+        .handle_event(&channel_ref, &mut state, ChannelEvent::MaintainChannelTlcs)
+        .await
+        .expect("maintain stalled ledger");
+
+    tokio::time::timeout(event_wait_timeout(), async {
+        while node_a.get_channel_actor_state(channel_id).state == ChannelState::ChannelReady {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the stalled ledger must trigger a force close");
+    channel_handle.abort();
+}
+
+/// The watchdog must leave healthy channels alone. After ordinary rounds in both
+/// directions, including one whose CommitmentSigned arrives late but does arrive, the
+/// revocation nonce ledger is balanced at rest and the channel stays usable past the
+/// peer response timeout.
+#[tokio::test]
+async fn test_revocation_nonce_watchdog_keeps_healthy_idle_channel_open() {
+    init_tracing();
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 50_000_000_000, true).await;
+
+    for _ in 0..3 {
+        let a_to_b = node_a
+            .send_payment_keysend(&node_b, 100_000_000, false)
+            .await
+            .expect("A pays B");
+        let b_to_a = node_b
+            .send_payment_keysend(&node_a, 100_000_000, false)
+            .await
+            .expect("B pays A");
+        node_a.wait_until_success(a_to_b.payment_hash).await;
+        node_b.wait_until_success(b_to_a.payment_hash).await;
+    }
+
+    // A late but delivered CommitmentSigned is an ordinary in-flight round.
+    node_a
+        .hold_next_fiber_messages(
+            node_b.pubkey,
+            channel_id,
+            TestFiberMessageKind::CommitmentSigned,
+            1,
+        )
+        .await;
+    let late = node_a
+        .send_payment_keysend(&node_b, 100_000_000, false)
+        .await
+        .expect("late payment");
+    node_a.wait_for_held_fiber_messages(1).await;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    node_a.release_held_fiber_messages().await;
+    node_a.wait_until_success(late.payment_hash).await;
+
+    // Stay idle for longer than the watchdog timeout.
+    tokio::time::sleep(Duration::from_millis(PEER_CHANNEL_RESPONSE_TIMEOUT + 5_000)).await;
+
+    for (name, node) in [("A", &node_a), ("B", &node_b)] {
+        let state = node.get_channel_actor_state(channel_id);
+        assert_eq!(
+            state.state,
+            ChannelState::ChannelReady,
+            "{name} must keep the channel open"
+        );
+        assert!(
+            state.remote_revocation_nonce_for_send.is_some()
+                && state.remote_revocation_nonce_for_verify.is_some(),
+            "{name} must be balanced at rest: send/verify present = {}/{}",
+            state.remote_revocation_nonce_for_send.is_some(),
+            state.remote_revocation_nonce_for_verify.is_some(),
+        );
+    }
+
+    let after_idle = node_a
+        .send_payment_keysend(&node_b, 100_000_000, false)
+        .await
+        .expect("payment after idle");
+    node_a.wait_until_success(after_idle.payment_hash).await;
+}
+
 #[tokio::test]
 async fn test_reestablish_restores_send_nonce() {
     init_tracing();
@@ -14796,6 +14911,7 @@ mod udt_funding_cell_capacity {
                 commitment_contract_features: Default::default(),
             },
             waiting_peer_response: None,
+            revocation_nonce_unbalanced_since: None,
             reestablish_started_at: None,
             network: None,
             scheduled_channel_update_handle: None,
