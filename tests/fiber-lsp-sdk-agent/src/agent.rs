@@ -197,6 +197,18 @@ struct PersistedAgent {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum FixtureAuthorization {
+    /// Approve the exact outgoing TLC amount, including the fixture's routing fee budget.
+    Payment {
+        channel_id: Hash256,
+        #[serde(deserialize_with = "deserialize_invoice_terms")]
+        terms: fiber_lsp_sdk::PaymentAuthorization,
+    },
+    /// Approve settlement after the fixture recipient reveals a matching preimage.
+    Fulfillment {
+        channel_id: Hash256,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    },
     /// Register wallet-owned invoice terms and prove possession of the preimage.
     Invoice {
         channel_id: Hash256,
@@ -436,6 +448,24 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
     /// Apply explicit test-driver intent, verifying recovery before releasing preimages.
     pub async fn authorize(&mut self, request: FixtureAuthorization) -> Result<()> {
         match request {
+            FixtureAuthorization::Payment { channel_id, terms } => {
+                self.session
+                    .channel_signer(channel_id)
+                    .await?
+                    .authorize_payment(terms)
+                    .await?;
+            }
+            FixtureAuthorization::Fulfillment {
+                channel_id,
+                payment_hash,
+                preimage,
+            } => {
+                self.session
+                    .channel_signer(channel_id)
+                    .await?
+                    .authorize_fulfillment(payment_hash, preimage)
+                    .await?;
+            }
             FixtureAuthorization::Invoice {
                 channel_id,
                 terms,
@@ -1464,6 +1494,78 @@ mod tests {
         assert_eq!(state.submissions[0].request_id, JsonHash256([0x22; 32]));
         assert_eq!(state.submissions[0].partial_signature.len(), 32);
         assert!(state.submissions[0].next_material.is_some());
+    }
+
+    #[tokio::test]
+    async fn outgoing_payment_authorization_requires_outbound_and_exact_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = Agent::open(
+            FakeNode::default(),
+            AgentConfig {
+                store_dir: dir.path().into(),
+                status_file: None,
+            },
+        )
+        .await
+        .unwrap();
+        agent.initialize().await.unwrap();
+        let (id, _) = approve_pending(&mut agent).await;
+        let preimage = Hash256::from([0x44; 32]);
+        let payment_hash = fiber_types::HashAlgorithm::CkbHash
+            .hash(preimage.as_ref())
+            .into();
+        let mut terms = fiber_lsp_sdk::PaymentAuthorization {
+            payment_hash,
+            hash_algorithm: fiber_types::HashAlgorithm::CkbHash,
+            inbound: true,
+            amount: 100_500,
+            expires_at_ms: now_ms() + 3_600_000,
+            min_tlc_expiry_delta_ms: 60_000,
+            max_tlc_expiry_ms: now_ms() + 86_400_000,
+        };
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        assert!(agent
+            .authorize(FixtureAuthorization::Payment {
+                channel_id: id,
+                terms: terms.clone(),
+            })
+            .await
+            .is_err());
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+
+        terms.inbound = false;
+        let request = FixtureAuthorization::Payment {
+            channel_id: id,
+            terms: terms.clone(),
+        };
+        let decoded = serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
+        agent.authorize(decoded).await.unwrap();
+        terms.amount += 1;
+        assert!(agent
+            .authorize(FixtureAuthorization::Payment {
+                channel_id: id,
+                terms,
+            })
+            .await
+            .is_err());
+        let before = fs::read(dir.path().join("snapshot.bin")).unwrap();
+        assert!(agent
+            .authorize(FixtureAuthorization::Fulfillment {
+                channel_id: id,
+                payment_hash,
+                preimage: Hash256::from([0x55; 32]),
+            })
+            .await
+            .is_err());
+        assert_eq!(fs::read(dir.path().join("snapshot.bin")).unwrap(), before);
+        agent
+            .authorize(FixtureAuthorization::Fulfillment {
+                channel_id: id,
+                payment_hash,
+                preimage,
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

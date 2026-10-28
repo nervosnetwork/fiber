@@ -26,7 +26,8 @@ body:json {
         "currency": "Fibd",
         "description": "hosted tenant outgoing payment",
         "expiry": "0xe10",
-        "allow_trampoline_routing": true
+        "allow_trampoline_routing": true,
+        "payment_preimage": "0x3333333333333333333333333333333333333333333333333333333333333333"
       }
     ]
   }
@@ -38,6 +39,7 @@ assert {
 }
 
 script:post-response {
+  bru.setVar("LSP_OUTGOING_PREIMAGE", "0x3333333333333333333333333333333333333333333333333333333333333333");
   bru.setVar("LSP_OUTGOING_INVOICE", res.body.result.invoice_address);
   bru.setVar("LSP_OUTGOING_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
 }

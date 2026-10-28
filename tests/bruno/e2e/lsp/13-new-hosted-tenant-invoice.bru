@@ -28,7 +28,8 @@ body:json {
         "description": "hosted tenant incoming payment",
         "expiry": "0xe10",
         "allow_trampoline_routing": true,
-        "payment_preimage": "0x2222222222222222222222222222222222222222222222222222222222222222"
+        "final_expiry_delta": "0x5265c00",
+        "payment_hash": "0x09dfb3a3fa5af1b3359b6256945af43e31be9f86f3d1b45779cebc09dc609138"
       }
     ]
   }
@@ -47,6 +48,7 @@ script:post-response {
   if (routeHint !== bru.getEnvVar("NODE2_PUBKEY")) {
     throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
   }
+  bru.setVar("LSP_INCOMING_PREIMAGE", "0x2222222222222222222222222222222222222222222222222222222222222222");
   bru.setVar("LSP_INCOMING_INVOICE", res.body.result.invoice_address);
   bru.setVar("LSP_INCOMING_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
 }
