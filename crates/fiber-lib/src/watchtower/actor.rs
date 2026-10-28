@@ -678,6 +678,13 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
         &self_node_id,
         channel_data.commitment_contract_features,
     );
+    prune_spent_signing_requests(
+        events,
+        store,
+        &self_node_id,
+        &channel_data.channel_id,
+        &settlement_scan.spent_inputs,
+    );
 
     // the live cells number should be 1 or 0 for normal case.
     // however, an attacker may create a lot of cells to implement a tx pinning attack, we have to use loop to get all cells
@@ -899,6 +906,7 @@ impl TrackedSettlementTlc {
 struct WatchedSettlementScan {
     witness_input_indices: HashMap<ckb_types::packed::Byte32, usize>,
     tracked_tlcs_by_outpoint: HashMap<OutPoint, Vec<TrackedSettlementTlc>>,
+    spent_inputs: HashSet<OutPoint>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -969,6 +977,17 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
         }
     }
 
+    // Candidates have been confirmed committed. Use positive spend evidence,
+    // never absence from an incomplete scan, to invalidate signing requests.
+    let spent_inputs = candidates
+        .iter()
+        .flat_map(|tx| {
+            tx.raw()
+                .inputs()
+                .into_iter()
+                .map(|input| input.previous_output())
+        })
+        .collect();
     let mut processed_tx_hashes = HashSet::new();
     loop {
         let mut progress = false;
@@ -998,6 +1017,7 @@ fn scan_watched_settlement_txs<S: WatchtowerStore>(
     WatchedSettlementScan {
         witness_input_indices: settlement_witness_input_indices,
         tracked_tlcs_by_outpoint: watched_outpoints,
+        spent_inputs,
     }
 }
 
@@ -1006,6 +1026,47 @@ fn lock_matches_commitment_prefix(lock: &Script, commitment_lock_prefix: &Script
     lock.code_hash() == commitment_lock_prefix.code_hash()
         && lock.hash_type() == commitment_lock_prefix.hash_type()
         && lock_args.starts_with(commitment_lock_prefix.args().raw_data().as_ref())
+}
+
+fn prune_spent_signing_requests<S: WatchtowerStore>(
+    events: &crate::signing::SigningEvents,
+    store: &S,
+    node_id: &NodeId,
+    channel_id: &Hash256,
+    spent_inputs: &HashSet<OutPoint>,
+) {
+    if spent_inputs.is_empty() {
+        return;
+    }
+    let signing_scope = events.watchtower(node_id);
+    let mut signing_update = signing_scope.prepare_update();
+    store
+        .update_watchtower_signer(node_id, channel_id, |state| {
+            if let fiber_types::WatchtowerSignerState::External(external) = state {
+                let count = external.pending_requests.len() + external.signed_signatures.len();
+                let is_unspent = |content: &fiber_types::OnchainSigningContent| {
+                    content
+                        .transaction
+                        .raw()
+                        .inputs()
+                        .into_iter()
+                        .all(|input| !spent_inputs.contains(&input.previous_output()))
+                };
+                external
+                    .pending_requests
+                    .retain(|_, content| is_unspent(content));
+                external
+                    .signed_signatures
+                    .retain(|_, (content, _)| is_unspent(content));
+                // Preserve last_applied as an idempotent submission receipt.
+                if count != external.pending_requests.len() + external.signed_signatures.len() {
+                    signing_update.watchtower_state(*channel_id, state);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .expect("infallible signer update");
+    signing_update.publish();
 }
 
 #[allow(dead_code)]

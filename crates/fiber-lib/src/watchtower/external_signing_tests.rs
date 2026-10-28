@@ -534,6 +534,159 @@ fn legacy_local_tlc_key_still_signs_without_derivation_metadata() {
 }
 
 #[test]
+fn spent_inputs_prune_watchtower_requests_and_publish_successor() {
+    use crate::signing::notifications::{SigningChange, SigningScope};
+    use fiber_json_types::WatchtowerSigningStatus;
+
+    let fixture = Fixture::new(false, false, false, false);
+    let Fixture {
+        events,
+        store,
+        node_id,
+        channel,
+        base_key,
+        ..
+    } = &fixture;
+    let channel_id = &channel.channel_id;
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let mut changes = events
+        .hub
+        .subscribe(SigningScope::Watchtower(node_id.clone()));
+    let mut requests: Vec<_> = [3u8, 99]
+        .into_iter()
+        .map(|seed| {
+            let content = OnchainSigningContent {
+                key_purpose: OnchainKeyPurpose::Settlement,
+                transaction: TransactionBuilder::default()
+                    .inputs([0, 1].map(|index| {
+                        CellInput::new(OutPoint::new(Byte32::from([seed; 32]), index), 0)
+                    }))
+                    .build()
+                    .data(),
+            };
+            let request_id = Hash256::from(ckb_hash::blake2b_256(content.transaction.as_slice()));
+            (request_id, content)
+        })
+        .collect();
+    // Make the stale request sort first, reproducing the RPC/notification blockage.
+    requests.sort_by_key(|(id, _)| *id);
+    let (stale_id, stale) = &requests[0];
+    let (live_id, live) = &requests[1];
+    // Either a commitment input or a fee input can invalidate a request.
+    for input_index in [0, 1] {
+        for already_signed in [false, true] {
+            let mut external = fiber_types::WatchtowerExternalSignerState::default();
+            if already_signed {
+                external.signed_signatures = requests
+                    .iter()
+                    .map(|(id, content)| {
+                        (
+                            *id,
+                            (
+                                content.clone(),
+                                sign_onchain_request(base_key, content).unwrap(),
+                            ),
+                        )
+                    })
+                    .collect();
+            } else {
+                external.pending_requests = requests.iter().cloned().collect();
+            }
+            let state = WatchtowerSignerState::External(external);
+            store.put_watchtower_signer(node_id, channel_id, state.clone());
+            // Unrelated chain spends must leave both valid requests untouched.
+            let unrelated = HashSet::from([OutPoint::new(Byte32::from([200; 32]), 0)]);
+            prune_spent_signing_requests(events, store, node_id, channel_id, &unrelated);
+            assert_eq!(store.get_watchtower_signer(node_id, channel_id), state);
+            let spent = HashSet::from([stale
+                .transaction
+                .raw()
+                .inputs()
+                .get(input_index)
+                .unwrap()
+                .previous_output()]);
+            prune_spent_signing_requests(events, store, node_id, channel_id, &spent);
+            let WatchtowerSignerState::External(state) =
+                store.get_watchtower_signer(node_id, channel_id)
+            else {
+                panic!("external signer");
+            };
+            assert!(!state.pending_requests.contains_key(stale_id));
+            assert!(!state.signed_signatures.contains_key(stale_id));
+            if already_signed {
+                assert_eq!(state.signed_signatures.len(), 1);
+                assert_eq!(&state.signed_signatures[live_id].0, live);
+            } else {
+                assert_eq!(
+                    state.pending_requests,
+                    std::collections::BTreeMap::from([(*live_id, live.clone())])
+                );
+            }
+            let expected = crate::rpc::watchtower::to_rpc_watchtower_signing_status(
+                WatchtowerSignerState::External(state),
+            );
+            match &expected {
+                WatchtowerSigningStatus::SignatureRequired { request_id, .. } => {
+                    assert_eq!(*request_id, (*live_id).into())
+                }
+                WatchtowerSigningStatus::NoSignatureRequired => assert!(already_signed),
+            }
+            let event = runtime.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(1), changes.recv())
+                    .await
+                    .expect("published change")
+                    .expect("receiver")
+            });
+            let SigningChange::WatchtowerUpdated { status, .. } = event.as_ref() else {
+                panic!("watchtower update");
+            };
+            assert_eq!(status, &expected);
+        }
+    }
+}
+
+#[test]
+fn pruned_signed_request_can_be_regenerated() {
+    let fixture = Fixture::new(false, false, false, false);
+    assert!(fixture.build().unwrap().is_none());
+    let (request_id, content) = fixture.pending();
+    let signature = sign_onchain_request(&fixture.tlc_key, &content).unwrap();
+    fixture.submit(request_id, signature).unwrap();
+    let spent = HashSet::from([content
+        .transaction
+        .raw()
+        .inputs()
+        .get(0)
+        .unwrap()
+        .previous_output()]);
+    prune_spent_signing_requests(
+        &fixture.events,
+        &fixture.store,
+        &fixture.node_id,
+        &fixture.channel.channel_id,
+        &spent,
+    );
+    let WatchtowerSignerState::External(state) = fixture
+        .store
+        .get_watchtower_signer(&fixture.node_id, &fixture.channel.channel_id)
+    else {
+        panic!("external signer");
+    };
+    assert!(state.pending_requests.is_empty() && state.signed_signatures.is_empty());
+    assert_eq!(state.last_applied.unwrap().request_id, request_id);
+
+    // Model the original cell becoming live again after a reorg. Rebuilding
+    // must clear the historical receipt so the same request can be signed again.
+    assert!(fixture.build().unwrap().is_none());
+    assert_eq!(fixture.pending(), (request_id, content));
+    assert_eq!(
+        fixture.submit(request_id, signature).unwrap(),
+        SubmitWatchtowerSignatureResult::Applied
+    );
+    assert!(fixture.build().unwrap().is_some());
+}
+
+#[test]
 fn external_final_settlement_uses_base_key_through_transaction_builder() {
     for for_remote in [false, true] {
         for subsequent in [false, true] {
