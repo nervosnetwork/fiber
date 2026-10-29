@@ -878,6 +878,61 @@ where
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
 
+                if state
+                    .session_v2
+                    .as_ref()
+                    .is_some_and(|session| session.incoming.is_some() && session.outgoing.is_some())
+                    && matches!(state.state, ChannelState::AwaitingChannelReady(_))
+                    && state.latest_commitment_transaction.is_some()
+                    && state.ephemeral_config.external_funding.enabled
+                    && state.ephemeral_config.external_funding.signed_submitted
+                    && state
+                        .ephemeral_config
+                        .external_funding
+                        .funding_lock_script
+                        .is_some()
+                    && !state.is_acceptor
+                    && !state.should_local_send_tx_signatures_first()
+                {
+                    let funding_tx = state.funding_tx.as_ref().ok_or_else(|| {
+                        ProcessingChannelError::InvalidState(
+                            "Missing submitted funding transaction for replay".to_owned(),
+                        )
+                    })?;
+                    for (index, witness) in tx_signatures.witnesses.iter().enumerate() {
+                        let witness: Bytes = witness.pack();
+                        if !is_empty_or_placeholder_witness(&witness)
+                            && funding_tx.witnesses().get(index).as_ref() != Some(&witness)
+                        {
+                            return Err(ProcessingChannelError::InvalidState(
+                                "Conflicting replayed funding witnesses".to_owned(),
+                            ));
+                        }
+                    }
+                    // The acceptor may have missed our response; replay only already saved witnesses.
+                    state.send_v2_message(FiberMessage::tx_signatures(TxSignatures {
+                        channel_id: state.id,
+                        witnesses: funding_tx
+                            .witnesses()
+                            .into_iter()
+                            .map(|w| w.unpack())
+                            .collect(),
+                    }));
+                    if matches!(state.state, ChannelState::AwaitingChannelReady(flags) if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY))
+                    {
+                        // Our earlier Ready could also have overtaken the lost witness response.
+                        let session = state.session_v2.as_ref().expect("V2 replay checked");
+                        state.send_v2_message(FiberMessage::channel_ready_v2(
+                            crate::fiber::types::ChannelReadyV2 {
+                                channel_id: state.id,
+                                next_commitment_number: session.own.number,
+                                next_commitment_nonce: session.own.public_nonce.clone(),
+                            },
+                        ));
+                    }
+                    return Ok(());
+                }
+
                 // Peer-sent TxSignatures is only valid once both CommitmentSigned messages have
                 // been exchanged, i.e. the channel has reached AwaitingTxSignatures(_). The
                 // fast-path branches below would otherwise advance the channel to
@@ -2790,17 +2845,22 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
         forward_fee: u128,
     ) {
+        // A stopped network actor must not leave an applied Add without recoverable ownership.
+        let shared_secret = peeled_onion_packet.shared_secret;
+        state
+            .waiting_forward_tlc_tasks
+            .insert(tlc_id, shared_secret);
         let (send, _recv) = oneshot::channel::<Result<(), TlcErr>>();
         let port = RpcReplyPort::from(send);
-        match self.network.send_message(NetworkActorMessage::Command(
+        if let Err(err) = self.network.send_message(NetworkActorMessage::Command(
             NetworkActorCommand::SendPaymentOnionPacket(
                 SendOnionPacketCommand {
-                    peeled_onion_packet: peeled_onion_packet.clone(),
+                    peeled_onion_packet,
                     previous_tlc: Some(PrevTlcInfo::new_with_shared_secret(
                         state.get_id(),
                         u64::from(tlc_id),
                         forward_fee,
-                        peeled_onion_packet.shared_secret,
+                        shared_secret,
                     )),
                     payment_hash,
                     // forward tlc always set attempt_id to None
@@ -2809,16 +2869,7 @@ where
                 port,
             ),
         )) {
-            Ok(_) => {
-                // we successfully sent the forward tlc, we will wait for the result
-                // here we just make sure the forward tlc is sent, we don't need to wait for the result
-                state
-                    .waiting_forward_tlc_tasks
-                    .insert(tlc_id, peeled_onion_packet.shared_secret);
-            }
-            Err(err) => {
-                error!("Failed to send forward tlc onion packet command: {:?}", err);
-            }
+            error!("Failed to send forward tlc onion packet command: {:?}", err);
         }
     }
 
@@ -6576,21 +6627,24 @@ impl ChannelActorState {
                 let local_funding_pubkey = *self.get_local_funding_pubkey();
                 let funding_key = self.signer.funding_key.clone();
                 let number = self.get_remote_commitment_number();
+                let ready_advertised = matches!(self.state, ChannelState::AwaitingChannelReady(flags)
+                    if flags.contains(AwaitingChannelReadyFlags::OUR_CHANNEL_READY));
                 if let Some(session) = self.session_v2.as_mut() {
-                    // Retire the previous nonce instead of dropping it: a commitment the peer
-                    // signed before it saw the rotation must still verify against the nonce it
-                    // used. Only the newest entries are kept, and they are never signed with
-                    // again, so MuSig2's one-message-per-nonce rule is preserved.
-                    let previous = session.own.clone();
-                    session.own = crate::fiber::session_v2::allocate_nonce(
-                        channel_id,
-                        local_funding_pubkey,
-                        number,
-                        fiber_types::NoncePurposeV2::Commitment,
-                        &funding_key,
-                    );
-                    session.own_retired.insert(0, previous);
-                    session.own_retired.truncate(2);
+                    // Until opening completes, our advertised Ready must be replayed verbatim.
+                    if !ready_advertised {
+                        // Only same-round retired allocations may sign a late CS; acceptance
+                        // advances own and discards retired copies of the consumed allocation.
+                        let previous = session.own.clone();
+                        session.own = crate::fiber::session_v2::allocate_nonce(
+                            channel_id,
+                            local_funding_pubkey,
+                            number,
+                            fiber_types::NoncePurposeV2::Commitment,
+                            &funding_key,
+                        );
+                        session.own_retired.insert(0, previous);
+                        session.own_retired.truncate(2);
+                    }
                     session.pending_incoming = None;
                     session.pending_ack = None;
                 }

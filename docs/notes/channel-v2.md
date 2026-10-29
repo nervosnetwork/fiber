@@ -86,6 +86,27 @@ CS/ACK signing and RPC ownership-handoff boundaries retain their existing saves.
 Forward-owner recovery saves only when it changes channel state. Outbox receipts
 use the normal tail commit unless actual preimage deletion needs an earlier save.
 
+## Reconnection nonce and opening replay
+
+Retired verification nonces may accept only a CS with their allocated commitment
+number. A verifying peer signature does not establish that allocation's round or
+prove that another copy of it has not already signed. Advancing `own` clears its
+retired allocations; older healthy snapshots with past-round retired entries
+remain readable, but those entries cannot be selected for a later round.
+
+While an outgoing CS awaits its RAA, a peer may advertise the following round.
+That advertisement stays in the per-connection recovery state until RAA acceptance
+advances the local counter and confirmed remote session together. A replayed RAA
+uses the current handshake's nonce when its next-round number matches, rather
+than rolling back to an advertisement that repeated reconnects may have retired.
+
+During opening, an already-advertised Ready keeps its exact number and nonce
+until opening completes. Reconnection must not replace it with a normal handshake
+nonce. A submitted external-funding initiator waiting for Ready can replay its
+saved witness response to a matching TxSignatures retry, followed by its saved
+Ready if already advertised. This replay does not mutate funding/signing state
+or bypass the commitment-exchange phase check.
+
 ## Backup restoration and ordinary crash recovery
 
 Actual database backup restoration marks penalty-risk channels `Stale`. A V2
@@ -155,8 +176,10 @@ Two durable records outlive the in-memory task that was supposed to finish them,
 and neither is replayed by reestablishment (which only resends offered/removed TLC
 updates). Both are re-driven from the persisted state instead.
 
-A forwarding task (`waiting_forward_tlc_tasks`) is reconciled on actor start. An
-already-created downstream TLC carries its upstream link in
+A forwarding task is registered before dispatch, including when a stopping network
+actor rejects dispatch, so an applied Add retains recoverable ownership in the
+next channel save. A forwarding task (`waiting_forward_tlc_tasks`) is reconciled
+on actor start. An already-created downstream TLC carries its upstream link in
 `TlcInfo::forwarding_tlc`; recovery re-links the incoming TLC to it. A downstream
 `AddTlc` can instead still be in `retryable_tlc_operations`, with its peeled onion
 and `previous_tlc` preserved but no outgoing TLC id assigned yet. Recovery matches
