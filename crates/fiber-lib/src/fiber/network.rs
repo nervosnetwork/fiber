@@ -827,6 +827,7 @@ pub struct SendOnionPacketCommand {
 #[cfg(test)]
 #[derive(Debug)]
 pub enum TestFiberMessageKind {
+    TxSignatures,
     AddTlc,
     CommitmentSigned,
     RevokeAndAck,
@@ -865,6 +866,9 @@ impl TestFiberMessageHold {
                     | FiberChannelMessage::CommitmentSignedV2(_)
                     | FiberChannelMessage::RevokeAndAck(_)
                     | FiberChannelMessage::RevokeAndAckV2(_)
+            ) | (
+                TestFiberMessageKind::TxSignatures,
+                FiberChannelMessage::TxSignatures(_)
             ) | (TestFiberMessageKind::AddTlc, FiberChannelMessage::AddTlc(_))
                 | (
                     TestFiberMessageKind::CommitmentSigned,

@@ -248,6 +248,124 @@ async fn test_pending_forward_without_downstream_tlc_is_failed_back() {
     );
 }
 
+#[tokio::test]
+async fn test_failed_forward_dispatch_keeps_recoverable_ownership() {
+    for owner in ["absent", "queued", "created"] {
+        let upstream = gen_rand_sha256_hash();
+        let downstream = gen_rand_sha256_hash();
+        let hash = gen_rand_sha256_hash();
+        let mut state = create_test_channel_state_with_tlc(upstream, 0, 1000, hash, None);
+        state
+            .tlc_state
+            .get_mut(&TLCId::Received(0))
+            .unwrap()
+            .applied_flags = AppliedFlags::ADD;
+        let packet = fiber_types::PeeledPaymentOnionPacket::create(
+            crate::tests::gen_utils::gen_rand_fiber_private_key(),
+            vec![
+                fiber_types::PaymentHopData {
+                    amount: 1000,
+                    next_hop: Some(gen_rand_fiber_public_key()),
+                    ..Default::default()
+                },
+                fiber_types::PaymentHopData {
+                    amount: 1000,
+                    ..Default::default()
+                },
+            ],
+            Some(hash.as_ref().to_vec()),
+            &secp256k1::Secp256k1::new(),
+        )
+        .unwrap();
+        let (stopped, stopped_task) = Actor::spawn(None, SilentNetworkActor, Default::default())
+            .await
+            .unwrap();
+        stopped.stop(None);
+        stopped_task.await.unwrap();
+        let store = MockStore::new();
+        let actor = ChannelActor::new(
+            state.get_local_pubkey(),
+            state.get_remote_pubkey(),
+            stopped,
+            MockStore::new(),
+            None,
+        );
+        actor.register_and_apply_forward_tlc(&mut state, hash, TLCId::Received(0), packet, 0);
+        store.insert_channel_actor_state(state);
+        let saved = store.get_channel_actor_state(&upstream).unwrap();
+        let core = bincode::deserialize::<fiber_types::ChannelActorData>(
+            &bincode::serialize(&saved.core).unwrap(),
+        )
+        .unwrap();
+        let mut restored = ChannelActorState::from(core);
+        assert!(
+            restored
+                .waiting_forward_tlc_tasks
+                .contains_key(&TLCId::Received(0)),
+            "failed dispatch must leave work for restore"
+        );
+        if owner != "absent" {
+            let mut next = create_test_channel_state_with_tlc(downstream, 3, 1000, hash, None);
+            next.tlc_state = Default::default();
+            if owner == "queued" {
+                next.retryable_tlc_operations
+                    .push_back(RetryableTlcOperation::AddTlc(queued_forward_add(
+                        upstream, hash,
+                    )));
+            } else {
+                let mut tlc = offered_tlc(3, 1000, hash, None);
+                tlc.forwarding_tlc = Some((upstream, 0));
+                next.tlc_state.offered_tlcs.tlcs.push(tlc);
+            }
+            store.insert_channel_actor_state(next);
+        }
+        let (network, task) = Actor::spawn(None, SilentNetworkActor, Default::default())
+            .await
+            .unwrap();
+        restored.network = Some(network.clone());
+        let actor = ChannelActor::new(
+            restored.get_local_pubkey(),
+            restored.get_remote_pubkey(),
+            network.clone(),
+            store,
+            None,
+        );
+        let myself = spawn_null_channel_actor().await;
+        actor.recover_pending_forward_tlcs(&myself, &mut restored);
+        if owner == "absent" {
+            assert!(restored.retryable_tlc_operations.iter().any(|op| matches!(
+                op,
+                RetryableTlcOperation::RemoveTlc(
+                    TLCId::Received(0),
+                    RemoveTlcReason::RemoveTlcFail(_)
+                )
+            )));
+        } else {
+            assert!(
+                restored.retryable_tlc_operations.is_empty(),
+                "a downstream owner must keep upstream backing"
+            );
+            if owner == "queued" {
+                assert!(restored
+                    .waiting_forward_tlc_tasks
+                    .contains_key(&TLCId::Received(0)));
+            } else {
+                assert_eq!(
+                    restored
+                        .tlc_state
+                        .get(&TLCId::Received(0))
+                        .unwrap()
+                        .forwarding_tlc,
+                    Some((downstream, 3))
+                );
+            }
+        }
+        myself.stop(None);
+        network.stop(None);
+        task.await.unwrap();
+    }
+}
+
 fn queued_forward_add(upstream: Hash256, hash: Hash256) -> fiber_types::AddTlcCommand {
     let expiry = crate::now_timestamp_as_millis_u64() + 86_400_000;
     let packet = fiber_types::PeeledPaymentOnionPacket::create(

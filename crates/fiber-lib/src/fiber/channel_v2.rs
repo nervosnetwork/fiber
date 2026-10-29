@@ -316,6 +316,7 @@ impl ChannelActorState {
                 NoncePurposeV2::Commitment,
                 &self.signer.funding_key,
             );
+            session.own_retired.clear();
         }
         let message = FiberMessage::channel_ready_v2(ChannelReadyV2 {
             channel_id: self.id,
@@ -520,11 +521,17 @@ impl ChannelActorState {
         );
         let agg = self.get_deterministic_musig2_agg_context();
         // The peer may have signed before it learned about a nonce rotation, so accept the active
-        // verification nonce or any recently retired one. The nonce that actually verifies is the
-        // one recorded with the accepted request, and its secret is never reused for a signature.
+        // verification nonce or a retired allocation for this same round. Signature validity alone
+        // cannot prove the allocation belongs to this commitment or has not signed an older one.
         let mut candidates = Vec::with_capacity(1 + session.own_retired.len());
         candidates.push(session.own.clone());
-        candidates.extend(session.own_retired.iter().cloned());
+        candidates.extend(
+            session
+                .own_retired
+                .iter()
+                .filter(|nonce| nonce.number == request.commitment_number)
+                .cloned(),
+        );
         let mut verified = None;
         for candidate in candidates {
             let nonce = AggNonce::sum([
@@ -689,6 +696,7 @@ impl ChannelActorState {
                 NoncePurposeV2::Commitment,
                 &self.signer.funding_key,
             );
+            session.own_retired.clear();
             let response = RevokeAndAckV2 {
                 channel_id: self.id,
                 commitment_number: request.commitment_number,
@@ -888,8 +896,15 @@ impl ChannelActorState {
         let numbers = self.commitment_numbers;
         self.tlc_state.update_for_revoke_and_ack(numbers);
         self.set_waiting_ack(myself, false);
-        session.remote_nonce = Some(ack.next_commitment_nonce.clone());
         session.remote_number = ack.commitment_number + 1;
+        // A cached RAA predates this connection's same-round nonce advertisement.
+        session.remote_nonce = Some(
+            self.recovery_peer_v2
+                .as_ref()
+                .filter(|peer| peer.next_commitment_number == session.remote_number)
+                .map(|peer| peer.next_local_commitment_nonce.clone())
+                .unwrap_or_else(|| ack.next_commitment_nonce.clone()),
+        );
         session.last_ack = Some(packed);
         session.pending_ack = None;
         let revocation = RevocationData {
@@ -1519,13 +1534,15 @@ where
         } else {
             None
         };
-        // The peer advertises a fresh verification nonce on every re-establishment; adopt it.
         let peer_nonce = peer.next_local_commitment_nonce.clone();
         let peer_number = peer.next_commitment_number;
         state.recovery_peer_v2 = Some(peer);
-        if let Some(session) = state.session_v2.as_mut() {
-            session.remote_nonce = Some(peer_nonce);
-            session.remote_number = peer_number;
+        // An ahead-of-us advertisement remains per-connection until RAA advances both counters.
+        if peer_number == local {
+            if let Some(session) = state.session_v2.as_mut() {
+                session.remote_nonce = Some(peer_nonce);
+                session.remote_number = peer_number;
+            }
         }
         if resign_outstanding_cs {
             // Carry the original updates into the regenerated round so another crash can replay
@@ -1968,23 +1985,6 @@ where
             );
             return Ok(());
         }
-        // The peer advertises its next verification nonce both in the reestablishment handshake and
-        // in every `revoke_and_ack` (`next_local_nonces` in `bolt-simple-taproot`). The newest
-        // advertisement wins: an ACK produced before a reconnect legitimately carries the previous
-        // nonce, so a mismatch is not a contradiction. `accept_ack_v2` only accepts the ACK for
-        // our current commitment number, so an older advertisement can never roll the nonce back.
-        if state.reestablishing
-            && state.recovery_peer_v2.as_ref().is_some_and(|peer| {
-                ack.commitment_number.checked_add(1) == Some(peer.next_commitment_number)
-                    && ack.next_commitment_nonce != peer.next_local_commitment_nonce
-            })
-        {
-            tracing::debug!(
-                "Channel {} adopts the ACK's verification nonce over the handshake one (commitment {})",
-                state.id,
-                ack.commitment_number + 1
-            );
-        }
         let verified = state.stage_ack_v2(&ack)?;
         // A reconnect abandons the outstanding commitment and re-signs it with a fresh nonce, so
         // the peer may still answer the *previous* round with an ACK that can no longer be
@@ -2093,7 +2093,7 @@ where
 }
 
 impl ChannelActorState {
-    fn send_v2_message(&self, message: FiberMessage) {
+    pub(super) fn send_v2_message(&self, message: FiberMessage) {
         self.network()
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithTarget::new(
@@ -2637,6 +2637,360 @@ mod tests {
             "publish only successful removals, before the close that can supersede their outbox"
         );
         handle.abort();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_retired_nonce_cannot_sign_a_later_round() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let sender = a.get_channel_actor_state(id);
+        let owner = b.get_channel_actor_state(id);
+        b.stop().await;
+        a.stop().await;
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        for use_retired in [false, true] {
+            let mut sender = sender.clone();
+            let mut owner = owner.clone();
+            owner.network = Some(network.clone());
+            let retired = owner.session_v2.as_ref().unwrap().own.clone();
+            owner.mark_reestablishing_offline();
+            owner.on_peer_reconnected();
+            if !use_retired {
+                sender.session_v2.as_mut().unwrap().remote_nonce =
+                    Some(owner.session_v2.as_ref().unwrap().own.public_nonce.clone());
+            }
+            let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
+            sender.tlc_state.waiting_ack = true;
+            let verified = owner.stage_incoming_v2(&request, false).unwrap();
+            let (_, _, ack) = owner
+                .accept_commitment_v2(&request, false, verified)
+                .unwrap();
+            sender.stage_ack_v2(&ack.clone().unwrap()).unwrap();
+            sender.accept_ack_v2(&myself, &ack.unwrap(), false).unwrap();
+            // Old healthy snapshots retain this apparently unused allocation, even after signing it.
+            owner.session_v2.as_mut().unwrap().own_retired = vec![retired.clone()];
+            owner.validate_session_v2().unwrap();
+            sender.session_v2.as_mut().unwrap().remote_nonce = Some(retired.public_nonce);
+            let (malicious, _) = sender.prepare_outgoing_v2(false).unwrap();
+            let before = bincode::serialize(&owner.core).unwrap();
+            assert!(
+                owner.stage_incoming_v2(&malicious, false).is_err(),
+                "reject a cross-round allocation, used={use_retired}"
+            );
+            assert_eq!(bincode::serialize(&owner.core).unwrap(), before);
+        }
+        myself.stop(None);
+        handle.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_round_advance_discards_retired_allocations() {
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sender = a.get_channel_actor_state(id);
+        let mut owner = b.get_channel_actor_state(id);
+        let retired = owner.session_v2.as_ref().unwrap().own.clone();
+        owner.session_v2.as_mut().unwrap().own_retired.push(retired);
+        let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
+        let verified = owner.stage_incoming_v2(&request, false).unwrap();
+        owner
+            .accept_commitment_v2(&request, false, verified)
+            .unwrap();
+        assert!(owner.session_v2.as_ref().unwrap().own_retired.is_empty());
+        let session = owner.session_v2.as_mut().unwrap();
+        // Exercise the separate bootstrap-to-Ready advancement with its real initial allocation.
+        let initial = b
+            .get_channel_actor_state(id)
+            .core
+            .session_v2
+            .unwrap()
+            .incoming
+            .unwrap()
+            .funding;
+        session.own = initial.clone();
+        session.own_retired.push(initial);
+        owner.ready_wire_message().unwrap();
+        assert!(owner.session_v2.as_ref().unwrap().own_retired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_v2_lost_ack_handshakes_keep_restorable_sessions_and_fresh_nonce() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let mut sender = a.get_channel_actor_state(id);
+        let mut owner = b.get_channel_actor_state(id);
+        b.stop().await;
+        a.stop().await;
+        let (network, task) = Actor::spawn(None, CaptureNetwork, Default::default())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        sender.network = Some(network.clone());
+        owner.network = Some(network.clone());
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+        let (request, _) = sender.prepare_outgoing_v2(false).unwrap();
+        sender.tlc_state.waiting_ack = true;
+        let verified = owner.stage_incoming_v2(&request, false).unwrap();
+        let (_, _, ack) = owner
+            .accept_commitment_v2(&request, false, verified)
+            .unwrap();
+        let ack = ack.unwrap();
+        for _ in 0..3 {
+            owner.mark_reestablishing_offline();
+            owner.on_peer_reconnected();
+            sender.mark_reestablishing_offline();
+            actor
+                .reestablish_v2(&myself, &mut sender, owner.reestablish_message_v2())
+                .await
+                .unwrap();
+            assert_eq!(
+                sender.get_local_commitment_number(),
+                request.commitment_number
+            );
+            sender.validate_session_v2().unwrap();
+            actor.persist_state_and_publish_pending_effects(&mut sender);
+            let stored = actor.store.get_channel_actor_state(&id).unwrap();
+            let core = bincode::deserialize::<fiber_types::ChannelActorData>(
+                &bincode::serialize(&stored.core).unwrap(),
+            )
+            .unwrap();
+            sender = ChannelActorState::from(core);
+            sender.network = Some(network.clone());
+        }
+        // Reconnect once more after restoring: RAA must be gated by a fresh valid handshake.
+        sender.mark_reestablishing_offline();
+        actor
+            .reestablish_v2(&myself, &mut sender, owner.reestablish_message_v2())
+            .await
+            .unwrap();
+        assert!(!owner
+            .session_v2
+            .as_ref()
+            .unwrap()
+            .own_retired
+            .iter()
+            .any(|n| n.public_nonce == ack.next_commitment_nonce));
+        actor
+            .receive_ack_v2(&myself, &mut sender, ack)
+            .await
+            .unwrap();
+        sender.validate_session_v2().unwrap();
+        assert_eq!(
+            sender.session_v2.as_ref().unwrap().remote_nonce.as_ref(),
+            Some(&owner.session_v2.as_ref().unwrap().own.public_nonce)
+        );
+        let (next, _) = sender.prepare_outgoing_v2(false).unwrap();
+        owner.stage_incoming_v2(&next, false).unwrap();
+        myself.stop(None);
+        handle.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_external_funding_response_replay_is_phase_and_witness_bound() {
+        use ckb_types::prelude::Unpack;
+        let (a, b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        let actor = ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+        for mode in [
+            "same",
+            "placeholder",
+            "conflict",
+            "early",
+            "no_history",
+            "acceptor",
+            "ready",
+        ] {
+            let mut state = a.get_channel_actor_state(id);
+            state.network = Some(network.clone());
+            state.ephemeral_config.external_funding.enabled = true;
+            state.ephemeral_config.external_funding.signed_submitted = true;
+            state.ephemeral_config.external_funding.funding_lock_script =
+                Some(ckb_types::packed::Script::default());
+            state.state =
+                ChannelState::AwaitingChannelReady(fiber_types::AwaitingChannelReadyFlags::empty());
+            let mut witnesses: Vec<Vec<u8>> = state
+                .funding_tx
+                .as_ref()
+                .unwrap()
+                .witnesses()
+                .into_iter()
+                .map(|w| w.unpack())
+                .collect();
+            match mode {
+                "placeholder" => witnesses = vec![Vec::new()],
+                "conflict" => witnesses = vec![vec![77; 65]],
+                "early" => {
+                    state.state = ChannelState::SigningCommitment(SigningCommitmentFlags::empty())
+                }
+                "no_history" => state.latest_commitment_transaction = None,
+                "acceptor" => state.is_acceptor = true,
+                "ready" => state.state = ChannelState::ChannelReady,
+                _ => {}
+            }
+            let before = bincode::serialize(&state.core).unwrap();
+            let result = actor
+                .handle_peer_message(
+                    &myself,
+                    &mut state,
+                    FiberChannelMessage::TxSignatures(crate::fiber::types::TxSignatures {
+                        channel_id: id,
+                        witnesses,
+                    }),
+                )
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                matches!(mode, "same" | "placeholder"),
+                "{mode}: {result:?}"
+            );
+            assert_eq!(
+                bincode::serialize(&state.core).unwrap(),
+                before,
+                "replay must not mutate funding or signing state"
+            );
+            capture_barrier(&network, id).await;
+            let frames = take_wire_messages(&captured);
+            if result.is_ok() {
+                assert_eq!(frames.len(), 1);
+                let FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(reply)) =
+                    &frames[0].message
+                else {
+                    panic!("expected cached TxSignatures")
+                };
+                let cached: Vec<Vec<u8>> = state
+                    .funding_tx
+                    .as_ref()
+                    .unwrap()
+                    .witnesses()
+                    .into_iter()
+                    .map(|w| w.unpack())
+                    .collect();
+                assert_eq!(reply.witnesses, cached);
+            } else {
+                assert!(frames.is_empty());
+            }
+        }
+        myself.stop(None);
+        handle.await.unwrap();
+        network.stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_v2_opening_reconnect_replays_identical_ready() {
+        let (mut a, mut b, id) =
+            create_nodes_with_established_channel(100000000000, 11800000000, false).await;
+        let peer = a.get_channel_actor_state(id);
+        let mut opening = b.get_channel_actor_state(id);
+        b.stop().await;
+        a.stop().await;
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (network, task) = Actor::spawn(None, CaptureNetwork, captured.clone())
+            .await
+            .unwrap();
+        let (myself, handle) = Actor::spawn(None, NoopChannelActor, ()).await.unwrap();
+        opening.network = Some(network.clone());
+        opening.private_key = Some(b.private_key.clone());
+        let original = opening.ready_wire_message().unwrap().to_molecule_bytes();
+        opening.state = ChannelState::AwaitingChannelReady(
+            fiber_types::AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
+        );
+        opening.commitment_numbers = fiber_types::CommitmentNumbers {
+            local: 1,
+            remote: 1,
+        };
+        let session = opening.session_v2.as_mut().unwrap();
+        session.remote_ready = None;
+        session.remote_number = 1;
+        session.remote_nonce = session.bootstrap_remote_nonce.clone();
+        opening.mark_reestablishing_offline();
+        let actor = ChannelActor::new(b.pubkey, a.pubkey, network.clone(), MockStore::new(), None);
+        actor
+            .reestablish_v2(&myself, &mut opening, peer.reestablish_message_v2())
+            .await
+            .unwrap();
+        capture_barrier(&network, id).await;
+        let ready = take_wire_messages(&captured)
+            .into_iter()
+            .find_map(|frame| match frame.message {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(
+                    ready,
+                )) => Some(ready),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            FiberMessage::channel_ready_v2(ready.clone()).to_molecule_bytes(),
+            original
+        );
+        for missed in [false, true] {
+            let mut peer = peer.clone();
+            peer.network = Some(network.clone());
+            peer.private_key = Some(a.private_key.clone());
+            if missed {
+                peer.state = ChannelState::AwaitingChannelReady(
+                    fiber_types::AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
+                );
+                peer.commitment_numbers = fiber_types::CommitmentNumbers {
+                    local: 1,
+                    remote: 1,
+                };
+                let session = peer.session_v2.as_mut().unwrap();
+                session.remote_ready = None;
+                session.remote_number = 1;
+                session.remote_nonce = session.bootstrap_remote_nonce.clone();
+            }
+            let peer_actor =
+                ChannelActor::new(a.pubkey, b.pubkey, network.clone(), MockStore::new(), None);
+            peer_actor
+                .handle_peer_message(
+                    &myself,
+                    &mut peer,
+                    FiberChannelMessage::ChannelReadyV2(ready.clone()),
+                )
+                .await
+                .unwrap();
+            peer.validate_session_v2().unwrap();
+        }
+        let mut peer = peer;
+        let FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReadyV2(ready)) =
+            peer.ready_wire_message().unwrap()
+        else {
+            unreachable!()
+        };
+        actor
+            .handle_peer_message(
+                &myself,
+                &mut opening,
+                FiberChannelMessage::ChannelReadyV2(ready),
+            )
+            .await
+            .unwrap();
+        assert_eq!(opening.state, ChannelState::ChannelReady);
+        opening.validate_session_v2().unwrap();
+        let restored = ChannelActorState::from(
+            bincode::deserialize::<fiber_types::ChannelActorData>(
+                &bincode::serialize(&opening.core).unwrap(),
+            )
+            .unwrap(),
+        );
+        restored.validate_session_v2().unwrap();
+        myself.stop(None);
+        handle.await.unwrap();
         network.stop(None);
         task.await.unwrap();
     }

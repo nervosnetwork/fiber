@@ -13181,6 +13181,80 @@ async fn test_tx_signatures_after_channel_ready_rejected() {
 }
 
 #[tokio::test]
+async fn test_external_funding_replays_lost_tx_signatures_after_acceptor_restart() {
+    init_tracing();
+    let [mut node_a, mut node_b] = new_2_nodes_with_auto_accept().await;
+    let (channel_id, unsigned) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let signed = mock_sign_external_funding_tx(&unsigned);
+    node_a
+        .hold_next_fiber_messages(
+            node_b.pubkey,
+            channel_id,
+            TestFiberMessageKind::TxSignatures,
+            1,
+        )
+        .await;
+    call!(node_a.network_actor, |reply| NetworkActorMessage::Command(
+        NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed.clone(),
+            reply,
+        }
+    ))
+    .unwrap()
+    .unwrap();
+    node_a.wait_for_held_fiber_messages(1).await;
+    wait_until_timeout(5000, || {
+        matches!(
+            node_a.get_channel_actor_state(channel_id).state,
+            ChannelState::AwaitingChannelReady(_)
+        )
+    })
+    .await;
+    let initiator = node_a.get_channel_actor_state(channel_id);
+    assert!(matches!(
+        initiator.state,
+        ChannelState::AwaitingChannelReady(_)
+    ));
+    assert!(matches!(node_b.get_channel_actor_state(channel_id).state,
+        ChannelState::AwaitingTxSignatures(flags) if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT)));
+    node_a.discard_held_fiber_messages().await;
+    node_b.restart().await;
+    node_a.connect_to(&mut node_b).await;
+    wait_until_timeout(10000, || {
+        matches!(
+            node_b.get_channel_actor_state(channel_id).state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        )
+    })
+    .await;
+    assert_eq!(
+        node_a
+            .get_channel_actor_state(channel_id)
+            .funding_tx
+            .as_ref()
+            .unwrap()
+            .as_slice(),
+        initiator.funding_tx.as_ref().unwrap().as_slice()
+    );
+    assert!(matches!(
+        node_a.submit_tx(signed.into_view()).await,
+        TxStatus::Committed(..)
+    ));
+    for node in [&mut node_a, &mut node_b] {
+        node.expect_event(|event| matches!(event, NetworkServiceEvent::ChannelReady(_, id, _) if *id == channel_id)).await;
+        let state = node.get_channel_actor_state(channel_id);
+        fiber_types::channel_v2_validation::validate_channel_v2(&state.core).unwrap();
+    }
+    let payment = node_a
+        .send_payment_keysend(&node_b, 1000, false)
+        .await
+        .unwrap();
+    node_a.wait_until_success(payment.payment_hash).await;
+}
+
+#[tokio::test]
 async fn test_external_funding_acceptor_restart_after_signed_submit_resumes_handshake() {
     init_tracing();
 
