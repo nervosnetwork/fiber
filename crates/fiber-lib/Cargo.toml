@@ -126,6 +126,7 @@ metrics = ["dep:metrics", "tentacle/metrics", "tokio-metrics", "metrics-exporter
 pprof = ["dep:pprof"]
 
 [dev-dependencies]
+jsonrpc-core = "18"
 ciborium = "0.2.2"
 ckb-testtool = "1"
 fiber-types = { path = "../fiber-types", features = ["sample"] }
