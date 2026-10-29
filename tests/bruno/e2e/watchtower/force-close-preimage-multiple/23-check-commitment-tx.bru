@@ -1,5 +1,5 @@
 meta {
-  name: check submitted commitment tx should be settled
+  name: wait for final settlement payout capacity
   type: http
   seq: 23
 }
@@ -19,38 +19,57 @@ body:json {
   {
     "id": 42,
     "jsonrpc": "2.0",
-    "method": "get_live_cell",
+    "method": "get_cells_capacity",
     "params": [
       {
-        "index": "0x0",
-        "tx_hash": "{{TX_HASH}}"
-      },
-      false
+        "script_type": "lock"
+      }
     ]
   }
 }
 
 script:pre-request {
+  let body = req.getBody();
+  body.params[0].script = bru.getVar("NODE1_FUNDING_SCRIPT");
+  req.setBody(body);
   if (bru.getVar("settlement_poll_iteration") === undefined) {
     bru.setVar("settlement_poll_iteration", 0);
+    bru.setVar("settlement_poll_started_at", Date.now());
   }
   if (bru.getVar("settlement_poll_max") === undefined) {
-    bru.setVar("settlement_poll_max", 8);
+    bru.setVar("settlement_poll_max", 120);
+  }
+  if (bru.getVar("settlement_poll_timeout_ms") === undefined) {
+    bru.setVar("settlement_poll_timeout_ms", 120000);
   }
 }
 
 script:post-response {
-  console.log("generated result: ", res.body);
-  const status = res.body?.result?.status;
-  if (status !== "unknown") {
-    const iteration = bru.getVar("settlement_poll_iteration");
-    const max = bru.getVar("settlement_poll_max");
-    if (iteration >= max) {
-      throw new Error(`Settlement tx not committed after ${max} polling attempts, status=${status}`);
-    }
-    bru.setVar("settlement_poll_iteration", iteration + 1);
-    bru.setNextRequest("generate a few blocks for final settlement tx committed");
-  } else {
+  const capacity = res.body?.result?.capacity;
+  if (res.status !== 200 || res.body?.error || capacity === undefined) {
+    throw new Error(`Final settlement capacity RPC failed: ${JSON.stringify(res.body)}`);
+  }
+  const deficit = BigInt(bru.getVar("NODE1_BALANCE")) - BigInt(capacity);
+  // An unknown root cell can be absent or spent by the first descendant.
+  // NODE1's remaining balance is returned by the LAST party unlock, after both
+  // preimage claims and NODE2's unlock. Indexed capacity excludes pool payouts.
+  // Keep the 9,000,000 transfer and original 5,000 fee budget as the predicate.
+  if (deficit >= BigInt(9000000) && deficit < BigInt(9005000)) {
     bru.setVar("settlement_poll_iteration", undefined);
+    bru.setVar("settlement_poll_started_at", undefined);
+  } else {
+    const iteration = bru.getVar("settlement_poll_iteration") + 1;
+    const max = bru.getVar("settlement_poll_max");
+    const elapsed = Date.now() - bru.getVar("settlement_poll_started_at");
+    const timeout = bru.getVar("settlement_poll_timeout_ms");
+    console.log(`Final settlement poll ${iteration}/${max}: capacity=${capacity}, deficit=${deficit}, elapsed=${elapsed}ms`);
+    if (iteration >= max || elapsed >= timeout) {
+      throw new Error(`Final settlement payout not indexed after ${iteration} polling attempts (max=${max}, elapsed=${elapsed}ms, timeout=${timeout}ms): capacity=${capacity}, deficit=${deficit}, commitment=${bru.getVar("TX_HASH")}`);
+    }
+    bru.setVar("settlement_poll_iteration", iteration);
+    // This is the polling cadence, not a completion assumption: recheck the
+    // returned capacity after mining, including watchtower and indexer lag.
+    await new Promise(r => setTimeout(r, Math.min(1000, timeout - elapsed)));
+    bru.setNextRequest("generate a few blocks for final settlement tx committed");
   }
 }

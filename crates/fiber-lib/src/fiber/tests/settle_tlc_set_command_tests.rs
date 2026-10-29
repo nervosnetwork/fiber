@@ -25,7 +25,7 @@ use fiber_types::{
 };
 use fiber_types::{ChannelConstraints, InboundTlcStatus};
 use fiber_types::{HashAlgorithm, RemoveTlcFulfill, TlcErr, TlcErrorCode};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 const TEST_SHARED_SECRET: [u8; 32] = [42u8; 32];
@@ -37,6 +37,8 @@ pub(crate) struct MockStore {
     preimages: RefCell<HashMap<Hash256, Hash256>>,
     hold_tlcs: RefCell<HashMap<Hash256, Vec<HoldTlc>>>,
     channel_states: RefCell<HashMap<Hash256, ChannelActorState>>,
+    pub(crate) channel_state_writes: Cell<usize>,
+    pub(crate) preimage_removal_writes: RefCell<Vec<usize>>,
     pub(crate) onchain_settlements: RefCell<HashMap<(Hash256, TLCId), StoredOnChainTlcSettlement>>,
     pub(crate) shutdown_settlements: RefCell<HashMap<Hash256, ShutdownSettlementRecord>>,
     pub(crate) watch_channels: RefCell<HashMap<Hash256, fiber_types::ChannelData>>,
@@ -50,6 +52,8 @@ impl MockStore {
             preimages: RefCell::new(HashMap::new()),
             hold_tlcs: RefCell::new(HashMap::new()),
             channel_states: RefCell::new(HashMap::new()),
+            channel_state_writes: Cell::new(0),
+            preimage_removal_writes: RefCell::new(Vec::new()),
             onchain_settlements: RefCell::new(HashMap::new()),
             shutdown_settlements: RefCell::new(HashMap::new()),
             watch_channels: RefCell::new(HashMap::new()),
@@ -215,6 +219,9 @@ impl PreimageStore for MockStore {
     }
 
     fn remove_preimage(&self, payment_hash: &Hash256) {
+        self.preimage_removal_writes
+            .borrow_mut()
+            .push(self.channel_state_writes.get());
         self.preimages.borrow_mut().remove(payment_hash);
     }
 
@@ -224,11 +231,22 @@ impl PreimageStore for MockStore {
 }
 
 impl ChannelActorStateStore for MockStore {
+    fn has_trampoline_payment_for_tlc(
+        &self,
+        _payment_hash: Hash256,
+        _channel_id: Hash256,
+        _tlc_id: u64,
+    ) -> bool {
+        false
+    }
+
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         self.channel_states.borrow().get(id).cloned()
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
+        self.channel_state_writes
+            .set(self.channel_state_writes.get() + 1);
         let channel_id = state.id;
         self.channel_states.borrow_mut().insert(channel_id, state);
     }
@@ -452,15 +470,19 @@ pub(crate) fn create_test_channel_state_with_tlc(
             pending_replay_updates: vec![],
             last_was_revoke: false,
             external_funding: None,
-            commitment_contract_features: Default::default(),
+            channel_features: Default::default(),
+            session_v2: None,
             created_at: SystemTime::now(),
         },
         waiting_peer_response: None,
         revocation_nonce_unbalanced_since: None,
         reestablish_started_at: None,
+        recovery_peer_v2: None,
         network: None,
         scheduled_channel_update_handle: None,
         pending_notify_settle_tlcs: vec![],
+        pending_remove_effects_v2: 0,
+        replayed_tlc_updates_v2: 0,
         pending_reestablish_channel_ready: false,
         defer_peer_tlc_updates: false,
         deferred_peer_tlc_updates: std::collections::VecDeque::new(),

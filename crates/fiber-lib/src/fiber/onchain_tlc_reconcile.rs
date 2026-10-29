@@ -11,9 +11,9 @@ use ckb_hash::blake2b_256;
 use ckb_sdk::util::blake160;
 use ckb_types::packed::Script;
 use fiber_types::{
-    AppliedFlags, ChannelData, ChannelState, CloseFlags, CommitmentContractFeatures, Hash256,
-    HashAlgorithm, InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason,
-    SettlementData, TLCId, TlcInfo,
+    AppliedFlags, ChannelData, ChannelFeatures, ChannelState, CloseFlags, Hash256, HashAlgorithm,
+    InboundTlcStatus, OutboundTlcStatus, Pubkey, RemoveTlcFulfill, RemoveTlcReason, SettlementData,
+    TLCId, TlcInfo,
 };
 use musig2::{secp::Point, KeyAggContext};
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub struct TrackedSettlementTlc {
     pub payment_hash: Hash256,
     pub hash_algorithm: HashAlgorithm,
     pub witness: Vec<u8>,
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,7 +151,7 @@ pub fn verify_and_select_settlement_data<'a>(
         let settlement_witness = settlement_data_to_witness(
             settlement_data,
             parsed.for_remote,
-            channel_data.commitment_contract_features,
+            channel_data.channel_features,
             channel_data.local_settlement_key.clone(),
             channel_data.remote_settlement_key,
         );
@@ -206,7 +206,7 @@ pub(crate) fn recover_shutdown_settlement_data(
 pub fn tracked_settlement_tlcs(
     settlement_data: &SettlementData,
     for_remote: bool,
-    commitment_contract_features: CommitmentContractFeatures,
+    channel_features: ChannelFeatures,
 ) -> Vec<TrackedSettlementTlc> {
     settlement_data
         .tlcs
@@ -219,8 +219,8 @@ pub fn tracked_settlement_tlcs(
             },
             payment_hash: tlc.payment_hash,
             hash_algorithm: tlc.hash_algorithm,
-            witness: settlement_tlc_to_witness(tlc, for_remote, commitment_contract_features),
-            commitment_contract_features,
+            witness: settlement_tlc_to_witness(tlc, for_remote, channel_features),
+            channel_features,
         })
         .collect()
 }

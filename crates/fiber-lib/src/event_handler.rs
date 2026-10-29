@@ -47,7 +47,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
             local_funding_pubkey,
             remote_funding_pubkey,
             settlement_data,
-            commitment_contract_features,
+            channel_features,
         ) => {
             watchtower_client
                 .create_watch_channel(CreateWatchChannelParams {
@@ -58,7 +58,7 @@ pub async fn forward_event_to_client<T: WatchtowerRpcClient + Sync>(
                     local_funding_pubkey: local_funding_pubkey.into(),
                     remote_funding_pubkey: remote_funding_pubkey.into(),
                     settlement_data: settlement_data.into(),
-                    commitment_contract_features: commitment_contract_features.into(),
+                    channel_features: channel_features.into(),
                 })
                 .await
                 .map_err(|e| format!("Failed to create watch channel: {e}"))?;

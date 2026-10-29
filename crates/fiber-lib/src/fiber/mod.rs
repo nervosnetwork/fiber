@@ -20,6 +20,7 @@ mod path;
 mod peer_message_policy;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod proxy;
+mod session_v2;
 mod settle_tlc_set_command;
 
 pub use config::FiberConfig;

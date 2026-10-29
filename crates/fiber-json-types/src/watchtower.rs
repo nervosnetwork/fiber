@@ -9,10 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-/// Commitment-lock feature bits (0x0: Legacy; 0x1: full payment hash).
+/// Channel version features (0x0: Legacy; 0x1: V2 with full payment hashes).
 #[serde_as]
 #[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct CommitmentContractFeatures(
+pub struct ChannelFeatures(
     #[serde_as(as = "U8Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub u8,
@@ -116,9 +116,9 @@ pub struct CreateWatchChannelParams {
     pub remote_funding_pubkey: Pubkey,
     /// Settlement data
     pub settlement_data: SettlementData,
-    /// Commitment-lock feature bitmap as hex: "0x0" (Legacy) or "0x1" (full payment hash).
+    /// Channel feature bitmap as hex: "0x0" (Legacy) or "0x1" (V2 with full payment hashes).
     #[serde(default)]
-    pub commitment_contract_features: CommitmentContractFeatures,
+    pub channel_features: ChannelFeatures,
 }
 
 /// Parameters for removing a watch channel.
