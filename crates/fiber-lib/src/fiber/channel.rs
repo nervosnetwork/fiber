@@ -5049,7 +5049,7 @@ pub struct ChannelActorState {
 }
 
 fn is_empty_or_placeholder_witness(witness: &Bytes) -> bool {
-    witness.is_empty() || is_secp_sighash_placeholder_witness(witness.as_slice())
+    witness.is_empty() || is_secp_sighash_placeholder_witness(&witness.raw_data())
 }
 
 pub(crate) fn merge_external_funding_witnesses(
