@@ -8,7 +8,7 @@ use crate::fiber::channel::{
     ChannelOpenRecordStore, ProcessingChannelResult, ReloadParams, ReplayOrderHint, UpdateCommand,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
     MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS,
-    PEER_CHANNEL_RESPONSE_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
+    PEER_CHANNEL_RESPONSE_TIMEOUT, REESTABLISH_TIMEOUT, XUDT_COMPATIBLE_WITNESS,
 };
 use crate::fiber::config::{
     DEFAULT_COMMITMENT_DELAY_EPOCHS, DEFAULT_FINAL_TLC_EXPIRY_DELTA, DEFAULT_TLC_EXPIRY_DELTA,
@@ -10255,6 +10255,179 @@ async fn test_revocation_nonce_watchdog_keeps_healthy_idle_channel_open() {
         .await
         .expect("payment after idle");
     node_a.wait_until_success(after_idle.payment_hash).await;
+}
+
+/// A peer that reconnects but never sends its ReestablishChannel keeps the channel
+/// reestablishing: every other peer message is ignored and TLC updates are blocked. The
+/// channel must be force-closed once `REESTABLISH_TIMEOUT` has passed since the reconnect
+/// instead of staying wedged in ChannelReady.
+#[tokio::test]
+async fn test_reestablish_timeout_force_closes_channel_when_peer_withholds_reestablish() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
+
+    // B never answers: every ReestablishChannel it sends to A is held back. Installed before
+    // the disconnect so an automatic reconnect cannot slip one through.
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::ReestablishChannel,
+            usize::MAX,
+        )
+        .await;
+    let disconnected_at = tokio::time::Instant::now();
+    disconnect_peers_and_wait_for_channel_offline(
+        &mut node_a,
+        &mut node_b,
+        channel_id,
+        "disconnect before withheld reestablish",
+    )
+    .await;
+    node_a.connect_to(&mut node_b).await;
+    node_b.wait_for_held_fiber_messages(1).await;
+
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(REESTABLISH_TIMEOUT)
+        + CHECK_CHANNELS_INTERVAL * 3;
+    loop {
+        let state_a = node_a.get_channel_actor_state(channel_id);
+        if state_a.state != ChannelState::ChannelReady {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "channel stayed ChannelReady for {:?} after the disconnect while the peer withheld \
+             its ReestablishChannel: reestablishing={} connectivity={:?}",
+            disconnected_at.elapsed(),
+            state_a.reestablishing,
+            state_a.connectivity_state,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // The clock starts at the reconnect, which comes after the disconnect.
+    assert!(
+        disconnected_at.elapsed() >= Duration::from_millis(REESTABLISH_TIMEOUT),
+        "channel was force-closed {:?} after the disconnect, before REESTABLISH_TIMEOUT",
+        disconnected_at.elapsed(),
+    );
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    assert!(
+        matches!(
+            state_a.state,
+            ChannelState::ShuttingDown(flags)
+                if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+        ) || matches!(
+            state_a.state,
+            ChannelState::Closed(flags) if flags.contains(CloseFlags::UNCOOPERATIVE_LOCAL)
+        ),
+        "channel should be force-closed locally, got {:?}",
+        state_a.state
+    );
+}
+
+/// Time the peer spends offline does not count toward `REESTABLISH_TIMEOUT`: an offline peer
+/// is not withholding its ReestablishChannel, so the channel stays open however long the peer
+/// is gone and reestablishes normally once it is back.
+#[tokio::test]
+async fn test_reestablish_timeout_ignores_time_spent_offline() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(50_000_000_000, 10_000_000_000, true).await;
+
+    node_b.stop().await;
+    tokio::time::timeout(event_wait_timeout(), async {
+        while node_a
+            .get_channel_actor_state(channel_id)
+            .connectivity_state
+            != ChannelConnectivityState::Offline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("A's channel should go offline after B stops");
+
+    tokio::time::sleep(Duration::from_millis(REESTABLISH_TIMEOUT) + CHECK_CHANNELS_INTERVAL * 2)
+        .await;
+    let state_a = node_a.get_channel_actor_state(channel_id);
+    assert_eq!(
+        (state_a.state, state_a.connectivity_state),
+        (
+            ChannelState::ChannelReady,
+            ChannelConnectivityState::Offline
+        ),
+        "an offline peer must not trip the reestablish timeout"
+    );
+
+    node_b.start().await;
+    node_a.connect_to(&mut node_b).await;
+    tokio::time::timeout(event_wait_timeout(), async {
+        loop {
+            let state_a = node_a.get_channel_actor_state(channel_id);
+            let state_b = node_b.get_channel_actor_state(channel_id);
+            if !state_a.reestablishing && !state_b.reestablishing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("reestablishment must complete once the peer is back");
+    for (name, node) in [("A", &node_a), ("B", &node_b)] {
+        assert_eq!(
+            node.get_channel_actor_state(channel_id).state,
+            ChannelState::ChannelReady,
+            "{name} must keep the channel open"
+        );
+    }
+}
+
+#[test]
+fn test_reestablish_stalled_only_for_syncing_force_closable_channels() {
+    fn stalled_with(
+        base: &ChannelActorState,
+        now: u64,
+        update: impl FnOnce(&mut ChannelActorState),
+    ) -> bool {
+        let mut state = base.clone();
+        update(&mut state);
+        state.is_reestablish_stalled(now)
+    }
+
+    let started = 1_000_000;
+    let after_timeout = started + REESTABLISH_TIMEOUT + 1;
+    let mut stalled = ChannelActorState::samples(0)
+        .into_iter()
+        .next()
+        .expect("channel state sample");
+    stalled.state = ChannelState::ChannelReady;
+    stalled.reestablishing = true;
+    stalled.connectivity_state = ChannelConnectivityState::Syncing;
+    stalled.reestablish_started_at = Some(started);
+    assert!(stalled.is_reestablish_stalled(after_timeout));
+    assert!(!stalled.is_reestablish_stalled(started + REESTABLISH_TIMEOUT));
+
+    // The peer's ReestablishChannel arrived and stopped the clock.
+    assert!(!stalled_with(&stalled, after_timeout, |state| {
+        state.reestablish_started_at = None
+    }));
+    // An offline peer is not withholding anything.
+    assert!(!stalled_with(&stalled, after_timeout, |state| {
+        state.connectivity_state = ChannelConnectivityState::Offline
+    }));
+    assert!(stalled_with(&stalled, after_timeout, |state| {
+        state.state = ChannelState::ShuttingDown(ShuttingDownFlags::OUR_SHUTDOWN_SENT)
+    }));
+    // Our commitment is already broadcast.
+    assert!(!stalled_with(&stalled, after_timeout, |state| {
+        state.state = ChannelState::ShuttingDown(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION)
+    }));
+    // A restored channel waits for the peer's audit and cannot be force-closed.
+    assert!(!stalled_with(&stalled, after_timeout, |state| {
+        state.state = ChannelState::Stale
+    }));
 }
 
 #[tokio::test]
