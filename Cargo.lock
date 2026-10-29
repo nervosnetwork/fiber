@@ -2674,6 +2674,7 @@ dependencies = [
  "home",
  "hyper 1.11.1",
  "hyper-util",
+ "jsonrpc-core",
  "jsonrpsee",
  "lightning-invoice",
  "lnd-grpc-tonic-client",
