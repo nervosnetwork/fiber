@@ -830,6 +830,7 @@ pub enum TestFiberMessageKind {
     AddTlc,
     CommitmentSigned,
     RevokeAndAck,
+    TxSignatures,
 }
 
 #[cfg(test)]
@@ -863,6 +864,10 @@ impl TestFiberMessageHold {
                 | (
                     TestFiberMessageKind::RevokeAndAck,
                     FiberChannelMessage::RevokeAndAck(_)
+                )
+                | (
+                    TestFiberMessageKind::TxSignatures,
+                    FiberChannelMessage::TxSignatures(_)
                 )
         )
     }

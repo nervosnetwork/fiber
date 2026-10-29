@@ -742,10 +742,12 @@ where
                         .build()
                         .data();
                     debug!(
-                        "Received peer TxSignatures after external funding tx {:?} was submitted; merging peer witnesses and replying with submitted witnesses",
+                        "Received peer TxSignatures after external funding tx {:?} was submitted; merging peer witnesses and replying with the merged witnesses",
                         merged_funding_tx.calc_tx_hash(),
                     );
-                    let witnesses: Vec<Vec<u8>> = funding_tx
+                    // The peer signed first and takes the witnesses we send as the whole set,
+                    // so send all of them, its own included.
+                    let witnesses: Vec<Vec<u8>> = merged_funding_tx
                         .witnesses()
                         .into_iter()
                         .map(|x| x.unpack())

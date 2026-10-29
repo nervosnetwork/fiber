@@ -12270,6 +12270,114 @@ async fn test_external_funding_initiator_send_tx_signatures_first_preserves_exte
     );
 }
 
+async fn wait_for_funding_tx_signatures(
+    node: &NetworkNode,
+    channel_id: Hash256,
+) -> ChannelActorState {
+    let mut last_state = None;
+    for _ in 0..50 {
+        let state = node.get_channel_actor_state(channel_id);
+        if matches!(
+            state.state,
+            ChannelState::AwaitingChannelReady(_) | ChannelState::ChannelReady
+        ) {
+            return state;
+        }
+        last_state = Some(state);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "tx_signatures handshake did not complete, last state {:?}",
+        last_state.map(|state| state.state)
+    );
+}
+
+#[tokio::test]
+async fn test_external_funding_acceptor_send_tx_signatures_first_keeps_its_witnesses() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        let mut builder = NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("ext-fund-acceptor-first-node-{}", i)))
+            .base_dir_prefix(&format!("test-ext-fund-acceptor-first-node-{}-", i));
+        if i == 1 {
+            builder = builder.fiber_config_updater(|config| {
+                config.auto_accept_channel_ckb_funding_amount = Some(50_000_000_000);
+            });
+        }
+        builder.build()
+    })
+    .await
+    .try_into()
+    .expect("2 nodes");
+
+    let (channel_id, unsigned_tx) =
+        open_external_funding_channel(&node_a, &node_b, 100_000_000_000).await;
+    let external_witness: Bytes = [9u8; 65].pack();
+    let signed_tx =
+        mock_sign_external_funding_tx_with_witness(&unsigned_tx, external_witness.clone());
+
+    // The mock chain does not sign, so the acceptor's tx_signatures carry no witness of
+    // its own. Hold it and send one with a witness at the acceptor's input instead.
+    node_b
+        .hold_next_fiber_messages(
+            node_a.pubkey,
+            channel_id,
+            TestFiberMessageKind::TxSignatures,
+            1,
+        )
+        .await;
+
+    let submit_message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SubmitSignedFundingTx {
+            channel_id,
+            signed_tx: signed_tx.clone(),
+            reply: rpc_reply,
+        })
+    };
+    call!(node_a.network_actor, submit_message)
+        .expect("node_a alive")
+        .expect("submit signed funding tx success");
+
+    node_b.wait_for_held_fiber_messages(1).await;
+    node_b.discard_held_fiber_messages().await;
+    let acceptor_witness: Bytes = [7u8; 65].pack();
+    node_a
+        .network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::FiberMessage(
+            node_b.pubkey,
+            FiberMessage::tx_signatures(TxSignatures {
+                channel_id,
+                witnesses: vec![Vec::new(), acceptor_witness.raw_data().to_vec()],
+            }),
+            None,
+        )))
+        .expect("network actor alive");
+
+    let initiator = wait_for_funding_tx_signatures(&node_a, channel_id).await;
+    let acceptor = wait_for_funding_tx_signatures(&node_b, channel_id).await;
+    assert!(
+        acceptor.to_local_amount < acceptor.to_remote_amount,
+        "this test needs the acceptor to send tx_signatures first; got to_local={} to_remote={}",
+        acceptor.to_local_amount,
+        acceptor.to_remote_amount,
+    );
+
+    let initiator_tx = initiator.funding_tx.clone().expect("initiator funding tx");
+    let acceptor_tx = acceptor.funding_tx.clone().expect("acceptor funding tx");
+    let initiator_witnesses: Vec<Bytes> = initiator_tx.witnesses().into_iter().collect();
+    assert_eq!(
+        initiator_witnesses,
+        vec![external_witness, acceptor_witness],
+        "initiator should merge the acceptor's witness"
+    );
+    assert_eq!(
+        acceptor_tx.as_slice(),
+        initiator_tx.as_slice(),
+        "the acceptor should hold the same fully signed funding tx as the initiator"
+    );
+}
+
 /// Regression test for GHSA-x6rw-txsignatures-verification: a stale `TxSignatures`
 /// from the peer against an established channel must be rejected by the state guard.
 /// Exercises branch #3 of the `FiberChannelMessage::TxSignatures` handler (the
