@@ -14,6 +14,7 @@ use ckb_types::packed::OutPoint;
 
 /// How long the watchtower's cells stay held: a transaction of its not committed by then has left
 /// the pool, and its cells are free again.
+#[cfg(feature = "watchtower")]
 pub(crate) const WATCHTOWER_HOLD_MS: u64 = 30 * 60 * 1000;
 
 #[derive(Default)]
@@ -45,6 +46,7 @@ pub(crate) fn hold_funding(holder: u64, cells: Vec<OutPoint>) {
 }
 
 /// The cells of a transaction the watchtower sent, held until `WATCHTOWER_HOLD_MS` after `now_ms`.
+#[cfg(feature = "watchtower")]
 pub(crate) fn hold_for_watchtower(cells: impl IntoIterator<Item = OutPoint>, now_ms: u64) {
     if let Ok(mut held) = HELD.lock() {
         let until = now_ms.saturating_add(WATCHTOWER_HOLD_MS);
@@ -139,6 +141,7 @@ mod tests {
         assert!(locked(&[a, b, cell(203)], 0).is_empty());
     }
 
+    #[cfg(feature = "watchtower")]
     #[test]
     fn the_watchtowers_cells_are_locked_for_their_hold() {
         let (c, d) = (cell(211), cell(212));
