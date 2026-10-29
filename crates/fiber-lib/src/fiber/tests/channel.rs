@@ -12977,6 +12977,22 @@ mod udt_funding_cell_capacity {
         assert!(!state.can_auto_fulfill_received_tlc(&tlc));
 
         tlc.forwarding_tlc = None;
+        // A queued failure is the selected outcome for this forwarding attempt and must block
+        // fulfill from a local preimage.
+        state
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::RemoveTlc(
+                tlc_id,
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                    &NO_SHARED_SECRET,
+                )),
+            ));
+        assert!(!state.can_auto_fulfill_received_tlc(&tlc));
+
+        // A queued fulfill is the settlement being replayed; it must not block rebuilding the
+        // hold-set contexts.
+        state.retryable_tlc_operations.clear();
         state
             .retryable_tlc_operations
             .push_back(RetryableTlcOperation::RemoveTlc(
@@ -12985,7 +13001,7 @@ mod udt_funding_cell_capacity {
                     payment_preimage: gen_rand_sha256_hash(),
                 }),
             ));
-        assert!(!state.can_auto_fulfill_received_tlc(&tlc));
+        assert!(state.can_auto_fulfill_received_tlc(&tlc));
 
         state.retryable_tlc_operations.clear();
         tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {

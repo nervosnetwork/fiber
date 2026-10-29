@@ -5976,7 +5976,7 @@ impl ChannelActorState {
     ///   `-- forwarding
     ///         |-- waiting_forward_tlc_tasks --------> wait for AddTlc result
     ///         |-- forwarding_tlc = Some(...) -------> wait for downstream RemoveTlc
-    ///         `-- retryable RemoveTlc --------------> preserve the selected failure
+    ///         `-- retryable RemoveTlcFail ---------> preserve the selected failure
     /// ```
     pub(crate) fn can_auto_fulfill_received_tlc(&self, tlc: &TlcInfo) -> bool {
         tlc.is_received()
@@ -5984,7 +5984,17 @@ impl ChannelActorState {
             && tlc.forwarding_tlc.is_none()
             && !self.is_waiting_forward_result_for_received_tlc(tlc.tlc_id)
             && !self.retryable_tlc_operations.iter().any(|operation| {
-                matches!(operation, RetryableTlcOperation::RemoveTlc(tlc_id, _) if *tlc_id == tlc.tlc_id)
+                // A queued fail must win over a local preimage: it is the outcome this
+                // forwarding attempt already selected. A queued fulfill is the same settlement
+                // being replayed, so it must not hide the TLC from the hold-set settlement
+                // command that rebuilds its contexts.
+                matches!(
+                    operation,
+                    RetryableTlcOperation::RemoveTlc(
+                        tlc_id,
+                        RemoveTlcReason::RemoveTlcFail(_)
+                    ) if *tlc_id == tlc.tlc_id
+                )
             })
     }
 
