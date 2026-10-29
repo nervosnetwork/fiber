@@ -272,6 +272,13 @@ where
     S: WatchtowerStore + Send + Sync + 'static,
 {
     let mut cell_collector = new_default_cell_collector(&rpc_url);
+    // Not the cells an opening put in its funding, nor those of this watchtower's own
+    // transactions still in the pool (`held_cells`).
+    if let Err(err) =
+        crate::ckb::held_cells::lock_held(&mut cell_collector, crate::now_timestamp_as_millis_u64())
+    {
+        error!("Failed to lock held cells: {:?}", err);
+    }
 
     for (channel_node_id, channel_data) in store.get_watch_channels_with_nodes() {
         let ckb_client = CkbRpcClient::with_builder(&rpc_url, |builder| {
@@ -354,6 +361,10 @@ where
                                                                 ) {
                                                                     Ok(tx_hash) => {
                                                                         info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                        hold_sent(
+                                                                            &tx,
+                                                                            &mut cell_collector,
+                                                                        );
                                                                     }
                                                                     Err(err) => {
                                                                         error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
@@ -422,6 +433,21 @@ where
             Err(err) => {
                 error!("Failed to get commitment tx: {:?}", err);
             }
+        }
+    }
+}
+
+/// Holds the cells `tx` spends (`held_cells`), and locks them in `cell_collector` for the rest of
+/// this round.
+fn hold_sent(tx: &TransactionView, cell_collector: &mut dyn CellCollector) {
+    let cells: Vec<OutPoint> = tx.input_pts_iter().collect();
+    crate::ckb::held_cells::hold_for_watchtower(
+        cells.iter().cloned(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    for cell in cells {
+        if let Err(err) = cell_collector.lock_cell(cell, u64::MAX) {
+            error!("Failed to lock a sent cell: {:?}", err);
         }
     }
 }
@@ -757,6 +783,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                         Ok(Some(tx)) => match ckb_client.send_transaction(tx.data().into(), None) {
                             Ok(tx_hash) => {
                                 info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                                hold_sent(&tx, cell_collector);
                             }
                             Err(err) => {
                                 error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);

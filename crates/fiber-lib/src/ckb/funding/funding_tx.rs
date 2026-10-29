@@ -135,6 +135,14 @@ impl LiveCellsExclusionMap {
         self.map.remove(tx_hash);
     }
 
+    /// The inputs of every funding transaction held here.
+    pub(crate) fn input_out_points(&self) -> Vec<packed::OutPoint> {
+        self.map
+            .values()
+            .flat_map(|exclusion| exclusion.input_out_points.iter().cloned())
+            .collect()
+    }
+
     /// Move the exclusion entry for a funding tx that a peer replaced via `TxUpdate`.
     ///
     /// When the local node builds a funding tx, its inputs are reserved under that local tx
@@ -672,6 +680,12 @@ impl FundingTxBuilder {
         live_cells_exclusion_map
             .apply(&mut cell_collector)
             .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
+        // And the cells the watchtower's transactions spend, which the indexer still lists as live.
+        crate::ckb::held_cells::lock_held(
+            &mut cell_collector,
+            crate::now_timestamp_as_millis_u64(),
+        )
+        .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
 
         #[cfg(not(target_arch = "wasm32"))]
         let build_result = self.build_unlocked(
