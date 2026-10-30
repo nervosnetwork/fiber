@@ -4,6 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+use ckb_jsonrpc_types::Script;
+
 use crate::{
     schema_helpers::schema_as_uint_hex, serde_utils::U64Hex, GetPaymentCommandParams, Hash256,
     Pubkey,
@@ -92,16 +94,26 @@ pub struct LspTenantStatus {
     /// Tenant protocol key used for its private channel and invoice signatures;
     /// it is not a public, gossip-routable node identity.
     pub invoice_pubkey: Pubkey,
-    /// Private channel currently bound to this tenant.
-    pub private_channel_id: Option<Hash256>,
+    /// All private channels currently bound to this tenant.
+    #[serde(default)]
+    pub channels: Vec<LspTenantChannel>,
     /// Tenant creation timestamp in milliseconds since Unix epoch.
     #[serde_as(as = "U64Hex")]
     #[schemars(schema_with = "schema_as_uint_hex")]
     pub created_at: u64,
     /// Whether the tenant execution context is currently resident in this process.
     pub runtime_status: LspTenantRuntimeStatus,
-    /// Whether Public T currently has an online private channel to the tenant.
-    pub channel_online: bool,
+}
+
+/// One private channel bound to a hosted tenant.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct LspTenantChannel {
+    /// Channel identifier.
+    pub channel_id: Hash256,
+    /// `None` for CKB, otherwise the channel's UDT type script.
+    pub funding_udt_type_script: Option<Script>,
+    /// Whether Public T currently has this channel online.
+    pub online: bool,
 }
 
 /// Result of registering a hosted tenant.

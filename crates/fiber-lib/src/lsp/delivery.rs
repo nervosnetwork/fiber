@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::fiber_types::{Hash256, PaymentStatus, TlcErrorCode};
 use crate::store::{FiberStore, Store};
 
-use super::{LspInvoiceRegistration, TenantId, TrampolineForwardingRequest};
+use super::{LspInvoiceRegistration, TenantChannelRecord, TenantId, TrampolineForwardingRequest};
 
 const PAYMENT_DELIVERY_PREFIX: &[u8] = b"\xf2lsp/delivery/";
 const PAYMENT_DELIVERY_HASH_INDEX_PREFIX: &[u8] = b"\xf2lsp/delivery-by-hash/";
@@ -381,10 +381,31 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         Ok(delivery)
     }
 
+    /// Test convenience for the common CKB single-channel case.
+    #[cfg(test)]
     pub fn accept(
         &self,
         registration: &LspInvoiceRegistration,
         tenant: &super::HostedTenantRecord,
+        channel_id: Hash256,
+        request: TrampolineForwardingRequest,
+        now: u64,
+    ) -> Result<LspPaymentDelivery, String> {
+        let channel = TenantChannelRecord {
+            channel_id,
+            funding_udt_type_script: request.udt_type_script.clone(),
+            bound_at: 0,
+        };
+        self.accept_on_channel(registration, tenant, &channel, request, now)
+    }
+
+    /// Persist a delivery routed over the exact tenant channel selected for
+    /// the incoming asset.
+    pub fn accept_on_channel(
+        &self,
+        registration: &LspInvoiceRegistration,
+        tenant: &super::HostedTenantRecord,
+        channel: &TenantChannelRecord,
         mut request: TrampolineForwardingRequest,
         now: u64,
     ) -> Result<LspPaymentDelivery, String> {
@@ -397,9 +418,10 @@ impl<S: LspPaymentDeliveryStore> LspPaymentDeliveryManager<S> {
         if registration.tenant_id != tenant.tenant_id {
             return Err("hosted invoice registration does not match tenant".to_string());
         }
-        let private_channel_id = tenant
-            .private_channel_id
-            .ok_or_else(|| "hosted tenant has no private channel".to_string())?;
+        if channel.funding_udt_type_script != request.udt_type_script {
+            return Err("selected hosted channel asset does not match delivery asset".to_string());
+        }
+        let private_channel_id = channel.channel_id;
         request.next_node_id = tenant.tenant_pubkey;
         request.clone().into_send_payment_data()?;
         if registration

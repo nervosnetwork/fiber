@@ -12051,7 +12051,7 @@ pub trait ChannelActorStateStore {
     }
 }
 
-/// Durable single-channel opening slot in a tenant's namespaced store.
+/// Durable per-channel opening record in a tenant's namespaced store.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TenantChannelOpening {
     pub command: super::network::OpenChannelWithExternalFundingCommand,
@@ -12062,10 +12062,14 @@ pub struct TenantChannelOpening {
 
 /// Store trait for persisting and querying outbound channel-opening records.
 pub trait ChannelOpenRecordStore {
-    /// Read the authenticated tenant's durable opening slot.
-    fn get_tenant_channel_opening(&self) -> Option<TenantChannelOpening>;
-    /// Persist a slot before starting negotiation; clear only after confirmed termination.
-    fn put_tenant_channel_opening(&self, opening: Option<TenantChannelOpening>);
+    /// Read a durable opening by its (temporary or final) channel id.
+    fn get_tenant_channel_opening(&self, channel_id: &Hash256) -> Option<TenantChannelOpening>;
+    /// List all durable openings in the current tenant namespace.
+    fn list_tenant_channel_openings(&self) -> Vec<TenantChannelOpening>;
+    /// Persist an opening before starting negotiation.
+    fn put_tenant_channel_opening(&self, opening: TenantChannelOpening);
+    /// Delete an opening once the channel is ready or the opening is abandoned.
+    fn delete_tenant_channel_opening(&self, channel_id: &Hash256);
 
     /// Return all stored channel-opening records.
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord>;

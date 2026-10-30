@@ -18,8 +18,8 @@ pub use fiber_json_types::{
     GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetLspTenantRegistryNonceParams,
     GetLspTenantRegistryNonceResult, GetPaymentCommandResult, ListLspTenantsResult,
     LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus,
-    LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams,
-    RegisterLspTenantResult,
+    LspTenantChannel, LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus,
+    RegisterLspTenantParams, RegisterLspTenantResult,
 };
 
 /// RPC module for hosted LSP tenant and payment-delivery administration.
@@ -310,10 +310,20 @@ impl From<InternalTenantStatus> for LspTenantStatus {
             tenant_id: status.record.tenant_id.to_string(),
             root_signer_pubkey: status.record.root_signer_pubkey.map(Into::into),
             invoice_pubkey: status.record.tenant_pubkey.into(),
-            private_channel_id: status.record.private_channel_id.map(Into::into),
+            channels: status
+                .channels
+                .into_iter()
+                .map(|channel| LspTenantChannel {
+                    channel_id: channel.channel.channel_id.into(),
+                    funding_udt_type_script: channel
+                        .channel
+                        .funding_udt_type_script
+                        .map(Into::into),
+                    online: channel.online,
+                })
+                .collect(),
             created_at: status.record.created_at,
             runtime_status,
-            channel_online: status.channel_online,
         }
     }
 }

@@ -109,6 +109,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Type `InboundTlcStatus`](#type-inboundtlcstatus)
     * [Type `InvoiceData`](#type-invoicedata)
     * [Type `LspPaymentDeliveryStatus`](#type-lsppaymentdeliverystatus)
+    * [Type `LspTenantChannel`](#type-lsptenantchannel)
     * [Type `LspTenantRuntimeStatus`](#type-lsptenantruntimestatus)
     * [Type `LspTenantStatus`](#type-lsptenantstatus)
     * [Type `NextChannelSignerMaterial`](#type-nextchannelsignermaterial)
@@ -471,7 +472,7 @@ Opens a channel with external funding. The node will negotiate the channel with 
 <a id="channel-open_tenant_channel"></a>
 #### Method `open_tenant_channel`
 
-Opens the authenticated tenant's single private channel with client-owned keys.
+Opens an authenticated tenant's private channel with client-owned keys.
  Requires the LSP public node as `pubkey`, explicit `public: false`, and `external_channel_signer`.
  Repeating identical parameters resumes the pending opening or returns its frozen result.
  Validate the returned terms locally before signing the funding transaction.
@@ -991,10 +992,9 @@ Starts a registered tenant execution context if it is currently cold.
  authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
-* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
+* `channels` - <em>Vec<[LspTenantChannel](#type-lsptenantchannel)></em>, All private channels currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
-* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 
 ---
 
@@ -1016,10 +1016,9 @@ Stops a tenant execution context while retaining its persistent state and keys.
  authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
-* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
+* `channels` - <em>Vec<[LspTenantChannel](#type-lsptenantchannel)></em>, All private channels currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
-* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 
 ---
 
@@ -2240,6 +2239,19 @@ Durable hosted-payment delivery state.
 * `failed` - Delivery failed before or during downstream payment.
 ---
 
+<a id="#type-lsptenantchannel"></a>
+### Type `LspTenantChannel`
+
+One private channel bound to a hosted tenant.
+
+
+#### Fields
+
+* `channel_id` - <em>[Hash256](#type-hash256)</em>, Channel identifier.
+* `funding_udt_type_script` - <em>`Option<Script>`</em>, `None` for CKB, otherwise the channel's UDT type script.
+* `online` - <em>`bool`</em>, Whether Public T currently has this channel online.
+---
+
 <a id="#type-lsptenantruntimestatus"></a>
 ### Type `LspTenantRuntimeStatus`
 
@@ -2265,10 +2277,9 @@ Hosted tenant state boundary and liveness information.
  authenticated tenant registry protocol.
 * `invoice_pubkey` - <em>[Pubkey](#type-pubkey)</em>, Tenant protocol key used for its private channel and invoice signatures;
  it is not a public, gossip-routable node identity.
-* `private_channel_id` - <em>Option<[Hash256](#type-hash256)></em>, Private channel currently bound to this tenant.
+* `channels` - <em>Vec<[LspTenantChannel](#type-lsptenantchannel)></em>, All private channels currently bound to this tenant.
 * `created_at` - <em>`u64`</em>, Tenant creation timestamp in milliseconds since Unix epoch.
 * `runtime_status` - <em>[LspTenantRuntimeStatus](#type-lsptenantruntimestatus)</em>, Whether the tenant execution context is currently resident in this process.
-* `channel_online` - <em>`bool`</em>, Whether Public T currently has an online private channel to the tenant.
 ---
 
 <a id="#type-nextchannelsignermaterial"></a>

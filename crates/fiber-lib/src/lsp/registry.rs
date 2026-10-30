@@ -4,18 +4,33 @@ use std::sync::{Arc, Mutex};
 
 use crate::store::{FiberStore, Store};
 
-use super::{HostedTenantRecord, TenantId};
+use super::{HostedTenantRecord, TenantChannelRecord, TenantId};
 
 const TENANT_RECORD_PREFIX: &[u8] = b"\xf0lsp/tenant/";
 const TENANT_NONCE_PREFIX: &[u8] = b"\xf0lsp/tenant-nonce/";
 const ROOT_SIGNER_INDEX_PREFIX: &[u8] = b"\xf0lsp/root-signer/";
 const TENANT_PUBKEY_INDEX_PREFIX: &[u8] = b"\xf0lsp/tenant-pubkey/";
+const TENANT_CHANNEL_PREFIX: &[u8] = b"\xf0lsp/tenant-channel/";
 
 /// Persistence interface for hosted tenant state boundaries.
 pub trait TenantRegistryStore: Clone + Send + Sync + 'static {
     fn get_tenant(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String>;
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String>;
     fn list_tenants(&self) -> Result<Vec<HostedTenantRecord>, String>;
+    fn get_tenant_channel(
+        &self,
+        tenant_id: &TenantId,
+        channel_id: &crate::fiber_types::Hash256,
+    ) -> Result<Option<TenantChannelRecord>, String>;
+    fn put_tenant_channel(
+        &self,
+        tenant_id: &TenantId,
+        channel: &TenantChannelRecord,
+    ) -> Result<(), String>;
+    fn list_tenant_channels(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<TenantChannelRecord>, String>;
     fn get_registration_nonce(
         &self,
         root_signer_pubkey: &crate::fiber_types::Pubkey,
@@ -40,6 +55,18 @@ fn public_key_index_key(prefix: &[u8], public_key: &crate::fiber_types::Pubkey) 
     [prefix, public_key.serialize().as_slice()].concat()
 }
 
+fn tenant_channel_prefix(tenant_id: &TenantId) -> Vec<u8> {
+    [TENANT_CHANNEL_PREFIX, tenant_id.as_str().as_bytes(), b"/"].concat()
+}
+
+fn tenant_channel_key(tenant_id: &TenantId, channel_id: &crate::fiber_types::Hash256) -> Vec<u8> {
+    [
+        tenant_channel_prefix(tenant_id).as_slice(),
+        channel_id.as_ref(),
+    ]
+    .concat()
+}
+
 impl TenantRegistryStore for Store {
     fn get_tenant(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String> {
         self.get(tenant_key(tenant_id))
@@ -55,6 +82,36 @@ impl TenantRegistryStore for Store {
 
     fn list_tenants(&self) -> Result<Vec<HostedTenantRecord>, String> {
         self.collect_by_prefix(TENANT_RECORD_PREFIX)
+            .into_iter()
+            .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn get_tenant_channel(
+        &self,
+        tenant_id: &TenantId,
+        channel_id: &crate::fiber_types::Hash256,
+    ) -> Result<Option<TenantChannelRecord>, String> {
+        self.get(tenant_channel_key(tenant_id, channel_id))
+            .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
+            .transpose()
+    }
+
+    fn put_tenant_channel(
+        &self,
+        tenant_id: &TenantId,
+        channel: &TenantChannelRecord,
+    ) -> Result<(), String> {
+        let bytes = serialize(channel).map_err(|error| error.to_string())?;
+        self.put(tenant_channel_key(tenant_id, &channel.channel_id), bytes);
+        Ok(())
+    }
+
+    fn list_tenant_channels(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<TenantChannelRecord>, String> {
+        self.collect_by_prefix(&tenant_channel_prefix(tenant_id))
             .into_iter()
             .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
             .collect()
@@ -242,26 +299,41 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         self.store.list_tenants()
     }
 
-    /// Bind the tenant to its single MVP private channel.
-    pub fn bind_private_channel(
+    /// Bind one of the tenant's private channels.
+    ///
+    /// A tenant may bind multiple channels, one per asset (and eventually more
+    /// than one for the same asset). Re-binding the same channel id is
+    /// idempotent as long as the asset does not change.
+    pub fn bind_channel(
         &self,
         tenant_id: &TenantId,
         channel_id: crate::fiber_types::Hash256,
+        funding_udt_type_script: Option<ckb_types::packed::Script>,
     ) -> Result<HostedTenantRecord, String> {
-        let mut record = self
+        let record = self
             .get(tenant_id)?
             .ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
-        if record
-            .private_channel_id
-            .is_some_and(|existing| existing != channel_id)
-        {
-            return Err(format!(
-                "tenant {tenant_id} is already bound to another private channel"
-            ));
+        if let Some(existing) = self.store.get_tenant_channel(tenant_id, &channel_id)? {
+            if existing.funding_udt_type_script != funding_udt_type_script {
+                return Err(format!(
+                    "tenant {tenant_id} channel {channel_id} is already bound with a different asset"
+                ));
+            }
+        } else {
+            self.store.put_tenant_channel(
+                tenant_id,
+                &TenantChannelRecord {
+                    channel_id,
+                    funding_udt_type_script,
+                    bound_at: crate::now_timestamp_as_millis_u64(),
+                },
+            )?;
         }
-        record.private_channel_id = Some(channel_id);
-        self.store.put_tenant(&record)?;
         Ok(record)
+    }
+
+    pub fn list_channels(&self, tenant_id: &TenantId) -> Result<Vec<TenantChannelRecord>, String> {
+        self.store.list_tenant_channels(tenant_id)
     }
 
     pub fn find_by_tenant_pubkey(

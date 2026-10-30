@@ -170,7 +170,6 @@ impl<C: CkbChainClient + Clone + Send + Sync + 'static> TenantRuntimeFactory
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: None,
             tenant_pubkey,
-            private_channel_id: None,
             created_at: crate::now_timestamp_as_millis_u64(),
         })
     }

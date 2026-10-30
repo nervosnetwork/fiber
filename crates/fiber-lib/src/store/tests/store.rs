@@ -2942,16 +2942,16 @@ async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
     {
         let store = open_store(&path).unwrap();
         let tenant = store.namespaced(NodeNamespace::hosted_tenant("opening-owner"));
-        tenant.put_tenant_channel_opening(Some(TenantChannelOpening {
+        tenant.put_tenant_channel_opening(TenantChannelOpening {
             command: command.clone(),
             channel_id: temporary_id,
             result: None,
             terminated: false,
-        }));
-        assert!(store.get_tenant_channel_opening().is_none());
+        });
+        assert!(store.get_tenant_channel_opening(&temporary_id).is_none());
         assert!(store
             .namespaced(NodeNamespace::hosted_tenant("other-tenant"))
-            .get_tenant_channel_opening()
+            .get_tenant_channel_opening(&temporary_id)
             .is_none());
     }
     let result = fiber_json_types::OpenTenantChannelResult {
@@ -2973,24 +2973,38 @@ async fn test_tenant_channel_opening_persists_before_and_after_final_id() {
         let store = open_store(&path)
             .unwrap()
             .namespaced(NodeNamespace::hosted_tenant("opening-owner"));
-        let mut pending = store.get_tenant_channel_opening().unwrap();
+        let mut pending = store.get_tenant_channel_opening(&temporary_id).unwrap();
         assert_eq!(pending.channel_id, temporary_id);
         assert!(pending.result.is_none());
         assert_eq!(
             serde_json::to_value(&pending.command).unwrap(),
             serde_json::to_value(&command).unwrap()
         );
+        store.delete_tenant_channel_opening(&temporary_id);
         pending.channel_id = final_id;
         pending.result = Some(result.clone());
-        store.put_tenant_channel_opening(Some(pending));
+        store.put_tenant_channel_opening(pending);
     }
     let store = open_store(&path)
         .unwrap()
         .namespaced(NodeNamespace::hosted_tenant("opening-owner"));
-    let restored = store.get_tenant_channel_opening().unwrap();
+    let restored = store.get_tenant_channel_opening(&final_id).unwrap();
     assert_eq!(restored.channel_id, final_id);
     assert_eq!(
         serde_json::to_value(restored.result.unwrap()).unwrap(),
         serde_json::to_value(result).unwrap()
     );
+
+    let second_id = Hash256::from([3; 32]);
+    store.put_tenant_channel_opening(TenantChannelOpening {
+        command: command.clone(),
+        channel_id: second_id,
+        result: None,
+        terminated: false,
+    });
+    assert_eq!(store.list_tenant_channel_openings().len(), 2);
+    assert!(store.get_tenant_channel_opening(&second_id).is_some());
+    store.delete_tenant_channel_opening(&second_id);
+    assert!(store.get_tenant_channel_opening(&second_id).is_none());
+    assert_eq!(store.list_tenant_channel_openings().len(), 1);
 }

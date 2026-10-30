@@ -2001,16 +2001,17 @@ where
             },
             inflight_payments: Default::default(),
             pending_trampoline_settlements,
-            pending_tenant_opening_replies: Vec::new(),
+            pending_tenant_opening_replies: HashMap::new(),
             pending_external_funding_replies: self
                 .store
-                .get_tenant_channel_opening()
+                .list_tenant_channel_openings()
+                .into_iter()
                 .filter(|opening| !opening.terminated && opening.result.is_none())
                 .map(|opening| {
                     let (sender, _receiver) = tokio::sync::oneshot::channel();
-                    HashMap::from([(opening.channel_id, sender.into())])
+                    (opening.channel_id, sender.into())
                 })
-                .unwrap_or_default(),
+                .collect(),
             last_channel_ready_scan: Default::default(),
             pending_channel_ready_retry_scans: Default::default(),
             pending_remove_tlcs: Default::default(),
@@ -2672,11 +2673,9 @@ where
                         | StopReason::AbortFunding
                         | StopReason::AbortFundingWithDetail(_)
                 ) {
-                    if let Some(mut opening) = state.store.get_tenant_channel_opening() {
-                        if opening.channel_id == channel_id {
-                            opening.terminated = true;
-                            state.store.put_tenant_channel_opening(Some(opening));
-                        }
+                    if let Some(mut opening) = state.store.get_tenant_channel_opening(&channel_id) {
+                        opening.terminated = true;
+                        state.store.put_tenant_channel_opening(opening);
                     }
                 }
 
@@ -2947,12 +2946,12 @@ where
                 }
             }
             FiberActorEvent::ExternalFundingTxReady(channel_id, funding_tx) => {
-                if let Some(mut opening) = state.store.get_tenant_channel_opening() {
-                    if opening.channel_id == channel_id && opening.result.is_none() {
+                if let Some(mut opening) = state.store.get_tenant_channel_opening(&channel_id) {
+                    if opening.result.is_none() {
                         if let Some(channel) = state.store.get_channel_actor_state(&channel_id) {
                             let result = channel.tenant_opening_result(funding_tx.clone());
                             opening.result = Some(result.clone());
-                            state.store.put_tenant_channel_opening(Some(opening));
+                            state.store.put_tenant_channel_opening(opening);
                             state.reply_tenant_opening(channel_id, Ok(result));
                         }
                     }
@@ -3773,8 +3772,36 @@ where
             }
 
             FiberActorCommand::OpenTenantChannel { command, reply } => {
-                let outcome = async {
-                    if let Some(mut opening) = state.store.get_tenant_channel_opening() {
+                let outcome: Result<
+                    (Option<fiber_json_types::OpenTenantChannelResult>, Hash256),
+                    String,
+                > = async {
+                    let signer = command
+                        .external_channel_signer
+                        .as_ref()
+                        .ok_or_else(|| "tenant requires external signer".to_string())?;
+                    let key = signer.base_public_keys.tlc_base_key;
+                    let temp_id: Hash256 =
+                        ckb_hash::blake2b_256([key.serialize().as_slice(), &[0; 33]].concat())
+                            .into();
+                    let command_value =
+                        serde_json::to_value(&command).map_err(|e| e.to_string())?;
+
+                    let existing =
+                        state
+                            .store
+                            .get_tenant_channel_opening(&temp_id)
+                            .or_else(|| {
+                                state.store.list_tenant_channel_openings().into_iter().find(
+                                    |opening| {
+                                        serde_json::to_value(&opening.command)
+                                            .map(|value| value == command_value)
+                                            .unwrap_or(false)
+                                    },
+                                )
+                            });
+
+                    if let Some(mut opening) = existing {
                         let orphaned = opening.result.is_none()
                             && state
                                 .store
@@ -3788,10 +3815,11 @@ where
                         let failed = opening.terminated || orphaned;
                         if !failed {
                             if serde_json::to_value(&opening.command).map_err(|e| e.to_string())?
-                                != serde_json::to_value(&command).map_err(|e| e.to_string())?
+                                != command_value
                             {
                                 return Err(
-                                    "tenant already has a different channel opening".to_string()
+                                    "tenant already has a different channel opening for this signer"
+                                        .to_string(),
                                 );
                             }
                             if state
@@ -3812,75 +3840,72 @@ where
                                             opening.result = Some(channel.tenant_opening_result(
                                                 external.unsigned_funding_tx.clone(),
                                             ));
-                                            state
-                                                .store
-                                                .put_tenant_channel_opening(Some(opening.clone()));
+                                            state.store.put_tenant_channel_opening(opening.clone());
                                         }
                                     }
                                 }
                             }
-                            return Ok(opening.result);
+                            return Ok((opening.result, opening.channel_id));
                         }
                         state.reply_tenant_opening(
                             opening.channel_id,
                             Err("tenant channel opening terminated".into()),
                         );
-                        state.store.put_tenant_channel_opening(None);
+                        state
+                            .store
+                            .delete_tenant_channel_opening(&opening.channel_id);
+                        if opening.channel_id != temp_id {
+                            state.store.delete_tenant_channel_opening(&temp_id);
+                        }
                     }
+
                     if state
                         .store
-                        .get_channel_open_records()
-                        .iter()
-                        .any(|record| record.status != ChannelOpeningStatus::Failed)
+                        .get_channel_open_record(&temp_id)
+                        .is_some_and(|record| record.status != ChannelOpeningStatus::Failed)
                     {
-                        return Err("tenant already has a channel".to_string());
+                        return Err("tenant channel is already open".to_string());
                     }
-                    let key = command
-                        .external_channel_signer
-                        .as_ref()
-                        .ok_or_else(|| "tenant requires external signer".to_string())?
-                        .base_public_keys
-                        .tlc_base_key;
-                    let temp_id =
-                        ckb_hash::blake2b_256([key.serialize().as_slice(), &[0; 33]].concat())
-                            .into();
-                    state.store.put_tenant_channel_opening(Some(
-                        super::channel::TenantChannelOpening {
+
+                    state
+                        .store
+                        .put_tenant_channel_opening(super::channel::TenantChannelOpening {
                             command: command.clone(),
                             channel_id: temp_id,
                             result: None,
                             terminated: false,
-                        },
-                    ));
+                        });
                     match state
                         .create_outbound_channel_with_external_funding(command)
                         .await
                     {
                         Ok((_, id)) => {
-                            // Keep the existing collaboration response path even if the caller disconnects.
                             let (sender, _receiver) = tokio::sync::oneshot::channel();
                             state
                                 .pending_external_funding_replies
                                 .insert(id, sender.into());
-                            Ok(None)
+                            Ok((None, temp_id))
                         }
                         Err(error) => {
-                            state.store.put_tenant_channel_opening(None);
+                            state.store.delete_tenant_channel_opening(&temp_id);
                             Err(error.to_string())
                         }
                     }
                 }
                 .await;
                 match outcome {
-                    Ok(Some(result)) => {
+                    Ok((Some(result), reply_key)) => {
+                        state.reply_tenant_opening(reply_key, Ok(result.clone()));
                         state.reply_tenant_opening(result.channel_id.into(), Ok(result.clone()));
                         let _ = reply.send(Ok(result));
                     }
-                    Ok(None) => {
-                        state
+                    Ok((None, reply_key)) => {
+                        let replies = state
                             .pending_tenant_opening_replies
-                            .retain(|reply| !reply.is_closed());
-                        state.pending_tenant_opening_replies.push(reply);
+                            .entry(reply_key)
+                            .or_default();
+                        replies.retain(|reply| !reply.is_closed());
+                        replies.push(reply);
                     }
                     Err(error) => {
                         let _ = reply.send(Err(error));
@@ -6564,12 +6589,13 @@ pub struct FiberActorState<S, C> {
     inflight_payments: HashMap<Hash256, ActorRef<PaymentActorMessage>>,
     // Final trampoline payments that still have an unresolved upstream TLC, indexed by channel.
     pending_trampoline_settlements: HashMap<Hash256, HashSet<Hash256>>,
-    // Pending replies for external funding channel requests.
-    // When a user requests to open a channel with external funding, we store the reply port here
-    // until the peer accepts the channel and we build the unsigned funding tx.
-    // All callers of the tenant's single pending opening share its frozen result.
-    pending_tenant_opening_replies:
+    // Pending replies for external funding channel requests, keyed by the
+    // opening's current channel id (temporary before AcceptChannel, final after).
+    // All callers of the same tenant channel opening share its frozen result.
+    pending_tenant_opening_replies: HashMap<
+        Hash256,
         Vec<RpcReplyPort<Result<fiber_json_types::OpenTenantChannelResult, String>>>,
+    >,
     pending_external_funding_replies:
         HashMap<Hash256, RpcReplyPort<Result<OpenChannelWithExternalFundingResponse, String>>>,
 
@@ -7214,7 +7240,7 @@ where
     }
 
     fn move_channel_open_record_to_final_id(
-        &self,
+        &mut self,
         temporary_channel_id: &Hash256,
         final_channel_id: Hash256,
     ) {
@@ -7222,10 +7248,20 @@ where
             return;
         };
 
-        if let Some(mut opening) = self.store.get_tenant_channel_opening() {
-            if opening.channel_id == *temporary_channel_id {
-                opening.channel_id = final_channel_id;
-                self.store.put_tenant_channel_opening(Some(opening));
+        if let Some(opening) = self.store.get_tenant_channel_opening(temporary_channel_id) {
+            self.store
+                .delete_tenant_channel_opening(temporary_channel_id);
+            let mut opening = opening;
+            opening.channel_id = final_channel_id;
+            self.store.put_tenant_channel_opening(opening);
+            if let Some(replies) = self
+                .pending_tenant_opening_replies
+                .remove(temporary_channel_id)
+            {
+                self.pending_tenant_opening_replies
+                    .entry(final_channel_id)
+                    .or_default()
+                    .extend(replies);
             }
         }
         self.store.delete_channel_open_record(temporary_channel_id);
@@ -8503,12 +8539,8 @@ where
         channel_id: Hash256,
         result: Result<fiber_json_types::OpenTenantChannelResult, String>,
     ) {
-        if self
-            .store
-            .get_tenant_channel_opening()
-            .is_some_and(|opening| opening.channel_id == channel_id)
-        {
-            for reply in self.pending_tenant_opening_replies.drain(..) {
+        if let Some(replies) = self.pending_tenant_opening_replies.remove(&channel_id) {
+            for reply in replies {
                 let _ = reply.send(result.clone());
             }
         }

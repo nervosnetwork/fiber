@@ -138,9 +138,11 @@ pub use service::{
     LspServiceState, LspServiceStatus, TenantSubscriptionContext,
 };
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use tenant::select_tenant_channel;
+#[cfg(not(target_arch = "wasm32"))]
 pub use tenant::{
-    tenant_watchtower_node_id, HostedTenantRecord, HostedTenantStatus, TenantId,
-    TenantRuntimeStatus,
+    tenant_watchtower_node_id, HostedTenantChannelStatus, HostedTenantRecord, HostedTenantStatus,
+    TenantChannelRecord, TenantId, TenantRuntimeStatus,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use token::BiscuitTokenIssuer;

@@ -96,7 +96,7 @@ trait ChannelRpc {
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned>;
 
-    /// Opens the authenticated tenant's single private channel with client-owned keys.
+    /// Opens an authenticated tenant's private channel with client-owned keys.
     /// Requires the LSP public node as `pubkey`, explicit `public: false`, and `external_channel_signer`.
     /// Repeating identical parameters resumes the pending opening or returns its frozen result.
     /// Validate the returned terms locally before signing the funding transaction.

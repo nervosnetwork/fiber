@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 
@@ -14,12 +18,13 @@ use crate::invoice::CkbInvoice;
 use crate::store::{NodeNamespace, Store};
 
 use super::{
-    is_permanent_hosted_payment_failure, tenant_watchtower_node_id, BiscuitTokenIssuer,
-    HostedTenantRpcContext, HostedTenantStatus, LspConfig, LspInvoiceRegistration,
-    LspInvoiceRegistry, LspPaymentDelivery, LspPaymentDeliveryKey, LspPaymentDeliveryLimits,
-    LspPaymentDeliveryManager, LspPaymentDeliveryStatus, LspPaymentDispatchError,
-    LspPaymentOutcomeDecision, TenantId, TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus,
-    TenantSupervisor, TrampolineForwardingRequest,
+    is_permanent_hosted_payment_failure, select_tenant_channel, tenant_watchtower_node_id,
+    BiscuitTokenIssuer, HostedTenantChannelStatus, HostedTenantRpcContext, HostedTenantStatus,
+    LspConfig, LspInvoiceRegistration, LspInvoiceRegistry, LspPaymentDelivery,
+    LspPaymentDeliveryKey, LspPaymentDeliveryLimits, LspPaymentDeliveryManager,
+    LspPaymentDeliveryStatus, LspPaymentDispatchError, LspPaymentOutcomeDecision, TenantId,
+    TenantRegistry, TenantRuntimeFactory, TenantRuntimeStatus, TenantSupervisor,
+    TrampolineForwardingRequest,
 };
 
 /// Runtime dependencies of the LSP service container.
@@ -153,7 +158,7 @@ pub struct LspServiceState {
     pub watchtower_store: Store,
     #[cfg(feature = "watchtower")]
     signing_events: crate::signing::SigningEvents,
-    pub ready_tenants: HashMap<TenantId, Hash256>,
+    pub ready_tenants: HashMap<TenantId, HashSet<Hash256>>,
 }
 
 impl LspServiceState {
@@ -163,10 +168,21 @@ impl LspServiceState {
         } else {
             TenantRuntimeStatus::Cold
         };
+        let ready = self.ready_tenants.get(&record.tenant_id);
+        let channels = self
+            .registry
+            .list_channels(&record.tenant_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|channel| HostedTenantChannelStatus {
+                online: ready.is_some_and(|ready| ready.contains(&channel.channel_id)),
+                channel,
+            })
+            .collect::<Vec<_>>();
         HostedTenantStatus {
-            channel_online: self.ready_tenants.contains_key(&record.tenant_id),
             record,
             runtime_status,
+            channels,
         }
     }
 
@@ -524,13 +540,23 @@ impl Actor for LspService {
                             Ok(LspDeliveryDecision::NotHosted)
                         }
                         Ok(Some(tenant)) => state
-                            .delivery_manager
-                            .accept(
-                                &registration,
-                                &tenant,
-                                request,
-                                crate::now_timestamp_as_millis_u64(),
-                            )
+                            .registry
+                            .list_channels(&tenant.tenant_id)
+                            .and_then(|channels| {
+                                let ready = state.ready_tenants.get(&tenant.tenant_id);
+                                let channel = select_tenant_channel(
+                                    &channels,
+                                    ready,
+                                    request.udt_type_script.as_ref(),
+                                )?;
+                                state.delivery_manager.accept_on_channel(
+                                    &registration,
+                                    &tenant,
+                                    channel,
+                                    request,
+                                    crate::now_timestamp_as_millis_u64(),
+                                )
+                            })
                             .map(|delivery| {
                                 let key = delivery.key();
                                 LspServiceState::schedule_delivery_deadline(
@@ -559,24 +585,33 @@ impl Actor for LspService {
             }
             LspServiceMessage::TenantChannelOnline(tenant_pubkey, channel_id) => {
                 if let Some(tenant) = state.registry.find_by_tenant_pubkey(&tenant_pubkey)? {
-                    let tenant = match state
-                        .registry
-                        .bind_private_channel(&tenant.tenant_id, channel_id)
-                    {
-                        Ok(tenant) => tenant,
-                        Err(error) => {
-                            tracing::warn!(
-                                tenant_id = %tenant.tenant_id,
-                                channel_id = %channel_id,
-                                %error,
-                                "Ignoring an additional hosted tenant private channel"
-                            );
-                            return Ok(());
-                        }
-                    };
+                    let tenant_store = state
+                        .store
+                        .namespaced(NodeNamespace::hosted_tenant(tenant.tenant_id.as_str()));
+                    let asset = tenant_store
+                        .get_channel_actor_state(&channel_id)
+                        .and_then(|channel| channel.funding_udt_type_script.clone());
+                    let tenant =
+                        match state
+                            .registry
+                            .bind_channel(&tenant.tenant_id, channel_id, asset)
+                        {
+                            Ok(tenant) => tenant,
+                            Err(error) => {
+                                tracing::warn!(
+                                    tenant_id = %tenant.tenant_id,
+                                    channel_id = %channel_id,
+                                    %error,
+                                    "Ignoring hosted tenant channel with conflicting metadata"
+                                );
+                                return Ok(());
+                            }
+                        };
                     state
                         .ready_tenants
-                        .insert(tenant.tenant_id.clone(), channel_id);
+                        .entry(tenant.tenant_id.clone())
+                        .or_default()
+                        .insert(channel_id);
                     #[cfg(feature = "watchtower")]
                     if let Err(error) = super::watch::ensure_hosted_watch_channel(
                         &state.signing_events,
@@ -603,7 +638,14 @@ impl Actor for LspService {
             }
             LspServiceMessage::TenantChannelOffline(tenant_pubkey, channel_id) => {
                 if let Some(tenant) = state.registry.find_by_tenant_pubkey(&tenant_pubkey)? {
-                    if state.ready_tenants.get(&tenant.tenant_id) == Some(&channel_id) {
+                    let remove_tenant =
+                        if let Some(ready) = state.ready_tenants.get_mut(&tenant.tenant_id) {
+                            ready.remove(&channel_id);
+                            ready.is_empty()
+                        } else {
+                            false
+                        };
+                    if remove_tenant {
                         state.ready_tenants.remove(&tenant.tenant_id);
                     }
                 }
@@ -898,8 +940,10 @@ impl LspService {
             let _ = myself.send_message(LspServiceMessage::ExpireDelivery(key));
             return Ok(());
         };
-        let channel_ready =
-            state.ready_tenants.get(&tenant.tenant_id) == Some(&delivery.private_channel_id);
+        let channel_ready = state
+            .ready_tenants
+            .get(&tenant.tenant_id)
+            .is_some_and(|ready| ready.contains(&delivery.private_channel_id));
         if !channel_ready {
             LspServiceState::schedule_delivery_retry(&myself, key, delivery.buffer_deadline);
             return Ok(());

@@ -1424,25 +1424,43 @@ impl ChannelActorStateStore for Store {
     }
 }
 
+fn tenant_channel_opening_key(channel_id: &Hash256) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + channel_id.as_ref().len());
+    key.push(TENANT_CHANNEL_OPENING_PREFIX);
+    key.extend_from_slice(channel_id.as_ref());
+    key
+}
+
 impl ChannelOpenRecordStore for Store {
     // Use a tenant-namespaced Store: get() prefixes the key and reads only that tenant's record.
-    fn get_tenant_channel_opening(&self) -> Option<crate::fiber::channel::TenantChannelOpening> {
-        self.get([TENANT_CHANNEL_OPENING_PREFIX])
+    fn get_tenant_channel_opening(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<crate::fiber::channel::TenantChannelOpening> {
+        self.get(tenant_channel_opening_key(channel_id))
             .map(|bytes| serde_json::from_slice(&bytes).expect("valid persisted tenant opening"))
     }
 
-    // put()/delete() prefix the key with this Store's tenant namespace; each tenant has one slot.
-    fn put_tenant_channel_opening(
-        &self,
-        opening: Option<crate::fiber::channel::TenantChannelOpening>,
-    ) {
-        match opening {
-            Some(opening) => self.put(
-                [TENANT_CHANNEL_OPENING_PREFIX],
-                serde_json::to_vec(&opening).expect("serializable tenant opening"),
-            ),
-            None => self.delete([TENANT_CHANNEL_OPENING_PREFIX]),
-        }
+    fn list_tenant_channel_openings(&self) -> Vec<crate::fiber::channel::TenantChannelOpening> {
+        self.collect_by_prefix(&[TENANT_CHANNEL_OPENING_PREFIX])
+            .into_iter()
+            .map(|pair| {
+                serde_json::from_slice(&pair.value).expect("valid persisted tenant opening")
+            })
+            .collect()
+    }
+
+    // put()/delete() prefix the key with this Store's tenant namespace; each
+    // opening has its own channel-id key.
+    fn put_tenant_channel_opening(&self, opening: crate::fiber::channel::TenantChannelOpening) {
+        self.put(
+            tenant_channel_opening_key(&opening.channel_id),
+            serde_json::to_vec(&opening).expect("serializable tenant opening"),
+        );
+    }
+
+    fn delete_tenant_channel_opening(&self, channel_id: &Hash256) {
+        self.delete(tenant_channel_opening_key(channel_id));
     }
 
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {

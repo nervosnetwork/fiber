@@ -276,23 +276,31 @@ impl<S: SignerStore> HostedSession<S> {
                 "tenant opening requires public: false".into(),
             ));
         }
-        if !self.state.bindings.is_empty() {
-            let encoded =
-                serde_json::to_vec(&request).map_err(|e| SessionError::Invalid(e.to_string()))?;
-            if self.state.opening_request.as_ref() == Some(&encoded) {
-                return Ok(request);
-            }
-            return Err(SessionError::Invalid(
-                "tenant already has an approved channel".into(),
-            ));
+        let encoded =
+            serde_json::to_vec(&request).map_err(|e| SessionError::Invalid(e.to_string()))?;
+        // Repeating the last opening intent is a retry and must not allocate a
+        // second signer key. Once that opening has completed, a different
+        // intent is a new channel for this tenant.
+        if self.state.opening_request.as_ref() == Some(&encoded) {
+            return Ok(request);
         }
-        let material = self.allocate_pending_channel().await?;
+        let (material, allocated_new) = if let Some(key_id) = self.state.pending {
+            let signer = self.root.open_channel(key_id).await?;
+            (signer.channel_open_material(false).await?, false)
+        } else {
+            (self.allocate_pending_channel().await?, true)
+        };
         let expected = crate::json::open_material_to_rpc(&material);
-        if serde_json::to_value(Some(&expected))
-            .map_err(|e| SessionError::Invalid(e.to_string()))?
+        if serde_json::to_value(Some(expected)).map_err(|e| SessionError::Invalid(e.to_string()))?
             != serde_json::to_value(&request.external_channel_signer)
                 .map_err(|e| SessionError::Invalid(e.to_string()))?
         {
+            // We allocated a key speculatively for this request. If the caller
+            // supplied material for a different key, discard it so the previous
+            // completed opening can still be retried.
+            if allocated_new {
+                self.state.pending = None;
+            }
             return Err(SessionError::Invalid(
                 "opening material is not owned by the pending signer".into(),
             ));
@@ -300,18 +308,6 @@ impl<S: SignerStore> HostedSession<S> {
         if request.commitment_delay_epoch.is_none() || request.commitment_fee_rate.is_none() {
             return Err(SessionError::Invalid(
                 "choose commitment delay and fee rate before opening".into(),
-            ));
-        }
-        let encoded =
-            serde_json::to_vec(&request).map_err(|e| SessionError::Invalid(e.to_string()))?;
-        if self
-            .state
-            .opening_request
-            .as_ref()
-            .is_some_and(|old| old != &encoded)
-        {
-            return Err(SessionError::Invalid(
-                "cannot replace pending opening intent".into(),
             ));
         }
         self.state.opening_request = Some(encoded);
@@ -788,10 +784,9 @@ mod tests {
                     tenant_id: session.tenant_id().as_str().to_string(),
                     root_signer_pubkey: Some(params.root_signer_pubkey),
                     invoice_pubkey: lsp_pubkey().into(),
-                    private_channel_id: None,
+                    channels: Vec::new(),
                     created_at: 1,
                     runtime_status: LspTenantRuntimeStatus::Cold,
-                    channel_online: false,
                 },
                 access_token: "token".to_string(),
             })

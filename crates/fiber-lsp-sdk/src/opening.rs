@@ -627,6 +627,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn subsequent_channel_opening_is_allowed_for_the_same_tenant() {
+        let created = RootSigner::in_memory().await.unwrap();
+        let mut session = HostedSession::new(created.root_signer);
+        session.allocate_pending_channel().await.unwrap();
+        let first_signer = session
+            .open_channel(session.pending_channel_key_id().unwrap())
+            .await
+            .unwrap();
+        let (first_request, first_result, first_network, first_inputs) =
+            proposal(&first_signer).await;
+        session.begin_channel_opening(first_request).await.unwrap();
+        session
+            .finish_channel_opening(&first_result, &first_network, &first_inputs)
+            .await
+            .unwrap();
+        assert_eq!(session.state().bindings.len(), 1);
+
+        session.allocate_pending_channel().await.unwrap();
+        let second_signer = session
+            .open_channel(session.pending_channel_key_id().unwrap())
+            .await
+            .unwrap();
+        let (second_request, second_result, second_network, second_inputs) =
+            proposal(&second_signer).await;
+        session.begin_channel_opening(second_request).await.unwrap();
+        session
+            .finish_channel_opening(&second_result, &second_network, &second_inputs)
+            .await
+            .unwrap();
+        assert_eq!(session.state().bindings.len(), 2);
+        assert_ne!(
+            first_result.channel_id, second_result.channel_id,
+            "each channel opener must use a distinct channel id"
+        );
+    }
+
+    #[tokio::test]
     async fn opening_rejects_malicious_proposals_without_binding() {
         let root = RootSigner::create(RootKey::import([31; 32]).unwrap(), MemoryStore::default())
             .await
