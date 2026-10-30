@@ -85,16 +85,30 @@ pub(crate) struct LiveCellsExclusion {
     committed_block_number: Option<u64>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct LiveCellsExclusionMap {
     pub(crate) map: HashMap<packed::Byte32, LiveCellsExclusion>,
+    /// Who holds these inputs in `held_cells`.
+    holder: u64,
+}
+
+impl Default for LiveCellsExclusionMap {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            holder: crate::ckb::held_cells::new_holder(),
+        }
+    }
 }
 
 impl LiveCellsExclusionMap {
     pub fn new() -> Self {
-        Self {
-            map: HashMap::default(),
-        }
+        Self::default()
+    }
+
+    /// Who holds these inputs in `held_cells`.
+    pub(crate) fn holder(&self) -> u64 {
+        self.holder
     }
 
     /// Remove the committed funding txs that has been committed KEEP_BLOCK_PERIOD blocks ago.
@@ -133,6 +147,14 @@ impl LiveCellsExclusionMap {
 
     pub fn remove(&mut self, tx_hash: &packed::Byte32) {
         self.map.remove(tx_hash);
+    }
+
+    /// The inputs of every funding transaction held here.
+    pub(crate) fn input_out_points(&self) -> Vec<packed::OutPoint> {
+        self.map
+            .values()
+            .flat_map(|exclusion| exclusion.input_out_points.iter().cloned())
+            .collect()
     }
 
     /// Move the exclusion entry for a funding tx that a peer replaced via `TxUpdate`.
@@ -658,7 +680,12 @@ impl FundingTxBuilder {
         };
 
         let header_dep_resolver = new_default_header_dep_resolver(&self.context.rpc_url);
-        let mut cell_collector = new_default_cell_collector(&self.context.rpc_url);
+        // Every cell it picks is held at once, so the watchtower cannot pick it meanwhile.
+        let mut cell_collector = crate::ckb::held_cells::TakingCollector::new(
+            new_default_cell_collector(&self.context.rpc_url),
+            crate::ckb::held_cells::Taker::Funding(live_cells_exclusion_map.holder()),
+            self.context.rpc_url.clone(),
+        );
         let tx_dep_provider =
             new_default_transaction_dependency_provider(&self.context.rpc_url, 10).await;
 
@@ -672,6 +699,12 @@ impl FundingTxBuilder {
         live_cells_exclusion_map
             .apply(&mut cell_collector)
             .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
+        // And the cells the watchtower's transactions spend, which the indexer still lists as live.
+        crate::ckb::held_cells::lock_held(
+            &mut cell_collector,
+            crate::now_timestamp_as_millis_u64(),
+        )
+        .map_err(|err| FundingError::CkbTxBuilderError(TxBuilderError::Other(err.into())))?;
 
         #[cfg(not(target_arch = "wasm32"))]
         let build_result = self.build_unlocked(
