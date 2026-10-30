@@ -11,7 +11,7 @@ use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::{Either, Status};
 use ckb_sdk::{
     rpc::ckb_indexer::{Cell, Order, ScriptType, SearchKey, SearchKeyFilter, SearchMode},
-    traits::{CellCollector, CellQueryOptions, DefaultCellCollector, ValueRangeOption},
+    traits::{CellCollector, CellQueryOptions, ValueRangeOption},
     transaction::builder::FeeCalculator,
     util::blake160,
     CkbRpcClient, RpcError, Since, SinceType,
@@ -271,7 +271,12 @@ fn run_periodic_check<S>(store: S, _node_id: NodeId, signer: LocalSigner, rpc_ur
 where
     S: WatchtowerStore + Send + Sync + 'static,
 {
-    let mut cell_collector = new_default_cell_collector(&rpc_url);
+    // Each cell it picks is held at once, so an opening cannot pick it meanwhile (`held_cells`).
+    let mut cell_collector = crate::ckb::held_cells::TakingCollector::new(
+        new_default_cell_collector(&rpc_url),
+        crate::ckb::held_cells::Taker::Watchtower,
+        rpc_url.clone(),
+    );
     // Not the cells an opening put in its funding, nor those of this watchtower's own
     // transactions still in the pool (`held_cells`).
     if let Err(err) =
@@ -367,6 +372,7 @@ where
                                                                         );
                                                                     }
                                                                     Err(err) => {
+                                                                        crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                                                         error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
                                                                     }
                                                                 }
@@ -457,7 +463,7 @@ fn build_revocation_tx(
     revocation_data: RevocationData,
     x_only_aggregated_pubkey: [u8; 32],
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let witness = [
         XUDT_COMPATIBLE_WITNESS.to_vec(),
@@ -567,7 +573,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
     channel_data: ChannelData,
     for_remote: bool,
     signer: &LocalSigner,
-    cell_collector: &mut DefaultCellCollector,
+    cell_collector: &mut impl CellCollector,
     store: &S,
     self_node_id: NodeId,
     first_commitment_block_number: u64,
@@ -786,6 +792,7 @@ fn try_settle_commitment_tx<S: WatchtowerStore>(
                                 hold_sent(&tx, cell_collector);
                             }
                             Err(err) => {
+                                crate::ckb::held_cells::release_for_watchtower(tx.input_pts_iter());
                                 error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
                             }
                         },

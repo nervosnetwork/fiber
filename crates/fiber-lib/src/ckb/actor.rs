@@ -37,15 +37,13 @@ pub struct CkbChainState {
     signer: LocalSigner,
     funding_source_lock_script: packed::Script,
     live_cells_exclusion_map: LiveCellsExclusionMap,
-    /// This actor's holder in `held_cells`, for the inputs of its funding transactions.
-    holder: u64,
 }
 
 impl CkbChainState {
     /// Lets the watchtower see this actor's funding inputs (`held_cells`).
     fn publish_held(&self) {
         super::held_cells::hold_funding(
-            self.holder,
+            self.live_cells_exclusion_map.holder(),
             self.live_cells_exclusion_map.input_out_points(),
         );
     }
@@ -128,7 +126,6 @@ impl Actor for CkbChainActor {
             funding_source_lock_script,
             ckb_tx_tracing_actor,
             live_cells_exclusion_map: Default::default(),
-            holder: super::held_cells::new_holder(),
         })
     }
 
@@ -137,7 +134,7 @@ impl Actor for CkbChainActor {
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        super::held_cells::hold_funding(state.holder, vec![]);
+        super::held_cells::hold_funding(state.live_cells_exclusion_map.holder(), vec![]);
         Ok(())
     }
 
