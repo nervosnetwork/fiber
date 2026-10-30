@@ -36,9 +36,11 @@ script:pre-request {
 assert {
   res.body.error: isUndefined
   res.body.result.runtime_status: eq "cold"
-  res.body.result.channel_online: eq false
 }
 
 script:post-response {
+  if ((res.body.result.channels || []).some(channel => channel.online)) {
+    throw new Error("eviction left a hosted channel online");
+  }
   await new Promise(r => setTimeout(r, 500));
 }

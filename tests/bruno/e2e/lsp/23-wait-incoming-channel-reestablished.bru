@@ -37,11 +37,10 @@ script:post-response {
   const iteration = Number(bru.getVar("LSP_INCOMING_CHANNEL_ITERATION") || 0);
   const maxIterations = Number(bru.getVar("LSP_INCOMING_CHANNEL_MAX_ITERATIONS"));
 
-  if (
-    tenant?.runtime_status === "active" &&
-    tenant.channel_online &&
-    tenant.private_channel_id === bru.getVar("HOSTED_CHANNEL_ID")
-  ) {
+  const channel = (tenant?.channels || []).find(
+    item => item.channel_id === bru.getVar("HOSTED_CHANNEL_ID") && item.online
+  );
+  if (tenant?.runtime_status === "active" && channel) {
     bru.setVar("LSP_INCOMING_CHANNEL_ITERATION", 0);
     return;
   }

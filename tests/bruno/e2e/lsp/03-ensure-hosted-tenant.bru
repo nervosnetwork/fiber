@@ -36,7 +36,7 @@ script:pre-request {
 assert {
   res.body.error: isUndefined
   res.body.result.runtime_status: eq "active"
-  res.body.result.channel_online: eq false
+  res.body.result.channels: length 0
 }
 
 script:post-response {
