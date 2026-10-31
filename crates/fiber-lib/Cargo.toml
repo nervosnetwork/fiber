@@ -38,6 +38,7 @@ once_cell = "1.19.0"
 parking_lot = "0.12"
 ractor = { version = "0.15", features = [
   "async-trait",
+  "output-port-v2",
 ] }
 rand = "0.9"
 regex = "1.10.5"
