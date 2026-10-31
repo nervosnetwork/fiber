@@ -2,6 +2,7 @@
 use ckb_types::packed::Script;
 
 use crate::store::store_trait::{FiberStore, PrefixIterOptions};
+use crate::store::NodeNamespace;
 use fiber_store::backend::{BatchWriter, StorageBackend, TakeWhileFn};
 use fiber_store::iterator::{IteratorDirection, KVPair};
 use fiber_store::StoreError;
@@ -45,7 +46,7 @@ use fiber_types::{
 #[cfg(not(target_arch = "wasm32"))]
 use fiber_types::{CchOrder, CchReceiveBtcOrderCreation, CchSendBtcOrderCreation};
 #[cfg(feature = "watchtower")]
-use fiber_types::{NodeId, Privkey, RevocationData};
+use fiber_types::{NodeId, Privkey, RevocationData, WatchtowerSignerState};
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -64,6 +65,7 @@ use tracing::warn;
 #[derive(Clone)]
 pub struct Store {
     inner: fiber_store::Store,
+    namespace: Option<NodeNamespace>,
     watcher: Option<Arc<dyn Fn(StoreChange) + Send + Sync>>,
     #[cfg(feature = "watchtower")]
     watchtower_write_locks: Arc<parking_lot::Mutex<HashMap<NodeId, Arc<parking_lot::Mutex<()>>>>>,
@@ -92,12 +94,49 @@ impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Store")
             .field("inner", &self.inner)
+            .field("namespace", &self.namespace)
             .field("watcher", &self.watcher.as_ref().map(|_| "..."))
             .finish()
     }
 }
 
 impl Store {
+    /// Create a logical node store backed by this store's physical database.
+    pub fn namespaced(&self, namespace: NodeNamespace) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            namespace: Some(namespace),
+            // Watchers observe one logical node's state changes. Inheriting
+            // Public T's watcher would expose hosted tenant invoices and
+            // payments to Public T consumers such as CCH.
+            watcher: None,
+            #[cfg(feature = "watchtower")]
+            watchtower_write_locks: self.watchtower_write_locks.clone(),
+            #[cfg(feature = "watchtower")]
+            onchain_tlc_settlement_write_lock: self.onchain_tlc_settlement_write_lock.clone(),
+        }
+    }
+
+    /// Initialize or migrate this logical store to the current Fiber schema.
+    ///
+    /// A namespaced store owns its own migration version key, so migrations
+    /// scan only that node's logical keyspace.
+    pub fn ensure_current_schema(&self) -> Result<(), String> {
+        run_auto_migrate(self, Box::new(|_| true), Box::new(|_| {}))
+    }
+
+    fn namespace_prefix(&self) -> Option<Vec<u8>> {
+        self.namespace.as_ref().map(NodeNamespace::key_prefix)
+    }
+
+    fn physical_key(&self, key: &[u8]) -> Vec<u8> {
+        let Some(mut physical_key) = self.namespace_prefix() else {
+            return key.to_vec();
+        };
+        physical_key.extend_from_slice(key);
+        physical_key
+    }
+
     /// Shut down the browser database after all actors and background writes stop.
     #[cfg(target_arch = "wasm32")]
     pub fn shutdown(self) {
@@ -135,25 +174,79 @@ impl Store {
             .or_insert_with(|| Arc::new(parking_lot::Mutex::new(())))
             .clone()
     }
+
+    #[cfg(feature = "watchtower")]
+    fn local_watchtower_node_id(&self, channel_id: &Hash256) -> Option<NodeId> {
+        // Hosted channel state is namespaced, but its host watchtower keeps
+        // snapshots and settlement proofs in the root store. Resolve ownership
+        // from this namespace before reading those shared rows.
+        if self.namespace.is_some() {
+            let state = self.get_channel_actor_state(channel_id)?;
+            Some(NodeId::from_bytes(
+                state.get_local_pubkey().serialize().to_vec(),
+            ))
+        } else {
+            Some(NodeId::local())
+        }
+    }
+}
+
+/// A write batch that applies one node namespace to every physical key.
+pub struct StoreBatch {
+    inner: fiber_store::Batch,
+    namespace_prefix: Option<Vec<u8>>,
+}
+
+impl StoreBatch {
+    fn physical_key(&self, key: &[u8]) -> Vec<u8> {
+        let Some(namespace_prefix) = &self.namespace_prefix else {
+            return key.to_vec();
+        };
+        let mut physical_key = Vec::with_capacity(namespace_prefix.len() + key.len());
+        physical_key.extend_from_slice(namespace_prefix);
+        physical_key.extend_from_slice(key);
+        physical_key
+    }
+}
+
+impl BatchWriter for StoreBatch {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+        self.inner.put(self.physical_key(key.as_ref()), value)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.inner.delete(self.physical_key(key.as_ref()))
+    }
+
+    fn commit(self) {
+        self.inner.commit()
+    }
 }
 
 impl StorageBackend for Store {
-    type Batch = <fiber_store::Store as StorageBackend>::Batch;
+    type Batch = StoreBatch;
+
+    fn sync_writes(&self) -> bool {
+        self.inner.sync_writes()
+    }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
-        self.inner.get(key)
+        self.inner.get(self.physical_key(key.as_ref()))
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) {
-        self.inner.put(key, value)
+        self.inner.put(self.physical_key(key.as_ref()), value)
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) {
-        self.inner.delete(key)
+        self.inner.delete(self.physical_key(key.as_ref()))
     }
 
     fn batch(&self) -> Self::Batch {
-        self.inner.batch()
+        StoreBatch {
+            inner: self.inner.batch(),
+            namespace_prefix: self.namespace_prefix(),
+        }
     }
 
     fn collect_iterator(
@@ -163,8 +256,31 @@ impl StorageBackend for Store {
         take_while_fn: TakeWhileFn,
         limit: usize,
     ) -> Vec<KVPair> {
+        let Some(namespace_prefix) = self.namespace_prefix() else {
+            return self
+                .inner
+                .collect_iterator(start, direction, take_while_fn, limit);
+        };
+        let mut physical_start = namespace_prefix.clone();
+        physical_start.extend_from_slice(&start);
+        let physical_namespace_prefix = namespace_prefix.clone();
         self.inner
-            .collect_iterator(start, direction, take_while_fn, limit)
+            .collect_iterator(
+                physical_start,
+                direction,
+                Box::new(move |physical_key| {
+                    physical_key
+                        .strip_prefix(physical_namespace_prefix.as_slice())
+                        .is_some_and(&take_while_fn)
+                }),
+                limit,
+            )
+            .into_iter()
+            .filter_map(|mut kv| {
+                kv.key = kv.key.strip_prefix(namespace_prefix.as_slice())?.to_vec();
+                Some(kv)
+            })
+            .collect()
     }
 
     fn backup(&self, path: &Path) -> Result<(), StoreError> {
@@ -237,6 +353,7 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
         .map_err(|e| e.to_string())?;
     Ok(Store {
         inner: db,
+        namespace: None,
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -245,10 +362,23 @@ pub(crate) fn open_store_with_migrations<P: AsRef<Path>>(
     })
 }
 
+fn run_auto_migrate<S: StorageBackend>(
+    db: &S,
+    confirm_fn: MigrateConfirmFn,
+    progress_fn: MigrateProgressFn,
+) -> Result<(), String> {
+    let mut migrate = DbMigrate::new();
+    fiber_store::migrations::register_all_migrations(&mut migrate);
+    migrate
+        .auto_migrate(db, confirm_fn, progress_fn)
+        .map_err(|e| e.to_string())
+}
+
 pub fn check_validate<P: AsRef<Path>>(path: P) -> Result<(), String> {
     let db = fiber_store::Store::open_db(path.as_ref())?;
     let store = Store {
         inner: db,
+        namespace: None,
         watcher: None,
         #[cfg(feature = "watchtower")]
         watchtower_write_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -966,13 +1096,26 @@ impl NetworkActorStateStore for Store {
 }
 
 impl ChannelActorStateStore for Store {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_internal_channel(&self, peer: &Pubkey) -> Result<bool, String> {
+        // Only Public T owns hosted peers. Tenant stores must retain their own
+        // timeout policy and must not resolve peers through the host's registry.
+        if self.namespace.is_some() {
+            return Ok(false);
+        }
+        crate::lsp::TenantRegistry::new(self.namespaced(NodeNamespace::lsp_metadata()))
+            .find_by_tenant_pubkey(peer)
+            .map(|tenant| tenant.is_some())
+    }
+
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "ChannelActorState"))
     }
 
-    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+    fn insert_channel_actor_state(&self, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         let mut batch = self.batch();
 
         let kv = KeyValue::PubkeyChannelId((state.get_remote_pubkey(), state.id), state.state);
@@ -988,9 +1131,10 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state_with_pending_commit_diff(
         &self,
-        state: ChannelActorState,
+        mut state: ChannelActorState,
         diff: &CommitDiff,
     ) {
+        state.clear_local_signer_material();
         let channel_id = state.get_id();
         let mut batch = self.batch();
 
@@ -1008,7 +1152,8 @@ impl ChannelActorStateStore for Store {
         batch.commit();
     }
 
-    fn move_channel_actor_state(&self, old_id: &Hash256, state: ChannelActorState) {
+    fn move_channel_actor_state(&self, old_id: &Hash256, mut state: ChannelActorState) {
+        state.clear_local_signer_material();
         if old_id == &state.id {
             self.insert_channel_actor_state(state);
             return;
@@ -1191,6 +1336,19 @@ impl ChannelActorStateStore for Store {
     ) -> Option<StoredOnChainTlcSettlement> {
         #[cfg(feature = "watchtower")]
         {
+            if self.namespace.is_some() {
+                let node_id = self.local_watchtower_node_id(channel_id)?;
+                // Legacy proofs have no node identity and cannot establish
+                // tenant ownership. Hosted tenants only consume exact proofs
+                // from the host watchtower, never another namespace's fallback.
+                let key = Self::tlc_on_chain_settled_key(&node_id, channel_id, tlc_id);
+                return self.inner.get(key).map(|value| {
+                    StoredOnChainTlcSettlement::Exact(deserialize_from(
+                        value.as_ref(),
+                        "OnChainTlcSettlement",
+                    ))
+                });
+            }
             WatchtowerStore::get_onchain_tlc_settlement(
                 self,
                 &NodeId::local(),
@@ -1248,13 +1406,16 @@ impl ChannelActorStateStore for Store {
 
     #[cfg(feature = "watchtower")]
     fn get_local_watch_channel(&self, channel_id: &Hash256) -> Option<ChannelData> {
+        let node_id = self.local_watchtower_node_id(channel_id)?;
         let key = [
             &[WATCHTOWER_CHANNEL_PREFIX],
-            NodeId::local().as_ref(),
+            node_id.as_ref(),
             channel_id.as_ref(),
         ]
         .concat();
-        self.get(&key).map(|v| deserialize_from(&v, "ChannelData"))
+        self.inner
+            .get(&key)
+            .map(|v| deserialize_from(&v, "ChannelData"))
     }
 
     #[cfg(not(feature = "watchtower"))]
@@ -1263,7 +1424,45 @@ impl ChannelActorStateStore for Store {
     }
 }
 
+fn tenant_channel_opening_key(channel_id: &Hash256) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + channel_id.as_ref().len());
+    key.push(TENANT_CHANNEL_OPENING_PREFIX);
+    key.extend_from_slice(channel_id.as_ref());
+    key
+}
+
 impl ChannelOpenRecordStore for Store {
+    // Use a tenant-namespaced Store: get() prefixes the key and reads only that tenant's record.
+    fn get_tenant_channel_opening(
+        &self,
+        channel_id: &Hash256,
+    ) -> Option<crate::fiber::channel::TenantChannelOpening> {
+        self.get(tenant_channel_opening_key(channel_id))
+            .map(|bytes| serde_json::from_slice(&bytes).expect("valid persisted tenant opening"))
+    }
+
+    fn list_tenant_channel_openings(&self) -> Vec<crate::fiber::channel::TenantChannelOpening> {
+        self.collect_by_prefix(&[TENANT_CHANNEL_OPENING_PREFIX])
+            .into_iter()
+            .map(|pair| {
+                serde_json::from_slice(&pair.value).expect("valid persisted tenant opening")
+            })
+            .collect()
+    }
+
+    // put()/delete() prefix the key with this Store's tenant namespace; each
+    // opening has its own channel-id key.
+    fn put_tenant_channel_opening(&self, opening: crate::fiber::channel::TenantChannelOpening) {
+        self.put(
+            tenant_channel_opening_key(&opening.channel_id),
+            serde_json::to_vec(&opening).expect("serializable tenant opening"),
+        );
+    }
+
+    fn delete_tenant_channel_opening(&self, channel_id: &Hash256) {
+        self.delete(tenant_channel_opening_key(channel_id));
+    }
+
     fn get_channel_open_records(&self) -> Vec<ChannelOpenRecord> {
         let prefix = [CHANNEL_OPEN_RECORD_PREFIX];
         self.collect_by_prefix(&prefix)
@@ -1697,6 +1896,10 @@ impl NetworkGraphStateStore for Store {
 
 #[cfg(feature = "watchtower")]
 impl WatchtowerStore for Store {
+    fn get_watch_channels_for_node(&self, node_id: &NodeId) -> Vec<ChannelData> {
+        self.watch_channels_for_node(node_id)
+    }
+
     fn get_watch_channels_with_nodes(&self) -> Vec<(NodeId, ChannelData)> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.collect_by_prefix(&prefix)
@@ -1714,7 +1917,8 @@ impl WatchtowerStore for Store {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
+        local_settlement_key: Option<Privkey>,
+        local_settlement_key_pubkey: Pubkey,
         remote_settlement_key: Pubkey,
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
@@ -1725,6 +1929,7 @@ impl WatchtowerStore for Store {
             channel_id,
             funding_udt_type_script,
             local_settlement_key,
+            local_settlement_key_pubkey,
             remote_settlement_key,
             local_funding_pubkey,
             remote_funding_pubkey,
@@ -1738,7 +1943,8 @@ impl WatchtowerStore for Store {
         node_id: NodeId,
         channel_id: Hash256,
         funding_udt_type_script: Option<Script>,
-        local_settlement_key: Privkey,
+        local_settlement_key: Option<Privkey>,
+        local_settlement_key_pubkey: Pubkey,
         remote_settlement_key: Pubkey,
         local_funding_pubkey: Pubkey,
         remote_funding_pubkey: Pubkey,
@@ -1753,11 +1959,13 @@ impl WatchtowerStore for Store {
             channel_id.as_ref(),
         ]
         .concat();
+        let external = local_settlement_key.is_none();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
                 funding_udt_type_script,
                 local_settlement_key,
+                local_settlement_key_pubkey: Some(local_settlement_key_pubkey),
                 remote_settlement_key,
                 local_funding_pubkey,
                 remote_funding_pubkey,
@@ -1769,12 +1977,27 @@ impl WatchtowerStore for Store {
             },
             "ChannelData",
         );
+        let signer_state = if external {
+            WatchtowerSignerState::External(fiber_types::WatchtowerExternalSignerState::default())
+        } else {
+            WatchtowerSignerState::Internal
+        };
+        let signer_key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
         let mut batch = self.batch();
         batch.put(key, value);
+        batch.put(
+            signer_key,
+            serialize_to_vec(&signer_state, "WatchtowerSignerState"),
+        );
         batch.commit();
     }
 
-    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) {
+    fn remove_watch_channel(&self, node_id: NodeId, channel_id: Hash256) -> bool {
         // Only allow removing watchtower monitoring for closed channels.
         // Prevents accidental or malicious disabling of active channel protection.
         // Skipped in test builds to allow e2e tests to simulate stopping the watchtower.
@@ -1785,7 +2008,7 @@ impl WatchtowerStore for Store {
                     "Refusing to remove watchtower for live channel {} (state: {:?})",
                     channel_id, state.state
                 );
-                return;
+                return false;
             }
         }
         let key = [
@@ -1802,11 +2025,20 @@ impl WatchtowerStore for Store {
             .map(|channel_data| Self::watch_channel_payment_hashes(&channel_data))
             .unwrap_or_default();
         self.delete(key);
+        self.delete(
+            [
+                &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+        );
         self.cleanup_unused_watch_preimages_locked(
             &node_id,
             WatchtowerPreimageCleanupTarget::ExactSet(&payment_hashes),
             || {},
         );
+        true
     }
 
     fn update_revocation(
@@ -1834,6 +2066,12 @@ impl WatchtowerStore for Store {
             let kv = KeyValue::WatchtowerChannel(node_id, channel_id, channel_data);
             batch.put(kv.key(), kv.value());
             batch.commit();
+        } else {
+            tracing::warn!(
+                node_id = %node_id,
+                channel_id = %channel_id,
+                "update_revocation ignored: watch channel row does not exist"
+            );
         }
     }
 
@@ -1910,6 +2148,78 @@ impl WatchtowerStore for Store {
     fn get_watch_preimage(&self, node_id: &NodeId, payment_hash: &Hash256) -> Option<Hash256> {
         self.get(Self::watchtower_preimage_key(node_id, payment_hash))
             .map(|v| deserialize_from(v.as_ref(), "Preimage"))
+    }
+
+    fn get_watch_channel(&self, node_id: &NodeId, channel_id: &Hash256) -> Option<ChannelData> {
+        let key = [
+            &[WATCHTOWER_CHANNEL_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "ChannelData"))
+    }
+
+    fn get_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+    ) -> WatchtowerSignerState {
+        let key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "WatchtowerSignerState"))
+            .unwrap_or(WatchtowerSignerState::Internal)
+    }
+
+    fn put_watchtower_signer(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        state: WatchtowerSignerState,
+    ) {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        let key = [
+            &[WATCHTOWER_SIGNER_PREFIX],
+            node_id.as_ref(),
+            channel_id.as_ref(),
+        ]
+        .concat();
+        let mut batch = self.batch();
+        batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
+        batch.commit();
+    }
+
+    fn update_watchtower_signer<R, E>(
+        &self,
+        node_id: &NodeId,
+        channel_id: &Hash256,
+        update: impl FnOnce(&mut WatchtowerSignerState) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let lock = self.watchtower_write_lock(node_id);
+        let _guard = lock.lock();
+        let mut state = self.get_watchtower_signer(node_id, channel_id);
+        let original = state.clone();
+        let result = update(&mut state)?;
+        if state != original {
+            // Write directly: put_watchtower_signer would acquire this lock again.
+            let key = [
+                &[WATCHTOWER_SIGNER_PREFIX],
+                node_id.as_ref(),
+                channel_id.as_ref(),
+            ]
+            .concat();
+            let mut batch = self.batch();
+            batch.put(key, serialize_to_vec(&state, "WatchtowerSignerState"));
+            batch.commit();
+        }
+        Ok(result)
     }
 
     fn insert_onchain_tlc_settlement(

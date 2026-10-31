@@ -77,5 +77,6 @@ ignored = ["getrandom"]
 
 [lints.clippy]
 expect-fun-call = "allow"
+large-enum-variant = "allow"
 needless-return = "allow"
 upper-case-acronyms = "allow"

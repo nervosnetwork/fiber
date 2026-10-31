@@ -1,3 +1,4 @@
+use bincode::Options;
 use super::decode_as_new;
 use crate::migration::{Migration, MigrationStore};
 use tracing::info;
@@ -192,6 +193,17 @@ impl Migration for MigrationObj {
     }
 }
 
+// LSP's pre-feature layout is the current layout minus its final feature byte.
+// Decode the entire buffer to avoid mistaking one format's prefix for another.
+fn upgrade_lsp_layout<T: serde::de::DeserializeOwned>(value: &[u8]) -> Option<Vec<u8>> {
+    let decode = |bytes: &[u8]| bincode::DefaultOptions::new()
+        .with_fixint_encoding().reject_trailing_bytes().deserialize::<T>(bytes);
+    if decode(value).is_ok() { return Some(value.to_vec()); }
+    let mut upgraded = value.to_vec();
+    upgraded.push(0); // Existing commitments always used the legacy witness layout.
+    decode(&upgraded).ok().map(|_| upgraded)
+}
+
 fn migrate_channel_actor_data(store: &dyn MigrationStore) -> Result<(), String> {
     let entries = store.collect_prefix(CHANNEL_ACTOR_STATE_PREFIX);
     let total = entries.len();
@@ -199,6 +211,12 @@ fn migrate_channel_actor_data(store: &dyn MigrationStore) -> Result<(), String> 
     let mut skipped = 0u64;
 
     for (key, value) in entries {
+        if let Some(upgraded) = upgrade_lsp_layout::<fiber_types_current::ChannelActorData>(&value) {
+            store.put(&key, &upgraded);
+            migrated += 1;
+            continue;
+        }
+
         if bincode::deserialize::<NewChannelActorData>(&value).is_ok() {
             skipped += 1;
             continue;
@@ -255,6 +273,12 @@ fn migrate_watchtower_channel_data(store: &dyn MigrationStore) -> Result<(), Str
     let mut skipped = 0u64;
 
     for (key, value) in entries {
+        if let Some(upgraded) = upgrade_lsp_layout::<fiber_types_current::ChannelData>(&value) {
+            store.put(&key, &upgraded);
+            migrated += 1;
+            continue;
+        }
+
         if bincode::deserialize::<NewChannelData>(&value).is_ok() {
             skipped += 1;
             continue;
@@ -356,5 +380,33 @@ mod tests {
             bincode::deserialize(&new_bytes).expect("deserialize migrated watchtower channel data");
 
         assert_eq!(new.commitment_contract_features.bits(), 0);
+    }
+}
+
+#[cfg(test)]
+mod lsp_layout_tests {
+    use super::upgrade_lsp_layout;
+    use fiber_types_current::{sample::StoreSample, ChannelActorData, ChannelData};
+
+    fn check<T: serde::Serialize + serde::de::DeserializeOwned>(samples: Vec<T>) {
+        for sample in samples {
+            let bytes = bincode::serialize(&sample).unwrap();
+            assert_eq!(bytes.last(), Some(&0));
+            let old = &bytes[..bytes.len() - 1];
+            assert_eq!(upgrade_lsp_layout::<T>(old).unwrap(), bytes);
+            assert_eq!(upgrade_lsp_layout::<T>(&bytes).unwrap(), bytes);
+            let mut extra = bytes.clone(); extra.push(0);
+            assert!(upgrade_lsp_layout::<T>(&extra).is_none());
+        }
+    }
+
+    #[test]
+    fn preserves_existing_lsp_signer_state_and_watch_material() {
+        let mut channels = ChannelActorData::samples(42);
+        for channel in &mut channels { channel.commitment_contract_features = Default::default(); }
+        check(channels);
+        let mut watches = ChannelData::samples(42);
+        for watch in &mut watches { watch.commitment_contract_features = Default::default(); }
+        check(watches);
     }
 }

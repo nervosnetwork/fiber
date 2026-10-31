@@ -1,0 +1,50 @@
+meta {
+  name: wait prefund simple
+  type: http
+  seq: 5.95
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"get_payment","params":[{"payment_hash":"placeholder"}]}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].payment_hash = bru.getVar("PREFUND_PAYMENT_HASH");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const payment = res.body.result;
+  const iteration = Number(bru.getVar("PREFUND_ITERATION") || 0);
+  if (payment.status === "Success") {
+    bru.setVar("PREFUND_ITERATION", 0);
+    bru.setNextRequest("prefund public T XUDT");
+    return;
+  }
+  if (payment.status === "Failed") {
+    throw new Error(`prefund simple failed: ${payment.failed_error}`);
+  }
+  if (iteration + 1 < 30) {
+    bru.setVar("PREFUND_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait prefund simple");
+    return;
+  }
+  throw new Error(`prefund simple stayed ${payment.status}`);
+}

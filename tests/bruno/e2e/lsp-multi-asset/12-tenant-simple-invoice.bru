@@ -1,0 +1,47 @@
+meta {
+  name: tenant create SIMPLE_UDT invoice
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id":"42","jsonrpc":"2.0","method":"new_invoice",
+    "params":[{
+      "amount":"0x3e8","currency":"Fibd","description":"hosted multi-asset simple invoice",
+      "expiry":"0xe10","allow_trampoline_routing":true,"final_expiry_delta":"0x5265c00",
+      "payment_preimage":"0x2222222222222222222222222222222222222222222222222222222222222222",
+        "udt_type_script":{"code_hash":"{{UDT_CODE_HASH}}","hash_type":"data2","args":"{{UDT_SCRIPT_ARGS}}"}
+    }]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.invoice_address: isDefined
+  res.body.result.invoice.data.payment_hash: isDefined
+}
+
+script:post-response {
+  const routeHint = res.body.result.invoice.data.attrs
+    .map(attr => attr.trampoline_route_hint)
+    .find(value => value !== undefined);
+  if (routeHint !== bru.getEnvVar("NODE2_PUBKEY")) {
+    throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
+  }
+  bru.setVar("CURRENT_INVOICE_ASSET", "simple");
+  bru.setVar("CURRENT_INVOICE", res.body.result.invoice_address);
+  bru.setVar("CURRENT_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
+  bru.setNextRequest("payer pay hosted invoice");
+}

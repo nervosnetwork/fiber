@@ -1,11 +1,11 @@
 meta {
-  name: remove watched channel from node2 watchtower
+  name: stop Node2 standalone watchtower monitoring on Node3
   type: http
   seq: 11
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -31,4 +31,33 @@ body:json {
 assert {
   res.body.error: isUndefined
   res.body.result: isDefined
+}
+
+script:pre-request {
+  const axios = require('axios');
+  // The dedicated start.sh setup disables Node2's built-in watchtower and
+  // forwards its updates to Node3. Verify that the watch really exists before
+  // removing it; a successful remove RPC alone does not prove anything.
+  const { data } = await axios.post(bru.getEnvVar("NODE3_RPC_URL"), {
+    id: 42,
+    jsonrpc: "2.0",
+    method: "get_watchtower_signing_status",
+    params: [{ channel_id: bru.getVar("CHANNEL_ID") }],
+  }, { timeout: 10000 });
+  if (data.error || data.result?.channel_id !== bru.getVar("CHANNEL_ID")) {
+    throw new Error(`Node2 standalone watch was not registered: ${JSON.stringify(data)}`);
+  }
+}
+
+script:post-response {
+  const axios = require('axios');
+  const { data } = await axios.post(bru.getEnvVar("NODE3_RPC_URL"), {
+    id: 42,
+    jsonrpc: "2.0",
+    method: "get_watchtower_signing_status",
+    params: [{ channel_id: bru.getVar("CHANNEL_ID") }],
+  }, { timeout: 10000 });
+  if (data.error?.message !== "watched channel not found" || data.result !== undefined) {
+    throw new Error(`Node2 standalone watch was not removed: ${JSON.stringify(data)}`);
+  }
 }

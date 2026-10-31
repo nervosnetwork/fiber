@@ -1,0 +1,45 @@
+meta {
+  name: reactivate tenant for incoming payment
+  type: http
+  seq: 22
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "lsp_ensure_tenant",
+    "params": [
+      { "tenant_id": "placeholder" }
+    ]
+  }
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].tenant_id = bru.getVar("LSP_TENANT_ID");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.runtime_status: eq "active"
+}
+
+script:post-response {
+  if (res.body.error) {
+    console.log("Step 22 ERROR:", JSON.stringify(res.body.error));
+  }
+}

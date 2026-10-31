@@ -1,0 +1,22 @@
+meta {
+  name: verify SDK holds complete revocation evidence
+  type: http
+  seq: 16.5
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const records = res.body.revoked_commitments[bru.getVar("REMOTE_CHANNEL_ID")] || [];
+  if (!records.some(r => r.for_remote && r.version === 1)) {
+    throw new Error("SDK has no complete revocation signature for peer commitment 1");
+  }
+}

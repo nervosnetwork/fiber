@@ -9,7 +9,7 @@ NATIVE_PACKAGES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-types -
 # fiber-types excluded because fiber-store depends on fiber-types@0.8.1 from
 # crates.io, making "-p fiber-types" ambiguous. Checked separately.
 NATIVE_NO_FIBER_TYPES = -p fnn -p fiber-bin -p fnn-cli -p fiber-store -p fiber-json-types
-WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common
+WASM_PACKAGES = -p fiber-wasm -p fiber-wasm-db-worker -p fiber-wasm-db-common -p fiber-lsp-sdk
 
 .PHONY: build-metrics-prof
 build-metrics-prof:

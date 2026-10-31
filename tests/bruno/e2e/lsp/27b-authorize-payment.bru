@@ -1,0 +1,36 @@
+meta {
+  name: authorize hosted outgoing payment
+  type: http
+  seq: 27.5
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/authorize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"type":"Payment","channel_id":"placeholder",
+   "terms":{"payment_hash":"0x09dfb3a3fa5af1b3359b6256945af43e31be9f86f3d1b45779cebc09dc609138","hash_algorithm":"ckb_hash","inbound":false,"amount":100500,"expires_at_ms":0,"min_tlc_expiry_delta_ms":60000,"max_tlc_expiry_ms":0}}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.channel_id = bru.getVar("HOSTED_CHANNEL_ID");
+  body.terms.payment_hash = bru.getVar("LSP_OUTGOING_PAYMENT_HASH");
+  const now = Date.now();
+  body.terms.expires_at_ms = now + 3600000;
+  // The one-hop fixture spends 100000 plus its explicit 500 routing fee budget.
+  body.terms.max_tlc_expiry_ms = now + 7 * 86400000 + 3600000;
+  req.setBody(body);
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.authorized: eq true
+}

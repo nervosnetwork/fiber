@@ -1,0 +1,26 @@
+meta {
+  name: prepare next tenant channel
+  type: http
+  seq: 5.8
+}
+
+post {
+  url: {{LSP_SDK_AGENT_URL}}/prepare-channel
+  body: none
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+assert {
+  res.status: eq 200
+  res.body.result.channel_open_signer_material: isDefined
+}
+
+script:post-response {
+  bru.setVar("REMOTE_OPEN_MATERIAL", res.body.result.channel_open_signer_material);
+  const next = bru.getVar("NEXT_TENANT_ASSET");
+  bru.setNextRequest(next === "simple" ? "open tenant SIMPLE_UDT channel" : "open tenant XUDT channel");
+}
