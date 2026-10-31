@@ -94,3 +94,60 @@ pub async fn register_pub_sub_rpc(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fiber_types::Hash256;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct Counter;
+
+    #[async_trait::async_trait]
+    impl Actor for Counter {
+        type Msg = StoreChange;
+        type State = Arc<AtomicUsize>;
+        type Arguments = Arc<AtomicUsize>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            seen: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(seen)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _message: Self::Msg,
+            seen: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The store sends a change for each write it makes; a burst of more than the port's
+    /// buffer, before the subscriber's forwarding task runs, must still reach the subscriber,
+    /// and later changes too. The RPC subscription and the CCH actor subscribe this way.
+    #[tokio::test]
+    async fn a_burst_of_store_changes_reaches_the_subscriber() {
+        let port = Arc::new(OutputPort::<StoreChange>::default());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (counter, _) = Actor::spawn(None, Counter, seen.clone()).await.unwrap();
+        counter.subscribe_to_port(&port);
+        let change = |i: u8| StoreChange::PutPreimage {
+            payment_hash: Hash256::from([i; 32]),
+            payment_preimage: Hash256::from([i; 32]),
+        };
+        for i in 0..100u8 {
+            port.send(change(i));
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        port.send(change(200));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seen.load(Ordering::SeqCst), 101);
+    }
+}
