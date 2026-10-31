@@ -18,7 +18,7 @@ export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::trackers::lnd_track
 
 is_lsp_e2e() {
     case "$testcase_name" in
-        e2e/lsp|e2e/lsp-remote-signer|e2e/lsp-remote-signer-watchtower*)
+        e2e/lsp|e2e/lsp-multi-asset|e2e/lsp-remote-signer|e2e/lsp-remote-signer-watchtower*)
             return 0
             ;;
         *)
@@ -71,7 +71,7 @@ case "$testcase_name" in
   "e2e/router-pay")
     export START_BOOTNODE=y
     ;;
-  e2e/lsp|e2e/lsp-remote-signer|e2e/lsp-remote-signer-watchtower*)
+  e2e/lsp|e2e/lsp-multi-asset|e2e/lsp-remote-signer|e2e/lsp-remote-signer-watchtower*)
     export RPC_ENABLED_MODULES=cch,channel,payment,graph,info,invoice,lsp,peer,pubsub,watchtower,dev,prof
     ;;
   "e2e/funding-tx-verification")

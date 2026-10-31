@@ -18,7 +18,13 @@ Before servicing a channel, the local fixture driver must:
    fulfillment preimages when settling TLCs, and close or announcement approvals.
    These authorizations and the verified channel history persist in the SDK store.
 
+`POST /prepare-channel` allocates the next pending channel key for a tenant that
+already has a bound channel. The multi-channel LSP workflow calls it before opening
+each additional tenant channel. It returns the new `channel_open_signer_material`
+in the `result` object.
+
 The test-only `POST /authorize` control endpoint records driver intent:
+
 
 - `Invoice`: `channel_id`, SDK `PaymentAuthorization` in `terms`, and the
   wallet-held `preimage`. Calls `authorize_invoice` before the LSP sees a payment.

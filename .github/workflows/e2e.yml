@@ -18,6 +18,7 @@ jobs:
           - external-funding-open
           - invoice-ops
           - lsp
+          - lsp-multi-asset
           - lsp-remote-signer
           - lsp-remote-signer-watchtower
           - lsp-remote-signer-watchtower-evict

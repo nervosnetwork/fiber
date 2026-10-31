@@ -1,0 +1,35 @@
+meta {
+  name: sign current tenant funding
+  type: http
+  seq: 5.1
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"sign_external_funding_tx","params":[{"unsigned_funding_tx":{},"private_key":"{{LSP_REMOTE_SIGNER_FUNDING_PRIVKEY}}"}]}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].unsigned_funding_tx = bru.getVar("CURRENT_UNSIGNED_TX");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.signed_funding_tx: isDefined
+}
+
+script:post-response {
+  bru.setVar("CURRENT_SIGNED_TX", res.body.result.signed_funding_tx);
+  bru.setNextRequest("submit current tenant funding");
+}

@@ -1,0 +1,34 @@
+meta {
+  name: payer pay hosted invoice
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"send_payment","params":[{"invoice":"placeholder","max_fee_amount":"0x186a0","tlc_expiry_limit":"0x240c8400"}]}
+}
+
+script:pre-request {
+  const body = req.getBody();
+  body.params[0].invoice = bru.getVar("CURRENT_INVOICE");
+  req.setBody(body);
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.payment_hash: eq "{{CURRENT_PAYMENT_HASH}}"
+}
+
+script:post-response {
+  bru.setNextRequest("wait payer payment success");
+}

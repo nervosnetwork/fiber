@@ -1,0 +1,35 @@
+meta {
+  name: check tenant channels
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_OPERATOR_TOKEN}}
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"lsp_list_tenants"}
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const tenant = (res.body.result.tenants || []).find(item => item.tenant_id === bru.getVar("LSP_TENANT_ID"));
+  const channels = tenant?.channels || [];
+  if (channels.length < 3) {
+    throw new Error(`expected three hosted channels, got ${JSON.stringify(tenant)}`);
+  }
+  if (!channels.every(channel => channel.online)) {
+    throw new Error(`not all hosted channels are online: ${JSON.stringify(channels)}`);
+  }
+}

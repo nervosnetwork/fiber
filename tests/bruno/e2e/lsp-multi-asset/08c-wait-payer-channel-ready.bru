@@ -1,0 +1,48 @@
+meta {
+  name: wait payer channel ready
+  type: http
+  seq: 8.2
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {"id":"42","jsonrpc":"2.0","method":"list_channels","params":[{"pubkey":"{{NODE2_PUBKEY}}"}]}
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  const current = bru.getVar("CURRENT_PAYER_UDT_SCRIPT");
+  const matches = channel => {
+    if (!current) return !channel.funding_udt_type_script;
+    const asset = channel.funding_udt_type_script;
+    return asset && asset.code_hash === current.code_hash && asset.args === current.args;
+  };
+  const channel = (res.body.result.channels || []).find(
+    item => item.state?.state_name === "ChannelReady" && matches(item)
+  );
+  const iteration = Number(bru.getVar("CURRENT_PAYER_READY_ITERATION") || 0);
+  if (channel) {
+    bru.setVar("CURRENT_PAYER_READY_ITERATION", 0);
+    bru.setNextRequest("advance payer asset");
+    return;
+  }
+  if (iteration + 1 < 30) {
+    bru.setVar("CURRENT_PAYER_READY_ITERATION", iteration + 1);
+    await new Promise(r => setTimeout(r, 1000));
+    bru.setNextRequest("wait payer channel ready");
+    return;
+  }
+  throw new Error("payer channel did not become ready");
+}

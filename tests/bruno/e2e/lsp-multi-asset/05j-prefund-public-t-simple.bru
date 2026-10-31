@@ -1,0 +1,39 @@
+meta {
+  name: prefund public T SIMPLE_UDT
+  type: http
+  seq: 5.9
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {{LSP_TENANT_TOKEN}}
+}
+
+body:json {
+  {
+    "id":"42","jsonrpc":"2.0","method":"send_payment",
+    "params":[{
+      "target_pubkey":"{{NODE2_PUBKEY}}",
+      "amount":"0x1388",
+      "keysend":true,
+      "udt_type_script":{"code_hash":"{{UDT_CODE_HASH}}","hash_type":"data2","args":"{{UDT_SCRIPT_ARGS}}"},
+      "max_fee_amount":"0x186a0"
+    }]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.payment_hash: isDefined
+}
+
+script:post-response {
+  bru.setVar("PREFUND_PAYMENT_HASH", res.body.result.payment_hash);
+  bru.setNextRequest("wait prefund simple");
+}

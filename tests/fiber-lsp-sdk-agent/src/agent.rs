@@ -416,6 +416,19 @@ impl<R: FiberRpc, S: SignerStore> Agent<R, S> {
         Ok(())
     }
 
+    /// Allocate a new pending channel key and publish its opening material.
+    /// The e2e driver uses this to open another channel for the same tenant.
+    pub async fn prepare_channel(&mut self) -> Result<fiber_lsp_sdk::ChannelOpenSignerMaterial> {
+        let material = self
+            .session
+            .allocate_pending_channel()
+            .await
+            .map_err(|error| anyhow!("allocate pending channel: {error}"))?;
+        self.persist_state()?;
+        self.write_status().await?;
+        Ok(material)
+    }
+
     /// Open through the production tenant RPC and validate before installing local state.
     pub async fn open_tenant_channel(
         &mut self,
@@ -1130,10 +1143,9 @@ mod tests {
                     tenant_id: tenant_id.as_str().to_string(),
                     root_signer_pubkey: Some(root_signer_pubkey.into()),
                     invoice_pubkey: self.lsp_key.pubkey().into(),
-                    private_channel_id: None,
+                    channels: Vec::new(),
                     created_at: 1,
                     runtime_status: LspTenantRuntimeStatus::Active,
-                    channel_online: false,
                 },
                 access_token: "tenant-token".to_string(),
             })

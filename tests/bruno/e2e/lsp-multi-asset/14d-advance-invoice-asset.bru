@@ -1,0 +1,26 @@
+meta {
+  name: advance invoice asset
+  type: http
+  seq: 14.3
+}
+
+get {
+  url: {{LSP_SDK_AGENT_URL}}/status
+  body: none
+  auth: none
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  const asset = bru.getVar("CURRENT_INVOICE_ASSET");
+  if (asset === "ckb") {
+    bru.setNextRequest("tenant create SIMPLE_UDT invoice");
+  } else if (asset === "simple") {
+    bru.setNextRequest("tenant create XUDT invoice");
+  } else {
+    bru.setNextRequest("check tenant channels");
+  }
+}
