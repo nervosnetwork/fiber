@@ -13125,6 +13125,38 @@ fn test_external_funding_witness_merge_preserves_existing_signatures() {
     assert_eq!(merged[2], remote_extra_signature);
 }
 
+#[test]
+fn test_external_funding_witness_merge_replaces_secp_placeholders() {
+    // The witness the funding builder writes for a secp256k1 input it does not sign.
+    let placeholder = ckb_types::packed::WitnessArgs::new_builder()
+        .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
+        .build();
+    assert!(crate::ckb::is_secp_sighash_placeholder_witness(
+        placeholder.as_slice()
+    ));
+    let placeholder: Bytes = placeholder.as_bytes().pack();
+    let external_signature: Bytes = [1u8; 65].pack();
+    let remote_signature: Bytes = [2u8; 65].pack();
+    let local_tx = Transaction::default()
+        .as_advanced_builder()
+        .set_witnesses(vec![external_signature.clone(), placeholder.clone()])
+        .build();
+
+    let merged = merge_external_funding_witnesses(
+        local_tx.witnesses(),
+        vec![placeholder, remote_signature.clone()],
+    );
+
+    assert_eq!(
+        merged[0], external_signature,
+        "a peer's placeholder must not replace a signature"
+    );
+    assert_eq!(
+        merged[1], remote_signature,
+        "our placeholder takes the peer's signature"
+    );
+}
+
 async fn wait_for_external_funding_post_submit_progress(
     node: &NetworkNode,
     channel_id: Hash256,
@@ -15201,6 +15233,22 @@ mod udt_funding_cell_capacity {
         assert!(!state.can_auto_fulfill_received_tlc(&tlc));
 
         tlc.forwarding_tlc = None;
+        // A queued failure is the selected outcome for this forwarding attempt and must block
+        // fulfill from a local preimage.
+        state
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::RemoveTlc(
+                tlc_id,
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                    &NO_SHARED_SECRET,
+                )),
+            ));
+        assert!(!state.can_auto_fulfill_received_tlc(&tlc));
+
+        // A queued fulfill is the settlement being replayed; it must not block rebuilding the
+        // hold-set contexts.
+        state.retryable_tlc_operations.clear();
         state
             .retryable_tlc_operations
             .push_back(RetryableTlcOperation::RemoveTlc(
@@ -15209,7 +15257,7 @@ mod udt_funding_cell_capacity {
                     payment_preimage: gen_rand_sha256_hash(),
                 }),
             ));
-        assert!(!state.can_auto_fulfill_received_tlc(&tlc));
+        assert!(state.can_auto_fulfill_received_tlc(&tlc));
 
         state.retryable_tlc_operations.clear();
         tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {

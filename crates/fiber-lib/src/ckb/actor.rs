@@ -319,15 +319,26 @@ impl Actor for CkbChainActor {
                     Err(err) => {
                         //FIXME(yukang): RBF or duplicated transaction handling
                         match err {
-                            RpcError::Rpc(e)
-                                if (e.code.code() == -1107 || e.code.code() == -1111) =>
-                            {
+                            RpcError::Rpc(e) if e.code.code() == -1107 => {
                                 tracing::warn!(
                                     "[{}] transaction { } already in pool",
                                     myself.get_name().unwrap_or_default(),
                                     tx.hash(),
                                 );
                                 Ok(())
+                            }
+                            // PoolRejectedRBF: another transaction in the pool spends an input of
+                            // this one, and this one cannot replace it. It was taken for "already
+                            // in pool", so a funding that lost its input waited for its own
+                            // timeout (LSP2, 2026-10-28).
+                            RpcError::Rpc(ref e) if super::is_pool_conflict_code(e.code.code()) => {
+                                tracing::error!(
+                                    "[{}] transaction {} conflicts with one in the pool: {:?}",
+                                    myself.get_name().unwrap_or_default(),
+                                    tx.hash(),
+                                    err
+                                );
+                                Err(err)
                             }
                             _ => {
                                 tracing::error!(
