@@ -1,4 +1,5 @@
 name: Unittests for wasm32-unknown-unknown
+# Pinned to ubuntu-24.04 for the rocksdb/GCC 15 reason described in ci.yml.
 on:
   push:
     branches: develop
@@ -9,7 +10,7 @@ on:
 jobs:
   unit-test:
     name: Run unit tests in browser
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 

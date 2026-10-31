@@ -1,6 +1,11 @@
 on: [push, pull_request]
 
 name: Continuous integration
+# Linux jobs are pinned to ubuntu-24.04 on purpose: `ubuntu-latest` now resolves to
+# ubuntu-26.04, whose GCC 15 no longer includes <cstdint> transitively from the C++
+# standard headers, and the vendored rocksdb 8.5.4 (via ckb-rocksdb 0.21.1) fails to
+# compile there ("'uint64_t' has not been declared"). Move back to ubuntu-latest once
+# rocksdb is bumped to a version that builds with GCC 15.
 
 env:
   CARGO_TERM_COLOR: always
@@ -9,7 +14,7 @@ env:
 jobs:
   changes:
     name: Detect channel_restart_stress Changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pull-requests: read
     outputs:
@@ -33,7 +38,7 @@ jobs:
 
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dsherret/rust-toolchain-file@v1
@@ -47,7 +52,7 @@ jobs:
 
   cargo-shear:
     name: Cargo Shear
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dsherret/rust-toolchain-file@v1
@@ -61,7 +66,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -87,7 +92,7 @@ jobs:
     name: channel_restart_stress
     needs: [changes]
     if: needs.changes.outputs.channel_restart_stress == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -106,7 +111,7 @@ jobs:
 
   fmt:
     name: Rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dsherret/rust-toolchain-file@v1
@@ -117,7 +122,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dsherret/rust-toolchain-file@v1
@@ -129,7 +134,7 @@ jobs:
           make clippy
 
   typos:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -147,7 +152,7 @@ jobs:
   coverage:
     name: Code Coverage
     needs: [test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     steps:
       - uses: actions/checkout@v6
@@ -177,7 +182,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
         profile: [dev, release]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     timeout-minutes: 45
@@ -314,7 +319,7 @@ jobs:
 
   benchmark:
     name: Benchmark (Non-Gossip)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     if: github.event_name == 'pull_request'
     steps:
@@ -409,7 +414,7 @@ jobs:
 
   payment-benchmark:
     name: Payment Benchmark
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     if: false # temporarily disabled
     steps:
