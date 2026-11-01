@@ -27,7 +27,10 @@ assert {
 }
 
 script:post-response {
+  if (res.body.error) throw new Error(JSON.stringify(res.body.error));
   bru.setVar("CURRENT_PAYER_ASSET", "ckb");
   bru.setVar("CURRENT_PAYER_UDT_SCRIPT", "");
-  bru.setNextRequest("generate payer channel epochs");
+  bru.setVar("CURRENT_PAYER_FUNDING_ITERATION", 0);
+  bru.setVar("CURRENT_PAYER_BROADCAST_ITERATION", 0);
+  bru.setNextRequest("wait payer funding transaction");
 }

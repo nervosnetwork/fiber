@@ -29,6 +29,7 @@ assert {
 }
 
 script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
   const payment = res.body.result;
   const iteration = Number(bru.getVar("CURRENT_PAYER_PAYMENT_ITERATION") || 0);
   if (payment.status === "Success") {

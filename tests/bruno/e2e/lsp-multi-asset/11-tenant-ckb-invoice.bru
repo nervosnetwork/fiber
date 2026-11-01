@@ -21,7 +21,7 @@ body:json {
     "params":[{
       "amount":"0xf4240","currency":"Fibd","description":"hosted multi-asset ckb invoice",
       "expiry":"0xe10","allow_trampoline_routing":true,"final_expiry_delta":"0x5265c00",
-      "payment_preimage":"0x1111111111111111111111111111111111111111111111111111111111111111"
+      "payment_hash":"0x0e980cbe0b76eed0d53aa6e1f4febe500500147098fb251e18ee565f7cc12d81"
     }]
   }
 }
@@ -33,6 +33,7 @@ assert {
 }
 
 script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
   const routeHint = res.body.result.invoice.data.attrs
     .map(attr => attr.trampoline_route_hint)
     .find(value => value !== undefined);
@@ -40,7 +41,11 @@ script:post-response {
     throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
   }
   bru.setVar("CURRENT_INVOICE_ASSET", "ckb");
+  bru.setVar("CURRENT_INVOICE_CHANNEL_ID", bru.getVar("HOSTED_CKB_CHANNEL_ID"));
+  bru.setVar("CURRENT_INVOICE_AMOUNT", 1000000);
+  bru.setVar("CURRENT_INVOICE_PREIMAGE", "0x1111111111111111111111111111111111111111111111111111111111111111");
   bru.setVar("CURRENT_INVOICE", res.body.result.invoice_address);
   bru.setVar("CURRENT_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
-  bru.setNextRequest("payer pay hosted invoice");
+  bru.setVar("CURRENT_INVOICE_ITERATION", 0);
+  bru.setNextRequest("authorize current hosted invoice");
 }

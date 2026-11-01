@@ -30,12 +30,16 @@ assert {
 }
 
 script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
   const status = res.body.result.status;
   const iteration = Number(bru.getVar("CURRENT_INVOICE_ITERATION") || 0);
   if (status === "Paid") {
     bru.setVar("CURRENT_INVOICE_ITERATION", 0);
     bru.setNextRequest("advance invoice asset");
     return;
+  }
+  if (status === "Cancelled" || status === "Expired") {
+    throw new Error(`hosted invoice became ${status}`);
   }
   if (iteration + 1 < 30) {
     bru.setVar("CURRENT_INVOICE_ITERATION", iteration + 1);

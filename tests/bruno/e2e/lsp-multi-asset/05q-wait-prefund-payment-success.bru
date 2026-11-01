@@ -1,7 +1,7 @@
 meta {
-  name: wait prefund xudt
+  name: wait prefund payment success
   type: http
-  seq: 5.97
+  seq: 5.95
 }
 
 post {
@@ -34,17 +34,17 @@ script:post-response {
   const iteration = Number(bru.getVar("PREFUND_ITERATION") || 0);
   if (payment.status === "Success") {
     bru.setVar("PREFUND_ITERATION", 0);
-    bru.setNextRequest("open payer CKB channel");
+    bru.setNextRequest("wait prefund invoice paid");
     return;
   }
   if (payment.status === "Failed") {
-    throw new Error(`prefund xudt failed: ${payment.failed_error}`);
+    throw new Error(`prefund ${bru.getVar("PREFUND_ASSET")} failed: ${payment.failed_error}`);
   }
   if (iteration + 1 < 30) {
     bru.setVar("PREFUND_ITERATION", iteration + 1);
     await new Promise(r => setTimeout(r, 1000));
-    bru.setNextRequest("wait prefund xudt");
+    bru.setNextRequest("wait prefund payment success");
     return;
   }
-  throw new Error(`prefund xudt stayed ${payment.status}`);
+  throw new Error(`prefund ${bru.getVar("PREFUND_ASSET")} stayed ${payment.status}`);
 }

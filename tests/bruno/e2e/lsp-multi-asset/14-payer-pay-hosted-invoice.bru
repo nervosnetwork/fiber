@@ -19,6 +19,8 @@ body:json {
 }
 
 script:pre-request {
+  bru.setVar("CURRENT_PAYER_PAYMENT_ITERATION", 0);
+  bru.setVar("CURRENT_HOLD_RECEIVED_ITERATION", 0);
   const body = req.getBody();
   body.params[0].invoice = bru.getVar("CURRENT_INVOICE");
   req.setBody(body);
@@ -30,5 +32,6 @@ assert {
 }
 
 script:post-response {
-  bru.setNextRequest("wait payer payment success");
+  if (res.body.error) throw new Error(res.body.error.message);
+  bru.setNextRequest("wait current hosted hold invoice received");
 }

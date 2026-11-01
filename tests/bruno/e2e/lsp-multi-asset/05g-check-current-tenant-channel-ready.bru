@@ -27,6 +27,7 @@ script:post-response {
   const channel = (res.body.result.channels || []).find(item => item.channel_id === bru.getVar("CURRENT_CHANNEL_ID"));
   const iteration = Number(bru.getVar("CURRENT_READY_ITERATION") || 0);
   if (channel?.state?.state_name === "ChannelReady") {
+    bru.setVar(`HOSTED_${bru.getVar("CURRENT_ASSET").toUpperCase()}_CHANNEL_ID`, channel.channel_id);
     bru.setVar("CURRENT_READY_ITERATION", 0);
     bru.setNextRequest("advance tenant asset");
     return;

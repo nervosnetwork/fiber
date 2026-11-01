@@ -21,8 +21,8 @@ body:json {
     "params":[{
       "amount":"0x3e8","currency":"Fibd","description":"hosted multi-asset xudt invoice",
       "expiry":"0xe10","allow_trampoline_routing":true,"final_expiry_delta":"0x5265c00",
-      "payment_preimage":"0x3333333333333333333333333333333333333333333333333333333333333333",
-        "udt_type_script":{"code_hash":"{{XUDT_CODE_HASH}}","hash_type":"data2","args":"{{XUDT_SCRIPT_ARGS}}"}
+      "payment_hash":"0xdbddb41b1249f996f6ef6ef69499964db5b200dd8e82360b7de82448e36cc1e4",
+      "udt_type_script":{"code_hash":"{{XUDT_CODE_HASH}}","hash_type":"data2","args":"{{XUDT_SCRIPT_ARGS}}"}
     }]
   }
 }
@@ -34,6 +34,7 @@ assert {
 }
 
 script:post-response {
+  if (res.body.error) throw new Error(res.body.error.message);
   const routeHint = res.body.result.invoice.data.attrs
     .map(attr => attr.trampoline_route_hint)
     .find(value => value !== undefined);
@@ -41,7 +42,11 @@ script:post-response {
     throw new Error("hosted invoice must advertise Public T as its trampoline route hint");
   }
   bru.setVar("CURRENT_INVOICE_ASSET", "xudt");
+  bru.setVar("CURRENT_INVOICE_CHANNEL_ID", bru.getVar("HOSTED_XUDT_CHANNEL_ID"));
+  bru.setVar("CURRENT_INVOICE_AMOUNT", 1000);
+  bru.setVar("CURRENT_INVOICE_PREIMAGE", "0x3333333333333333333333333333333333333333333333333333333333333333");
   bru.setVar("CURRENT_INVOICE", res.body.result.invoice_address);
   bru.setVar("CURRENT_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
-  bru.setNextRequest("payer pay hosted invoice");
+  bru.setVar("CURRENT_INVOICE_ITERATION", 0);
+  bru.setNextRequest("authorize current hosted invoice");
 }
