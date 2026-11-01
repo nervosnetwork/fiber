@@ -2039,7 +2039,7 @@ where
 
     pub async fn handle_commitment_signed_command(
         &self,
-        myself: &ActorRef<ChannelActorMessage>,
+        _myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
         // 1. Strict invariant check: cannot initiate if already awaiting signature
@@ -2058,13 +2058,10 @@ where
         state.clean_up_failed_tlcs();
 
         let (content, settlement_data) = state.prepare_commitment_signature_request()?;
-        state.request_and_delegate_signature(
-            myself,
-            ChannelSignatureRequest::SendCommitmentSigned {
-                content,
-                settlement_data,
-            },
-        )
+        state.request_signature(ChannelSignatureRequest::SendCommitmentSigned {
+            content,
+            settlement_data,
+        })
     }
 
     fn commitment_signed_flags(
@@ -2382,6 +2379,67 @@ where
             .complete_request(receipt)
             .map_err(Self::signing_context_error)?;
 
+        self.finish_signature_request(myself, state, request, partial_signature)
+            .await?;
+        Ok(fiber_types::SubmitSignatureOutcome::Applied)
+    }
+
+    /// Local keys are available now: finish signing in this actor turn instead
+    /// of queuing a self-message behind more TLC updates. External signatures
+    /// still go through validation, a recovery checkpoint and a durable RPC reply.
+    async fn complete_local_signatures(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) -> ProcessingChannelResult {
+        if !state.channel_signer.is_local() {
+            return Ok(());
+        }
+        // A continuation can request another signature (e.g. commitment then
+        // revocation). Drain iteratively, without recursive actor messages.
+        while let Some((request_id, request)) = state.signing_context.awaiting_signature() {
+            if state.signature_tlc_deadline_reached(now_timestamp_as_millis_u64()) {
+                self.force_close_expired_signature(myself, state).await?;
+                return Ok(());
+            }
+            let ChannelSignOutcome::Ready(SignerNotification::ChannelSignatureReady {
+                signature,
+                ..
+            }) =
+                state
+                    .channel_signer
+                    .request_signature(state.get_id(), request_id, request.clone())
+            else {
+                return Err(ProcessingChannelError::InvalidState(
+                    "local channel signer did not produce a signature".to_string(),
+                ));
+            };
+            let partial_signature = signature.map_err(ProcessingChannelError::InvalidState)?;
+            // This signature was generated here, not submitted by an RPC caller.
+            // No external-response verification/checkpoint is needed. The
+            // finish_* methods retain their persist-before-send boundaries,
+            // and handle() saves the completed state before the next message.
+            state
+                .signing_context
+                .complete_request(LastAppliedChannelSignature {
+                    request_id,
+                    partial_signature,
+                    next_material: None,
+                })
+                .map_err(Self::signing_context_error)?;
+            self.finish_signature_request(myself, state, request, partial_signature)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_signature_request(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        request: ChannelSignatureRequest,
+        partial_signature: PartialSignature,
+    ) -> ProcessingChannelResult {
         match request {
             ChannelSignatureRequest::SendCommitmentSigned {
                 content,
@@ -2482,7 +2540,7 @@ where
         }
 
         self.drain_pending_messages(myself, state).await?;
-        Ok(fiber_types::SubmitSignatureOutcome::Applied)
+        Ok(())
     }
 
     async fn finish_send_revoke_and_ack(
@@ -5220,6 +5278,10 @@ where
             }
         }
 
+        if let Err(err) = self.complete_local_signatures(&myself, state).await {
+            error!("Error while completing local channel signature: {:?}", err);
+        }
+
         // Continuations may still use the old round while advancing counters.
         // Prune only after the complete message has been processed.
         state.prune_expired_signer_rounds(
@@ -6202,24 +6264,13 @@ impl ChannelActorState {
         self.channel_signer.signing_status(&self.signing_context)
     }
 
-    fn request_and_delegate_signature(
-        &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
-        request: ChannelSignatureRequest,
-    ) -> ProcessingChannelResult {
+    fn request_signature(&mut self, request: ChannelSignatureRequest) -> ProcessingChannelResult {
         let request_id = SignatureRequestId(crate::gen_rand_sha256_hash());
+        // The actor drains local requests before yielding. External requests
+        // remain pending and are published after the actor's final state save.
         self.signing_context
-            .request_signature(request_id, request.clone())
-            .map_err(|error| ProcessingChannelError::InvalidState(error.to_string()))?;
-        let outcome = self
-            .channel_signer
-            .request_signature(self.get_id(), request_id, request);
-        if let ChannelSignOutcome::Ready(notification) = outcome {
-            myself
-                .send_message(ChannelActorMessage::SignerNotification(notification))
-                .map_err(|error| ProcessingChannelError::InvalidState(error.to_string()))?;
-        }
-        Ok(())
+            .request_signature(request_id, request)
+            .map_err(|error| ProcessingChannelError::InvalidState(error.to_string()))
     }
 
     /// Verify a submitted partial signature against the persisted plaintext and nonce.
@@ -7884,7 +7935,7 @@ impl ChannelActorState {
 
     fn get_or_create_local_channel_announcement_signature(
         &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
+        _myself: &ActorRef<ChannelActorMessage>,
         remote_nonce: PubNonce,
         _message: [u8; 32],
         unsigned_announcement: &ChannelAnnouncement,
@@ -7904,23 +7955,20 @@ impl ChannelActorState {
         let agg_nonce = AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce));
         let key_agg_ctx = self.get_deterministic_musig2_agg_context();
         if self
-            .request_and_delegate_signature(
-                myself,
-                ChannelSignatureRequest::SignChannelAnnouncement {
-                    content: Musig2SigningContent {
-                        slot: NonceSlot {
-                            purpose: NoncePurpose::ChannelAnnouncement,
-                            commitment_number: 0,
-                        },
-                        commitment_counter: None,
-                        key_agg_ctx,
-                        agg_nonce,
-                        content: Musig2SignableContent::ChannelAnnouncement(
-                            unsigned_announcement.clone(),
-                        ),
+            .request_signature(ChannelSignatureRequest::SignChannelAnnouncement {
+                content: Musig2SigningContent {
+                    slot: NonceSlot {
+                        purpose: NoncePurpose::ChannelAnnouncement,
+                        commitment_number: 0,
                     },
+                    commitment_counter: None,
+                    key_agg_ctx,
+                    agg_nonce,
+                    content: Musig2SignableContent::ChannelAnnouncement(
+                        unsigned_announcement.clone(),
+                    ),
                 },
-            )
+            })
             .is_err()
         {
             return None;
@@ -8050,7 +8098,7 @@ impl ChannelActorState {
     // If `resend` is true, we MUST use the cached message (for reestablish scenarios).
     pub(crate) async fn send_revoke_and_ack_message(
         &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
+        _myself: &ActorRef<ChannelActorMessage>,
         resend: bool,
     ) -> ProcessingChannelResult {
         // When resending during reestablish, we MUST use the cached message because:
@@ -8142,21 +8190,18 @@ impl ChannelActorState {
             commitment_lock_script_args,
         };
         let commitment_number = self.get_remote_commitment_number();
-        self.request_and_delegate_signature(
-            myself,
-            ChannelSignatureRequest::SendRevokeAndAck {
-                content: Musig2SigningContent {
-                    slot: NonceSlot {
-                        purpose: NoncePurpose::Revocation,
-                        commitment_number,
-                    },
-                    commitment_counter: Some(CommitmentCounter::Remote),
-                    key_agg_ctx: common_ctx.key_agg_ctx,
-                    agg_nonce: common_ctx.agg_nonce,
-                    content: signable,
+        self.request_signature(ChannelSignatureRequest::SendRevokeAndAck {
+            content: Musig2SigningContent {
+                slot: NonceSlot {
+                    purpose: NoncePurpose::Revocation,
+                    commitment_number,
                 },
+                commitment_counter: Some(CommitmentCounter::Remote),
+                key_agg_ctx: common_ctx.key_agg_ctx,
+                agg_nonce: common_ctx.agg_nonce,
+                content: signable,
             },
-        )
+        })
     }
 
     pub fn get_id(&self) -> Hash256 {
@@ -9282,7 +9327,7 @@ impl ChannelActorState {
 
     async fn maybe_transfer_to_shutdown(
         &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
+        _myself: &ActorRef<ChannelActorMessage>,
     ) -> ProcessingChannelResult {
         // This function will also be called when we resolve all pending tlcs.
         // If we are not in the ShuttingDown state, we should not do anything.
@@ -9335,23 +9380,20 @@ impl ChannelActorState {
                         return Ok(());
                     }
                     let commitment_number = self.get_local_commitment_number();
-                    return self.request_and_delegate_signature(
-                        myself,
-                        ChannelSignatureRequest::SendClosingSigned {
-                            content: Musig2SigningContent {
-                                slot: NonceSlot {
-                                    purpose: NoncePurpose::Commitment,
-                                    commitment_number,
-                                },
-                                commitment_counter: Some(CommitmentCounter::Local),
-                                key_agg_ctx: common_ctx.key_agg_ctx.clone(),
-                                agg_nonce: common_ctx.agg_nonce.clone(),
-                                content: Musig2SignableContent::CooperativeCloseTransaction(
-                                    shutdown_tx.data(),
-                                ),
+                    return self.request_signature(ChannelSignatureRequest::SendClosingSigned {
+                        content: Musig2SigningContent {
+                            slot: NonceSlot {
+                                purpose: NoncePurpose::Commitment,
+                                commitment_number,
                             },
+                            commitment_counter: Some(CommitmentCounter::Local),
+                            key_agg_ctx: common_ctx.key_agg_ctx.clone(),
+                            agg_nonce: common_ctx.agg_nonce.clone(),
+                            content: Musig2SignableContent::CooperativeCloseTransaction(
+                                shutdown_tx.data(),
+                            ),
                         },
-                    );
+                    });
                 }
             };
 
@@ -9839,24 +9881,21 @@ impl ChannelActorState {
         }
         let common_ctx = self.get_funding_common_context();
         let commitment_number = self.get_local_commitment_number();
-        self.request_and_delegate_signature(
-            myself,
-            ChannelSignatureRequest::CompleteReceivedCommitment {
-                content: Musig2SigningContent {
-                    slot: NonceSlot {
-                        purpose: NoncePurpose::Commitment,
-                        commitment_number,
-                    },
-                    commitment_counter: Some(CommitmentCounter::Local),
-                    key_agg_ctx: common_ctx.key_agg_ctx,
-                    agg_nonce: common_ctx.agg_nonce,
-                    content: Musig2SignableContent::CommitmentTransaction(unsigned_tx.data()),
+        self.request_signature(ChannelSignatureRequest::CompleteReceivedCommitment {
+            content: Musig2SigningContent {
+                slot: NonceSlot {
+                    purpose: NoncePurpose::Commitment,
+                    commitment_number,
                 },
-                peer_partial_signature: commitment_signed.funding_tx_partial_signature,
-                peer_next_commitment_nonce: commitment_signed.next_commitment_nonce,
-                settlement_data,
+                commitment_counter: Some(CommitmentCounter::Local),
+                key_agg_ctx: common_ctx.key_agg_ctx,
+                agg_nonce: common_ctx.agg_nonce,
+                content: Musig2SignableContent::CommitmentTransaction(unsigned_tx.data()),
             },
-        )
+            peer_partial_signature: commitment_signed.funding_tx_partial_signature,
+            peer_next_commitment_nonce: commitment_signed.next_commitment_nonce,
+            settlement_data,
+        })
     }
 
     fn maybe_transfer_to_tx_signatures(
@@ -10245,7 +10284,7 @@ impl ChannelActorState {
 
     async fn handle_revoke_and_ack_peer_message(
         &mut self,
-        myself: &ActorRef<ChannelActorMessage>,
+        _myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
         self.assert_not_awaiting_signature()?;
@@ -10337,24 +10376,21 @@ impl ChannelActorState {
             commitment_lock_script_args,
         };
         let commitment_number = self.get_local_commitment_number();
-        self.request_and_delegate_signature(
-            myself,
-            ChannelSignatureRequest::CompleteReceivedRevokeAndAck {
-                content: Musig2SigningContent {
-                    slot: NonceSlot {
-                        purpose: NoncePurpose::Revocation,
-                        commitment_number,
-                    },
-                    commitment_counter: Some(CommitmentCounter::Local),
-                    key_agg_ctx: common_ctx.key_agg_ctx.clone(),
-                    agg_nonce: common_ctx.agg_nonce.clone(),
-                    content: signable,
+        self.request_signature(ChannelSignatureRequest::CompleteReceivedRevokeAndAck {
+            content: Musig2SigningContent {
+                slot: NonceSlot {
+                    purpose: NoncePurpose::Revocation,
+                    commitment_number,
                 },
-                peer_partial_signature: revocation_partial_signature,
-                next_per_commitment_point,
-                next_revocation_nonce,
+                commitment_counter: Some(CommitmentCounter::Local),
+                key_agg_ctx: common_ctx.key_agg_ctx.clone(),
+                agg_nonce: common_ctx.agg_nonce.clone(),
+                content: signable,
             },
-        )
+            peer_partial_signature: revocation_partial_signature,
+            next_per_commitment_point,
+            next_revocation_nonce,
+        })
     }
 
     fn should_replay_external_funding_commitment_on_reestablish(&self) -> bool {
