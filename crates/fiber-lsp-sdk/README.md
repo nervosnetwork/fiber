@@ -37,7 +37,20 @@ a `TenantOpeningRpc` transport, an independent `FundingVerifier`, and durable
 `OpeningPersistence`. The SDK saves intent before sending the RPC, verifies the
 wallet transaction and opening context, and persists the baseline and binding
 before returning. Retry the same request after interruption. There is no separate
-approval or bind RPC.
+approval or bind RPC. The transport calls the standard
+`open_channel_with_external_funding` method with the tenant token; tenant
+responses include the required `opening_context`, which the SDK validates.
+
+A session can bind multiple channels. Allocate a fresh pending channel signer
+with `allocate_pending_channel` for each additional opening and supply that
+signer's public material. Retry an interrupted opening with its original intent;
+changing amount or asset while reusing the same signer is rejected before RPC.
+
+For registration or credential refresh, call `HostedSession::begin_registration`
+with the trusted LSP node ID, a fresh random 32-byte request ID and the current
+Unix time in milliseconds, then send the returned parameters to
+`lsp_register_tenant`. Store its result with `finish_registration`. A consumed
+request cannot be retried; generate a fresh proof after a lost response.
 
 RPC clients can subscribe to `channel_signing` and `watchtower_signing` over
 WebSocket, or query `get_channel_signing_status` and
@@ -58,7 +71,7 @@ standard `send_payment` method for outbound payments.
 ```text
 Locally saved opening intent + pending signer (no channel ID yet)
                               |
-                    open_tenant_channel
+              open_channel_with_external_funding
                               |
              Frozen funding transaction + opening_context
                               |

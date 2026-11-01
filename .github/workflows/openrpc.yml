@@ -1,11 +1,12 @@
 on: [push, pull_request]
 
 name: Test OpenRPC Spec generating
+# Pinned to ubuntu-24.04 for the rocksdb/GCC 15 reason described in ci.yml.
 
 jobs:
   generating:
     name: Generate OpenRPC Spec
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: dsherret/rust-toolchain-file@v1

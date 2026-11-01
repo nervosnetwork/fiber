@@ -87,6 +87,7 @@ async fn test_rpc_basic() {
             "get_payment",
             GetPaymentCommandParams {
                 payment_hash: payment_hash.into(),
+                tenant_id: None,
             },
         )
         .await
@@ -654,6 +655,7 @@ async fn test_rpc_basic_with_auth() {
             "get_payment",
             GetPaymentCommandParams {
                 payment_hash: payment_hash.into(),
+                tenant_id: None,
             },
         )
         .await

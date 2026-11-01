@@ -4,20 +4,16 @@ use jsonrpsee::{proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::{call, ActorRef};
 
 use crate::lsp::{
-    HostedTenantRpcContext, HostedTenantStatus as InternalTenantStatus,
-    LspPaymentDelivery as InternalPaymentDelivery,
+    HostedTenantStatus as InternalTenantStatus, LspPaymentDelivery as InternalPaymentDelivery,
     LspPaymentDeliveryStatus as InternalPaymentDeliveryStatus, LspServiceMessage,
     LspServiceStatus as InternalServiceStatus, TenantId,
     TenantRuntimeStatus as InternalTenantRuntimeStatus,
 };
-use crate::rpc::invoice::InvoiceRpcServerImpl;
-use crate::rpc::payment::PaymentRpcServerImpl;
 use crate::rpc::utils::{rpc_error, RpcResultExt};
 
 pub use fiber_json_types::{
-    GetInvoiceResult, GetLspInvoiceParams, GetLspPaymentParams, GetLspTenantRegistryNonceParams,
-    GetLspTenantRegistryNonceResult, GetPaymentCommandResult, ListLspTenantsResult,
-    LspPaymentDelivery, LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus,
+    GetInvoiceResult, GetPaymentCommandResult, ListLspTenantsResult, LspPaymentDelivery,
+    LspPaymentDeliveryStatus, LspPaymentHashParams, LspServiceStatus, LspTenantChannel,
     LspTenantParams, LspTenantRuntimeStatus, LspTenantStatus, RegisterLspTenantParams,
     RegisterLspTenantResult,
 };
@@ -29,14 +25,11 @@ trait LspRpc {
     #[method(name = "lsp_get_status")]
     async fn lsp_get_status(&self) -> Result<LspServiceStatus, ErrorObjectOwned>;
 
-    /// Issues and persists a fresh one-time tenant registration nonce.
-    #[method(name = "lsp_get_tenant_registry_nonce")]
-    async fn lsp_get_tenant_registry_nonce(
-        &self,
-        params: GetLspTenantRegistryNonceParams,
-    ) -> Result<GetLspTenantRegistryNonceResult, ErrorObjectOwned>;
-
-    /// Persistently registers a hosted tenant without starting its Fiber runtime.
+    /// Registers a hosted tenant or refreshes its token without starting its Fiber runtime.
+    /// The RootSigner signs a v2 payload binding the LSP identity, a fresh client-generated
+    /// request ID, and `signed_at` in Unix milliseconds. Proofs may be at most five minutes
+    /// old or thirty seconds in the future. A request ID is consumed durably and cannot
+    /// be reused, including after restart; use a fresh proof if a response is lost.
     #[method(name = "lsp_register_tenant")]
     async fn lsp_register_tenant(
         &self,
@@ -61,20 +54,6 @@ trait LspRpc {
     #[method(name = "lsp_list_tenants")]
     async fn lsp_list_tenants(&self) -> Result<ListLspTenantsResult, ErrorObjectOwned>;
 
-    /// Retrieves an invoice from a hosted tenant's scoped store.
-    #[method(name = "lsp_get_invoice")]
-    async fn lsp_get_invoice(
-        &self,
-        params: GetLspInvoiceParams,
-    ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
-
-    /// Retrieves an outgoing payment owned by a hosted tenant runtime.
-    #[method(name = "lsp_get_payment")]
-    async fn lsp_get_payment(
-        &self,
-        params: GetLspPaymentParams,
-    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
-
     /// Retrieves durable delivery state for a hosted incoming payment.
     ///
     /// Returns the active incoming-TLC execution when present, otherwise the
@@ -97,26 +76,13 @@ impl LspRpcServerImpl {
         Self { actor }
     }
 
-    async fn tenant_rpc_context(
-        &self,
-        tenant_id: TenantId,
-    ) -> Result<HostedTenantRpcContext, ErrorObjectOwned> {
-        call!(
-            self.actor,
-            LspServiceMessage::GetTenantRpcContext,
-            tenant_id
-        )
-        .rpc_err()?
-        .rpc_err()
-    }
-
     async fn register_tenant(
         &self,
         params: RegisterLspTenantParams,
     ) -> Result<RegisterLspTenantResult, ErrorObjectOwned> {
         let root_signer_pubkey =
             crate::fiber_types::Pubkey::from_slice(&params.root_signer_pubkey.0).rpc_err()?;
-        let nonce: crate::fiber_types::Hash256 = params.nonce.into();
+        let request_id: crate::fiber_types::Hash256 = params.request_id.into();
         let signature_bytes = hex::decode(params.signature.trim_start_matches("0x")).rpc_err()?;
         let signature =
             crate::fiber_types::TenantRegistrySignature::from_slice(&signature_bytes).rpc_err()?;
@@ -124,7 +90,8 @@ impl LspRpcServerImpl {
         let payload = crate::fiber_types::TenantRegistryPayload::new(
             status.public_node_id,
             root_signer_pubkey,
-            nonce.into(),
+            request_id.into(),
+            params.signed_at,
         );
         let registration = call!(self.actor, |reply| {
             LspServiceMessage::RegisterAuthenticatedTenant {
@@ -163,34 +130,6 @@ impl LspRpcServerImpl {
             .map(Into::into)
     }
 
-    async fn get_invoice(
-        &self,
-        params: GetLspInvoiceParams,
-    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
-        let context = self.tenant_rpc_context(tenant_id).await?;
-        InvoiceRpcServerImpl::new_fiber(
-            context.store,
-            Some(context.fiber_actor),
-            Some(context.config),
-        )
-        .get_invoice(fiber_json_types::InvoiceParams {
-            payment_hash: params.payment_hash,
-        })
-        .await
-    }
-
-    async fn get_payment(
-        &self,
-        params: GetLspPaymentParams,
-    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        let tenant_id = TenantId::new(params.tenant_id).rpc_err()?;
-        let context = self.tenant_rpc_context(tenant_id).await?;
-        PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-            .get_payment(params.payment)
-            .await
-    }
-
     async fn get_payment_delivery(
         &self,
         params: LspPaymentHashParams,
@@ -214,27 +153,6 @@ impl LspRpcServer for LspRpcServerImpl {
         call!(self.actor, LspServiceMessage::GetStatus)
             .rpc_err()
             .map(Into::into)
-    }
-
-    async fn lsp_get_tenant_registry_nonce(
-        &self,
-        params: GetLspTenantRegistryNonceParams,
-    ) -> Result<GetLspTenantRegistryNonceResult, ErrorObjectOwned> {
-        let root_signer_pubkey =
-            crate::fiber_types::Pubkey::from_slice(&params.root_signer_pubkey.0).rpc_err()?;
-        let nonce = call!(
-            self.actor,
-            LspServiceMessage::IssueTenantRegistryNonce,
-            root_signer_pubkey
-        )
-        .rpc_err()?
-        .rpc_err()?;
-        let status = call!(self.actor, LspServiceMessage::GetStatus).rpc_err()?;
-        Ok(GetLspTenantRegistryNonceResult {
-            lsp_node_id: status.public_node_id.into(),
-            root_signer_pubkey: root_signer_pubkey.into(),
-            nonce: crate::fiber_types::Hash256::from(nonce).into(),
-        })
     }
 
     async fn lsp_register_tenant(
@@ -267,20 +185,6 @@ impl LspRpcServer for LspRpcServerImpl {
             })
     }
 
-    async fn lsp_get_invoice(
-        &self,
-        params: GetLspInvoiceParams,
-    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        self.get_invoice(params).await
-    }
-
-    async fn lsp_get_payment(
-        &self,
-        params: GetLspPaymentParams,
-    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        self.get_payment(params).await
-    }
-
     async fn lsp_get_payment_delivery(
         &self,
         params: LspPaymentHashParams,
@@ -310,10 +214,20 @@ impl From<InternalTenantStatus> for LspTenantStatus {
             tenant_id: status.record.tenant_id.to_string(),
             root_signer_pubkey: status.record.root_signer_pubkey.map(Into::into),
             invoice_pubkey: status.record.tenant_pubkey.into(),
-            private_channel_id: status.record.private_channel_id.map(Into::into),
+            channels: status
+                .channels
+                .into_iter()
+                .map(|channel| LspTenantChannel {
+                    channel_id: channel.channel.channel_id.into(),
+                    funding_udt_type_script: channel
+                        .channel
+                        .funding_udt_type_script
+                        .map(Into::into),
+                    online: channel.online,
+                })
+                .collect(),
             created_at: status.record.created_at,
             runtime_status,
-            channel_online: status.channel_online,
         }
     }
 }

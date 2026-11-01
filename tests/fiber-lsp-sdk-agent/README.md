@@ -4,19 +4,29 @@ The agent exercises the production SDK validation path. It uses Manual policy,
 then explicitly confirms a successfully prepared request. It never infers payment
 approval or opening terms from an LSP signing response.
 
+Pass the trusted LSP public node ID with `--lsp-node-id` (or
+`FIBER_LSP_SDK_AGENT_LSP_NODE_ID`). Registration signs a fresh client request ID
+and the current Unix time in milliseconds, then calls `lsp_register_tenant`
+once. The node ID comes from fixture configuration, not a registration response.
+
 Before servicing a channel, the local fixture driver must:
 
 1. Send the original `OpenChannelWithExternalFundingParams` to `POST /open-channel` as
    `{ "params": ... }`, setting `pubkey` to the LSP public node, `public: false`,
    and the client-owned `external_channel_signer`, plus explicit commitment delay
    and fee rate. The agent calls the SDK opening entrypoint, which saves intent, sends
-   `open_tenant_channel`, checks live funding inputs through
+   `open_channel_with_external_funding`, checks live funding inputs through
    `--ckb-rpc`, and verifies the response using local dev-chain binaries from
    `--contracts-dir`. It returns the opening result only after SDK verification and persistence.
 2. There is no `/bind` endpoint or driver-supplied commitment baseline.
 3. Use `open_channel` to register the test's exact payment/invoice authorizations,
    fulfillment preimages when settling TLCs, and close or announcement approvals.
    These authorizations and the verified channel history persist in the SDK store.
+
+`POST /prepare-channel` allocates the next pending channel key for a tenant that
+already has a bound channel. The multi-channel LSP workflow calls it before opening
+each additional tenant channel. It returns the new `channel_open_signer_material`
+in the `result` object.
 
 The test-only `POST /authorize` control endpoint records driver intent:
 

@@ -521,7 +521,8 @@ impl<S: SignerStore> ChannelSigner<S> {
     /// Validate wallet-approved opening terms and install their baseline and funding identity.
     /// The funding wallet must approve the complete transaction and selected inputs.
     /// Contract, keys, fee and balances come from the wallet's opening approval.
-    /// JSON-RPC clients should use `HostedSession::open_tenant_channel` to validate the response
+    /// JSON-RPC clients should use `HostedSession::open_tenant_channel` (which calls the generic
+    /// `open_channel_with_external_funding` RPC) to require and validate `opening_context`
     /// against their original request and trusted network configuration.
     pub async fn approve_opening(
         &self,
@@ -1891,6 +1892,7 @@ mod tests {
             lsp_node_id,
             root.identity_public_key().into(),
             [3; 32],
+            1_700_000_000_123,
         );
         let signature = root
             .sign_tenant_registry_payload(&payload)
@@ -1906,6 +1908,7 @@ mod tests {
                 .public_key()
                 .into(),
             [3; 32],
+            1_700_000_000_123,
         );
         assert!(matches!(
             root.sign_tenant_registry_payload(&wrong_payload),

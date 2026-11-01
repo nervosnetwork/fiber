@@ -5,31 +5,48 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::store::{FiberStore, Store};
 
-use super::{HostedTenantRecord, TenantId};
+use super::{HostedTenantRecord, TenantChannelRecord, TenantId};
 
 const TENANT_RECORD_PREFIX: &[u8] = b"\xf0lsp/tenant/";
-const TENANT_NONCE_PREFIX: &[u8] = b"\xf0lsp/tenant-nonce/";
+const TENANT_REQUEST_PREFIX: &[u8] = b"\xf0lsp/tenant-request/";
 const ROOT_SIGNER_INDEX_PREFIX: &[u8] = b"\xf0lsp/root-signer/";
 const TENANT_PUBKEY_INDEX_PREFIX: &[u8] = b"\xf0lsp/tenant-pubkey/";
+const REGISTRATION_REQUEST_CONSUMED: &str = "tenant registration request was already consumed";
+const TENANT_CHANNEL_PREFIX: &[u8] = b"\xf0lsp/tenant-channel/";
 
 /// Persistence interface for hosted tenant state boundaries.
 pub trait TenantRegistryStore: Clone + Send + Sync + 'static {
     fn get_tenant(&self, tenant_id: &TenantId) -> Result<Option<HostedTenantRecord>, String>;
     fn put_tenant(&self, record: &HostedTenantRecord) -> Result<(), String>;
     fn list_tenants(&self) -> Result<Vec<HostedTenantRecord>, String>;
-    fn get_registration_nonce(
+    fn get_tenant_channel(
         &self,
-        root_signer_pubkey: &crate::fiber_types::Pubkey,
-    ) -> Result<Option<[u8; 32]>, String>;
-    fn put_registration_nonce(
+        tenant_id: &TenantId,
+        channel_id: &crate::fiber_types::Hash256,
+    ) -> Result<Option<TenantChannelRecord>, String>;
+    fn put_tenant_channel(
         &self,
-        root_signer_pubkey: &crate::fiber_types::Pubkey,
-        nonce: [u8; 32],
+        tenant_id: &TenantId,
+        channel: &TenantChannelRecord,
     ) -> Result<(), String>;
-    fn register_and_consume_nonce(
+    fn list_tenant_channels(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<TenantChannelRecord>, String>;
+    fn registration_request_consumed(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+        request_id: &[u8; 32],
+    ) -> Result<bool, String>;
+    fn consume_registration_request(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+        request_id: &[u8; 32],
+    ) -> Result<(), String>;
+    fn register_and_consume_request(
         &self,
         record: &HostedTenantRecord,
-        expected_nonce: [u8; 32],
+        request_id: &[u8; 32],
     ) -> Result<(), String>;
 }
 
@@ -39,6 +56,30 @@ fn tenant_key(tenant_id: &TenantId) -> Vec<u8> {
 
 fn public_key_index_key(prefix: &[u8], public_key: &crate::fiber_types::Pubkey) -> Vec<u8> {
     [prefix, public_key.serialize().as_slice()].concat()
+}
+
+fn registration_request_key(
+    root_signer_pubkey: &crate::fiber_types::Pubkey,
+    request_id: &[u8; 32],
+) -> Vec<u8> {
+    [
+        TENANT_REQUEST_PREFIX,
+        root_signer_pubkey.serialize().as_slice(),
+        request_id.as_slice(),
+    ]
+    .concat()
+}
+
+fn tenant_channel_prefix(tenant_id: &TenantId) -> Vec<u8> {
+    [TENANT_CHANNEL_PREFIX, tenant_id.as_str().as_bytes(), b"/"].concat()
+}
+
+fn tenant_channel_key(tenant_id: &TenantId, channel_id: &crate::fiber_types::Hash256) -> Vec<u8> {
+    [
+        tenant_channel_prefix(tenant_id).as_slice(),
+        channel_id.as_ref(),
+    ]
+    .concat()
 }
 
 impl TenantRegistryStore for Store {
@@ -61,41 +102,72 @@ impl TenantRegistryStore for Store {
             .collect()
     }
 
-    fn get_registration_nonce(
+    fn get_tenant_channel(
         &self,
-        root_signer_pubkey: &crate::fiber_types::Pubkey,
-    ) -> Result<Option<[u8; 32]>, String> {
-        self.get(public_key_index_key(
-            TENANT_NONCE_PREFIX,
-            root_signer_pubkey,
-        ))
-        .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
-        .transpose()
+        tenant_id: &TenantId,
+        channel_id: &crate::fiber_types::Hash256,
+    ) -> Result<Option<TenantChannelRecord>, String> {
+        self.get(tenant_channel_key(tenant_id, channel_id))
+            .map(|bytes| deserialize(&bytes).map_err(|error| error.to_string()))
+            .transpose()
     }
 
-    fn put_registration_nonce(
+    fn put_tenant_channel(
         &self,
-        root_signer_pubkey: &crate::fiber_types::Pubkey,
-        nonce: [u8; 32],
+        tenant_id: &TenantId,
+        channel: &TenantChannelRecord,
     ) -> Result<(), String> {
-        let bytes = serialize(&nonce).map_err(|error| error.to_string())?;
-        self.put(
-            public_key_index_key(TENANT_NONCE_PREFIX, root_signer_pubkey),
-            bytes,
-        );
+        let bytes = serialize(channel).map_err(|error| error.to_string())?;
+        self.put(tenant_channel_key(tenant_id, &channel.channel_id), bytes);
         Ok(())
     }
 
-    fn register_and_consume_nonce(
+    fn list_tenant_channels(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<TenantChannelRecord>, String> {
+        self.collect_by_prefix(&tenant_channel_prefix(tenant_id))
+            .into_iter()
+            .map(|pair| deserialize(&pair.value).map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn registration_request_consumed(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+        request_id: &[u8; 32],
+    ) -> Result<bool, String> {
+        Ok(self
+            .get(registration_request_key(root_signer_pubkey, request_id))
+            .is_some())
+    }
+
+    fn consume_registration_request(
+        &self,
+        root_signer_pubkey: &crate::fiber_types::Pubkey,
+        request_id: &[u8; 32],
+    ) -> Result<(), String> {
+        let key = registration_request_key(root_signer_pubkey, request_id);
+        if self.get(key.clone()).is_some() {
+            return Err(REGISTRATION_REQUEST_CONSUMED.to_string());
+        }
+        let mut batch = self.batch();
+        batch.put(key, []);
+        batch.commit();
+        Ok(())
+    }
+
+    fn register_and_consume_request(
         &self,
         record: &HostedTenantRecord,
-        expected_nonce: [u8; 32],
+        request_id: &[u8; 32],
     ) -> Result<(), String> {
         let root_signer_pubkey = record.root_signer_pubkey.as_ref().ok_or_else(|| {
             "authenticated tenant record has no RootSigner public key".to_string()
         })?;
-        if self.get_registration_nonce(root_signer_pubkey)? != Some(expected_nonce) {
-            return Err("tenant registration nonce is missing, replaced, or consumed".to_string());
+        let request_key = registration_request_key(root_signer_pubkey, request_id);
+        if self.get(request_key.clone()).is_some() {
+            return Err(REGISTRATION_REQUEST_CONSUMED.to_string());
         }
         let record_bytes = serialize(record).map_err(|error| error.to_string())?;
         let tenant_id_bytes = serialize(&record.tenant_id).map_err(|error| error.to_string())?;
@@ -109,10 +181,7 @@ impl TenantRegistryStore for Store {
             public_key_index_key(TENANT_PUBKEY_INDEX_PREFIX, &record.tenant_pubkey),
             tenant_id_bytes,
         );
-        batch.delete(public_key_index_key(
-            TENANT_NONCE_PREFIX,
-            root_signer_pubkey,
-        ));
+        batch.put(request_key, []);
         batch.commit();
         Ok(())
     }
@@ -224,35 +293,25 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         Ok(record)
     }
 
-    /// Replace the current one-time registration nonce for this RootSigner.
-    pub fn issue_registration_nonce(
+    fn ensure_registration_request_fresh(
         &self,
         root_signer_pubkey: &crate::fiber_types::Pubkey,
-    ) -> Result<[u8; 32], String> {
-        let _guard = self
-            .registration_lock
-            .lock()
-            .map_err(|_| "tenant registration lock is poisoned".to_string())?;
-        let mut nonce = [0u8; 32];
-        getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
-        self.store
-            .put_registration_nonce(root_signer_pubkey, nonce)?;
-        Ok(nonce)
+        request_id: &[u8; 32],
+    ) -> Result<(), String> {
+        if self
+            .store
+            .registration_request_consumed(root_signer_pubkey, request_id)?
+        {
+            return Err(REGISTRATION_REQUEST_CONSUMED.to_string());
+        }
+        Ok(())
     }
 
-    /// Read the current registration nonce, primarily for verification and tests.
-    pub fn registration_nonce(
-        &self,
-        root_signer_pubkey: &crate::fiber_types::Pubkey,
-    ) -> Result<Option<[u8; 32]>, String> {
-        self.store.get_registration_nonce(root_signer_pubkey)
-    }
-
-    /// Atomically create an authenticated tenant and consume its one-time nonce.
+    /// Atomically create an authenticated tenant and consume its request id.
     pub fn register_authenticated(
         &self,
         record: HostedTenantRecord,
-        nonce: [u8; 32],
+        request_id: [u8; 32],
     ) -> Result<HostedTenantRecord, String> {
         let _guard = self
             .registration_lock
@@ -261,6 +320,7 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         let root_signer_pubkey = record.root_signer_pubkey.ok_or_else(|| {
             "authenticated tenant record has no RootSigner public key".to_string()
         })?;
+        self.ensure_registration_request_fresh(&root_signer_pubkey, &request_id)?;
         let derived = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
         if record.tenant_id != derived {
             return Err("tenant id does not match its RootSigner public key".to_string());
@@ -278,24 +338,26 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
                 existing.tenant_id
             ));
         }
-        self.store.register_and_consume_nonce(&record, nonce)?;
+        self.store
+            .register_and_consume_request(&record, &request_id)?;
         self.index_insert(&record)?;
         Ok(record)
     }
 
     /// Refresh credentials for an existing tenant after verifying a fresh RootSigner proof.
     ///
-    /// Consume the challenge without replacing protocol keys, channel bindings, or
+    /// Consume the request id without replacing protocol keys, channel bindings, or
     /// creation metadata. A consumed proof cannot be reused to mint another token.
     pub fn refresh_authenticated(
         &self,
         root_signer_pubkey: crate::fiber_types::Pubkey,
-        nonce: [u8; 32],
+        request_id: [u8; 32],
     ) -> Result<HostedTenantRecord, String> {
         let _guard = self
             .registration_lock
             .lock()
             .map_err(|_| "tenant registration lock is poisoned".to_string())?;
+        self.ensure_registration_request_fresh(&root_signer_pubkey, &request_id)?;
         let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
         let record = self
             .get(&tenant_id)?
@@ -303,7 +365,8 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         if record.root_signer_pubkey != Some(root_signer_pubkey) {
             return Err("tenant is not registered to this RootSigner".to_string());
         }
-        self.store.register_and_consume_nonce(&record, nonce)?;
+        self.store
+            .consume_registration_request(&root_signer_pubkey, &request_id)?;
         Ok(record)
     }
 
@@ -311,26 +374,41 @@ impl<S: TenantRegistryStore> TenantRegistry<S> {
         self.store.list_tenants()
     }
 
-    /// Bind the tenant to its single MVP private channel.
-    pub fn bind_private_channel(
+    /// Bind one of the tenant's private channels.
+    ///
+    /// A tenant may bind multiple channels, one per asset (and eventually more
+    /// than one for the same asset). Re-binding the same channel id is
+    /// idempotent as long as the asset does not change.
+    pub fn bind_channel(
         &self,
         tenant_id: &TenantId,
         channel_id: crate::fiber_types::Hash256,
+        funding_udt_type_script: Option<ckb_types::packed::Script>,
     ) -> Result<HostedTenantRecord, String> {
-        let mut record = self
+        let record = self
             .get(tenant_id)?
             .ok_or_else(|| format!("tenant {tenant_id} is not registered"))?;
-        if record
-            .private_channel_id
-            .is_some_and(|existing| existing != channel_id)
-        {
-            return Err(format!(
-                "tenant {tenant_id} is already bound to another private channel"
-            ));
+        if let Some(existing) = self.store.get_tenant_channel(tenant_id, &channel_id)? {
+            if existing.funding_udt_type_script != funding_udt_type_script {
+                return Err(format!(
+                    "tenant {tenant_id} channel {channel_id} is already bound with a different asset"
+                ));
+            }
+        } else {
+            self.store.put_tenant_channel(
+                tenant_id,
+                &TenantChannelRecord {
+                    channel_id,
+                    funding_udt_type_script,
+                    bound_at: crate::now_timestamp_as_millis_u64(),
+                },
+            )?;
         }
-        record.private_channel_id = Some(channel_id);
-        self.store.put_tenant(&record)?;
         Ok(record)
+    }
+
+    pub fn list_channels(&self, tenant_id: &TenantId) -> Result<Vec<TenantChannelRecord>, String> {
+        self.store.list_tenant_channels(tenant_id)
     }
 
     pub fn find_by_tenant_pubkey(

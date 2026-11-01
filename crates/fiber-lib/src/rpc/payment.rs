@@ -5,7 +5,7 @@ use crate::fiber::{
     channel::ChannelActorStateStore, payment::SendPaymentCommand, FiberActorCommand,
     FiberActorMessage, FiberActorRef, NetworkActorMessage,
 };
-use crate::rpc::utils::RpcResultExt;
+use crate::rpc::utils::{rpc_error, RpcResultExt};
 use crate::{handle_actor_call, log_and_error};
 #[cfg(debug_assertions)]
 use fiber_json_types::SessionRoute as JsonSessionRoute;
@@ -143,7 +143,17 @@ where
         extensions: &Extensions,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+        let context = crate::rpc::tenant::resolve_tenant_query_rpc_context(
+            extensions,
+            self.lsp_actor.as_ref(),
+            params.tenant_id.as_deref(),
+        )
+        .await?;
+        let params = GetPaymentCommandParams {
+            payment_hash: params.payment_hash,
+            tenant_id: None,
+        };
+        if let Some(context) = context {
             return PaymentRpcServerImpl::new_fiber(context.fiber_actor, context.store)
                 .get_payment(params)
                 .await;
@@ -297,6 +307,11 @@ where
         &self,
         params: GetPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        if params.tenant_id.is_some() {
+            return Err(rpc_error(
+                "tenant_id is only supported by the native get_payment RPC",
+            ));
+        }
         let payment_hash = params.payment_hash.into();
         let message = |rpc_reply| -> FiberActorMessage {
             FiberActorMessage::new_command(FiberActorCommand::GetPayment(payment_hash, rpc_reply))

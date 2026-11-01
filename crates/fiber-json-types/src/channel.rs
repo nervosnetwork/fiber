@@ -293,17 +293,6 @@ pub struct TenantChannelOpeningContext {
     pub remote_reserved_ckb_amount: u64,
 }
 
-/// Frozen proposal returned before the tenant signs funding or commitments.
-#[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
-pub struct OpenTenantChannelResult {
-    /// Final channel ID, derived from both settlement base keys.
-    pub channel_id: Hash256,
-    /// Frozen transaction. The client must independently approve its inputs and outputs.
-    pub unsigned_funding_tx: Transaction,
-    /// Negotiated terms to validate against the client's original opening intent.
-    pub opening_context: TenantChannelOpeningContext,
-}
-
 /// Result of opening a channel with external funding.
 #[derive(Clone, Serialize, Deserialize, Debug, JsonSchema)]
 pub struct OpenChannelWithExternalFundingResult {
@@ -312,6 +301,11 @@ pub struct OpenChannelWithExternalFundingResult {
 
     /// The final unsigned funding transaction that needs to be signed.
     pub unsigned_funding_tx: Transaction,
+
+    /// Frozen opening terms, returned only for hosted tenant openings. Ordinary
+    /// operator openings omit this field from JSON responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_context: Option<TenantChannelOpeningContext>,
 }
 
 /// Parameters for submitting a signed funding transaction.
@@ -1025,4 +1019,20 @@ pub enum SubmitWatchtowerSignatureResult {
     Applied,
     /// The same signature was already applied for this request.
     AlreadyApplied,
+}
+
+#[cfg(test)]
+mod opening_result_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_external_funding_result_omits_opening_context() {
+        let result = OpenChannelWithExternalFundingResult {
+            channel_id: Hash256([0; 32]),
+            unsigned_funding_tx: Transaction::default(),
+            opening_context: None,
+        };
+        let value = serde_json::to_value(result).expect("serialize ordinary result");
+        assert!(value.get("opening_context").is_none());
+    }
 }

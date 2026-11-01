@@ -127,14 +127,18 @@ pub(crate) struct TestOpeningRpc {
 
 #[async_trait::async_trait]
 impl fiber_lsp_sdk::TenantOpeningRpc for TestOpeningRpc {
-    async fn open_tenant_channel(
+    async fn open_channel_with_external_funding(
         &self,
         _token: &str,
         request: fiber_json_types::OpenChannelWithExternalFundingParams,
-    ) -> Result<fiber_json_types::OpenTenantChannelResult, fiber_lsp_sdk::SessionError> {
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult, fiber_lsp_sdk::SessionError>
+    {
         use jsonrpsee::core::client::ClientT;
         self.client
-            .request("open_tenant_channel", jsonrpsee::rpc_params![request])
+            .request(
+                "open_channel_with_external_funding",
+                jsonrpsee::rpc_params![request],
+            )
             .await
             .map_err(|e| fiber_lsp_sdk::SessionError::Invalid(e.to_string()))
     }
@@ -147,7 +151,7 @@ impl fiber_lsp_sdk::FundingVerifier for TestOpeningRpc {
     async fn verify_funding(
         &self,
         _request: &fiber_json_types::OpenChannelWithExternalFundingParams,
-        result: &fiber_json_types::OpenTenantChannelResult,
+        result: &fiber_json_types::OpenChannelWithExternalFundingResult,
     ) -> Result<Vec<ckb_types::packed::OutPoint>, fiber_lsp_sdk::SessionError> {
         let funding: Transaction = result.unsigned_funding_tx.clone().into();
         Ok(funding
@@ -175,7 +179,7 @@ pub(crate) async fn open_rpc_channel(
     client: jsonrpsee::http_client::HttpClient,
     request: fiber_json_types::OpenChannelWithExternalFundingParams,
     saved: std::sync::Arc<std::sync::Mutex<Option<fiber_lsp_sdk::HostedSessionState>>>,
-) -> fiber_json_types::OpenTenantChannelResult {
+) -> fiber_json_types::OpenChannelWithExternalFundingResult {
     let asset = request.funding_udt_type_script.clone().map(Into::into);
     let network = fiber_lsp_sdk::OpeningNetwork {
         funding_lock: crate::ckb::contracts::get_script_by_contract(

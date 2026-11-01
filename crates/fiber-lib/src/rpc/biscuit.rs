@@ -115,7 +115,6 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
         "open_channel_with_external_funding",
         r#"allow if write("channels");"#,
     );
-    b.rule("open_tenant_channel", r#"allow if write("channels");"#);
     b.rule("submit_signed_funding_tx", r#"allow if write("channels");"#);
     b.rule(
         "get_channel_signing_status",
@@ -146,13 +145,10 @@ fn build_rules() -> HashMap<&'static str, AuthRule> {
 
     // hosted LSP
     b.rule("lsp_get_status", r#"allow if read("lsp");"#);
-    b.rule("lsp_get_tenant_registry_nonce", r#"allow if write("lsp");"#);
     b.rule("lsp_register_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_ensure_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_evict_tenant", r#"allow if write("lsp");"#);
     b.rule("lsp_list_tenants", r#"allow if read("lsp");"#);
-    b.rule("lsp_get_invoice", r#"allow if read("lsp");"#);
-    b.rule("lsp_get_payment", r#"allow if read("lsp");"#);
     b.rule("lsp_get_payment_delivery", r#"allow if read("lsp");"#);
 
     // payment
@@ -397,6 +393,11 @@ mod tests {
         auth.check_permission("submit_channel_signature", &token)
             .unwrap();
         auth.check_permission("list_channels", &token).unwrap();
+        auth.check_permission("open_channel_with_external_funding", &token)
+            .unwrap();
+        assert!(auth
+            .check_permission("open_tenant_channel", &token)
+            .is_err());
         auth.check_permission("new_invoice", &token).unwrap();
         auth.check_permission("settle_invoice", &token).unwrap();
         auth.check_permission("send_payment", &token).unwrap();
@@ -413,9 +414,19 @@ mod tests {
         }
         crate::rpc::tenant::enforce_tenant_method_allowlist("get_channel_signing_status", &biscuit)
             .unwrap();
+        crate::rpc::tenant::enforce_tenant_method_allowlist(
+            "open_channel_with_external_funding",
+            &biscuit,
+        )
+        .unwrap();
         assert!(
             crate::rpc::tenant::enforce_tenant_method_allowlist("open_channel", &biscuit).is_err()
         );
+        assert!(crate::rpc::tenant::enforce_tenant_method_allowlist(
+            "open_tenant_channel",
+            &biscuit
+        )
+        .is_err());
         // write("channels") still exists so biscuit allows node-operation
         // methods; middleware is the tenant method gate.
         auth.check_permission("open_channel", &token).unwrap();
@@ -679,12 +690,9 @@ mod tests {
         let read_methods = [
             "lsp_get_status",
             "lsp_list_tenants",
-            "lsp_get_invoice",
-            "lsp_get_payment",
             "lsp_get_payment_delivery",
         ];
         let write_methods = [
-            "lsp_get_tenant_registry_nonce",
             "lsp_register_tenant",
             "lsp_ensure_tenant",
             "lsp_evict_tenant",
@@ -697,6 +705,12 @@ mod tests {
         for method in write_methods {
             assert!(auth.check_permission(method, &write_token).is_ok());
             assert!(auth.check_permission(method, &read_token).is_err());
+        }
+        for method in ["lsp_get_invoice", "lsp_get_payment"] {
+            assert!(
+                auth.get_rule(method).is_err(),
+                "{method} rule must be removed"
+            );
         }
     }
 

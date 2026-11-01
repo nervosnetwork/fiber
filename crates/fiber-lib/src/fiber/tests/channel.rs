@@ -175,6 +175,19 @@ impl Actor for CapturingPublicNetworkActor {
 /// Captures signer-actor notifications addressed to a channel actor.
 struct SignerNotificationProbe;
 
+/// Hand-driven tests can pause a signing request without running the actor's
+/// local-signature drain. Generate its response explicitly when they resume it.
+fn sign_pending_channel_request(state: &ChannelActorState) -> SignerNotification {
+    let (request_id, request) = state.signing_context.awaiting_signature().unwrap();
+    let crate::fiber::channel_signer::ChannelSignOutcome::Ready(notification) = state
+        .channel_signer
+        .request_signature(state.get_id(), request_id, request)
+    else {
+        panic!("test fixture must have a local signer");
+    };
+    notification
+}
+
 #[async_trait::async_trait]
 impl Actor for SignerNotificationProbe {
     type Msg = ChannelActorMessage;
@@ -3132,7 +3145,6 @@ async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestabli
     state_a.network = Some(FiberActorRef::from_network(&network_a));
     state_a.private_key = Some(node_a.private_key.clone());
 
-    let signer_notifications = Arc::new(Mutex::new(Vec::new()));
     let channel = ChannelActor::new(
         node_a.pubkey,
         node_b.pubkey,
@@ -3140,10 +3152,9 @@ async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestabli
         node_a.store.clone(),
         None,
     );
-    let (channel_actor_ref, _channel_actor_handle) =
-        Actor::spawn(None, SignerNotificationProbe, signer_notifications.clone())
-            .await
-            .expect("spawn notification probe");
+    let (channel_actor_ref, _channel_actor_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn channel probe");
 
     state_a
         .send_revoke_and_ack_message(&channel_actor_ref, false)
@@ -3184,16 +3195,7 @@ async fn test_external_signer_offline_reestablish_arrives_no_duplicate_reestabli
     let initial_messages = take_captured_actor_messages(&network_a, &captured).await;
     assert!(initial_messages.is_empty());
 
-    let notification = tokio::time::timeout(event_wait_timeout(), async {
-        loop {
-            if let Some(notification) = signer_notifications.lock().expect("probe lock").pop() {
-                return notification;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("signature notification within timeout");
+    let notification = sign_pending_channel_request(&state_a);
 
     channel
         .handle_signer_notification(&channel_actor_ref, &mut state_a, notification)
@@ -12503,11 +12505,79 @@ async fn test_deferred_peer_tlc_updates_are_bounded_by_channel_constraints() {
         .await;
 }
 
-/// With a local ChannelSigner, revoke-owing signing is delegated via
-/// SignerNotification (send-to-self) and only sends the peer message once the
-/// signature notification is applied.
+/// Ordinary nodes must finish local signing before yielding their mailbox to
+/// more TLC updates. Only an external signer needs an asynchronous round trip.
 #[tokio::test]
-async fn test_channel_signer_signs_revocation_via_messages() {
+async fn test_local_commitment_signature_completes_in_same_actor_turn() {
+    init_tracing();
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(100000000000, 100000000000, true).await;
+    node_a.stop().await;
+    node_b.stop().await;
+    let mut state = node_a.get_channel_actor_state(channel_id);
+    state.reestablishing = false;
+    state.reestablish_started_at = None;
+    state.connectivity_state = ChannelConnectivityState::Online;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (network, _) = Actor::spawn(None, CapturingNetworkActor, captured.clone())
+        .await
+        .unwrap();
+    state.network = Some(FiberActorRef::from_network(&network));
+    state.private_key = Some(node_a.private_key.clone());
+    let channel = ChannelActor::new(
+        node_a.pubkey,
+        node_b.pubkey,
+        FiberActorRef::from_network(&network),
+        node_a.store.clone(),
+        None,
+    );
+    // The probe deliberately does not execute notifications. This distinguishes
+    // completion in this actor turn from eventual completion through self-mail.
+    let notifications = Arc::new(Mutex::new(Vec::new()));
+    let (myself, _) = Actor::spawn(None, SignerNotificationProbe, notifications.clone())
+        .await
+        .unwrap();
+    channel
+        .handle(
+            myself.clone(),
+            ChannelActorMessage::Command(ChannelCommand::CommitmentSigned(None)),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !state.signing_context.is_awaiting_signature(),
+        "local signature must finish without processing another mailbox message"
+    );
+    assert!(state.tlc_state.waiting_ack);
+    let persisted = node_a.get_channel_actor_state(channel_id);
+    assert!(!persisted.signing_context.is_awaiting_signature());
+    assert!(persisted.tlc_state.waiting_ack);
+    assert!(node_a.store.get_pending_commit_diff(&channel_id).is_some());
+    let messages = take_captured_actor_messages(&network, &captured).await;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| matches!(
+                m.message,
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(_))
+            ))
+            .count(),
+        1
+    );
+    // Draining the probe before checking also catches notifications still queued.
+    myself.drain_and_wait(None).await.unwrap();
+    assert!(notifications.lock().unwrap().is_empty());
+    network.stop_and_wait(None, None).await.unwrap();
+}
+
+/// A paused revoke-owing request must not send the peer message until its
+/// signature is applied. Drive the shared continuation by hand here; normal
+/// local actors drain it in the same turn, while external signers wait for RPC.
+#[tokio::test]
+async fn test_channel_signer_resumes_paused_revocation() {
     init_tracing();
     let (mut node_a, mut node_b, channel_id) =
         create_nodes_with_established_channel(100000000000, 100000000000, true).await;
@@ -12569,8 +12639,6 @@ async fn test_channel_signer_signs_revocation_via_messages() {
     state_a.network = Some(FiberActorRef::from_network(&network_a));
     state_a.private_key = Some(node_a.private_key.clone());
 
-    let signer_notifications = Arc::new(Mutex::new(Vec::new()));
-
     let channel = ChannelActor::new(
         node_a.pubkey,
         node_b.pubkey,
@@ -12578,12 +12646,10 @@ async fn test_channel_signer_signs_revocation_via_messages() {
         node_a.store.clone(),
         None,
     );
-    // The probe doubles as the channel actor ref: it is passed as `myself` to
-    // the signing call and notifications routed there land in its buffer.
-    let (channel_actor_ref, _channel_actor_handle) =
-        Actor::spawn(None, SignerNotificationProbe, signer_notifications.clone())
-            .await
-            .expect("spawn notification probe");
+    // Drive the request and its continuation separately to exercise the pause.
+    let (channel_actor_ref, _channel_actor_handle) = Actor::spawn(None, NoopChannelActor, ())
+        .await
+        .expect("spawn channel probe");
 
     // Sending the revoke now goes through ChannelSigner: nothing may be
     // put on the wire yet.
@@ -12598,18 +12664,8 @@ async fn test_channel_signer_signs_revocation_via_messages() {
         "no peer message may be sent before the signature notification"
     );
 
-    // The signature comes back asynchronously; feeding the notification into
-    // the channel resumes the transition and sends the RevokeAndAck.
-    let notification = tokio::time::timeout(event_wait_timeout(), async {
-        loop {
-            if let Some(notification) = signer_notifications.lock().expect("probe lock").pop() {
-                return notification;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("signature notification within timeout");
+    // Applying a signature resumes the transition and sends the RevokeAndAck.
+    let notification = sign_pending_channel_request(&state_a);
     let SignerNotification::ChannelSignatureReady {
         channel_id: notified_channel_id,
         ..
@@ -13123,6 +13179,38 @@ fn test_external_funding_witness_merge_preserves_existing_signatures() {
     assert_eq!(merged[0], external_signature);
     assert_eq!(merged[1], remote_signature);
     assert_eq!(merged[2], remote_extra_signature);
+}
+
+#[test]
+fn test_external_funding_witness_merge_replaces_secp_placeholders() {
+    // The witness the funding builder writes for a secp256k1 input it does not sign.
+    let placeholder = ckb_types::packed::WitnessArgs::new_builder()
+        .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
+        .build();
+    assert!(crate::ckb::is_secp_sighash_placeholder_witness(
+        placeholder.as_slice()
+    ));
+    let placeholder: Bytes = placeholder.as_bytes().pack();
+    let external_signature: Bytes = [1u8; 65].pack();
+    let remote_signature: Bytes = [2u8; 65].pack();
+    let local_tx = Transaction::default()
+        .as_advanced_builder()
+        .set_witnesses(vec![external_signature.clone(), placeholder.clone()])
+        .build();
+
+    let merged = merge_external_funding_witnesses(
+        local_tx.witnesses(),
+        vec![placeholder, remote_signature.clone()],
+    );
+
+    assert_eq!(
+        merged[0], external_signature,
+        "a peer's placeholder must not replace a signature"
+    );
+    assert_eq!(
+        merged[1], remote_signature,
+        "our placeholder takes the peer's signature"
+    );
 }
 
 async fn wait_for_external_funding_post_submit_progress(
@@ -15201,6 +15289,22 @@ mod udt_funding_cell_capacity {
         assert!(!state.can_auto_fulfill_received_tlc(&tlc));
 
         tlc.forwarding_tlc = None;
+        // A queued failure is the selected outcome for this forwarding attempt and must block
+        // fulfill from a local preimage.
+        state
+            .retryable_tlc_operations
+            .push_back(RetryableTlcOperation::RemoveTlc(
+                tlc_id,
+                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                    TlcErr::new(TlcErrorCode::TemporaryChannelFailure),
+                    &NO_SHARED_SECRET,
+                )),
+            ));
+        assert!(!state.can_auto_fulfill_received_tlc(&tlc));
+
+        // A queued fulfill is the settlement being replayed; it must not block rebuilding the
+        // hold-set contexts.
+        state.retryable_tlc_operations.clear();
         state
             .retryable_tlc_operations
             .push_back(RetryableTlcOperation::RemoveTlc(
@@ -15209,7 +15313,7 @@ mod udt_funding_cell_capacity {
                     payment_preimage: gen_rand_sha256_hash(),
                 }),
             ));
-        assert!(!state.can_auto_fulfill_received_tlc(&tlc));
+        assert!(state.can_auto_fulfill_received_tlc(&tlc));
 
         state.retryable_tlc_operations.clear();
         tlc.removed_reason = Some(RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {

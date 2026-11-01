@@ -476,6 +476,7 @@ impl CchFiberAgentHttpBackend {
     pub async fn get_payment(&self, payment_hash: Hash256) -> Result<GetPaymentCommandResult> {
         let params = GetPaymentCommandParams {
             payment_hash: payment_hash.into(),
+            tenant_id: None,
         };
         Ok(self
             .client

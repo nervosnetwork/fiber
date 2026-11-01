@@ -27,8 +27,8 @@ use std::time::Duration;
 use tentacle::secio::SecioKeyPair;
 
 pub use fiber_json_types::{
-    Attribute, CkbInvoice, GetInvoiceResult, InvoiceData, InvoiceParams, InvoiceResult,
-    NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult, SettleInvoiceParams,
+    Attribute, CkbInvoice, GetInvoiceParams, GetInvoiceResult, InvoiceData, InvoiceParams,
+    InvoiceResult, NewInvoiceParams, ParseInvoiceParams, ParseInvoiceResult, SettleInvoiceParams,
     SettleInvoiceResult,
 };
 
@@ -54,7 +54,7 @@ trait InvoiceRpc {
     #[method(name = "get_invoice", with_extensions)]
     async fn get_invoice(
         &self,
-        payment_hash: InvoiceParams,
+        params: GetInvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
@@ -232,18 +232,27 @@ where
     async fn get_invoice(
         &self,
         extensions: &Extensions,
-        payment_hash: InvoiceParams,
+        params: GetInvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
-        if let Some(context) = self.tenant_rpc_context(extensions).await? {
+        let context = crate::rpc::tenant::resolve_tenant_query_rpc_context(
+            extensions,
+            self.lsp_actor.as_ref(),
+            params.tenant_id.as_deref(),
+        )
+        .await?;
+        let params = InvoiceParams {
+            payment_hash: params.payment_hash,
+        };
+        if let Some(context) = context {
             return InvoiceRpcServerImpl::new_fiber(
                 context.store,
                 Some(context.fiber_actor),
                 Some(context.config),
             )
-            .get_invoice(payment_hash)
+            .get_invoice(params)
             .await;
         }
-        self.get_invoice(payment_hash).await
+        self.get_invoice(params).await
     }
 
     /// Cancels an invoice, only when invoice is in status `Open` can be canceled.

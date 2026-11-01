@@ -36,12 +36,17 @@ script:pre-request {
 assert {
   res.body.error: isUndefined
   res.body.result.runtime_status: eq "cold"
-  res.body.result.channel_online: eq false
 }
 
 script:post-response {
-  if (res.body.result.private_channel_id !== bru.getVar("HOSTED_CHANNEL_ID")) {
-    throw new Error("eviction did not preserve the hosted private channel binding");
+  const channel = (res.body.result.channels || []).find(
+    item => item.channel_id === bru.getVar("HOSTED_CHANNEL_ID")
+  );
+  if (!channel) {
+    throw new Error("eviction did not preserve the hosted channel binding");
+  }
+  if (channel.online) {
+    throw new Error("eviction left the hosted channel online");
   }
   await new Promise(r => setTimeout(r, 500));
 }

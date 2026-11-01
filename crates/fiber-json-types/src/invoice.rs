@@ -187,6 +187,17 @@ pub struct InvoiceParams {
     pub payment_hash: Hash256,
 }
 
+/// Parameters for querying an invoice, optionally in a hosted tenant's namespace.
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+pub struct GetInvoiceParams {
+    /// The payment hash of the invoice.
+    pub payment_hash: Hash256,
+    /// Hosted tenant whose invoice store should be queried. Tenant tokens may
+    /// only omit this field or repeat their own tenant id. Operator tokens need
+    /// the additional `read("lsp")` capability to select a tenant explicitly.
+    pub tenant_id: Option<String>,
+}
+
 /// Parameters for settling an invoice.
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct SettleInvoiceParams {

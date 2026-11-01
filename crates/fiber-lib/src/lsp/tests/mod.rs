@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ckb_types::packed::Script;
 use fiber_store::backend::StorageBackend;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use tempfile::tempdir;
@@ -23,17 +24,20 @@ use crate::fiber_types::{
 use crate::invoice::{Currency, InvoiceBuilder};
 use crate::lsp::TrampolineForwardingRequest;
 use crate::lsp::{
-    is_permanent_hosted_payment_failure, BiscuitTokenIssuer, HostedTenantRecord,
-    HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
+    is_permanent_hosted_payment_failure, select_tenant_channel, BiscuitTokenIssuer,
+    HostedTenantRecord, HostedTenantRuntime, LspConfig, LspDeliveryDecision, LspInvoiceRegistry,
     LspPaymentDeliveryLimits, LspPaymentDeliveryManager, LspPaymentDeliveryStatus,
     LspPaymentDispatchError, LspPaymentOutcomeDecision, LspService, LspServiceArgs,
-    LspServiceMessage, TenantId, TenantRegistry, TenantRuntimeFactory, TenantSupervisor,
-    DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS, MAX_LSP_BUFFER_DURATION_MS,
+    LspServiceMessage, TenantChannelRecord, TenantId, TenantRegistry, TenantRuntimeFactory,
+    TenantSupervisor, DEFAULT_LSP_BUFFER_DURATION_MS, LSP_DELIVERY_SAFETY_MARGIN_MS,
+    MAX_LSP_BUFFER_DURATION_MS,
 };
 use crate::store::{open_store, NodeNamespace, Store};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod integration;
+#[cfg(not(target_arch = "wasm32"))]
+mod query_rpc;
 #[cfg(not(target_arch = "wasm32"))]
 mod signer_isolation;
 
@@ -102,7 +106,6 @@ fn tenant_registry_is_persistent_and_idempotent() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
 
@@ -112,7 +115,6 @@ fn tenant_registry_is_persistent_and_idempotent() {
         tenant_id: TenantId::new("u2").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: record.tenant_pubkey,
-        private_channel_id: None,
         created_at: 43,
     };
     assert_eq!(
@@ -136,7 +138,6 @@ fn tenant_registry_finds_by_key_after_a_reopen() {
             tenant_id: TenantId::new(format!("u{i}")).unwrap(),
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[i; 32]).pubkey(),
-            private_channel_id: None,
             created_at: i as u64,
         })
         .collect();
@@ -181,6 +182,92 @@ fn tenant_registry_finds_by_key_after_a_reopen() {
     );
 }
 
+#[test]
+fn tenant_registry_binds_multiple_channels_with_assets() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let registry = TenantRegistry::new(store.clone());
+    let record = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
+        created_at: 42,
+    };
+    registry.register(record.clone()).unwrap();
+
+    let ckb_channel = Hash256::from([41; 32]);
+    let udt_channel = Hash256::from([42; 32]);
+    let udt_script = Script::default();
+    registry
+        .bind_channel(&record.tenant_id, ckb_channel, None)
+        .unwrap();
+    registry
+        .bind_channel(&record.tenant_id, udt_channel, Some(udt_script.clone()))
+        .unwrap();
+
+    let channels = registry.list_channels(&record.tenant_id).unwrap();
+    assert_eq!(channels.len(), 2);
+    assert!(channels.iter().any(|channel| {
+        channel.channel_id == ckb_channel && channel.funding_udt_type_script.is_none()
+    }));
+    assert!(channels.iter().any(|channel| {
+        channel.channel_id == udt_channel
+            && channel.funding_udt_type_script == Some(udt_script.clone())
+    }));
+    let reopened = TenantRegistry::new(store);
+    assert_eq!(reopened.list_channels(&record.tenant_id).unwrap().len(), 2);
+    reopened
+        .bind_channel(&record.tenant_id, udt_channel, Some(udt_script.clone()))
+        .unwrap();
+    assert_eq!(reopened.list_channels(&record.tenant_id).unwrap().len(), 2);
+    assert!(reopened
+        .bind_channel(&record.tenant_id, udt_channel, None)
+        .is_err());
+}
+
+#[test]
+fn select_tenant_channel_matches_asset_and_prefers_online() {
+    let ckb_channel = TenantChannelRecord {
+        channel_id: Hash256::from([51; 32]),
+        funding_udt_type_script: None,
+        bound_at: 0,
+    };
+    let udt_channel = TenantChannelRecord {
+        channel_id: Hash256::from([52; 32]),
+        funding_udt_type_script: Some(Script::default()),
+        bound_at: 0,
+    };
+    let channels = vec![ckb_channel.clone(), udt_channel.clone()];
+    let mut ready = HashSet::new();
+    ready.insert(udt_channel.channel_id);
+
+    assert_eq!(
+        select_tenant_channel(&channels, Some(&ready), Some(&Script::default()))
+            .unwrap()
+            .channel_id,
+        udt_channel.channel_id
+    );
+    assert_eq!(
+        select_tenant_channel(&channels, Some(&ready), None)
+            .unwrap()
+            .channel_id,
+        ckb_channel.channel_id
+    );
+    assert_eq!(
+        select_tenant_channel(&channels, Some(&HashSet::new()), Some(&Script::default()))
+            .unwrap()
+            .channel_id,
+        udt_channel.channel_id
+    );
+    assert!(select_tenant_channel(
+        &[ckb_channel],
+        Some(&HashSet::new()),
+        Some(&Script::default())
+    )
+    .is_err());
+}
+
 #[cfg(feature = "watchtower")]
 #[test]
 fn ensure_hosted_watch_skips_an_existing_row() {
@@ -194,7 +281,6 @@ fn ensure_hosted_watch_skips_an_existing_row() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[1; 32]).pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
     let channel_id = Hash256::from([9u8; 32]);
@@ -226,52 +312,105 @@ fn ensure_hosted_watch_skips_an_existing_row() {
 }
 
 #[test]
-fn authenticated_tenant_registry_replaces_consumes_and_persists_nonces() {
+fn authenticated_tenant_registry_consumes_and_persists_request_ids() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
     let registry = TenantRegistry::new(store.clone());
     let root_signer_pubkey = Privkey::from(&[7; 32]).pubkey();
     let tenant_id = TenantId::from_root_signer_pubkey(&root_signer_pubkey);
-    let first = registry
-        .issue_registration_nonce(&root_signer_pubkey)
-        .unwrap();
-    let second = registry
-        .issue_registration_nonce(&root_signer_pubkey)
-        .unwrap();
-    assert_ne!(first, second);
-    assert_eq!(
-        registry.registration_nonce(&root_signer_pubkey).unwrap(),
-        Some(second)
-    );
     let record = HostedTenantRecord {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: Some(root_signer_pubkey),
         tenant_pubkey: Privkey::from(&[8; 32]).pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
-    assert!(registry
-        .register_authenticated(record.clone(), first)
-        .unwrap_err()
-        .contains("missing, replaced, or consumed"));
+    let first = [1; 32];
+    let second = [2; 32];
     assert_eq!(
         registry
-            .register_authenticated(record.clone(), second)
+            .register_authenticated(record.clone(), first)
             .unwrap(),
         record
     );
+    assert!(registry
+        .register_authenticated(record.clone(), first)
+        .unwrap_err()
+        .contains("already consumed"));
     assert_eq!(
-        registry.registration_nonce(&root_signer_pubkey).unwrap(),
-        None
+        registry
+            .refresh_authenticated(root_signer_pubkey, second)
+            .unwrap(),
+        record
     );
+    assert!(registry
+        .refresh_authenticated(root_signer_pubkey, second)
+        .unwrap_err()
+        .contains("already consumed"));
 
-    let reopened = TenantRegistry::new(store);
+    let reopened = TenantRegistry::new(store.clone());
     assert_eq!(reopened.get(&tenant_id).unwrap(), Some(record.clone()));
     assert!(reopened
-        .register_authenticated(record, second)
+        .refresh_authenticated(root_signer_pubkey, second)
+        .unwrap_err()
+        .contains("already consumed"));
+    assert_eq!(
+        reopened
+            .refresh_authenticated(root_signer_pubkey, [3; 32])
+            .unwrap(),
+        record
+    );
+    assert!(reopened
+        .register_authenticated(record.clone(), [4; 32])
         .unwrap_err()
         .contains("already registered"));
+
+    // Request ids are consumed per RootSigner, so another identity may reuse one.
+    let other_root = Privkey::from(&[9; 32]).pubkey();
+    let other_record = HostedTenantRecord {
+        tenant_id: TenantId::from_root_signer_pubkey(&other_root),
+        root_signer_pubkey: Some(other_root),
+        tenant_pubkey: Privkey::from(&[10; 32]).pubkey(),
+        created_at: 43,
+    };
+    assert_eq!(
+        reopened
+            .register_authenticated(other_record.clone(), first)
+            .unwrap(),
+        other_record
+    );
+
+    // Concurrent refreshes must mint credentials for this request at most once.
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let registry = reopened.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                registry.refresh_authenticated(root_signer_pubkey, [5; 32])
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    for error in outcomes.into_iter().filter_map(Result::err) {
+        assert!(error.contains("already consumed"), "{error}");
+    }
+
+    // Close the physical database, not just the registry wrapper, before reopening.
+    drop(reopened);
+    drop(registry);
+    drop(store);
+    let reopened = TenantRegistry::new(open_lsp_store(&config));
+    assert_eq!(reopened.get(&tenant_id).unwrap(), Some(record));
+    assert!(reopened
+        .refresh_authenticated(root_signer_pubkey, [5; 32])
+        .unwrap_err()
+        .contains("already consumed"));
 }
 
 struct NoopNetworkActor;
@@ -379,7 +518,6 @@ impl TenantRuntimeFactory for BusyRuntimeFactory {
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[4; 32]).pubkey(),
-            private_channel_id: None,
             created_at: 42,
         })
     }
@@ -408,7 +546,6 @@ impl TenantRuntimeFactory for RestartableRuntimeFactory {
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[5; 32]).pubkey(),
-            private_channel_id: None,
             created_at: 42,
         })
     }
@@ -435,7 +572,6 @@ impl TenantRuntimeFactory for FakeRuntimeFactory {
             tenant_id: tenant_id.clone(),
             root_signer_pubkey: None,
             tenant_pubkey: Privkey::from(&[secret; 32]).pubkey(),
-            private_channel_id: None,
             created_at: 42,
         })
     }
@@ -556,7 +692,6 @@ fn hosted_invoice_registration_is_signed_and_persistent() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
     let payment_hash = Hash256::from([7; 32]);
@@ -592,7 +727,6 @@ fn hosted_invoice_route_hint_must_match_public_t() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
     let invoice = InvoiceBuilder::new(Currency::Fibd)
@@ -625,7 +759,6 @@ fn hosted_invoice_hint_detects_tampering_and_expiry() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
     let mut hint = invoices
@@ -663,7 +796,6 @@ fn hosted_invoice_buffer_duration_is_capped_at_seven_days() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
 
@@ -697,7 +829,6 @@ fn hosted_invoice_buffer_duration_is_shortened_by_operator_policy() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
 
@@ -727,7 +858,6 @@ fn hosted_invoice_must_be_signed_by_registered_tenant() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
 
@@ -789,7 +919,6 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([11; 32]);
@@ -808,6 +937,7 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
         .accept(
             &registration,
             &tenant,
+            Hash256::from([21; 32]),
             hosted_forwarding_request(&tenant, payment_hash, now),
             now,
         )
@@ -816,6 +946,67 @@ fn payment_delivery_deadline_preserves_downstream_expiry_budget() {
 
     let reopened = LspPaymentDeliveryManager::new(store);
     assert_eq!(reopened.list_pending().unwrap(), vec![delivery]);
+}
+
+#[test]
+fn payment_delivery_uses_selected_tenant_channel_and_rejects_asset_mismatch() {
+    let root = tempdir().expect("temporary directory");
+    let config = lsp_config(root.path().join("lsp"));
+    let store = open_lsp_store(&config);
+    let invoices = LspInvoiceRegistry::new(store.clone());
+    let deliveries = LspPaymentDeliveryManager::new(store);
+    let tenant_key = Privkey::from(&[3; 32]);
+    let lsp_key = Privkey::from(&[9; 32]);
+    let tenant = HostedTenantRecord {
+        tenant_id: TenantId::new("u1").unwrap(),
+        root_signer_pubkey: None,
+        tenant_pubkey: tenant_key.pubkey(),
+        created_at: 42,
+    };
+    let payment_hash = Hash256::from([31; 32]);
+    let registration = invoices
+        .register(
+            &tenant,
+            signed_invoice(&tenant_key, payment_hash),
+            None,
+            lsp_key.pubkey(),
+            &lsp_key,
+        )
+        .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let channel = TenantChannelRecord {
+        channel_id: Hash256::from([61; 32]),
+        funding_udt_type_script: None,
+        bound_at: 0,
+    };
+
+    let delivery = deliveries
+        .accept_on_channel(
+            &registration,
+            &tenant,
+            &channel,
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            now,
+        )
+        .unwrap();
+    assert_eq!(delivery.private_channel_id, channel.channel_id);
+
+    let mut udt_channel = channel;
+    udt_channel.channel_id = Hash256::from([62; 32]);
+    udt_channel.funding_udt_type_script = Some(Script::default());
+    let error = deliveries
+        .accept_on_channel(
+            &registration,
+            &tenant,
+            &udt_channel,
+            hosted_forwarding_request(&tenant, payment_hash, now),
+            now,
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("asset does not match"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -831,7 +1022,6 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([29; 32]);
@@ -847,12 +1037,24 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     let now = crate::now_timestamp_as_millis_u64();
     let first_request = hosted_forwarding_request(&tenant, payment_hash, now);
     let first = deliveries
-        .accept(&registration, &tenant, first_request.clone(), now)
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([21; 32]),
+            first_request.clone(),
+            now,
+        )
         .unwrap();
 
     assert_eq!(
         deliveries
-            .accept(&registration, &tenant, first_request.clone(), now + 1)
+            .accept(
+                &registration,
+                &tenant,
+                Hash256::from([21; 32]),
+                first_request.clone(),
+                now + 1
+            )
             .unwrap(),
         first
     );
@@ -860,14 +1062,26 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     conflicting_request.remaining_trampoline_onion.push(4);
     assert_eq!(
         deliveries
-            .accept(&registration, &tenant, conflicting_request, now + 2)
+            .accept(
+                &registration,
+                &tenant,
+                Hash256::from([21; 32]),
+                conflicting_request,
+                now + 2
+            )
             .unwrap_err(),
         "hosted payment execution already exists with different data"
     );
     let mut second_request = first_request.clone();
     second_request.previous_tlc.prev_tlc_id += 1;
     assert!(deliveries
-        .accept(&registration, &tenant, second_request.clone(), now + 3,)
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([21; 32]),
+            second_request.clone(),
+            now + 3,
+        )
         .unwrap_err()
         .contains("multiple active incoming TLCs"));
 
@@ -881,7 +1095,13 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
         )
         .unwrap();
     let second = deliveries
-        .accept(&registration, &tenant, second_request.clone(), now + 5)
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([21; 32]),
+            second_request.clone(),
+            now + 5,
+        )
         .unwrap();
     assert_ne!(first.key(), second.key());
     assert_eq!(
@@ -905,7 +1125,13 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     let mut third_request = first_request;
     third_request.previous_tlc.prev_channel_id = Hash256::from([30; 32]);
     let third = deliveries
-        .accept(&registration, &tenant, third_request, now + 7)
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([21; 32]),
+            third_request,
+            now + 7,
+        )
         .unwrap();
     assert_ne!(first.key(), third.key());
     assert_ne!(second.key(), third.key());
@@ -932,7 +1158,13 @@ fn payment_delivery_uses_incoming_tlc_as_primary_key() {
     let mut replay_after_success = second_request;
     replay_after_success.previous_tlc.prev_tlc_id += 1;
     assert!(deliveries
-        .accept(&registration, &tenant, replay_after_success, now + 12,)
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([21; 32]),
+            replay_after_success,
+            now + 12,
+        )
         .unwrap_err()
         .contains("already delivered successfully"));
 
@@ -981,7 +1213,6 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(Hash256::from([22; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([12; 32]);
@@ -999,6 +1230,7 @@ fn in_flight_delivery_is_not_reverted_by_buffer_deadline() {
         .accept(
             &registration,
             &tenant,
+            Hash256::from([21; 32]),
             hosted_forwarding_request(&tenant, payment_hash, now),
             now,
         )
@@ -1073,7 +1305,6 @@ fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition(
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(Hash256::from([25; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([17; 32]);
@@ -1090,7 +1321,13 @@ fn payment_delivery_accepts_downstream_mpp_and_rejects_invalid_state_transition(
     let mut request = hosted_forwarding_request(&tenant, payment_hash, now);
     request.max_parts = Some(2);
     let delivery = deliveries
-        .accept(&registration, &tenant, request.clone(), now)
+        .accept(
+            &registration,
+            &tenant,
+            Hash256::from([21; 32]),
+            request.clone(),
+            now,
+        )
         .unwrap();
     assert_eq!(delivery.request.max_parts, Some(2));
     assert!(request.into_send_payment_data().unwrap().allow_mpp);
@@ -1145,7 +1382,6 @@ fn payment_delivery_enforces_per_tenant_pending_limit() {
         tenant_id: TenantId::new("u1").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(Hash256::from([26; 32])),
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -1165,6 +1401,7 @@ fn payment_delivery_enforces_per_tenant_pending_limit() {
         let result = deliveries.accept(
             &registration,
             &tenant,
+            Hash256::from([21; 32]),
             hosted_forwarding_request(&tenant, payment_hash, now),
             now,
         );
@@ -1389,20 +1626,39 @@ fn test_protocol_key(secret: u8) -> Privkey {
     Privkey::from(&[secret; 32])
 }
 
+fn fresh_registration_request_id() -> [u8; 32] {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed) as u64;
+    let mut request_id = [0u8; 32];
+    request_id[..8].copy_from_slice(&sequence.to_be_bytes());
+    request_id
+}
+
+fn registration_payload(
+    lsp_key: &Privkey,
+    root_signer_key: &Privkey,
+    request_id: [u8; 32],
+    signed_at: u64,
+) -> TenantRegistryPayload {
+    TenantRegistryPayload::new(
+        lsp_key.pubkey(),
+        root_signer_key.pubkey(),
+        request_id,
+        signed_at,
+    )
+}
+
 async fn register_authenticated_test_tenant(
     service: &ActorRef<LspServiceMessage>,
     lsp_key: &Privkey,
     root_signer_key: &Privkey,
 ) -> TenantId {
-    let root_signer_pubkey = root_signer_key.pubkey();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .unwrap()
-    .unwrap();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, nonce);
+    let payload = registration_payload(
+        lsp_key,
+        root_signer_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let registration = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(root_signer_key, &payload),
@@ -1427,7 +1683,7 @@ fn sign_tenant_registry_payload(
 }
 
 #[tokio::test]
-async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
+async fn service_registers_only_valid_root_signer_proofs_and_consumes_requests() {
     let root = tempdir().expect("temporary directory");
     let config = lsp_config(root.path().join("lsp"));
     let store = open_lsp_store(&config);
@@ -1445,36 +1701,15 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     .await;
     let root_signer_key = Privkey::from(&[7; 32]);
     let root_signer_pubkey = root_signer_key.pubkey();
-    let replaced_nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .unwrap()
-    .unwrap();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_pubkey
-    )
-    .unwrap()
-    .unwrap();
+    let now = crate::now_timestamp_as_millis_u64();
+    let request_id = [5; 32];
 
-    let old_payload =
-        TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, replaced_nonce);
-    let old_result = ractor::call!(service, |reply| {
-        LspServiceMessage::RegisterAuthenticatedTenant {
-            signature: sign_tenant_registry_payload(&root_signer_key, &old_payload),
-            payload: old_payload,
-            reply,
-        }
-    })
-    .unwrap()
-    .unwrap_err();
-    assert!(old_result.contains("missing, replaced, or consumed"));
-
-    let wrong_lsp_payload =
-        TenantRegistryPayload::new(Privkey::from(&[6; 32]).pubkey(), root_signer_pubkey, nonce);
+    let wrong_lsp_payload = TenantRegistryPayload::new(
+        Privkey::from(&[6; 32]).pubkey(),
+        root_signer_pubkey,
+        request_id,
+        now,
+    );
     let wrong_lsp_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &wrong_lsp_payload),
@@ -1486,8 +1721,8 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     .unwrap_err();
     assert!(wrong_lsp_result.contains("another LSP node"));
 
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_pubkey, nonce);
-    let wrong_signature = sign_tenant_registry_payload(&Privkey::from(&[5; 32]), &payload);
+    let payload = registration_payload(&lsp_key, &root_signer_key, request_id, now);
+    let wrong_signature = sign_tenant_registry_payload(&Privkey::from(&[8; 32]), &payload);
     let wrong_signature_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             payload: payload.clone(),
@@ -1498,6 +1733,69 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
     .unwrap()
     .unwrap_err();
     assert!(wrong_signature_result.contains("invalid RootSigner registration proof"));
+
+    let mut tampered_timestamp = payload.clone();
+    tampered_timestamp.signed_at = now.saturating_add(1);
+    let tampered_timestamp_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            payload: tampered_timestamp,
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(tampered_timestamp_result.contains("invalid RootSigner registration proof"));
+
+    let mut tampered_request_id = payload.clone();
+    tampered_request_id.request_id = [6; 32];
+    let tampered_request_id_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            payload: tampered_request_id,
+            signature: sign_tenant_registry_payload(&root_signer_key, &payload),
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(tampered_request_id_result.contains("invalid RootSigner registration proof"));
+
+    let expired_payload = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        [7; 32],
+        now.saturating_sub(crate::fiber_types::TENANT_REGISTRY_MAX_SIGNED_AT_AGE_MS + 1),
+    );
+    let expired_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &expired_payload),
+            payload: expired_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(expired_result.contains("too old"));
+
+    let future_payload = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        [8; 32],
+        now.saturating_add(
+            crate::fiber_types::TENANT_REGISTRY_MAX_SIGNED_AT_FUTURE_SKEW_MS + 60_000,
+        ),
+    );
+    let future_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &future_payload),
+            payload: future_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(future_result.contains("too far in the future"));
+    assert!(registry.list().unwrap().is_empty());
 
     let registration = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
@@ -1514,22 +1812,40 @@ async fn service_registers_only_valid_root_signer_proofs_and_consumes_nonce() {
         registration.status.record.root_signer_pubkey,
         Some(root_signer_pubkey)
     );
-    assert_eq!(
-        registry.registration_nonce(&root_signer_pubkey).unwrap(),
-        None
-    );
     assert!(!registration.access_token.is_empty());
+    assert_eq!(
+        registry.list().unwrap(),
+        vec![registration.status.record.clone()]
+    );
 
     let replay_result = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &payload),
-            payload,
+            payload: payload.clone(),
             reply,
         }
     })
     .unwrap()
     .unwrap_err();
-    assert!(replay_result.contains("missing, replaced, or consumed"));
+    assert!(replay_result.contains("already consumed"));
+
+    let resigned_replay = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        request_id,
+        crate::now_timestamp_as_millis_u64(),
+    );
+    let resigned_replay_result = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_signer_key, &resigned_replay),
+            payload: resigned_replay,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(resigned_replay_result.contains("already consumed"));
+    assert_eq!(registry.list().unwrap(), vec![registration.status.record]);
 }
 
 #[tokio::test]
@@ -1570,14 +1886,12 @@ async fn authenticated_registration_issues_tenant_token_through_issuer() {
     .0;
 
     let root_signer_key = test_root_signer();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_signer_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_signer_key.pubkey(), nonce);
+    let payload = registration_payload(
+        &lsp_key,
+        &root_signer_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let issued = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_signer_key, &payload),
@@ -1654,57 +1968,50 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     let (service, handle) = Actor::spawn(None, LspService, args()).await.unwrap();
     let root_key = test_root_signer();
     let tenant_id = TenantId::from_root_signer_pubkey(&root_key.pubkey());
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), nonce);
+    let first_payload = registration_payload(
+        &lsp_key,
+        &root_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let (send, receive) = tokio::sync::oneshot::channel();
     drop(receive); // The registration response cannot reach the client.
     service
         .send_message(LspServiceMessage::RegisterAuthenticatedTenant {
-            signature: sign_tenant_registry_payload(&root_key, &payload),
-            payload,
+            signature: sign_tenant_registry_payload(&root_key, &first_payload),
+            payload: first_payload.clone(),
             reply: send.into(),
         })
         .unwrap();
     ractor::call!(service, LspServiceMessage::GetStatus).unwrap();
     let channel_id = Hash256::from([76; 32]);
-    let original = registry
-        .bind_private_channel(&tenant_id, channel_id)
+    let original = registry.bind_channel(&tenant_id, channel_id, None).unwrap();
+    registry
+        .bind_channel(&tenant_id, Hash256::from([77; 32]), Some(Script::default()))
         .unwrap();
+    let original_channels = registry.list_channels(&tenant_id).unwrap();
     service.stop(None);
     handle.await.unwrap();
     let (service, handle) = Actor::spawn(None, LspService, args()).await.unwrap();
 
-    let replaced = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let nonce = ractor::call!(
-        service,
-        LspServiceMessage::IssueTenantRegistryNonce,
-        root_key.pubkey()
-    )
-    .unwrap()
-    .unwrap();
-    let old_payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), replaced);
-    let _stale = ractor::call!(service, |reply| {
+    let replay_after_restart = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
-            signature: sign_tenant_registry_payload(&root_key, &old_payload),
-            payload: old_payload,
+            signature: sign_tenant_registry_payload(&root_key, &first_payload),
+            payload: first_payload,
             reply,
         }
     })
     .unwrap()
     .unwrap_err();
-    let payload = TenantRegistryPayload::new(lsp_key.pubkey(), root_key.pubkey(), nonce);
+    assert!(replay_after_restart.contains("already consumed"));
+    assert_eq!(registry.get(&tenant_id).unwrap(), Some(original.clone()));
+
+    let payload = registration_payload(
+        &lsp_key,
+        &root_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
     let invalid = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&Privkey::from(&[5; 32]), &payload),
@@ -1715,10 +2022,7 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     .unwrap()
     .unwrap_err();
     assert!(invalid.contains("invalid RootSigner registration proof"));
-    assert_eq!(
-        registry.registration_nonce(&root_key.pubkey()).unwrap(),
-        Some(nonce)
-    );
+    assert_eq!(registry.get(&tenant_id).unwrap(), Some(original.clone()));
 
     let refreshed = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
@@ -1731,11 +2035,16 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     .expect("fresh RootSigner proof must refresh the existing tenant token");
     assert!(!refreshed.created);
     assert_eq!(refreshed.status.record, original);
-    assert_eq!(registry.list().unwrap(), vec![original.clone()]);
     assert_eq!(
-        registry.registration_nonce(&root_key.pubkey()).unwrap(),
-        None
+        refreshed
+            .status
+            .channels
+            .iter()
+            .map(|status| status.channel.clone())
+            .collect::<Vec<_>>(),
+        original_channels
     );
+    assert_eq!(registry.list().unwrap(), vec![original.clone()]);
     let auth = BiscuitAuth::from_pubkey(biscuit_root.public().to_string()).unwrap();
     let (biscuit, _) = auth
         .check_permission("get_invoice", &refreshed.access_token)
@@ -1754,14 +2063,41 @@ async fn authenticated_registration_refreshes_token_after_lost_reply_and_restart
     let replay = ractor::call!(service, |reply| {
         LspServiceMessage::RegisterAuthenticatedTenant {
             signature: sign_tenant_registry_payload(&root_key, &payload),
-            payload,
+            payload: payload.clone(),
             reply,
         }
     })
     .unwrap()
     .unwrap_err();
-    assert!(replay.contains("missing, replaced, or consumed"));
-    assert_eq!(registry.list().unwrap(), vec![original]);
+    assert!(replay.contains("already consumed"));
+    assert_eq!(registry.list().unwrap(), vec![original.clone()]);
+
+    let fresh_payload = registration_payload(
+        &lsp_key,
+        &root_key,
+        fresh_registration_request_id(),
+        crate::now_timestamp_as_millis_u64(),
+    );
+    let refreshed_again = ractor::call!(service, |reply| {
+        LspServiceMessage::RegisterAuthenticatedTenant {
+            signature: sign_tenant_registry_payload(&root_key, &fresh_payload),
+            payload: fresh_payload,
+            reply,
+        }
+    })
+    .unwrap()
+    .unwrap();
+    assert!(!refreshed_again.created);
+    assert_eq!(refreshed_again.status.record, original);
+    assert_eq!(
+        refreshed_again
+            .status
+            .channels
+            .into_iter()
+            .map(|status| status.channel)
+            .collect::<Vec<_>>(),
+        original_channels
+    );
     service.stop(None);
     handle.await.unwrap();
     public_network_actor.stop(None);
@@ -1831,6 +2167,286 @@ async fn wait_for_delivery_status(
     .expect("delivery reached expected status");
 }
 
+struct BufferedDeliveryTest {
+    _root: tempfile::TempDir,
+    config: LspConfig,
+    store: Store,
+    manager: LspPaymentDeliveryManager<Store>,
+    service: ActorRef<LspServiceMessage>,
+    tenant: HostedTenantRecord,
+    request: TrampolineForwardingRequest,
+    dispatches: Arc<AtomicUsize>,
+}
+
+impl BufferedDeliveryTest {
+    fn channel_a() -> Hash256 {
+        Hash256::from([23; 32])
+    }
+
+    fn channel_b() -> Hash256 {
+        Hash256::from([24; 32])
+    }
+
+    async fn new() -> Self {
+        let root = tempdir().expect("temporary directory");
+        let config = lsp_config(root.path().join("lsp"));
+        let store = open_lsp_store(&config);
+        let manager = LspPaymentDeliveryManager::new(store.clone());
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let lsp_key = Privkey::from(&[9; 32]);
+        let tenant_key = Privkey::from(&[1; 32]);
+        let service = start_test_lsp_service(
+            store.clone(),
+            config.clone(),
+            Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+            lsp_key.clone(),
+            dispatches.clone(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await;
+        let tenant_id =
+            register_authenticated_test_tenant(&service, &lsp_key, &test_root_signer()).await;
+        let payment_hash = Hash256::from([93; 32]);
+        register_test_invoice(&service, tenant_id.clone(), &tenant_key, payment_hash).await;
+        let tenant = HostedTenantRecord {
+            tenant_id,
+            root_signer_pubkey: None,
+            tenant_pubkey: tenant_key.pubkey(),
+            created_at: 42,
+        };
+        let request =
+            hosted_forwarding_request(&tenant, payment_hash, crate::now_timestamp_as_millis_u64());
+        let test = Self {
+            _root: root,
+            config,
+            store,
+            manager,
+            service,
+            tenant,
+            request,
+            dispatches,
+        };
+        test.bind_channel(Self::channel_a(), None);
+        test
+    }
+
+    fn bind_channel(&self, channel_id: Hash256, asset: Option<Script>) {
+        use crate::fiber::channel::{ChannelActorState, ChannelActorStateStore};
+        use crate::store::sample::StoreSample;
+
+        TenantRegistry::new(self.store.clone())
+            .bind_channel(&self.tenant.tenant_id, channel_id, asset.clone())
+            .unwrap();
+        let mut channel = ChannelActorState::samples(42).remove(0);
+        channel.id = channel_id;
+        channel.remote_pubkey = self.tenant.tenant_pubkey;
+        channel.remote_channel_public_keys = Some(channel.local_channel_public_keys.clone());
+        channel.funding_udt_type_script = asset;
+        self.store.insert_channel_actor_state(channel.clone());
+        self.store
+            .namespaced(NodeNamespace::hosted_tenant(self.tenant.tenant_id.as_str()))
+            .insert_channel_actor_state(channel);
+    }
+
+    fn set_channel_state(&self, channel_id: Hash256, status: crate::fiber_types::ChannelState) {
+        use crate::fiber::channel::ChannelActorStateStore;
+
+        let mut channel = self.store.get_channel_actor_state(&channel_id).unwrap();
+        channel.state = status;
+        self.store.insert_channel_actor_state(channel);
+    }
+
+    async fn accept(&self) -> crate::lsp::LspPaymentDelivery {
+        assert_eq!(
+            ractor::call!(self.service, |reply| {
+                LspServiceMessage::AcceptTrampolineDelivery(self.request.clone(), reply)
+            })
+            .unwrap()
+            .unwrap(),
+            LspDeliveryDecision::Buffered,
+        );
+        self.manager
+            .get_by_payment_hash(&self.request.payment_hash)
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn online(&self, channel_id: Hash256) {
+        self.service
+            .send_message(LspServiceMessage::TenantChannelOnline(
+                self.tenant.tenant_pubkey,
+                channel_id,
+            ))
+            .unwrap();
+        ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
+    }
+
+    async fn resume(&self, key: crate::lsp::LspPaymentDeliveryKey) {
+        self.service
+            .send_message(LspServiceMessage::ResumeDelivery(key))
+            .unwrap();
+        // Wait for the explicit retry without depending on a wall-clock timer.
+        ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
+    }
+
+    async fn restart(&mut self) {
+        self.service.stop_and_wait(None, None).await.unwrap();
+        self.service = start_test_lsp_service(
+            self.store.clone(),
+            self.config.clone(),
+            Arc::new(FakeRuntimeFactory::new(Arc::new(AtomicUsize::new(0)))),
+            Privkey::from(&[9; 32]),
+            self.dispatches.clone(),
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await;
+        ractor::call!(self.service, LspServiceMessage::GetStatus).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn buffered_delivery_reselects_online_same_asset_channel() {
+    let test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+    let original = test.accept().await;
+    assert_eq!(
+        original.private_channel_id,
+        BufferedDeliveryTest::channel_a()
+    );
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+
+    let delivery = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        delivery.private_channel_id,
+        BufferedDeliveryTest::channel_b()
+    );
+    assert_eq!(delivery.status, LspPaymentDeliveryStatus::InFlight);
+    assert_eq!(delivery.request, original.request);
+    assert_eq!(delivery.buffer_deadline, original.buffer_deadline);
+    assert_eq!(delivery.attempt_count, 1);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn buffered_delivery_does_not_reselect_another_asset() {
+    let test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), Some(Script::default()));
+    let original = test.accept().await;
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+
+    let delivery = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        delivery.private_channel_id,
+        BufferedDeliveryTest::channel_a()
+    );
+    assert_eq!(delivery.status, LspPaymentDeliveryStatus::Deferred);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn buffered_delivery_keeps_channel_after_dispatch_starts() {
+    for status in [
+        LspPaymentDeliveryStatus::Deferred,
+        LspPaymentDeliveryStatus::Dispatching,
+        LspPaymentDeliveryStatus::InFlight,
+    ] {
+        let test = BufferedDeliveryTest::new().await;
+        test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+        let original = test.accept().await;
+        test.manager
+            .begin_dispatch(&original.key(), original.updated_at)
+            .unwrap();
+        test.manager
+            .transition(&original.key(), status.clone(), original.updated_at)
+            .unwrap();
+        test.online(BufferedDeliveryTest::channel_b()).await;
+        test.resume(original.key()).await;
+
+        let delivery = test.manager.get(&original.key()).unwrap().unwrap();
+        assert_eq!(
+            delivery.private_channel_id,
+            BufferedDeliveryTest::channel_a()
+        );
+        assert_eq!(delivery.status, status);
+        assert_eq!(delivery.attempt_count, 1);
+        assert_eq!(test.dispatches.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[tokio::test]
+async fn buffered_delivery_reselection_survives_service_restart() {
+    let mut test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+    let original = test.accept().await;
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+    let reselected = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        reselected.private_channel_id,
+        BufferedDeliveryTest::channel_b()
+    );
+
+    test.restart().await;
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    test.resume(original.key()).await;
+    assert_eq!(
+        test.manager.get(&original.key()).unwrap().unwrap(),
+        reselected
+    );
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn buffered_delivery_replay_preserves_existing_execution_without_eligible_channels() {
+    use crate::fiber_types::{ChannelState, CloseFlags};
+
+    let test = BufferedDeliveryTest::new().await;
+    test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+    test.online(BufferedDeliveryTest::channel_b()).await;
+    let original = test.accept().await;
+    test.resume(original.key()).await;
+    let dispatched = test.manager.get(&original.key()).unwrap().unwrap();
+    assert_eq!(
+        dispatched.private_channel_id,
+        BufferedDeliveryTest::channel_b()
+    );
+
+    // A becomes the selector's preferred channel, but is not a new execution identity.
+    test.online(BufferedDeliveryTest::channel_a()).await;
+    assert_eq!(test.accept().await, dispatched);
+    for channel_id in [
+        BufferedDeliveryTest::channel_a(),
+        BufferedDeliveryTest::channel_b(),
+    ] {
+        test.set_channel_state(channel_id, ChannelState::Closed(CloseFlags::empty()));
+    }
+    assert_eq!(test.accept().await, dispatched);
+    assert_eq!(test.dispatches.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn buffered_delivery_skips_closed_and_shutting_down_channels() {
+    use crate::fiber_types::{ChannelState, CloseFlags, ShuttingDownFlags};
+
+    for status in [
+        ChannelState::Closed(CloseFlags::empty()),
+        ChannelState::ShuttingDown(ShuttingDownFlags::empty()),
+    ] {
+        let test = BufferedDeliveryTest::new().await;
+        test.bind_channel(BufferedDeliveryTest::channel_b(), None);
+        test.set_channel_state(BufferedDeliveryTest::channel_a(), status);
+        test.online(BufferedDeliveryTest::channel_a()).await;
+        test.online(BufferedDeliveryTest::channel_b()).await;
+        let delivery = test.accept().await;
+        assert_eq!(
+            delivery.private_channel_id,
+            BufferedDeliveryTest::channel_b()
+        );
+    }
+}
+
 #[tokio::test]
 async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
     let root = tempdir().expect("temporary directory");
@@ -1874,7 +2490,6 @@ async fn cold_tenant_delivery_dispatches_only_after_channel_online() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: None,
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -1979,14 +2594,12 @@ async fn offline_tenant_does_not_block_an_online_tenant() {
         tenant_id: u1_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: u1_key.pubkey(),
-        private_channel_id: Some(u1_channel),
         created_at: 42,
     };
     let u2 = HostedTenantRecord {
         tenant_id: u2_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: u2_key.pubkey(),
-        private_channel_id: Some(u2_channel),
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -2081,7 +2694,6 @@ async fn cold_tenant_delivery_fails_at_buffer_deadline() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -2147,7 +2759,6 @@ async fn settling_delivery_resumes_upstream_failure_after_restart_marker() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -2242,7 +2853,6 @@ async fn restart_fails_deferred_delivery_after_upstream_tlc_removal() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     let now = crate::now_timestamp_as_millis_u64();
@@ -2334,7 +2944,6 @@ async fn zero_buffer_hint_keeps_immediate_trampoline_behavior() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
 
@@ -2397,7 +3006,6 @@ async fn tenant_with_pending_delivery_cannot_be_evicted() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     ractor::call!(service, |reply| {
@@ -2456,7 +3064,6 @@ async fn transient_dispatch_failure_returns_to_deferred_and_retries() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
 
@@ -2522,7 +3129,6 @@ async fn permanent_dispatch_failure_fails_upstream_without_retrying() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
 
@@ -2590,7 +3196,6 @@ async fn transient_payment_outcome_retries_delivery_before_deadline() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
 
@@ -2661,7 +3266,6 @@ async fn permanent_payment_outcomes_settle_upstream_without_redispatch() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     let cases = [
@@ -2797,7 +3401,6 @@ async fn downstream_outcome_is_persisted_before_upstream_settlement() {
         tenant_id: tenant_id.clone(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(private_channel_id),
         created_at: 42,
     };
     ractor::call!(service, |reply| {
@@ -2930,7 +3533,6 @@ async fn check_settling_delivery_reconciliation(code: TlcErrorCode, status: Paym
         tenant_id: TenantId::new("reconciliation").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: tenant_key.pubkey(),
-        private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([11; 32]);
@@ -2948,6 +3550,7 @@ async fn check_settling_delivery_reconciliation(code: TlcErrorCode, status: Paym
         .accept(
             &registration,
             &tenant,
+            Hash256::from([21; 32]),
             hosted_forwarding_request(&tenant, payment_hash, now),
             now,
         )
@@ -3094,7 +3697,6 @@ async fn payment_outcome_notification_allows_network_queries_before_settlement()
         tenant_id: TenantId::new("outcome-query").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[3; 32]).pubkey(),
-        private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([91; 32]);
@@ -3162,7 +3764,6 @@ async fn delayed_payment_outcome_does_not_settle_replacement_execution() {
         tenant_id: TenantId::new("outcome-replacement").unwrap(),
         root_signer_pubkey: None,
         tenant_pubkey: Privkey::from(&[3; 32]).pubkey(),
-        private_channel_id: Some(Hash256::from([21; 32])),
         created_at: 42,
     };
     let payment_hash = Hash256::from([92; 32]);

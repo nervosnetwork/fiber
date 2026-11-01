@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fiber_json_types::{
-    GetChannelSigningStatusParams, GetChannelSigningStatusResult, GetLspTenantRegistryNonceParams,
-    GetLspTenantRegistryNonceResult, GetWatchtowerSigningStatusParams,
+    GetChannelSigningStatusParams, GetChannelSigningStatusResult, GetWatchtowerSigningStatusParams,
     GetWatchtowerSigningStatusResult, Hash256, RegisterLspTenantParams, RegisterLspTenantResult,
     SubmitChannelSignatureParams, SubmitChannelSignatureResult, SubmitWatchtowerSignatureParams,
     SubmitWatchtowerSignatureResult,
@@ -34,18 +33,14 @@ pub trait FiberRpc: Clone + Send + Sync + 'static {
         anyhow::bail!("create_preimage is not implemented by this transport")
     }
 
-    async fn open_tenant_channel(
+    async fn open_channel_with_external_funding(
         &self,
         _token: &str,
         _params: fiber_json_types::OpenChannelWithExternalFundingParams,
-    ) -> Result<fiber_json_types::OpenTenantChannelResult> {
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult> {
         anyhow::bail!("opening RPC is not implemented by this transport")
     }
 
-    async fn get_tenant_registry_nonce(
-        &self,
-        root_signer_pubkey: fiber_json_types::Pubkey,
-    ) -> Result<GetLspTenantRegistryNonceResult>;
     async fn register_tenant(
         &self,
         params: RegisterLspTenantParams,
@@ -153,24 +148,13 @@ impl FiberRpc for HttpFiberRpc {
         self.call("create_preimage", &params, token).await
     }
 
-    async fn open_tenant_channel(
+    async fn open_channel_with_external_funding(
         &self,
         token: &str,
         params: fiber_json_types::OpenChannelWithExternalFundingParams,
-    ) -> Result<fiber_json_types::OpenTenantChannelResult> {
-        self.call("open_tenant_channel", &params, token).await
-    }
-
-    async fn get_tenant_registry_nonce(
-        &self,
-        root_signer_pubkey: fiber_json_types::Pubkey,
-    ) -> Result<GetLspTenantRegistryNonceResult> {
-        self.call(
-            "lsp_get_tenant_registry_nonce",
-            &GetLspTenantRegistryNonceParams { root_signer_pubkey },
-            &self.operator_token,
-        )
-        .await
+    ) -> Result<fiber_json_types::OpenChannelWithExternalFundingResult> {
+        self.call("open_channel_with_external_funding", &params, token)
+            .await
     }
 
     async fn register_tenant(

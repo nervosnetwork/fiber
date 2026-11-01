@@ -127,6 +127,7 @@ pprof = ["dep:pprof"]
 
 [dev-dependencies]
 fiber-lsp-sdk = { path = "../fiber-lsp-sdk" }
+jsonrpc-core = "18"
 ciborium = "0.2.2"
 ckb-testtool = "1"
 fiber-types = { path = "../fiber-types", features = ["sample"] }

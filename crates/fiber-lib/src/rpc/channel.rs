@@ -37,9 +37,8 @@ pub use fiber_json_types::{
     ChannelState, GetChannelSigningStatusParams, GetChannelSigningStatusResult, Hash256, Htlc,
     ListChannelsParams, ListChannelsResult, OpenChannelParams, OpenChannelResult,
     OpenChannelWithExternalFundingParams, OpenChannelWithExternalFundingResult,
-    OpenTenantChannelResult, ShutdownChannelParams, SubmitChannelSignatureParams,
-    SubmitChannelSignatureResult, SubmitSignedFundingTxParams, SubmitSignedFundingTxResult,
-    UpdateChannelParams,
+    ShutdownChannelParams, SubmitChannelSignatureParams, SubmitChannelSignatureResult,
+    SubmitSignedFundingTxParams, SubmitSignedFundingTxResult, UpdateChannelParams,
 };
 
 /// RPC module for channel management.
@@ -90,21 +89,16 @@ trait ChannelRpc {
     /// Returns the final unsigned funding transaction after internal tx collaboration
     /// has frozen the structure. The user must sign it and submit it with
     /// `submit_signed_funding_tx` without changing the transaction structure.
+    ///
+    /// For an authenticated hosted tenant, this is also the tenant opening RPC. It requires
+    /// the LSP public node as `pubkey`, explicit `public: false`, and
+    /// `external_channel_signer`, and the response includes `opening_context`.
+    /// Repeating identical parameters resumes the pending opening or returns its frozen result.
     #[method(name = "open_channel_with_external_funding", with_extensions)]
     async fn open_channel_with_external_funding(
         &self,
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned>;
-
-    /// Opens the authenticated tenant's single private channel with client-owned keys.
-    /// Requires the LSP public node as `pubkey`, explicit `public: false`, and `external_channel_signer`.
-    /// Repeating identical parameters resumes the pending opening or returns its frozen result.
-    /// Validate the returned terms locally before signing the funding transaction.
-    #[method(name = "open_tenant_channel", with_extensions)]
-    async fn open_tenant_channel(
-        &self,
-        params: OpenChannelWithExternalFundingParams,
-    ) -> Result<OpenTenantChannelResult, ErrorObjectOwned>;
 
     /// Submits a signed funding transaction for an externally funded channel.
     ///
@@ -326,48 +320,25 @@ where
         params: OpenChannelWithExternalFundingParams,
     ) -> Result<OpenChannelWithExternalFundingResult, ErrorObjectOwned> {
         if let Some(context) = self.tenant_rpc_context(extensions).await? {
-            let pubkey = Pubkey::try_from(params.pubkey).rpc_err()?;
-            if pubkey != context.public_node_id {
-                return Err(rpc_error(
-                    "hosted tenants may only open a channel to the public LSP node",
-                ));
-            }
-            if params.public.unwrap_or(true) {
-                return Err(rpc_error("hosted tenant channels must be private"));
-            }
-            return ChannelRpcServerImpl::new_fiber(context.fiber_actor, context.store)
-                .open_channel_with_external_funding(params)
-                .await;
+            validate_tenant_opening_params(&params, context.public_node_id.into())?;
+            let command = external_funding_command(&params)?;
+            // The actor owns the durable tenant opening; a disconnected caller can retry.
+            return ractor::call_t!(
+                context.fiber_actor,
+                |reply| FiberActorMessage::new_command(FiberActorCommand::OpenTenantChannel {
+                    command,
+                    reply
+                }),
+                30_000
+            )
+            .map_err(|e| {
+                rpc_error(format!(
+                    "tenant opening interrupted; retry the same request: {e}"
+                ))
+            })?
+            .map_err(rpc_error);
         }
         self.open_channel_with_external_funding(params).await
-    }
-
-    async fn open_tenant_channel(
-        &self,
-        extensions: &Extensions,
-        params: OpenChannelWithExternalFundingParams,
-    ) -> Result<OpenTenantChannelResult, ErrorObjectOwned> {
-        let context = self
-            .tenant_rpc_context(extensions)
-            .await?
-            .ok_or_else(|| rpc_error("open_tenant_channel requires a tenant token"))?;
-        validate_tenant_opening_params(&params, context.public_node_id.into())?;
-        let command = external_funding_command(&params)?;
-        // The actor owns the durable opening; a disconnected caller can retry.
-        ractor::call_t!(
-            context.fiber_actor,
-            |reply| FiberActorMessage::new_command(FiberActorCommand::OpenTenantChannel {
-                command,
-                reply
-            }),
-            30_000
-        )
-        .map_err(|e| {
-            rpc_error(format!(
-                "tenant opening interrupted; retry the same request: {e}"
-            ))
-        })?
-        .map_err(rpc_error)
     }
 
     /// Submits a signed funding transaction for an externally funded channel.
@@ -791,6 +762,7 @@ where
                 unsigned_funding_tx: ckb_jsonrpc_types::Transaction::from(
                     response.unsigned_funding_tx,
                 ),
+                opening_context: None,
             }
         })
     }
